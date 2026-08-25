@@ -1,0 +1,116 @@
+{
+  "arya": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The 2026-08-04 meeting notes state that the Cascade MVP targets Windows first, the default model is still to be determin",
+      "finalText": "Done.",
+      "credits": 3
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  },
+  "claude-sonnet-5": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The meeting notes from 2026-08-04 indicate that the Cascade MVP will target Windows first, with the default model still ",
+      "finalText": "Done! I read notes.txt and wrote a one-sentence summary to summary.txt.",
+      "credits": 45
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  },
+  "claude-fable-5": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The August 4, 2026 meeting notes state that the Cascade MVP will target Windows first, the default model is still undeci",
+      "finalText": "Done! I read notes.txt and wrote a one-sentence summary to summary.txt covering the key points: Windows-first MVP, undec",
+      "credits": 138
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  },
+  "gpt-5-6-terra": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The Cascade MVP will target Windows first, with the default model pending tool-call tests and a projected budget of thre",
+      "finalText": "Done.",
+      "credits": 54
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  },
+  "gemini-36-flash": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The meeting notes from August 4, 2026, outline that the Cascade MVP will target Windows first within a three-to-four-wee",
+      "finalText": "I'm done.",
+      "credits": 24
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  },
+  "kimi-k3": {
+    "loop": {
+      "ok": true,
+      "turns": 3,
+      "toolCallCount": 2,
+      "toolsUsed": [
+        "read_file",
+        "write_file"
+      ],
+      "wroteSummary": true,
+      "summaryContent": "The 2026-08-04 meeting notes state that the Cascade MVP will target Windows first, the default model is still TBD pendin",
+      "finalText": "Done! I read notes.txt and wrote a one-sentence summary to summary.txt:\n\n> \"The 2026-08-04 meeting notes state that the ",
+      "credits": 24
+    },
+    "streaming": {
+      "ok": true,
+      "calls": 1
+    }
+  }
+}

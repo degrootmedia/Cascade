@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+app/out/
+app/build/
+app/build_new/
+release-builds/
+win-unpacked/
+
+# Release snapshots
+release-v*/
+
+# Logs & temp files
+*.log
+tmp_*
+test-workspace/
+
+# Scratch / probe files
+_*
+probe-*.mjs
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db

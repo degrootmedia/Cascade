@@ -1,0 +1,95 @@
+{
+  "1786582905439": {
+    "models": [
+      "arya"
+    ],
+    "reps": 5,
+    "results": {
+      "arya": {
+        "S1 stream=off tools=off maxTok=5  (rename-like)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S2 stream=off tools=on  maxTok=8k (isolate tools)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S3 stream=on  tools=off maxTok=8k (isolate stream)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S4 stream=on  tools=on  maxTok=8k (chat-like FAIL)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        }
+      }
+    },
+    "at": "2026-08-13T01:01:45.439Z"
+  },
+  "1786582973226": {
+    "models": [
+      "claude-sonnet-5"
+    ],
+    "reps": 5,
+    "results": {
+      "claude-sonnet-5": {
+        "S1 stream=off tools=off maxTok=5  (rename-like)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S2 stream=off tools=on  maxTok=8k (isolate tools)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S3 stream=on  tools=off maxTok=8k (isolate stream)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S4 stream=on  tools=on  maxTok=8k (chat-like FAIL)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        }
+      }
+    },
+    "at": "2026-08-13T01:02:53.226Z"
+  },
+  "1786583000625": {
+    "models": [
+      "gemini-36-flash"
+    ],
+    "reps": 5,
+    "results": {
+      "gemini-36-flash": {
+        "S1 stream=off tools=off maxTok=5  (rename-like)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S2 stream=off tools=on  maxTok=8k (isolate tools)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S3 stream=on  tools=off maxTok=8k (isolate stream)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        },
+        "S4 stream=on  tools=on  maxTok=8k (chat-like FAIL)": {
+          "pass": 5,
+          "banner": 0,
+          "other": 0
+        }
+      }
+    },
+    "at": "2026-08-13T01:03:20.625Z"
+  }
+}

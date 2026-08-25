@@ -1,0 +1,18 @@
+{
+  "name": "cascade-core",
+  "version": "0.1.0",
+  "description": "Cascade agent core — Gab.ai-powered agent loop with file and shell tools",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

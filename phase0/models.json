@@ -1,0 +1,3414 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "arya",
+      "object": "model",
+      "created": 1745448179,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 131072,
+      "embedding_dimensions": null,
+      "max_output_tokens": 8192,
+      "credit_cost": null,
+      "is_plus_only": false
+    },
+    {
+      "id": "aura-sr",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "cassetteai-sound-effects",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "object": "model",
+      "created": 1748813537,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 200000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 60000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "claude-opus-5",
+      "object": "model",
+      "created": 1785131871,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 25,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "object": "model",
+      "created": 1759169002,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 200000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 50000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "claude-sonnet-4",
+      "object": "model",
+      "created": 1748813537,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "claude-sonnet-5",
+      "object": "model",
+      "created": 1784213518,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 15,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1777080015,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32000,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "deepseek-v4-flash-0731",
+      "object": "model",
+      "created": 1785542036,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32000,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1777080015,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "deepseek-v3",
+      "object": "model",
+      "created": 1754277120,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 128000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 8000,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "elevenlabs-scribe-v1",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 14,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "elevenlabs-scribe-v2",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "elevenlabs-sound-effects-v2",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 7,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "flux-2-pro",
+      "object": "model",
+      "created": 1784783384,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "claude-fable-5",
+      "object": "model",
+      "created": 1781031395,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 46,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "glm-5-1",
+      "object": "model",
+      "created": 1775601783,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 202752,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65535,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "glm-5-2",
+      "object": "model",
+      "created": 1781635942,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65535,
+      "credit_cost": {
+        "base_cost": 6,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "gpt-image-1",
+      "object": "model",
+      "created": 1759970706,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 32000
+    },
+    {
+      "id": "gpt-image-1-mini",
+      "object": "model",
+      "created": 1759883106,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 4,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 32000
+    },
+    {
+      "id": "gpt-image-2",
+      "object": "model",
+      "created": 1776804523,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 32000
+    },
+    {
+      "id": "gpt-4o-transcribe",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": 16000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 2000,
+      "credit_cost": {
+        "base_cost": 10,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gpt-4o-mini-tts",
+      "object": "model",
+      "created": 1745452312,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 2000,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 200
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": 16000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 2000,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gpt-5-4",
+      "object": "model",
+      "created": 1772738190,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gpt-5-5",
+      "object": "model",
+      "created": 1777080015,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 15,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gpt-5-6-sol",
+      "object": "model",
+      "created": 1784213518,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 22,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "gpt-5-6-sol-pro",
+      "object": "model",
+      "created": 1784213518,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 28,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "gpt-5-6-terra",
+      "object": "model",
+      "created": 1784213518,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 18,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "gpt-5-6-terra-pro",
+      "object": "model",
+      "created": 1784213518,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1050000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 24,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "gemini-2-5-flash",
+      "object": "model",
+      "created": 1754250792,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gemini-2-5-flash-image",
+      "object": "model",
+      "created": 1759521714,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 65536,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32768,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 8192
+    },
+    {
+      "id": "gemini-3-1-flash-lite",
+      "object": "model",
+      "created": 1779996626,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": true,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": true
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": null,
+      "is_plus_only": false
+    },
+    {
+      "id": "gemini-2-5-pro",
+      "object": "model",
+      "created": 1754266917,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 60000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gemini-3-5-flash",
+      "object": "model",
+      "created": 1779223870,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": true
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gemini-35-flash-lite",
+      "object": "model",
+      "created": 1784651161,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": true
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gemini-36-flash",
+      "object": "model",
+      "created": 1784651161,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": true
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "gemma-4-26b",
+      "object": "model",
+      "created": 1775601719,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": true
+      },
+      "context_window": 262144,
+      "embedding_dimensions": null,
+      "max_output_tokens": 16384,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hailuo-2-3",
+      "object": "model",
+      "created": 1764981906,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 60,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hailuo-2-3-img-2-vid",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 60,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hailuo-2-3-pro",
+      "object": "model",
+      "created": 1764981906,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 95,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hailuo-2-3-pro-img-2-vid",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 95,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hailuo-3",
+      "object": "model",
+      "created": 1785770261,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 100,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "happy-horse-img-2-vid",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 2500,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 63,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "happy-horse-text-to-video",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 2500,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 63,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hermes-4-405b",
+      "object": "model",
+      "created": 1763175576,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 131000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 131000,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "heygen-avatar-4",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 225,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "heygen-video-agent-v3",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": true
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 30,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hunyuan-3d-pro-text-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1024,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 120,
+        "context_threshold": 1024
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hunyuan-3d-pro-image-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1024,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 140,
+        "context_threshold": 1024
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hunyuan-3d-rapid-text-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1024,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 50,
+        "context_threshold": 1024
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hunyuan-3d-rapid-image-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1024,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 55,
+        "context_threshold": 1024
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "hunyuan-avatar",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 210,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "ideogram-remove-background",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "ideogram-upscale",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 9,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "ideogram-v4-fast",
+      "object": "model",
+      "created": 1783529343,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2048
+    },
+    {
+      "id": "image-generator",
+      "object": "model",
+      "created": 1745455506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 512,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2048
+    },
+    {
+      "id": "image2svg",
+      "object": "model",
+      "created": 1785131871,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 4,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "imagen-4-0",
+      "object": "model",
+      "created": 1759884306,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 480,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "kimi-k2-thinking",
+      "object": "model",
+      "created": 1763091949,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 256000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 256000,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "kimi-k2-6",
+      "object": "model",
+      "created": 1776715140,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 120000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "created": 1784230807,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1048576,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32000,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "kling-2-5-turbo-pro",
+      "object": "model",
+      "created": 1765055615,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 50,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "kling-2-5-turbo-pro-img-2-vid",
+      "object": "model",
+      "created": 1765055615,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 75,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "kling-3-0-pro",
+      "object": "model",
+      "created": 1765055615,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 100,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "kling-3-0-pro-img-2-vid",
+      "object": "model",
+      "created": 1765055615,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 75,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "kling-avatar-v2-pro",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 175,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "kling-avatar-v2-standard",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 90,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "meshy-v6-text-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 600,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 220,
+        "context_threshold": 600
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "meshy-v6-image-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 600,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 220,
+        "context_threshold": 600
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "meshy-v6-preview-text-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 600,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 180,
+        "context_threshold": 600
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "meshy-v6-preview-image-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 600,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 180,
+        "context_threshold": 600
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "minimax-m2-5",
+      "object": "model",
+      "created": 1770929202,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1000000,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "minimax-m2-7",
+      "object": "model",
+      "created": 1775601811,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 204800,
+      "embedding_dimensions": null,
+      "max_output_tokens": 16384,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "minimax-m3",
+      "object": "model",
+      "created": 1780287035,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": true
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32768,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "music-2-0",
+      "object": "model",
+      "created": 1763005513,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 30000,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "music-2-6",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 30000,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 25,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "multitalk-avatar",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 220,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "multitalk-avatar-tts",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 205,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "nano-banana-2",
+      "object": "model",
+      "created": 1772124762,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 15,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "claude-opus-4-6",
+      "object": "model",
+      "created": 1767647675,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 12,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776352985,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 14,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "claude-opus-4-8",
+      "object": "model",
+      "created": 1779996626,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 24,
+        "context_threshold": 20000
+      },
+      "is_plus_only": true
+    },
+    {
+      "id": "sonar",
+      "object": "model",
+      "created": 1754254101,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 128000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 64000,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-235b",
+      "object": "model",
+      "created": 1754279209,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 131072,
+      "embedding_dimensions": null,
+      "max_output_tokens": 8192,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-235b-thinking",
+      "object": "model",
+      "created": 1754279423,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 131072,
+      "embedding_dimensions": null,
+      "max_output_tokens": 32768,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-5-397b",
+      "object": "model",
+      "created": 1771268038,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 262144,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-5-397b-thinking",
+      "object": "model",
+      "created": 1771268057,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 262144,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-7-flash",
+      "object": "model",
+      "created": 1785344044,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": true
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 1,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-7-max",
+      "object": "model",
+      "created": 1779486626,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 8,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-7-plus",
+      "object": "model",
+      "created": 1780503605,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 65536,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-3-8-max",
+      "object": "model",
+      "created": 1785790035,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": true,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": true
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 131072,
+      "credit_cost": {
+        "base_cost": 12,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-audio-3-0-tts-flash",
+      "object": "model",
+      "created": 1784828053,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": true,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 2000,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 2,
+        "context_threshold": 200
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "qwen-image",
+      "object": "model",
+      "created": 1759797906,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "qwen-image-2",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 7,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "recraft-v4-1-text-to-vector",
+      "object": "model",
+      "created": 1779486626,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 12,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2048
+    },
+    {
+      "id": "recraft-vectorize",
+      "object": "model",
+      "created": 1785131871,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 4,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "seedvr2-upscale",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "seedance-2-0",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 90,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "seedance-2-0-img-2-vid",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 90,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "seedream-4-0",
+      "object": "model",
+      "created": 1759884306,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 6,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "seedream-4-5",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 6,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "sonar-reasoning",
+      "object": "model",
+      "created": 1745524328,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": true,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 128000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 128000,
+      "credit_cost": {
+        "base_cost": 3,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "sora-2",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 75,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "sora-2-img-2-vid",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 30,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "topaz-upscale",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": true,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 12,
+        "context_threshold": 512
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 4000
+    },
+    {
+      "id": "tripo-h-3-1-text-to-3d",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1024,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 90,
+        "context_threshold": 1024
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "veo-3-1",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 75,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "veo-3-1-fast",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 40,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "veo-3-1-img-2-vid",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 60,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "wan-2-5",
+      "object": "model",
+      "created": 1759711506,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 40,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "wan-2-7-text-to-image",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": true,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 100000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 512,
+      "credit_cost": {
+        "base_cost": 6,
+        "context_threshold": 20000
+      },
+      "is_plus_only": false,
+      "max_prompt_characters": 2000
+    },
+    {
+      "id": "wan-2-7-img-2-vid",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 30,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "wan-2-7-text-to-video",
+      "object": "model",
+      "created": 1777004887,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": false,
+        "images": false,
+        "video": true,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": true,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 1000000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 1024,
+      "credit_cost": {
+        "base_cost": 30,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "wizper",
+      "object": "model",
+      "created": 1778280659,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": false,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": false,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": true,
+        "audio_input": true,
+        "video_input": false
+      },
+      "context_window": null,
+      "embedding_dimensions": null,
+      "max_output_tokens": null,
+      "credit_cost": {
+        "base_cost": 5,
+        "context_threshold": 512
+      },
+      "is_plus_only": false
+    },
+    {
+      "id": "o3",
+      "object": "model",
+      "created": 1754287539,
+      "owned_by": "gab-ai",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "video": false,
+        "audio": false,
+        "streaming": true,
+        "thinking": false,
+        "web_search": false,
+        "function_calling": true,
+        "embeddings": false,
+        "image_input": false,
+        "file_input": false,
+        "audio_input": false,
+        "video_input": false
+      },
+      "context_window": 200000,
+      "embedding_dimensions": null,
+      "max_output_tokens": 100000,
+      "credit_cost": {
+        "base_cost": 6,
+        "context_threshold": 50000
+      },
+      "is_plus_only": false
+    }
+  ]
+}

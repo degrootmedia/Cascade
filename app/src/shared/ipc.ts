@@ -150,6 +150,8 @@ export interface ProductionShot {
   /** True once the user has edited `prompt` by hand: a manual prompt survives
    *  script re-ingestion and design changes (it never auto-regenerates). */
   promptManual?: boolean;
+  /** Whether the generated prompt includes the production brand identity. */
+  includeBrandIdentity?: boolean;
   /** Per-reference prompt overrides for this frame, keyed by reference id
    *  (character, product, or custom reference). A non-blank entry replaces
    *  that reference's Design-page description in this shot's prompts; an
@@ -189,12 +191,25 @@ export interface CustomRef {
   id: string;
   /** User label, e.g. "Gondola Interior". */
   name: string;
-  /** Free-text note embedded in prompts, e.g. "Use for material and texture reference." */
-  description?: string;
   /** Reference image (data URL) attached in Step 2. */
   artwork?: string;
   /** Shot ids this reference applies to. Empty until toggled on specific shots. */
   shotIds?: string[];
+  /** User-created category; absent means uncategorized. */
+  categoryId?: string;
+}
+
+export interface ReferenceCategory {
+  id: string;
+  name: string;
+}
+
+/** A character or prop found during ingest, awaiting explicit user approval. */
+export interface SuggestedReference {
+  id: string;
+  name: string;
+  kind: "character" | "product";
+  key?: string;
 }
 
 /** OpenArt generation choices made on the Step 3 board controls. */
@@ -251,6 +266,10 @@ export interface Production {
   products: ProductRef[];
   /** User-added per-shot references (materials, textures, hero props). */
   references?: CustomRef[];
+  /** Script discoveries shown for approval at the end of Step 1. */
+  suggestedReferences?: SuggestedReference[];
+  /** User-created groups for manual reference images. */
+  referenceCategories?: ReferenceCategory[];
   /** Step 3 OpenArt generation preferences. */
   openArt?: OpenArtBoardConfig;
   /**
@@ -402,6 +421,8 @@ export interface CascadeApi {
    *  `index` selects an entry of the shot's `artworkHistory` (0 = most recent
    *  previous frame); omit it for the current frame. */
   boardImage(productionId: string, shotId: string, index?: number): Promise<string | null>;
+  boardThumbnail(productionId: string, shotId: string, index?: number): Promise<string | null>;
+  deleteBoardImage(productionId: string, shotId: string): Promise<Production>;
   /**
    * Step 3: edit a shot's current frame via an image-input model — the frame
    * is sent as a visual reference alongside `prompt`, and the result becomes

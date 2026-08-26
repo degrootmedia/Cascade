@@ -311,7 +311,27 @@ export function App() {
 
   return (
     <div className="app">
-      <ViewTabs value={view} onChange={switchView} />
+      <ViewTabs
+        value={view}
+        onChange={switchView}
+        rightContent={
+          <ModelPicker
+            models={models}
+            current={effectiveModel}
+            disabled={busy}
+            onChange={(id) => {
+              if (activeMeta) {
+                void window.cascade.updateAgent(activeMeta.id, { model: id }).then(() => {
+                  void refreshActiveAgent(currentId);
+                  void refreshAgents();
+                });
+              } else {
+                void window.cascade.setModel(id).then(() => refreshMeta());
+              }
+            }}
+          />
+        }
+      />
       {view === "home" ? (
         <div className="app-home">
           <Sidebar
@@ -418,21 +438,6 @@ export function App() {
           >
             ↩ Undo
           </button>
-          <ModelPicker
-            models={models}
-            current={effectiveModel}
-            disabled={busy}
-            onChange={(id) => {
-              if (activeMeta) {
-                void window.cascade.updateAgent(activeMeta.id, { model: id }).then(() => {
-                  void refreshActiveAgent(currentId);
-                  void refreshAgents();
-                });
-              } else {
-                void window.cascade.setModel(id).then(() => refreshMeta());
-              }
-            }}
-          />
         </div>
           </main>
         </div>

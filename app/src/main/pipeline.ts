@@ -9,7 +9,7 @@ import { GabClient } from "@core";
 import type { Production, ProductionScene, ProductionShot } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
-import type { CharacterSheet, CustomRef, ProductRef } from "../shared/ipc.js";
+import type { CharacterSheet, ProductRef, SuggestedReference } from "../shared/ipc.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -139,6 +139,24 @@ export function mergeProducts(raw: unknown[] | undefined, existing: ProductRef[]
   }
   for (const p of existing) {
     if (!out.some((o) => o.id === p.id)) out.push(p);
+  }
+  return out;
+}
+
+/** Convert model discoveries into suggestions; they are not active references until approved. */
+export function suggestedReferences(rawCharacters: RawCharacter[] | undefined, rawProducts: unknown[] | undefined): SuggestedReference[] {
+  const out: SuggestedReference[] = [];
+  const add = (name: string, kind: SuggestedReference["kind"], key?: string) => {
+    if (!name || out.some((r) => r.name.toLowerCase() === name.toLowerCase())) return;
+    out.push({ id: `${kind === "character" ? "suggest-char" : "suggest-prod"}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, name, kind, key: key || undefined });
+  };
+  for (const c of rawCharacters ?? []) {
+    const name = typeof c?.name === "string" ? c.name.trim() : "";
+    if (name) add(name, "character", typeof c.key === "string" ? c.key.trim() : undefined);
+  }
+  for (const p of rawProducts ?? []) {
+    const name = typeof p === "string" ? p.trim() : typeof (p as { name?: unknown })?.name === "string" ? String((p as { name: string }).name).trim() : "";
+    if (name) add(name, "product");
   }
   return out;
 }
@@ -294,6 +312,16 @@ export function refTokens(p: Production, shot: ProductionShot): Map<string, stri
   return map;
 }
 
+/** Convert human-friendly @[name] tags to stable per-shot transport tokens. */
+export function resolveReferenceTags(p: Production, shot: ProductionShot, prompt: string): string {
+  let resolved = prompt;
+  for (const [name, token] of refTokens(p, shot)) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    resolved = resolved.replace(new RegExp(`@\\[${escaped}\\]`, "gi"), token);
+  }
+  return resolved;
+}
+
 /**
  * Resolve a shot's style override to its generation text. The dropdown stores
  * the ProductionStyle id; older productions may still carry raw prompt text,
@@ -325,24 +353,17 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
   // explicitly attached character/product refs). Artwork-bearing refs are
-  // cited by portable token (@image1, @image2, …) so each direction is bound
+  // cited by a human-friendly tag (@[name]) so each direction is bound
   // to one specific image — the OpenArt path swaps the token for the uploaded
   // reference's unique id; exports keep the literal token next to a numbered
   // reference list.
   const consistency: string[] = [];
-  const brand = brandPrompt(p);
-  if (brand) consistency.push(brand);
+   const brand = shot.includeBrandIdentity !== false ? brandPrompt(p) : "";
+  if (brand) consistency.push(`Brand identity: ${brand}`);
   const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
   const excludedIds = new Set(shot.refExcluded ?? []);
   for (const c of p.characters) {
     if (c.key && c.name && !excludedIds.has(c.id) && haystack.includes(c.name.toLowerCase())) consistency.push(`${c.name}: ${c.key}.`);
-  }
-  const tokens = refTokens(p, shot);
-  for (const r of shotReferences(p, shot)) {
-    if (!r.description) continue;
-    const tok = tokens.get(r.name);
-    if (tok) consistency.push(`Reference ${tok} ("${r.name}"): ${r.description}.`);
-    else consistency.push(`Reference "${r.name}": ${r.description}.`);
   }
   if (consistency.length) paras.push(consistency.join("\n"));
   // Paragraph 3 — ACTION: the shot's own visual description.
@@ -370,48 +391,32 @@ export function brandPrompt(p: Production): string {
  * set in Step 3 wins; otherwise the auto-derived boardPrompt applies.
  */
 export function effectivePrompt(p: Production, shot: ProductionShot): string {
-  if (shot.prompt?.trim()) return shot.prompt.trim();
+  if (shot.prompt?.trim()) {
+    const base = shot.prompt.trim();
+    const brand = brandPrompt(p);
+    const generatedBrand = /(?:^|\n\n)Brand identity: [^\n]*(?=\n\n|$)/;
+    if (shot.includeBrandIdentity === false) return base.replace(generatedBrand, "").trim();
+    if (brand && !/\n\nBrand identity: /.test(base)) return `${base}\n\nBrand identity: ${brand}`;
+    return base;
+  }
   return boardPrompt(p, shot);
 }
 
-/**
- * The alias mapping sentence appended to prompts handed to OpenArt, using the
- * portable tokens (@image1, …) in place of the uploaded references' opaque
- * server ids. At submission time every token occurrence — including these —
- * is swapped for the real visualReference id, so this text shows exactly what
- * OpenArt sees while staying human-readable in the UI.
- */
-export function referenceAliasClause(p: Production, shot: ProductionShot): string {
-  const names = shotReferences(p, shot)
-    .filter((r) => r.artwork)
-    .map((r) => r.name);
-  if (!names.length) return "";
-  const mapping = names.map((name, i) => `${refToken(i)} = "${name}"`).join("; ");
-  return `Reference images by id — ${mapping}. Apply each reference direction above to its matching image id.`;
-}
-
-/** Matches a reference-alias clause at the end of a prompt (any mapping
- *  content), so stale copies can be removed before saving or re-appending. */
 const REFERENCE_CLAUSE_RE = /(?:\n+|^)Reference images by id[^\n]*(?:\n*)$/;
 
-/** Remove any previously appended reference-alias clause from a prompt.
- *  The clause is display/submission-time decoration; storing it in a manual
- *  override would make openArtPrompt append another copy after every edit. */
+/** Remove an obsolete alias clause from a stored or edited prompt. */
 export function stripReferenceClause(prompt: string): string {
   return prompt.replace(REFERENCE_CLAUSE_RE, "").trim();
 }
 
 /**
- * The FULL prompt OpenArt ultimately receives for a shot: the effective
- * prompt plus the reference alias clause. This is both what gets submitted
- * (tokens swapped for real ids at upload time) and what Step 3 displays, so
- * the storyboard always mirrors the generation payload. Any clause already
- * present in the stored prompt is stripped first so exactly one copy ships.
+ * The prompt OpenArt ultimately receives for a shot. Human tags are converted
+ * to portable tokens here; the OpenArt adapter converts those tokens to the
+ * uploaded visualReference ids before calling MCP.
  */
 export function openArtPrompt(p: Production, shot: ProductionShot): string {
-  const clause = referenceAliasClause(p, shot);
-  const base = stripReferenceClause(effectivePrompt(p, shot));
-  return clause ? `${base}\n\n${clause}` : base;
+  const base = resolveReferenceTags(p, shot, stripReferenceClause(effectivePrompt(p, shot)));
+  return base;
 }
 
 /** A reference resolved for a specific shot: matched character/product, or a
@@ -435,36 +440,19 @@ export interface ShotRef {
  */
 export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   const out: ShotRef[] = [];
-  // Per-shot prompt overrides keyed by reference id (Step 3 lightbox editor).
-  // A non-blank override replaces the entry's Design-page description; blank
-  // or absent falls back to the Design-page text.
-  const overrides = shot.refPromptOverrides ?? {};
-  const withOverride = <T extends ShotRef>(r: T): T => {
-    const ov = r.id ? overrides[r.id]?.trim() : "";
-    return ov ? { ...r, description: ov } : r;
-  };
   const push = (r: ShotRef) => {
-    if (r.name && !out.some((o) => o.name.toLowerCase() === r.name.toLowerCase())) out.push(withOverride(r));
+    if (r.name && !out.some((o) => o.name.toLowerCase() === r.name.toLowerCase())) out.push(r);
   };
-  const hay = `${shot.audio} ${shot.visual}`.toLowerCase();
-  const excluded = new Set(shot.refExcluded ?? []);
-  for (const c of p.characters) {
-    if (c.name && !excluded.has(c.id) && hay.includes(c.name.toLowerCase())) push({ id: c.id, name: c.name, description: c.key, artwork: c.artwork });
-  }
-  for (const pr of p.products) {
-    if (pr.name && !excluded.has(pr.id) && hay.includes(pr.name.toLowerCase())) push({ id: pr.id, name: pr.name, artwork: pr.artwork });
-  }
-  const explicit = new Set(shot.refIds ?? []);
-  if (explicit.size) {
-    for (const c of p.characters) {
-      if (explicit.has(c.id)) push({ id: c.id, name: c.name, description: c.key, artwork: c.artwork });
-    }
-    for (const pr of p.products) {
-      if (explicit.has(pr.id)) push({ id: pr.id, name: pr.name, artwork: pr.artwork });
-    }
-  }
-  for (const r of p.references ?? []) {
-    if ((r.shotIds ?? []).includes(shot.id)) push({ id: r.id, name: r.name, description: r.description, artwork: r.artwork });
+  // Only explicit human-friendly tags assign images to a shot. This prevents
+  // script text, legacy shot toggles, or old associations from being uploaded.
+  const candidates: ShotRef[] = [
+    ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: c.artwork })),
+    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: pr.artwork })),
+    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: r.artwork })),
+  ];
+  for (const match of (shot.prompt ?? "").matchAll(/@\[([^\]]+)\]/g)) {
+    const ref = candidates.find((r) => r.name.toLowerCase() === match[1].toLowerCase());
+    if (ref) push(ref);
   }
   return out;
 }
@@ -597,7 +585,7 @@ export function exportBoardPrompts(p: Production, emit: EmitFn): Production {
       let n = 0;
       const listed = refs.map((r) => {
         const art = r.artwork ? refToken(n++) : null;
-        return `${art ? `${art} — ` : ""}${r.name}${r.description ? ` — ${r.description}` : ""}${art ? " (artwork attached)" : ""}`;
+        return `${art ? `${art} — ` : ""}${r.name}${art ? " (artwork attached)" : ""}`;
       });
       lines.push(
         "",
@@ -850,12 +838,9 @@ export async function ingestScript(
   if (!shotCount) throw new Error("The breakdown came back with no shots — check the script and retry.");
   emit(`Parsed ${scenes.length} scene(s), ${shotCount} shot(s).`);
 
-  // Characters & products feed Step 2's reference pickers.
-  p.characters = mergeCharacters(parsed.characters, p.characters ?? []);
-  p.products = mergeProducts(parsed.products, p.products ?? []);
-  if (p.characters.length || p.products.length) {
-    emit(`Found ${p.characters.length} character(s), ${p.products.length} product(s).`);
-  }
+  // Keep discoveries separate so ingest never silently creates active references.
+  p.suggestedReferences = suggestedReferences(parsed.characters, parsed.products);
+  if (p.suggestedReferences.length) emit(`Found ${p.suggestedReferences.length} suggested character/prop reference(s).`);
 
   // Preserve manually edited board prompts across re-ingestion. The old shot
   // list is about to be replaced, so stash each manually edited prompt keyed

@@ -28,6 +28,12 @@ function normalize(p: ProductionFile): ProductionFile {
   p.characters ??= [];
   p.products ??= [];
   p.references ??= [];
+  p.references = p.references.map((r) => {
+    const clean = { ...r } as typeof r & { description?: unknown };
+    delete clean.description;
+    return clean;
+  });
+  p.referenceCategories ??= [];
   p.openArt ??= { model: "auto", resolution: "1k" };
   p.status ??= {};
   p.visualStyle ??= "";

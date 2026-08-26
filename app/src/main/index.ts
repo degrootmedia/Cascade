@@ -11,7 +11,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
@@ -626,6 +626,8 @@ function registerIpc() {
     existing.characters = Array.isArray(p.characters) ? p.characters : [];
     existing.products = Array.isArray(p.products) ? p.products : [];
     existing.references = Array.isArray(p.references) ? p.references : [];
+    existing.suggestedReferences = Array.isArray(p.suggestedReferences) ? p.suggestedReferences : [];
+    existing.referenceCategories = Array.isArray(p.referenceCategories) ? p.referenceCategories : [];
     if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
       existing.openArt = { model: p.openArt.model, resolution: p.openArt.resolution } as OpenArtBoardConfig;
     }
@@ -1174,10 +1176,8 @@ function registerIpc() {
       // reference field), so their presence picks the mode below.
       // Each uploaded reference carries a unique string id (OpenArt's
       // visualReference id, falling back to its URL). The prompt already cites
-      // refs by portable token (@image1, …) AND includes the alias-mapping
-      // clause (see openArtPrompt) — here every token occurrence, including
-      // those inside the mapping clause, is swapped for that ref's actual id,
-      // so OpenArt receives exactly what Step 3 displays with real ids.
+       // refs by portable token (@image1, …); every token occurrence is
+       // swapped for that reference's actual OpenArt id before MCP submission.
       const uploaded: Record<string, unknown>[] = [];
       const tokenToId: { token: string; id: string }[] = [];
       for (const [i, r] of refs.entries()) {
@@ -1377,7 +1377,9 @@ function registerIpc() {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    return shot ? openArtPrompt(p, shot) : null;
+    // Keep human @[name] tags in the editor; transport conversion happens only
+    // inside openArtImageGen immediately before MCP submission.
+    return shot ? stripReferenceClause(effectivePrompt(p, shot)) : null;
   });
 
   // Step 3: persist a shot's editable board-prompt override (empty clears it).
@@ -1479,6 +1481,31 @@ function registerIpc() {
     } catch {
       return null;
     }
+  });
+
+  ipcMain.handle("production:boardThumbnail", (_e, id: string, shotId: string, index?: number) => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    const rel = index == null ? shot?.artwork : shot?.artworkHistory?.[index];
+    if (!rel) return null;
+    try {
+      const image = nativeImage.createFromPath(assetPath(p, rel)).resize({ width: 480 });
+      return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
+    } catch { return null; }
+  });
+
+  ipcMain.handle("production:deleteBoardImage", (_e, id: string, shotId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    if (shot.artwork) {
+      try { fs.unlinkSync(assetPath(p, shot.artwork)); } catch { /* missing file is already removed */ }
+      delete shot.artwork;
+    }
+    productions.saveProduction(p);
+    return p;
   });
 
   // Promote a history frame back to primary: the selected history entry

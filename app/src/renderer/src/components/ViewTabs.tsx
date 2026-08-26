@@ -2,7 +2,9 @@
 
 export type AppView = "home" | "prod";
 
-export function ViewTabs({ value, onChange }: { value: AppView; onChange: (v: AppView) => void }) {
+import type { ReactNode } from "react";
+
+export function ViewTabs({ value, onChange, rightContent }: { value: AppView; onChange: (v: AppView) => void; rightContent?: ReactNode }) {
   return (
     <nav className="view-tabs" role="tablist">
       <span className="view-tabs-brand">Cascade</span>
@@ -22,6 +24,7 @@ export function ViewTabs({ value, onChange }: { value: AppView; onChange: (v: Ap
       >
         Production Assistant
       </button>
+      {rightContent && <div className="view-tabs-right">{rightContent}</div>}
     </nav>
   );
 }

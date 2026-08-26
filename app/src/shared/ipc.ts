@@ -139,6 +139,10 @@ export interface ProductionShot {
   /** Character/product reference ids explicitly attached to this frame in
    *  Step 3 — beyond those auto-matched by name from the shot's text. */
   refIds?: string[];
+  /** Auto-matched (by name) character/product ids the user unchecked for this
+   *  frame. The entry stays visible so it can be re-checked later; excluded
+   *  ids are skipped at generation/export time too. */
+  refExcluded?: string[];
   /** The board generation prompt, editable in Step 3. When empty/absent the
    *  prompt is derived from the master/per-shot style, brand, and references;
    *  when set, this exact text drives the shot's generation. */
@@ -146,6 +150,11 @@ export interface ProductionShot {
   /** True once the user has edited `prompt` by hand: a manual prompt survives
    *  script re-ingestion and design changes (it never auto-regenerates). */
   promptManual?: boolean;
+  /** Per-reference prompt overrides for this frame, keyed by reference id
+   *  (character, product, or custom reference). A non-blank entry replaces
+   *  that reference's Design-page description in this shot's prompts; an
+   *  empty/absent entry falls back to the Design-page text. */
+  refPromptOverrides?: Record<string, string>;
 }
 
 export interface ProductionScene {
@@ -371,7 +380,7 @@ export interface CascadeApi {
   /** Step 3: return one shot's full generation prompt (used by the per-frame copy button). */
   getBoardPrompt(productionId: string, shotId: string): Promise<string | null>;
   /** Step 3: set a shot's editable board prompt (empty clears the override back to auto-derived). */
-  updateBoardPrompt(productionId: string, shotId: string, prompt: string): Promise<void>;
+  updateBoardPrompt(productionId: string, shotId: string, prompt: string): Promise<Production>;
   /**
    * Step 3: discard a shot's manually edited prompt and re-derive it from the
    * current design (style, brand, references) + script. Returns the updated

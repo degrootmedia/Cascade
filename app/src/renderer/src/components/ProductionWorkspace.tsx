@@ -210,6 +210,11 @@ export function ProductionWorkspace() {
     if (!prod) return;
     saveField({ references: (prod.references ?? []).filter((r) => r.id !== id) });
   }
+  /** Edit a custom reference's name/description prompt in place. */
+  function updateRef(id: string, patch: Partial<{ name: string; description: string }>) {
+    if (!prod) return;
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, ...patch } : r)) });
+  }
   async function attachRefArtwork(id: string) {
     if (!prod) return;
     const dataUrl = await window.cascade.pickReferenceImage();
@@ -436,18 +441,35 @@ export function ProductionWorkspace() {
     }
   }
 
-  /** Step 3: pick one shot's render style (stores the style's stable id). */
+  /** Step 3: pick one shot's render style (stores the style's stable id).
+   *  Only the style section of the prompt may change: on an auto-derived
+   *  prompt that happens naturally; on a manually edited prompt we swap just
+   *  its leading "Style:" paragraph and keep every other edit intact. */
   function updateShotStyle(shotId: string, styleId: string) {
     if (!prod) return;
+    const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
     saveField({
       scenes: prod.scenes.map((sc) => ({
         ...sc,
-        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, style: styleId || undefined } : s)),
+        shots: sc.shots.map((s) => {
+          if (s.id !== shotId) return s;
+          if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined };
+          const para = styleText
+            ? `Style: ${styleText}. Render consistently with the other shots in this production.`
+            : "";
+          // Replace the first "Style:" paragraph (up to a blank line); prepend
+          // one when the manual prompt has no style section of its own.
+          const rest = s.prompt.replace(/^Style:[\s\S]*?(?:\n\n|$)/, "");
+          const next = para ? (rest.trim() ? `${para}\n\n${rest.trimEnd()}` : para) : s.prompt;
+          return { ...s, style: styleId || undefined, prompt: next };
+        }),
       })),
     });
   }
 
-  /** Step 3: attach/detach a detected character/product reference to one shot. */
+  /** Step 3: attach/detach a detected character/product reference to one shot.
+   *  Auto-matched entries stay listed but can be unchecked (excluded) and
+   *  re-checked; explicit picks toggle as before. */
   function toggleShotEntityRef(shotId: string, entityId: string) {
     if (!prod) return;
     saveField({
@@ -455,7 +477,22 @@ export function ProductionWorkspace() {
         ...sc,
         shots: sc.shots.map((s) => {
           if (s.id !== shotId) return s;
+          const excluded = s.refExcluded ?? [];
           const ids = s.refIds ?? [];
+          const hay = `${s.audio} ${s.visual}`.toLowerCase();
+          const isAuto = prod.characters.some((c) => c.id === entityId && c.name && hay.includes(c.name.toLowerCase()))
+            || prod.products.some((pr) => pr.id === entityId && pr.name && hay.includes(pr.name.toLowerCase()));
+          if (isAuto && !ids.includes(entityId)) {
+            // Auto entry: toggling adds/removes it from the exclusion list so
+            // the row stays visible for easy re-checking.
+            return {
+              ...s,
+              refExcluded: excluded.includes(entityId)
+                ? excluded.filter((i) => i !== entityId)
+                : [...excluded, entityId],
+              refIds: ids.filter((i) => i !== entityId),
+            };
+          }
           return { ...s, refIds: ids.includes(entityId) ? ids.filter((i) => i !== entityId) : [...ids, entityId] };
         }),
       })),
@@ -501,14 +538,37 @@ export function ProductionWorkspace() {
     });
   }
 
-  /** Step 3: persist a shot's editable board-prompt override (empty clears it). */
+  /** Step 3: persist a shot's editable board-prompt override (empty clears it).
+   *  The returned production is merged into renderer state immediately —
+   *  otherwise the next saveField would write the stale pre-edit prompt back
+   *  and silently revert the manual edit (and its refresh button). */
   async function saveShotPrompt(shotId: string, prompt: string) {
     if (!prod) return;
     try {
-      await window.cascade.updateBoardPrompt(prod.meta.id, shotId, prompt);
+      const next = await window.cascade.updateBoardPrompt(prod.meta.id, shotId, prompt);
+      setProd(next);
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
+  }
+
+  /** Step 3: set/clear a per-frame prompt override for one reference on one
+   *  shot (edited from the enlarged-reference lightbox). A blank value clears
+   *  the override so the Design-page prompt applies again. */
+  function setShotRefPrompt(shotId: string, refId: string, value: string) {
+    if (!prod) return;
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => {
+          if (s.id !== shotId) return s;
+          const ov = { ...(s.refPromptOverrides ?? {}) };
+          if (value.trim()) ov[refId] = value;
+          else delete ov[refId];
+          return { ...s, refPromptOverrides: ov };
+        }),
+      })),
+    });
   }
 
   /** Step 3: AI-edit a shot's current frame (image-input model + prompt).
@@ -769,6 +829,7 @@ export function ProductionWorkspace() {
               onAttach={(id) => void attachRefArtwork(id)}
               onRemoveImage={(id) => removeRefArtwork(id)}
               onRemove={(id) => removeRef(id)}
+              onUpdate={updateRef}
             />
 
             <StepFooter prod={prod} onNext={goNext} />
@@ -858,6 +919,7 @@ export function ProductionWorkspace() {
                     onToggleEntityRef={(entityId) => toggleShotEntityRef(shot.id, entityId)}
                     onStyleChange={(style) => updateShotStyle(shot.id, style)}
                     onPromptChange={(shotId, prompt) => void saveShotPrompt(shotId, prompt)}
+                    onRefPromptChange={(shotId, refId, value) => setShotRefPrompt(shotId, refId, value)}
                     onRefreshPrompt={() =>
                       apply(window.cascade.refreshBoardPrompt(prod.meta.id, shot.id))
                     }
@@ -1046,13 +1108,16 @@ function RefSection({ title, items, emptyHint, onAttach, onRemove, onAdd, addKin
 }
 
 /** Step 2: user-created references (materials, textures, mood, hero props),
- *  each with a name, optional description, optional artwork, and remove. */
-function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove }: {
+ *  each with an editable name + description prompt (persisted as you type),
+ *  optional artwork, and remove. */
+function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onUpdate }: {
   items: (RefItem & { description?: string })[];
   onAdd: (name: string, description: string) => void;
   onAttach: (id: string) => void;
   onRemoveImage: (id: string) => void;
   onRemove: (id: string) => void;
+  /** Rename a reference or adjust its description prompt in place. */
+  onUpdate: (id: string, patch: Partial<{ name: string; description: string }>) => void;
 }) {
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
@@ -1071,8 +1136,21 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove }: {
           <figure key={i.id} className="prod-ref">
             {i.artwork ? <img src={i.artwork} alt={i.name} /> : <div className="prod-ref-blank">{i.description ? "ref" : "…"}</div>}
             <figcaption>
-              <span className="prod-ref-name">{i.name}</span>
-              {i.description && <span className="prod-ref-desc">{i.description}</span>}
+              <input
+                className="prod-ref-name prod-ref-edit-name"
+                value={i.name}
+                placeholder="Reference name"
+                onChange={(e) => onUpdate(i.id, { name: e.target.value })}
+                title="Rename this reference"
+              />
+              <textarea
+                className="prod-ref-desc prod-ref-edit-desc"
+                value={i.description ?? ""}
+                placeholder="Prompt / description (e.g. Use for material and texture reference)"
+                onChange={(e) => onUpdate(i.id, { description: e.target.value })}
+                title="Adjust this reference's prompt"
+                rows={2}
+              />
             </figcaption>
             {i.artwork
               ? <button className="prod-ref-remove" title="Remove reference image" onClick={() => onRemoveImage(i.id)}>×</button>
@@ -1112,7 +1190,7 @@ function formatRuntime(totalSec: number): string {
 
 /** One storyboard frame in the Step 3 contact sheet. The PNG lives in the
  *  production folder; the thumbnail is fetched on demand as a data URL. */
-function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onEdit, onToggleRef, onToggleEntityRef, onStyleChange, onPromptChange, onRefreshPrompt, onDropFrame, onPasteRef }: {
+function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onEdit, onToggleRef, onToggleEntityRef, onStyleChange, onPromptChange, onRefPromptChange, onRefreshPrompt, onDropFrame, onPasteRef }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -1126,6 +1204,9 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
   onToggleEntityRef: (entityId: string) => void;
   onStyleChange: (style: string) => void;
   onPromptChange: (shotId: string, prompt: string) => void;
+  /** Set/clear a per-frame prompt override for one reference on this shot
+   *  (blank clears it — the Design-page prompt applies again). */
+  onRefPromptChange: (shotId: string, refId: string, value: string) => void;
   /** Discard the manual prompt and re-derive it from the current design. */
   onRefreshPrompt: () => void;
   /** Attach a frame dragged from another card as a reference on this shot. */
@@ -1136,7 +1217,7 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
   const [img, setImg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showRefs, setShowRefs] = useState(false);
-  const [expandedRef, setExpandedRef] = useState<{ name: string; artwork: string } | null>(null);
+  const [expandedRef, setExpandedRef] = useState<{ id: string; name: string; artwork: string; defaultText?: string } | null>(null);
   const [expanded, setExpanded] = useState(false); // enlarged frame lightbox
   const [promptOpen, setPromptOpen] = useState(false); // full editor drawer
   // True while a dragged board frame hovers over this card's Refs button.
@@ -1192,7 +1273,17 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
   ]);
   useEffect(() => {
     let live = true;
-    window.cascade.getBoardPrompt(prod.meta.id, shot.id).then((p) => { if (live) setPrompt(p ?? shot.prompt ?? ""); }).catch(() => {});
+    window.cascade.getBoardPrompt(prod.meta.id, shot.id).then((p) => {
+      if (!live) return;
+      // While the user is typing in this card's editor, never replace the
+      // value: the debounced save changes shot.prompt, re-runs this effect,
+      // and a round-tripped (normalized) string would reset the textarea's
+      // DOM value and yank the caret to the end.
+      const el = document.activeElement;
+      if (el instanceof HTMLTextAreaElement
+        && (el.classList.contains("prod-board-prompt") || el.classList.contains("prod-prompt-drawer-text"))) return;
+      setPrompt(p ?? shot.prompt ?? "");
+    }).catch(() => {});
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prod.meta.id, shot.id, shot.prompt, shot.style, designSig]);
@@ -1230,21 +1321,19 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
   // the refs menu. All appear as thumbnails; auto-matches are pinned on.
   const hay = `${shot.audio} ${shot.visual}`.toLowerCase();
   const entityRefs = [
-    ...prod.characters.map((c) => ({ id: c.id, name: c.name, artwork: c.artwork })),
-    ...prod.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: pr.artwork })),
+    ...prod.characters.map((c) => ({ id: c.id, name: c.name, artwork: c.artwork, defaultText: c.key })),
+    ...prod.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: pr.artwork, defaultText: undefined as string | undefined })),
   ]
     .filter((r) => r.name)
     .map((r) => ({
       ...r,
       auto: !!(r.artwork && hay.includes(r.name.toLowerCase())),
       picked: (shot.refIds ?? []).includes(r.id),
+      excluded: (shot.refExcluded ?? []).includes(r.id),
     }))
-    .filter((r) => r.auto || r.picked);
-  const activeRefCount = activeRefs.length + entityRefs.length;
-  // Active custom references that carry an image — shown as thumbnails next to
-  // the detected character/product references (drop- or paste-attached refs).
-  const activeArtRefs = activeRefs.filter((r) => r.artwork);
-
+    .filter((r) => r.auto || r.picked || r.excluded);
+  const customThumbRefs = activeRefs.filter((r) => r.artwork);
+  const activeRefCount = entityRefs.filter((r) => (r.auto && !r.excluded) || r.picked).length + activeRefs.length;
   async function copyPrompt() {
     try {
       const prompt = await window.cascade.getBoardPrompt(prod.meta.id, shot.id);
@@ -1390,11 +1479,16 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
           ))}
         </select>
       </div>
-      {entityRefs.length > 0 && (
-        <div className="prod-board-autorefs" title="References applied to this frame (auto-matched or attached) — click to expand">
+      {(entityRefs.length > 0 || customThumbRefs.length > 0) && (
+        <div className="prod-board-autorefs" title="References applied to this frame (auto-matched, attached, or custom)">
           {entityRefs.map((r) => (
-            <button key={r.id} className={"prod-board-autoref" + (r.picked && !r.auto ? " picked" : "")} title={`${r.name}${r.auto ? " (auto-matched)" : " (attached)"} — click to expand`} onClick={() => r.artwork && setExpandedRef({ name: r.name, artwork: r.artwork })}>
+            <button key={r.id} className={"prod-board-autoref" + ((r.auto && r.excluded) ? " excluded" : "") + (r.picked && !r.auto ? " picked" : "")} title={`${r.name}${r.auto ? " (auto-matched)" : " (attached)"} — click to enlarge and edit its prompt for this frame`} onClick={() => r.artwork && setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork, defaultText: r.defaultText })}>
               {r.artwork ? <img src={r.artwork} alt={r.name} /> : <span className="prod-board-autoref-blank">?</span>}
+            </button>
+          ))}
+          {customThumbRefs.map((r) => (
+            <button key={r.id} className="prod-board-autoref custom" title={`${r.name} (custom reference) — click to enlarge and edit its prompt for this frame`} onClick={() => setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork!, defaultText: r.description })}>
+              <img src={r.artwork} alt={r.name} />
             </button>
           ))}
         </div>
@@ -1429,8 +1523,8 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
           <div className="prod-board-refmenu">
             {(() => {
               const withArt = [
-                ...prod.characters.filter((c) => c.name).map((c) => ({ id: c.id, name: c.name, auto: !!(c.artwork && hay.includes(c.name.toLowerCase())) })),
-                ...prod.products.filter((pr) => pr.name).map((pr) => ({ id: pr.id, name: pr.name, auto: !!(pr.artwork && hay.includes(pr.name.toLowerCase())) })),
+                ...prod.characters.filter((c) => c.name).map((c) => ({ id: c.id, name: c.name, auto: !!(c.artwork && hay.includes(c.name.toLowerCase())), excluded: (shot.refExcluded ?? []).includes(c.id) })),
+                ...prod.products.filter((pr) => pr.name).map((pr) => ({ id: pr.id, name: pr.name, auto: !!(pr.artwork && hay.includes(pr.name.toLowerCase())), excluded: (shot.refExcluded ?? []).includes(pr.id) })),
               ];
               const withoutArt = [
                 ...prod.characters.filter((c) => c.name && !c.artwork).map((c) => c.name),
@@ -1444,8 +1538,7 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
                     <label key={r.id} className="prod-board-refopt" title={r.auto ? `${r.name} — auto-matched by name (always on)` : `Attach ${r.name} as a reference for this frame`}>
                       <input
                         type="checkbox"
-                        checked={r.auto || (shot.refIds ?? []).includes(r.id)}
-                        disabled={r.auto}
+                        checked={(r.auto && !(shot.refExcluded ?? []).includes(r.id)) || (shot.refIds ?? []).includes(r.id)}
                         onChange={() => onToggleEntityRef(r.id)}
                       />
                       {r.name}{r.auto ? " ·auto" : ""}
@@ -1479,6 +1572,19 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
           <figure className="prod-ref-lightbox-card">
             <img src={expandedRef.artwork} alt={expandedRef.name} />
             <figcaption>{expandedRef.name}</figcaption>
+            <div className="prod-ref-prompt" onClick={(e) => e.stopPropagation()}>
+              <textarea
+                className="prod-ref-prompt-input"
+                rows={3}
+                value={shot.refPromptOverrides?.[expandedRef.id] ?? ""}
+                placeholder={expandedRef.defaultText?.trim()
+                  ? `Design prompt: ${expandedRef.defaultText.trim()}`
+                  : "No prompt set in Design — type one here"}
+                title="Prompt for this reference on this frame only — leave blank to use the Design-page prompt"
+                onChange={(e) => onRefPromptChange(shot.id, expandedRef.id, e.target.value)}
+              />
+              <span className="hint">Leave blank to fall back to this reference's Design-page prompt.</span>
+            </div>
           </figure>
         </div>
       )}

@@ -333,8 +333,9 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   const brand = brandPrompt(p);
   if (brand) consistency.push(brand);
   const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
+  const excludedIds = new Set(shot.refExcluded ?? []);
   for (const c of p.characters) {
-    if (c.key && c.name && haystack.includes(c.name.toLowerCase())) consistency.push(`${c.name}: ${c.key}.`);
+    if (c.key && c.name && !excludedIds.has(c.id) && haystack.includes(c.name.toLowerCase())) consistency.push(`${c.name}: ${c.key}.`);
   }
   const tokens = refTokens(p, shot);
   for (const r of shotReferences(p, shot)) {
@@ -389,20 +390,36 @@ export function referenceAliasClause(p: Production, shot: ProductionShot): strin
   return `Reference images by id — ${mapping}. Apply each reference direction above to its matching image id.`;
 }
 
+/** Matches a reference-alias clause at the end of a prompt (any mapping
+ *  content), so stale copies can be removed before saving or re-appending. */
+const REFERENCE_CLAUSE_RE = /(?:\n+|^)Reference images by id[^\n]*(?:\n*)$/;
+
+/** Remove any previously appended reference-alias clause from a prompt.
+ *  The clause is display/submission-time decoration; storing it in a manual
+ *  override would make openArtPrompt append another copy after every edit. */
+export function stripReferenceClause(prompt: string): string {
+  return prompt.replace(REFERENCE_CLAUSE_RE, "").trim();
+}
+
 /**
  * The FULL prompt OpenArt ultimately receives for a shot: the effective
  * prompt plus the reference alias clause. This is both what gets submitted
  * (tokens swapped for real ids at upload time) and what Step 3 displays, so
- * the storyboard always mirrors the generation payload.
+ * the storyboard always mirrors the generation payload. Any clause already
+ * present in the stored prompt is stripped first so exactly one copy ships.
  */
 export function openArtPrompt(p: Production, shot: ProductionShot): string {
   const clause = referenceAliasClause(p, shot);
-  return clause ? `${effectivePrompt(p, shot)}\n\n${clause}` : effectivePrompt(p, shot);
+  const base = stripReferenceClause(effectivePrompt(p, shot));
+  return clause ? `${base}\n\n${clause}` : base;
 }
 
 /** A reference resolved for a specific shot: matched character/product, or a
  *  custom reference associated to that shot. */
 export interface ShotRef {
+  /** Stable id of the source entry (character/product/custom reference) —
+   *  used to look up per-shot prompt overrides. */
+  id?: string;
   name: string;
   description?: string;
   artwork?: string;
@@ -418,27 +435,36 @@ export interface ShotRef {
  */
 export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   const out: ShotRef[] = [];
+  // Per-shot prompt overrides keyed by reference id (Step 3 lightbox editor).
+  // A non-blank override replaces the entry's Design-page description; blank
+  // or absent falls back to the Design-page text.
+  const overrides = shot.refPromptOverrides ?? {};
+  const withOverride = <T extends ShotRef>(r: T): T => {
+    const ov = r.id ? overrides[r.id]?.trim() : "";
+    return ov ? { ...r, description: ov } : r;
+  };
   const push = (r: ShotRef) => {
-    if (r.name && !out.some((o) => o.name.toLowerCase() === r.name.toLowerCase())) out.push(r);
+    if (r.name && !out.some((o) => o.name.toLowerCase() === r.name.toLowerCase())) out.push(withOverride(r));
   };
   const hay = `${shot.audio} ${shot.visual}`.toLowerCase();
+  const excluded = new Set(shot.refExcluded ?? []);
   for (const c of p.characters) {
-    if (c.name && hay.includes(c.name.toLowerCase())) push({ name: c.name, description: c.key, artwork: c.artwork });
+    if (c.name && !excluded.has(c.id) && hay.includes(c.name.toLowerCase())) push({ id: c.id, name: c.name, description: c.key, artwork: c.artwork });
   }
   for (const pr of p.products) {
-    if (pr.name && hay.includes(pr.name.toLowerCase())) push({ name: pr.name, artwork: pr.artwork });
+    if (pr.name && !excluded.has(pr.id) && hay.includes(pr.name.toLowerCase())) push({ id: pr.id, name: pr.name, artwork: pr.artwork });
   }
   const explicit = new Set(shot.refIds ?? []);
   if (explicit.size) {
     for (const c of p.characters) {
-      if (explicit.has(c.id)) push({ name: c.name, description: c.key, artwork: c.artwork });
+      if (explicit.has(c.id)) push({ id: c.id, name: c.name, description: c.key, artwork: c.artwork });
     }
     for (const pr of p.products) {
-      if (explicit.has(pr.id)) push({ name: pr.name, artwork: pr.artwork });
+      if (explicit.has(pr.id)) push({ id: pr.id, name: pr.name, artwork: pr.artwork });
     }
   }
   for (const r of p.references ?? []) {
-    if ((r.shotIds ?? []).includes(shot.id)) push({ name: r.name, description: r.description, artwork: r.artwork });
+    if ((r.shotIds ?? []).includes(shot.id)) push({ id: r.id, name: r.name, description: r.description, artwork: r.artwork });
   }
   return out;
 }

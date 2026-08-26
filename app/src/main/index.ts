@@ -11,7 +11,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, shotReferences, refToken, recordBoardArtwork, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
@@ -1350,9 +1350,16 @@ function registerIpc() {
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
     const text = typeof prompt === "string" ? prompt.trim() : "";
-    if (text) {
-      shot.prompt = text;
+    // The reference-alias clause is appended at display/submission time; strip
+    // any copy the user's editor included so it never accumulates in storage.
+    const clean = text ? stripReferenceClause(text) : "";
+    if (clean) {
+      shot.prompt = clean;
       shot.promptManual = true; // manual: survives re-ingestion & design changes
+    } else if (text && !clean) {
+      // User erased everything except the auto-appended clause — treat as cleared.
+      delete shot.prompt;
+      shot.promptManual = false;
     } else {
       delete shot.prompt;
       shot.promptManual = false; // cleared → auto-derived prompt applies again

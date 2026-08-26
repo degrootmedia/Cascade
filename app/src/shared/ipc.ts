@@ -129,8 +129,6 @@ export interface ProductionShot {
   artworkHistory?: string[];
   /** Step 4: planned screen time in seconds (animatic). */
   durationSec?: number;
-  /** Step 4: transition INTO the next shot. */
-  transition?: "cut" | "dissolve" | "fade" | "wipe";
   /** Optional per-shot render-style override: the id of a ProductionStyle
    *  from the Step 2 set (legacy productions may store raw prompt text —
    *  resolved by name/prompt at generation time). When absent, the master
@@ -245,6 +243,27 @@ export interface OpenArtModelChoice {
   cost: number | null;
 }
 
+/** A TTS-capable audio model surfaced in the Step 4 voiceover picker. */
+export interface AudioModelInfo {
+  id: string;
+  displayName: string;
+  /** Voice ids the model accepts (OpenAI-style: alloy/echo/fable/onyx/nova/shimmer). */
+  voices: string[];
+  /** Base credit cost for one VO job (null when the registry didn't report one). */
+  cost: number | null;
+  /** What this audio model generates — the VO picker shows tts, the music
+   *  picker shows music. */
+  kind: "tts" | "music" | "sfx";
+}
+
+/** Voiceover generation choices made on the Step 4 VO panel. */
+export interface VoiceoverConfig {
+  /** Audio model id, or "auto" for Cascade to pick. */
+  model: string;
+  /** Voice id fed to the model (when the model supports voices). */
+  voice: string;
+}
+
 export interface Production {
   meta: ProductionMeta;
   /** Pipeline step the user is focused on (1..5). */
@@ -272,6 +291,16 @@ export interface Production {
   referenceCategories?: ReferenceCategory[];
   /** Step 3 OpenArt generation preferences. */
   openArt?: OpenArtBoardConfig;
+  /** Step 4 voiceover generation preferences. */
+  voiceover?: VoiceoverConfig;
+  /** Step 4: workspace-relative path to the single voiceover clip for the whole production. */
+  voiceoverPath?: string;
+  /** Step 4: voiceover playback volume (0..1). Defaults to 1 when voiceoverPath is set. */
+  voiceoverVolume?: number;
+  /** Step 4: workspace-relative path to an imported background music track. */
+  musicPath?: string;
+  /** Step 4: music playback volume (0..1). Defaults to 0.5 when musicPath is set. */
+  musicVolume?: number;
   /**
    * Global brand look applied to every frame: up to 5 palette swatches plus an
    * optional font. Set in Design (Step 2); appended to every board prompt.
@@ -280,7 +309,7 @@ export interface Production {
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
-  assets: { scriptMd: string; designDir: string; boardsDir: string; outDir: string };
+  assets: { scriptMd: string; designDir: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string };
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -311,6 +340,8 @@ export interface CascadeApi {
   setApiKey(key: string): Promise<void>;
   setModel(model: string): Promise<void>;
   setAccent(color: string): Promise<void>;
+  /** Fired when the user picks File → Settings… from the native menu. */
+  onOpenSettings(cb: () => void): () => void;
   listModels(): Promise<ModelInfo[]>;
   getCredits(): Promise<number | null>;
 
@@ -421,6 +452,8 @@ export interface CascadeApi {
    *  `index` selects an entry of the shot's `artworkHistory` (0 = most recent
    *  previous frame); omit it for the current frame. */
   boardImage(productionId: string, shotId: string, index?: number): Promise<string | null>;
+  /** Load a board frame at full resolution (no downscale) for the lightbox. */
+  boardImageFull(productionId: string, shotId: string, index?: number): Promise<string | null>;
   boardThumbnail(productionId: string, shotId: string, index?: number): Promise<string | null>;
   deleteBoardImage(productionId: string, shotId: string): Promise<Production>;
   /**
@@ -437,5 +470,36 @@ export interface CascadeApi {
   promoteBoardHistory(productionId: string, shotId: string, index: number): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
+  /** Step 4: list TTS-capable audio models for the voiceover picker. */
+  listAudioModels(): Promise<AudioModelInfo[]>;
+  /**
+   * Step 4: synthesize one voiceover clip for the whole production (every
+   * shot's dialogue joined). Writes the audio into voiceoverDir and stores
+   * the relative path on the production. Resolves to the updated production.
+   */
+  generateVoiceover(productionId: string, opts?: { model?: string; voice?: string }): Promise<Production>;
+  /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
+  importVoiceover(productionId: string): Promise<Production | null>;
+  /** Step 4: read the production's voiceover clip as a data URL. */
+  voiceoverFile(productionId: string): Promise<string | null>;
+  /** Step 4: streamable `cascade-media://` URL for the voiceover clip (no
+   *  base64 / data-URL length limits; supports range requests). */
+  voiceoverUrl(productionId: string): Promise<string | null>;
+  /** Step 4: remove the voiceover file and clear voiceoverPath. */
+  removeVoiceover(productionId: string): Promise<Production>;
+  /** Step 4: open a native picker, copy the chosen music file into the production's musicDir, and set musicPath. */
+  importMusic(productionId: string): Promise<Production | null>;
+  /**
+   * Step 4: synthesize a background music clip from a text prompt using a
+   * music-capable model. Writes the audio into musicDir and stores the
+   * relative path on the production.
+   */
+  generateMusic(productionId: string, opts?: { model?: string; prompt?: string }): Promise<Production>;
+  /** Step 4: read the imported music file as a data URL (for the inline player / animatic mixing). */
+  musicFile(productionId: string): Promise<string | null>;
+  /** Step 4: streamable `cascade-media://` URL for the music track. */
+  musicUrl(productionId: string): Promise<string | null>;
+  /** Step 4: remove the imported music file and clear musicPath. */
+  removeMusic(productionId: string): Promise<Production>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }

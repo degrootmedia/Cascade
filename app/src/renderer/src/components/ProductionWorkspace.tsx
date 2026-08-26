@@ -3,8 +3,8 @@
  * then a 5-step pipeline view. Step 1 (script ingestion + shot table) is live;
  * later steps show their planned surface and keep persisted state (style).
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef } from "../../../shared/ipc.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo } from "../../../shared/ipc.js";
 import { ShotTable } from "./ShotTable.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -79,8 +79,19 @@ export function ProductionWorkspace() {
   const [importBusy, setImportBusy] = useState(false);
   const [openArtOk, setOpenArtOk] = useState<boolean | null>(null);
   const [openArtModels, setOpenArtModels] = useState<OpenArtModelChoice[]>([]);
-  // step 4: animatic timing
-  const [timingBusy, setTimingBusy] = useState(false);
+  const [audioModels, setAudioModels] = useState<AudioModelInfo[]>([]);
+  const [voBusy, setVoBusy] = useState(false);
+  const [voUrl, setVoUrl] = useState<string | null>(null);
+  const [voDuration, setVoDuration] = useState<number | null>(null);
+  const [musicUrl, setMusicUrl] = useState<string | null>(null);
+  const [musicBusy, setMusicBusy] = useState(false);
+  const [musicPrompt, setMusicPrompt] = useState("");
+  const [musicModel, setMusicModel] = useState("auto");
+  const [audioBust, setAudioBust] = useState(0);
+  // Live volume targets for the inline preview players (so the sliders can
+  // adjust playback volume during the drag, not just after release).
+  const voPreviewRef = useRef<HTMLAudioElement | null>(null);
+  const musicPreviewRef = useRef<HTMLAudioElement | null>(null);
   // step 3: per-frame AI edit (modal open on this shot id); edits run in the
   // background so more can be queued while others generate.
   const [editShotId, setEditShotId] = useState<string | null>(null);
@@ -118,6 +129,62 @@ export function ProductionWorkspace() {
       .catch(() => { if (live) setOpenArtModels([]); });
     return () => { live = false; };
   }, [prod?.meta.id, prod?.currentStep]);
+
+  // Step 4: fetch TTS-capable audio models for the voiceover picker.
+  useEffect(() => {
+    if (prod?.currentStep !== 4) return;
+    let live = true;
+    window.cascade.listAudioModels()
+      .then((m) => { if (live) setAudioModels(m); })
+      .catch(() => { if (live) setAudioModels([]); });
+    return () => { live = false; };
+  }, [prod?.meta.id, prod?.currentStep]);
+
+  // Step 4: fetch the imported music file as a streamable cascade-media:// URL
+  // (served from disk by main — no base64 / data-URL size limits). Falls back
+  // to the legacy data-URL IPC for older builds.
+  useEffect(() => {
+    if (prod?.currentStep !== 4) return;
+    if (!prod?.musicPath) { setMusicUrl(null); return; }
+    let live = true;
+    const maybeUrl = (window.cascade as unknown as { musicUrl?: (id: string) => Promise<string | null> }).musicUrl;
+    (async () => {
+      if (maybeUrl) {
+        try {
+          const u = await maybeUrl(prod.meta.id);
+          if (live) { setMusicUrl(u); return; }
+        } catch {}
+      }
+      const d = await window.cascade.musicFile(prod.meta.id).catch(() => null);
+      if (live) setMusicUrl(d);
+    })();
+    return () => { live = false; };
+  }, [prod?.meta.id, prod?.currentStep, prod?.musicPath, audioBust]);
+
+  // Step 4: fetch the voiceover clip as a streamable cascade-media:// URL.
+  useEffect(() => {
+    if (prod?.currentStep !== 4) return;
+    if (!prod?.voiceoverPath) { setVoUrl(null); setVoDuration(null); return; }
+    let live = true;
+    const maybeUrl = (window.cascade as unknown as { voiceoverUrl?: (id: string) => Promise<string | null> }).voiceoverUrl;
+    (async () => {
+      if (maybeUrl) {
+        try {
+          const u = await maybeUrl(prod.meta.id);
+          if (live) { setVoUrl(u); return; }
+        } catch {}
+      }
+      const d = await window.cascade.voiceoverFile(prod.meta.id).catch(() => null);
+      if (live) setVoUrl(d);
+    })();
+    return () => { live = false; };
+  }, [prod?.meta.id, prod?.currentStep, prod?.voiceoverPath, audioBust]);
+
+  // The URLs are streamable cascade-media:// (or blob:) URLs served from disk,
+  // so <audio> and AudioContext can load them directly — no blob conversion
+  // needed at this boundary.
+  const voObjectUrl = voUrl;
+  const musicObjectUrl = musicUrl;
 
   useEffect(() => {
     if (!promptShotId) return;
@@ -480,19 +547,141 @@ export function ProductionWorkspace() {
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
-  /** Step 4: auto-time the animatic via one LLM call. */
-  async function autoTime() {
-    if (!prod || timingBusy) return;
-    setTimingBusy(true); setErr(null);
+  /** Step 4: synthesize one voiceover clip for the whole production. */
+  async function generateVo() {
+    if (!prod || voBusy) return;
+    setVoBusy(true); setErr(null);
     try {
-      const next = await window.cascade.planAnimatic(prod.meta.id);
+      const next = await window.cascade.generateVoiceover(prod.meta.id);
       setProd(next);
+      setAudioBust((n) => n + 1);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
-      setTimingBusy(false);
+      setVoBusy(false);
     }
+  }
+
+  /** Step 4: pick a local audio file to use as the voiceover. */
+  async function importVo() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.importVoiceover(prod.meta.id);
+      if (next) { setProd(next); setVoUrl(null); setVoDuration(null); setAudioBust((n) => n + 1); }
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  /** Step 4: clear the voiceover (file + shot.voiceoverPath). */
+  async function removeVo() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.removeVoiceover(prod.meta.id);
+      setProd(next);
+      setVoUrl(null); setVoDuration(null); setAudioBust((n) => n + 1);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  /** Step 4: change the VO model; if the current voice isn't in the new
+   *  model's set, fall back to the first available voice. */
+  function setVoiceoverModel(model: string) {
+    if (!prod) return;
+    const m = audioModels.find((am) => am.id === model);
+    const allowed = m?.voices ?? [];
+    const cur = prod.voiceover;
+    const voice = cur && allowed.includes(cur.voice) ? cur.voice : (allowed[0] ?? "alloy");
+    saveField({ voiceover: { model, voice } });
+  }
+
+  function setVoiceoverConfig(patch: Partial<NonNullable<Production["voiceover"]>>) {
+    if (!prod) return;
+    const cur = prod.voiceover ?? { model: "auto", voice: audioModels[0]?.voices[0] ?? "alloy" };
+    saveField({ voiceover: { ...cur, ...patch } });
+  }
+
+  /** Step 4: open the native picker to import a music track. */
+  async function importMusic() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.importMusic(prod.meta.id);
+      if (next) { setProd(next); setMusicUrl(null); setAudioBust((n) => n + 1); }
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  /** Step 4: synthesize a background music clip from a text prompt. */
+  async function generateMusic() {
+    if (!prod || musicBusy) return;
+    setMusicBusy(true); setErr(null);
+    try {
+      const next = await window.cascade.generateMusic(prod.meta.id, { model: musicModel, prompt: musicPrompt });
+      setProd(next);
+      setMusicUrl(null);
+      setAudioBust((n) => n + 1);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setMusicBusy(false);
+    }
+  }
+
+  /** Step 4: clear the imported music track. */
+  async function removeMusic() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.removeMusic(prod.meta.id);
+      setProd(next);
+      setMusicUrl(null); setAudioBust((n) => n + 1);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  function setMusicVolume(v: number) {
+    if (!prod) return;
+    saveField({ musicVolume: Math.max(0, Math.min(1, v)) });
+  }
+
+  function setVoiceoverVolume(v: number) {
+    if (!prod) return;
+    saveField({ voiceoverVolume: Math.max(0, Math.min(1, v)) });
+  }
+
+  /** Step 4: rescale every shot's durationSec so the total matches `targetSec`.
+   *  Used after a VO is added/imported, and by the "Fit to VO" button. */
+  function fitShotsToTotal(targetSec: number) {
+    if (!prod) return;
+    const shots = prod.scenes.flatMap((s) => s.shots);
+    if (!shots.length) return;
+    const currentTotal = shots.reduce((n, s) => n + (s.durationSec ?? 3), 0);
+    if (currentTotal <= 0) {
+      // All zeros — distribute evenly.
+      const each = Math.max(0.5, targetSec / shots.length);
+      saveField({ scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => ({ ...s, durationSec: each })) })) });
+      return;
+    }
+    if (!Number.isFinite(targetSec) || targetSec <= 0) return;
+    const scale = targetSec / currentTotal;
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => ({ ...s, durationSec: Math.max(0.5, (s.durationSec ?? 3) * scale) })),
+      })),
+    });
   }
 
   /** Step 3: pick one shot's render style (stores the style's stable id).
@@ -627,13 +816,16 @@ export function ProductionWorkspace() {
     }
   }
 
-  /** Step 4: edit one shot's duration/transition in place (renderer-owned state). */
-  function updateTiming(shotId: string, patch: Partial<Pick<ProductionShot, "durationSec" | "transition">>) {
+  /** Step 4: apply several duration changes in one save. Used by the animatic
+   *  roll edit, where dragging one edit point trades time with the following
+   *  shot so later edit points stay exactly where they are. */
+  function updateDurations(updates: { shotId: string; durationSec: number }[]) {
     if (!prod) return;
+    const byId = new Map(updates.map((u) => [u.shotId, u.durationSec]));
     saveField({
       scenes: prod.scenes.map((sc) => ({
         ...sc,
-        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, ...patch } : s)),
+        shots: sc.shots.map((s) => (byId.has(s.id) ? { ...s, durationSec: byId.get(s.id)! } : s)),
       })),
     });
   }
@@ -685,6 +877,12 @@ export function ProductionWorkspace() {
   const imageModels = openArtModels.filter((m) => m.imageInput);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
+  // Split the audio model registry by family: VO picker shows TTS models,
+  // the music picker shows music models.
+  // Voiceover picker shows TTS + sound-effects (Gab's ElevenLabs offering is
+  // elevenlabs-sound-effects-v2); the music picker shows music + sound-effects.
+  const ttsModels = audioModels.filter((m) => m.kind === "tts" || m.kind === "sfx");
+  const musicModels = audioModels.filter((m) => m.kind === "music" || m.kind === "sfx");
 
   return (
     <div className="prod-workspace">
@@ -994,58 +1192,191 @@ export function ProductionWorkspace() {
         )}
 
         {prod.currentStep === 4 && (
-          <section className="prod-panel">
+          <section className="prod-panel prod-storyboard-panel">
             <h3>4 · Animatic</h3>
             <p className="hint">
-              Per-shot screen time and transitions for the pre-viz timeline. Auto-time uses one model call;
-              tweak any value by hand afterwards. The plan is written to <code>{prod.assets.outDir}/animatic.md</code>.
+              Generate or import one voiceover clip for the whole production, optionally add a music track, then
+              drag the cut points on the timeline to set the length of each clip. The plan is written to <code>{prod.assets.outDir}/animatic.md</code>.
             </p>
-            <div className="prod-boards-controls">
-              <button className="primary" disabled={timingBusy || !shotCount} onClick={() => void autoTime()}>
-                {timingBusy ? "Timing…" : anyTimed ? "Re-time via model" : "Auto-time via model"}
-              </button>
-              {anyTimed && <span className="hint">Total runtime ≈ {formatRuntime(totalRuntime)}</span>}
-            </div>
+
             {err && <p className="error-text">{err}</p>}
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+
             {shotCount > 0 && (
-              <div className="prod-timeline">
-                <div className="prod-timeline-row head">
-                  <span>Shot</span>
-                  <span>Audio / Visual</span>
-                  <span>Seconds</span>
-                  <span>Transition →</span>
+              <>
+                <div className="prod-animatic-panels">
+                  <section className="prod-audio">
+                    <header className="prod-audio-head">
+                      <label className="prod-label">Voiceover</label>
+                      <div className="prod-audio-controls">
+                        <label className="prod-openart-label">Model
+                          <select
+                            className="prod-openart-select"
+                            value={prod.voiceover?.model ?? "auto"}
+                            onChange={(e) => setVoiceoverModel(e.target.value)}
+                            title="Audio model for the voiceover"
+                          >
+                            <option value="auto">Auto</option>
+                            {ttsModels.map((m) => (
+                              <option key={m.id} value={m.id} title={m.cost != null ? `Base cost: ${m.cost} credits` : undefined}>
+                                {m.displayName}{m.cost != null ? ` ◎${m.cost}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="prod-openart-label">Voice
+                          <select
+                            className="prod-openart-select"
+                            value={(() => {
+                              const m = ttsModels.find((am) => am.id === prod.voiceover?.model);
+                              const allowed = m?.voices ?? [];
+                              return prod.voiceover && allowed.includes(prod.voiceover.voice)
+                                ? prod.voiceover.voice
+                                : (allowed[0] ?? "");
+                            })()}
+                            onChange={(e) => setVoiceoverConfig({ voice: e.target.value })}
+                            title="Voice id passed to the audio model"
+                          >
+                            {(() => {
+                              const m = ttsModels.find((am) => am.id === prod.voiceover?.model);
+                              const allowed = m?.voices ?? [];
+                              return allowed.map((v) => <option key={v} value={v}>{v}</option>);
+                            })()}
+                          </select>
+                        </label>
+                        <div className="prod-audio-buttons">
+                          <button
+                            className="primary"
+                            disabled={voBusy || !prod.scenes.some((sc) => sc.shots.some((s) => s.audio.trim()))}
+                            onClick={() => void generateVo()}
+                            title="Synthesize one voiceover clip for the whole production"
+                          >
+                            {voBusy ? "Generating…" : "Generate"}
+                          </button>
+                        </div>
+                        {prod.voiceoverPath && (voObjectUrl || voUrl) ? (
+                          <div className="prod-audio-file">
+                            <MiniAudioPlayer src={voObjectUrl ?? voUrl} onDurationKnown={setVoDuration} audioRef={voPreviewRef} />
+                            <span className="prod-music-name" title={prod.voiceoverPath}>
+                              {prod.voiceoverPath.split("/").pop()}
+                              {voDuration != null ? ` · ${formatRuntime(voDuration)}` : ""}
+                            </span>
+                            <VolumeSlider
+                              value={prod.voiceoverVolume ?? 1}
+                              onCommit={setVoiceoverVolume}
+                              audioRef={voPreviewRef}
+                              title="Voiceover volume"
+                            />
+                            <button
+                              onClick={() => fitShotsToTotal(voDuration ?? totalRuntime)}
+                              title="Rescale every shot's length so the total matches the voiceover"
+                            >
+                              Fit to VO
+                            </button>
+                            <button
+                              onClick={() => void importVo()}
+                              title="Pick a local audio file to replace the voiceover"
+                            >
+                              Replace…
+                            </button>
+                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}>×</button>
+                          </div>
+                        ) : (
+                          <div className="prod-audio-file">
+                            <button onClick={() => void importVo()} title="Pick a local audio file to use as the voiceover">
+                              Import…
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </header>
+                  </section>
+
+                  <section className="prod-audio">
+                    <header className="prod-audio-head">
+                      <label className="prod-label">Music</label>
+                      <div className="prod-audio-controls">
+                        <label className="prod-openart-label">Model
+                          <select
+                            className="prod-openart-select"
+                            value={musicModels.some((m) => m.id === musicModel) ? musicModel : "auto"}
+                            onChange={(e) => setMusicModel(e.target.value)}
+                            title="Audio model for music generation"
+                          >
+                            <option value="auto">Auto</option>
+                            {musicModels.map((m) => (
+                              <option key={m.id} value={m.id} title={m.cost != null ? `Base cost: ${m.cost} credits` : undefined}>
+                                {m.displayName}{m.cost != null ? ` ◎${m.cost}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <input
+                          className="prod-music-prompt"
+                          value={musicPrompt}
+                          onChange={(e) => setMusicPrompt(e.target.value)}
+                          placeholder="Describe the music… e.g. warm lofi loop, gentle piano, ~30s"
+                          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void generateMusic(); } }}
+                        />
+                        <div className="prod-audio-buttons">
+                          <button
+                            className="primary"
+                            disabled={musicBusy || !musicPrompt.trim()}
+                            onClick={() => void generateMusic()}
+                            title="Synthesize a background music clip from the description"
+                          >
+                            {musicBusy ? "Generating…" : "Generate"}
+                          </button>
+                        </div>
+                        {prod.musicPath && (musicObjectUrl || musicUrl) ? (
+                          <div className="prod-audio-file">
+                            <MiniAudioPlayer src={musicObjectUrl ?? musicUrl} audioRef={musicPreviewRef} />
+                            <span className="prod-music-name" title={prod.musicPath}>
+                              {prod.musicPath.split("/").pop()}
+                            </span>
+                            <VolumeSlider
+                              value={prod.musicVolume ?? 0.5}
+                              onCommit={setMusicVolume}
+                              audioRef={musicPreviewRef}
+                              title="Background music volume"
+                            />
+                            <button onClick={() => void importMusic()}>Replace…</button>
+                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}>×</button>
+                          </div>
+                        ) : (
+                          <div className="prod-audio-file">
+                            <button onClick={() => void importMusic()} title="Pick an mp3/wav/m4a/ogg/flac to play under the animatic">
+                              Import music…
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </header>
+                  </section>
                 </div>
-                {prod.scenes.flatMap((sc) => sc.shots).map((shot) => (
-                  <div key={shot.id} className="prod-timeline-row">
-                    <span className="prod-timeline-shotcell">
-                      <AnimaticThumb prodId={prod.meta.id} shotId={shot.id} artwork={shot.artwork} />
-                      <span className="shot-number" title={shot.id}>{shot.number}</span>
-                    </span>
-                    <span className="prod-timeline-desc" title={shot.visual}>{shot.audio || shot.visual || "—"}</span>
-                    <span>
-                      <input
-                        className="prod-timeline-dur"
-                        type="number" min={1.5} max={12} step={0.5}
-                        value={shot.durationSec ?? 3}
-                        onChange={(e) => updateTiming(shot.id, { durationSec: Math.max(1.5, Math.min(12, Number(e.target.value) || 3)) })}
-                      />
-                    </span>
-                    <span>
-                      <select
-                        className="prod-timeline-tr"
-                        value={shot.transition ?? "cut"}
-                        onChange={(e) => updateTiming(shot.id, { transition: e.target.value as ProductionShot["transition"] })}
-                      >
-                        <option value="cut">Cut</option>
-                        <option value="dissolve">Dissolve</option>
-                        <option value="fade">Fade</option>
-                        <option value="wipe">Wipe</option>
-                      </select>
-                    </span>
-                  </div>
-                ))}
-              </div>
+
+                <section className="prod-animatic">
+                  <header className="prod-animatic-head">
+                    <label className="prod-label">Timeline</label>
+                    <div className="prod-animatic-controls">
+                      {anyTimed && <span className="hint">Total runtime ≈ {formatRuntime(totalRuntime)}</span>}
+                    </div>
+                  </header>
+                  <AnimaticTimeline
+                    prodId={prod.meta.id}
+                    scenes={prod.scenes}
+                    voUrl={voObjectUrl ?? voUrl}
+                    voDuration={voDuration}
+                    onVoDurationKnown={setVoDuration}
+                    musicUrl={musicObjectUrl ?? musicUrl}
+                    musicVolume={prod.musicVolume ?? 0.5}
+                    voiceoverVolume={prod.voiceoverVolume ?? 1}
+                    onUpdateDurations={(updates) => updateDurations(updates)}
+                    onFitToVo={() => fitShotsToTotal(voDuration ?? totalRuntime)}
+                    onUpdateTotal={(sec) => fitShotsToTotal(sec)}
+                  />
+                </section>
+              </>
             )}
             <StepFooter prod={prod} onNext={goNext} />
           </section>
@@ -1077,6 +1408,752 @@ function AnimaticThumb({ prodId, shotId, artwork }: { prodId: string; shotId: st
   }, [prodId, shotId, artwork]);
   if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboards" />;
   return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title="Primary frame for this shot" />;
+}
+
+/** Flatten scenes to a single ordered shot list with a global timeline cursor. */
+function flatShots(scenes: Production["scenes"]): ProductionShot[] {
+  return scenes.flatMap((s) => s.shots);
+}
+
+/** Sum of all shot durations (clamped to >=0.1 so the strip always has a width). */
+function totalDuration(scenes: Production["scenes"]): number {
+  const t = flatShots(scenes).reduce((n, s) => n + (s.durationSec ?? 3), 0);
+  return t > 0 ? t : 0.1;
+}
+
+/** Convert a data URL into an ArrayBuffer for AudioContext decoding. The VO
+ *  / music IPCs prefer streamable cascade-media:// URLs, but legacy builds
+ *  fall back to data URLs — decode those without a fetch (and in chunks so
+ *  multi-MB base64 never hits a single-string limit). */
+function base64ToBytes(base64: string): Uint8Array | null {
+  try {
+    const clean = base64.replace(/\s/g, "");
+    const chunkSize = 32768; // multiple of 4 so chunk padding stays valid
+    const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+    const totalLen = Math.ceil((clean.length * 3) / 4) - padding;
+    const bytes = new Uint8Array(totalLen);
+    let offset = 0;
+    for (let i = 0; i < clean.length; i += chunkSize) {
+      const slice = clean.slice(i, i + chunkSize);
+      const bin = atob(slice);
+      for (let j = 0; j < bin.length; j++) bytes[offset++] = bin.charCodeAt(j);
+    }
+    return offset === bytes.length ? bytes : bytes.slice(0, offset);
+  } catch {
+    return null;
+  }
+}
+
+function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer | null {
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1) return null;
+  const bytes = base64ToBytes(dataUrl.slice(comma + 1));
+  return bytes ? (bytes.buffer as ArrayBuffer) : null;
+}
+
+async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
+  if (url.startsWith("data:")) {
+    const ab = dataUrlToArrayBuffer(url);
+    if (!ab || !ab.byteLength) throw new Error("empty data URL");
+    return ab;
+  }
+  const resp = await fetch(url);
+  const ab = await resp.arrayBuffer();
+  if (!ab.byteLength) throw new Error("empty");
+  return ab;
+}
+
+/** Compact design-language preview player for the VO / Music import rows.
+ *  Replaces the native `<audio controls>` (whose Chromium chrome clashes with
+ *  the dark theme): play/pause + click-to-seek progress bar + elapsed/total.
+ *  Reports the loaded duration via `onDurationKnown` (used by the VO row to
+ *  feed the Fit-to-VO math). */
+/** Mutable audio-element ref (React 18's RefObject.current is readonly, but
+ *  MiniAudioPlayer / VolumeSlider need to write `.current`). */
+type AudioElRef = { current: HTMLAudioElement | null };
+
+function MiniAudioPlayer({ src, onDurationKnown, audioRef }: {
+  src: string | null;
+  onDurationKnown?: (sec: number) => void;
+  /** Optional external ref — lets a sibling volume slider set the audio
+   *  element's volume live while dragging. */
+  audioRef?: AudioElRef;
+}) {
+  const internalRef = useRef<HTMLAudioElement | null>(null) as AudioElRef;
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  useEffect(() => {
+    // Reset the transport when the clip changes (re-import / replace).
+    setPlaying(false);
+    setCurrent(0);
+    setDuration(0);
+  }, [src]);
+
+  const toggle = () => {
+    const el = internalRef.current;
+    if (!el || !src) return;
+    if (el.paused) void el.play().catch(() => {});
+    else el.pause();
+  };
+
+  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = internalRef.current;
+    const bar = barRef.current;
+    if (!el || !bar || !Number.isFinite(el.duration) || el.duration <= 0) return;
+    const r = bar.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    el.currentTime = ratio * el.duration;
+    setCurrent(el.currentTime);
+  };
+
+  const pct = duration > 0 ? (current / duration) * 100 : 0;
+
+  return (
+    <div className="prod-mini-player">
+      <button
+        className="prod-mini-play"
+        onClick={toggle}
+        title={playing ? "Pause preview" : "Play preview"}
+        disabled={!src}
+        aria-label={playing ? "Pause preview" : "Play preview"}
+      >
+        {playing ? "❚❚" : "▶"}
+      </button>
+      <div className="prod-mini-bar" ref={barRef} onClick={seek} title="Click to seek">
+        <div className="prod-mini-fill" style={{ width: `${pct}%` }} />
+        <div className="prod-mini-head" style={{ left: `${pct}%` }} />
+      </div>
+      <span className="prod-mini-time">
+        {formatRuntime(current)} / {duration > 0 ? formatRuntime(duration) : "–:––"}
+      </span>
+      <audio
+        ref={(el) => {
+          internalRef.current = el;
+          if (audioRef) audioRef.current = el;
+        }}
+        src={src ?? undefined}
+        preload="metadata"
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          if (Number.isFinite(d) && d > 0) { setDuration(d); onDurationKnown?.(d); }
+        }}
+        onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => { setPlaying(false); setCurrent(0); }}
+      />
+    </div>
+  );
+}
+
+/** Volume slider that stays responsive during a drag: the thumb moves and the
+ *  audio element's volume updates immediately (local state + direct ref write),
+ *  but the expensive production save only happens when the user lets go. The
+ *  old onChange→saveField-per-tick path was noticeably sluggish. */
+function VolumeSlider({ value, onCommit, audioRef, title }: {
+  value: number;
+  onCommit: (v: number) => void;
+  /** Optional audio element to adjust live while dragging. */
+  audioRef?: AudioElRef;
+  title?: string;
+}) {
+  const [live, setLive] = useState(value);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => { setLive(value); }, [value]);
+  useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
+
+  const apply = (v: number) => {
+    setLive(v);
+    if (audioRef?.current) audioRef.current.volume = v;
+    // Safety net: persist shortly after the last change even if a pointerup
+    // is missed (e.g. release outside the input).
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => onCommit(v), 250);
+  };
+
+  const commitNow = () => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    onCommit(live);
+  };
+
+  return (
+    <label className="prod-music-vol" title={title}>
+      Vol
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.01}
+        value={live}
+        onChange={(e) => apply(Number(e.target.value))}
+        onPointerUp={commitNow}
+        onKeyUp={commitNow}
+        onBlur={commitNow}
+      />
+    </label>
+  );
+}
+
+/** Real-time playback preview + draggable cut points. The voiceover clip
+ *  (one file for the whole production) drives the timeline total when it
+ *  exists; otherwise the total is the sum of per-shot durations. Each block
+ *  is a shot, width is proportional to durationSec, and dragging the right
+ *  edge sets that shot's duration. The playhead can be drag-scrubbed; the
+ *  preview pane's height can be dragged from its bottom border. Both VO and
+ *  music are decoded to AudioBuffers and mixed via GainNodes so the sliders
+ *  affect live playback. The voiceover waveform is drawn on a canvas behind
+ *  the semi-transparent shot blocks. */
+function AnimaticTimeline({
+  prodId, scenes, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
+  onUpdateDurations, onFitToVo, onUpdateTotal,
+}: {
+  prodId: string;
+  scenes: Production["scenes"];
+  voUrl: string | null;
+  voDuration: number | null;
+  onVoDurationKnown: (sec: number) => void;
+  musicUrl: string | null;
+  musicVolume: number;
+  voiceoverVolume: number;
+  onUpdateDurations: (updates: { shotId: string; durationSec: number }[]) => void;
+  onFitToVo: () => void;
+  onUpdateTotal: (sec: number) => void;
+}) {
+  const shots = flatShots(scenes);
+  const sumDur = totalDuration(scenes);
+  // Total is always the sum of shot durations — the user can edit it freely
+  // (and "Fit to VO" rescales the shots to match the voiceover). The VO's
+  // own length is overlaid on the strip as a waveform at its true scale.
+  const total = sumDur;
+  const [playing, setPlaying] = useState(false);
+  const [playhead, setPlayhead] = useState(0);
+  const [editingTotal, setEditingTotal] = useState(false);
+  const [totalDraft, setTotalDraft] = useState("");
+  const stripRef = useRef<HTMLDivElement>(null);
+  const scrubRef = useRef<HTMLDivElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [previewHeight, setPreviewHeight] = useState(440);
+
+  /** Parse a user-entered total: "1:30", "0:42", "90", "1m30s", "45s". */
+  function parseTotalInput(s: string): number | null {
+    const t = s.trim();
+    if (!t) return null;
+    if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+    let m = t.match(/^(\d+)m(\d+(?:\.\d+)?)?s?$/);
+    if (m) return Number(m[1]) * 60 + (m[2] ? Number(m[2]) : 0);
+    m = t.match(/^(\d+(?:\.\d+)?)s$/);
+    if (m) return Number(m[1]);
+    m = t.match(/^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);
+    if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    m = t.match(/^(\d+):(\d{1,2}(?:\.\d+)?)$/);
+    if (m) return Number(m[1]) * 60 + Number(m[2]);
+    return null;
+  }
+
+  function startEditTotal() {
+    setTotalDraft(formatRuntime(total));
+    setEditingTotal(true);
+  }
+
+  function commitTotal() {
+    const next = parseTotalInput(totalDraft);
+    if (next != null && next > 0) onUpdateTotal(next);
+    setEditingTotal(false);
+  }
+
+  // Decode VO and music once into AudioBuffers (cached for playback + waveform).
+  // The decoded duration is the primary source for the waveform, but the
+  // <audio> element's metadata is the source of truth for playback length.
+  // If decode fails (e.g. codec supported by <audio> but not by
+  // AudioContext), we must NOT clobber a valid duration already reported
+  // by onLoadedMetadata — otherwise the UI sticks at 0:00 even though the
+  // file plays.
+  const [voBuffer, setVoBuffer] = useState<AudioBuffer | null>(null);
+  const [musicBuffer, setMusicBuffer] = useState<AudioBuffer | null>(null);
+  useEffect(() => {
+    if (!voUrl) { setVoBuffer(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ab = await fetchArrayBuffer(voUrl);
+        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        await ctx.close().catch(() => {});
+        if (cancelled) return;
+        setVoBuffer(buf);
+        onVoDurationKnown(buf.duration);
+      } catch (e) {
+        if (!cancelled) {
+          setVoBuffer(null);
+          // Do NOT call onVoDurationKnown(0) here — the hidden <audio>
+          // element's onLoadedMetadata will provide the real duration even
+          // when AudioContext can't decode this file (e.g. some mp3s).
+          console.warn("VO AudioContext decode failed, falling back to <audio> metadata:", e);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voUrl]);
+
+  useEffect(() => {
+    if (!musicUrl) { setMusicBuffer(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ab = await fetchArrayBuffer(musicUrl);
+        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        await ctx.close().catch(() => {});
+        if (cancelled) return;
+        setMusicBuffer(buf);
+      } catch {
+        if (!cancelled) setMusicBuffer(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [musicUrl]);
+
+  // Waveform redraw – depends on voBuffer, dimensions, and total. Also observes
+  // strip resize so the waveform stays sharp after the window or panel resizes.
+  const waveformVersion = `${voBuffer ? voBuffer.duration : 0}-${total}`;
+  const redrawWaveform = useCallback(() => {
+    const cvs = canvasRef.current;
+    if (!cvs) return;
+    const ctx = cvs.getContext("2d");
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = cvs.clientWidth, h = cvs.clientHeight;
+    if (w <= 0 || h <= 0) return;
+    cvs.width = Math.max(1, Math.floor(w * dpr));
+    cvs.height = Math.max(1, Math.floor(h * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (!voBuffer || total <= 0) return;
+    const cols = Math.max(1, Math.floor(w / 2));
+    const data = voBuffer.getChannelData(0);
+    const secondsPerCol = total / cols;
+    const voSecs = voBuffer.duration;
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#4f8ef7";
+    for (let i = 0; i < cols; i++) {
+      const colTime = i * secondsPerCol;
+      if (colTime >= voSecs) break;
+      const start = Math.floor((colTime / voSecs) * data.length);
+      const end = Math.min(data.length, Math.floor(((colTime + secondsPerCol) / voSecs) * data.length));
+      if (end <= start) continue;
+      let min = 1, max = -1;
+      for (let j = start; j < end; j++) {
+        const v = data[j];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      const x = (i / cols) * w;
+      const y1 = ((1 - max) / 2) * h;
+      const y2 = ((1 - min) / 2) * h;
+      const barH = Math.max(1, y2 - y1);
+      if (barH < 1.5) ctx.fillRect(x, (h - barH) / 2, Math.max(1, w / cols - 0.5), barH);
+      else ctx.fillRect(x, y1, Math.max(1, w / cols - 0.5), barH);
+    }
+  }, [voBuffer, total]);
+
+  useEffect(() => { redrawWaveform(); }, [redrawWaveform, waveformVersion, previewHeight, shots.length]);
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => redrawWaveform());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [redrawWaveform]);
+  // Also redraw after fonts/style settle
+  useEffect(() => {
+    const id = window.setTimeout(redrawWaveform, 100);
+    return () => window.clearTimeout(id);
+  }, [redrawWaveform]);
+
+  /** Cumulative start time of each shot in seconds. */
+  const starts = useMemo(() => {
+    const acc: number[] = [];
+    let t = 0;
+    for (const s of shots) { acc.push(t); t += s.durationSec ?? 3; }
+    return acc;
+  }, [shots]);
+
+  /** Index of the shot the playhead is currently inside. */
+  const activeIdx = useMemo(() => {
+    if (playhead < 0 || !shots.length) return -1;
+    for (let i = 0; i < shots.length; i++) {
+      const end = starts[i] + (shots[i].durationSec ?? 3);
+      if (playhead < end) return i;
+    }
+    return shots.length - 1;
+  }, [playhead, shots, starts]);
+
+  // Timeline playback uses hidden <audio> elements (more reliable codec support
+  // than AudioContext decoding). Both are mixed via volume props so sliders take
+  // effect live; the visual playhead follows wall-clock time synced to the
+  // audio currentTime when possible.
+  const voAudioRef = useRef<HTMLAudioElement | null>(null);
+  const musicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const stopFlagRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  const startedAtRef = useRef(0);
+  const startedHeadRef = useRef(0);
+
+  // Keep hidden players in sync with slider volumes and src changes.
+  useEffect(() => { if (voAudioRef.current) voAudioRef.current.volume = Math.max(0, Math.min(1, voiceoverVolume)); }, [voiceoverVolume, voUrl]);
+  useEffect(() => { if (musicAudioRef.current) musicAudioRef.current.volume = Math.max(0, Math.min(1, musicVolume)); }, [musicVolume, musicUrl]);
+  useEffect(() => {
+    if (voAudioRef.current) voAudioRef.current.src = voUrl ?? "";
+    if (voAudioRef.current && !voUrl) { try { voAudioRef.current.pause(); } catch {} }
+  }, [voUrl]);
+  useEffect(() => {
+    if (musicAudioRef.current) musicAudioRef.current.src = musicUrl ?? "";
+    if (musicAudioRef.current) musicAudioRef.current.loop = true;
+    if (musicAudioRef.current && !musicUrl) { try { musicAudioRef.current.pause(); } catch {} }
+  }, [musicUrl]);
+
+  const stop = useCallback(() => {
+    stopFlagRef.current++;
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    try { voAudioRef.current?.pause(); } catch {}
+    try { musicAudioRef.current?.pause(); } catch {}
+    setPlaying(false);
+  }, []);
+
+  const play = useCallback(async () => {
+    if (playing) { stop(); return; }
+    const flag = ++stopFlagRef.current;
+    const voEl = voAudioRef.current;
+    const muEl = musicAudioRef.current;
+    const head = playhead;
+    startedHeadRef.current = head;
+    startedAtRef.current = performance.now() / 1000;
+    // Wait until each element can play. Only force a load when it hasn't
+    // loaded yet; the seek below is applied AFTER this settles so a deferred
+    // load() can't reset currentTime back to 0 (which would restart playback
+    // from the top regardless of the playhead).
+    const waitUntilReady = (el: HTMLAudioElement | null): Promise<void> => {
+      if (!el || el.readyState >= 2) return Promise.resolve();
+      return new Promise((resolve) => {
+        const done = () => resolve();
+        el.addEventListener("canplay", done, { once: true });
+        el.addEventListener("error", done, { once: true });
+        window.setTimeout(done, 3000);
+        el.load();
+      });
+    };
+    await Promise.all([waitUntilReady(voEl), waitUntilReady(muEl)]);
+    // Seek both players to the playhead (music loops by its own length).
+    const toPlay: Promise<void>[] = [];
+    if (voEl && voUrl) {
+      const elDur = Number.isFinite(voEl.duration) && voEl.duration > 0 ? voEl.duration : 0;
+      const voDur = voBuffer ? voBuffer.duration : elDur; // 0 = unknown length
+      const pastEnd = voDur > 0 && head >= voDur;
+      if (!pastEnd) {
+        // Known duration: clamp to the playhead; unknown: best-effort seek and play anyway.
+        try { voEl.currentTime = voDur > 0 ? Math.max(0, Math.min(head, voDur)) : Math.max(0, head); } catch {}
+        voEl.volume = Math.max(0, Math.min(1, voiceoverVolume));
+        toPlay.push(voEl.play().catch(() => {}));
+      } else {
+        // Playhead is past the end of the voiceover — keep it silent and let
+        // the wall clock run the visuals (music may still be looping).
+        try { voEl.pause(); } catch {}
+      }
+    }
+    if (muEl && musicUrl) {
+      try {
+        const d = muEl.duration;
+        muEl.currentTime = Number.isFinite(d) && d > 0 ? head % d : head;
+      } catch { try { muEl.currentTime = head; } catch {} }
+      muEl.volume = Math.max(0, Math.min(1, musicVolume));
+      muEl.loop = true;
+      toPlay.push(muEl.play().catch(() => {}));
+    }
+    // Even with no audio, we still run the visual clock.
+    await Promise.all(toPlay);
+    // Re-anchor wall clock after play() resolves (play may be async).
+    startedAtRef.current = performance.now() / 1000;
+    setPlaying(true);
+    const tick = () => {
+      if (flag !== stopFlagRef.current) return;
+      // Prefer audio clock when VO is playing for sample-accurate sync.
+      let head: number;
+      if (voEl && !voEl.paused && voEl.currentTime > 0 && voBuffer && voEl.currentTime < voBuffer.duration) {
+        head = startedHeadRef.current + (voEl.currentTime - Math.min(startedHeadRef.current, voBuffer.duration));
+        // Fallback to wall clock if audio time stalls
+        const wallHead = startedHeadRef.current + (performance.now() / 1000 - startedAtRef.current);
+        if (Math.abs(head - wallHead) > 0.5) head = wallHead;
+      } else {
+        head = startedHeadRef.current + (performance.now() / 1000 - startedAtRef.current);
+      }
+      if (head >= total) { stop(); setPlayhead(0); return; }
+      setPlayhead(head);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, [playing, playhead, voUrl, musicUrl, voBuffer, total, stop, voiceoverVolume, musicVolume]);
+
+  useEffect(() => () => stop(), [stop]);
+
+  // ---- Interactions -----------------------------------------------------
+
+  /** Drag a block's right edge to set its duration. This is a roll edit: the
+   *  dragged shot trades time with the following shot, so the total stays put
+   *  and every later edit point is untouched. */
+  const dragRef = useRef<{
+    shotId: string;
+    startX: number;
+    startDur: number;
+    pxPerSec: number;
+    nextShot: { id: string; dur: number } | null;
+  } | null>(null);
+  const onHandleDown = (e: React.PointerEvent, shotId: string) => {
+    if (!stripRef.current) return;
+    const idx = shots.findIndex((s) => s.id === shotId);
+    if (idx < 0) return;
+    const stripWidth = stripRef.current.getBoundingClientRect().width;
+    const pxPerSec = stripWidth / total;
+    dragRef.current = {
+      shotId,
+      startX: e.clientX,
+      startDur: shots[idx].durationSec ?? 3,
+      pxPerSec,
+      nextShot: idx + 1 < shots.length
+        ? { id: shots[idx + 1].id, dur: shots[idx + 1].durationSec ?? 3 }
+        : null,
+    };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    stop();
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const onHandleMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.startX;
+    let next = Math.max(0.5, Math.min(20, d.startDur + dx / d.pxPerSec));
+    const updates: { shotId: string; durationSec: number }[] = [{ shotId: d.shotId, durationSec: next }];
+    if (d.nextShot) {
+      // Keep the boundary after the next shot fixed: shot i+1 absorbs the delta.
+      let nextDur = d.nextShot.dur - (next - d.startDur);
+      if (nextDur < 0.5) { nextDur = 0.5; next = d.startDur + (d.nextShot.dur - 0.5); }
+      if (nextDur > 20) { nextDur = 20; next = d.startDur - (20 - d.nextShot.dur); }
+      next = Math.max(0.5, Math.min(20, next));
+      updates[0].durationSec = next;
+      updates.push({ shotId: d.nextShot.id, durationSec: nextDur });
+    }
+    onUpdateDurations(updates.map((u) => ({ ...u, durationSec: Math.round(u.durationSec * 10) / 10 })));
+  };
+  const onHandleUp = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    dragRef.current = null;
+  };
+
+  /** Drag the preview's bottom border to resize. */
+  const resizeRef = useRef<{ startY: number; startH: number } | null>(null);
+  const onResizeDown = (e: React.PointerEvent) => {
+    resizeRef.current = { startY: e.clientY, startH: previewHeight };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  const onResizeMove = (e: React.PointerEvent) => {
+    const r = resizeRef.current;
+    if (!r) return;
+    const dy = e.clientY - r.startY;
+    setPreviewHeight(Math.max(80, Math.min(640, r.startH + dy)));
+  };
+  const onResizeUp = (e: React.PointerEvent) => {
+    if (!resizeRef.current) return;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    resizeRef.current = null;
+  };
+
+  /** Seek by pointer position. `ref` is the element whose rect defines the
+   *  0..total coordinate system, so the strip and the scrubber each map
+   *  their own width (the strip is full-width, the scrubber is narrower
+   *  because of the play/pause + time + fit buttons in its row). */
+  const seekFromEvent = (ref: React.RefObject<HTMLElement>, clientX: number) => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const x = clientX - r.left;
+    const next = Math.max(0, Math.min(total, (x / r.width) * total));
+    setPlayhead(next);
+  };
+  const headDragRef = useRef<{ ref: React.RefObject<HTMLElement> } | null>(null);
+  const onSeekDown = (ref: React.RefObject<HTMLElement>) => (e: React.PointerEvent) => {
+    headDragRef.current = { ref };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    stop();
+    seekFromEvent(ref, e.clientX);
+    e.preventDefault();
+  };
+  const onSeekMove = (e: React.PointerEvent) => {
+    const d = headDragRef.current;
+    if (!d) return;
+    seekFromEvent(d.ref, e.clientX);
+  };
+  const onSeekUp = (e: React.PointerEvent) => {
+    if (!headDragRef.current) return;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    headDragRef.current = null;
+  };
+
+  if (!shots.length) {
+    return <p className="hint">Add shots in Step 1 to start building the timeline.</p>;
+  }
+
+  const activeShot = activeIdx >= 0 ? shots[activeIdx] : null;
+  const activeThumb = activeShot?.artwork;
+  const headX = (playhead / total) * 100;
+
+  return (
+    <div className="prod-animatic-body">
+      <div
+        className="prod-animatic-preview"
+        ref={previewRef}
+        style={{ height: `${previewHeight}px` }}
+      >
+        {activeShot && activeThumb ? (
+          <AnimaticThumb prodId={prodId} shotId={activeShot.id} artwork={activeThumb} />
+        ) : null}
+        {activeShot && !activeThumb ? (
+          <div className="prod-animatic-preview-slate">
+            <span>SLATE</span>
+            <strong>{activeShot.number}</strong>
+          </div>
+        ) : null}
+        {!activeShot && <div className="prod-animatic-preview-slate"><span>No shots yet</span></div>}
+        <div
+          className="prod-animatic-preview-resize"
+          onPointerDown={onResizeDown}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeUp}
+          onPointerCancel={onResizeUp}
+          title="Drag to resize the preview"
+        />
+      </div>
+
+      <div className="prod-animatic-transport">
+        <button
+          className="primary"
+          onClick={() => void play()}
+          disabled={!shots.length}
+          title={playing ? "Pause playback" : "Play from playhead"}
+        >
+          {playing ? "❚❚" : "▶"}
+        </button>
+        <button onClick={() => { stop(); setPlayhead(0); }} title="Stop and rewind">■</button>
+        <div
+          className="prod-animatic-scrub"
+          ref={scrubRef}
+          onPointerDown={onSeekDown(scrubRef)}
+          onPointerMove={onSeekMove}
+          onPointerUp={onSeekUp}
+          onPointerCancel={onSeekUp}
+          title="Drag the playhead, or click to seek"
+        >
+          <div className="prod-animatic-scrub-fill" style={{ width: `${headX}%` }} />
+          <div className="prod-animatic-scrub-head" style={{ left: `${headX}%` }} />
+        </div>
+        <span className="prod-animatic-time">
+          {formatRuntime(playhead)} / {editingTotal ? (
+            <input
+              className="prod-animatic-total-input"
+              autoFocus
+              value={totalDraft}
+              onChange={(e) => setTotalDraft(e.target.value)}
+              onBlur={commitTotal}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); commitTotal(); }
+                if (e.key === "Escape") { e.preventDefault(); setEditingTotal(false); }
+              }}
+              onFocus={(e) => e.currentTarget.select()}
+              title="hh:mm:ss, mm:ss, or seconds"
+            />
+          ) : (
+            <button
+              className="prod-animatic-total-btn"
+              onClick={startEditTotal}
+              title="Click to set the total runtime"
+            >
+              {formatRuntime(total)}
+            </button>
+          )}
+        </span>
+        {voDuration && Math.abs(voDuration - sumDur) > 0.1 && (
+          <button
+            className="prod-btn"
+            onClick={onFitToVo}
+            title="Rescale every shot's length so the total matches the voiceover"
+          >
+            Fit to VO
+          </button>
+        )}
+      </div>
+
+      <div className="prod-animatic-strip-wrap">
+        <div
+          className="prod-animatic-strip"
+          ref={stripRef}
+          onPointerDown={onSeekDown(stripRef)}
+          onPointerMove={onSeekMove}
+          onPointerUp={onSeekUp}
+          onPointerCancel={onSeekUp}
+          title="Click or drag to seek"
+        >
+          {shots.map((s, i) => {
+            const dur = s.durationSec ?? 3;
+            const widthPct = (dur / total) * 100;
+            return (
+              <div
+                key={s.id}
+                className={"prod-animatic-block" + (i === activeIdx ? " active" : "")}
+                style={{ width: `${widthPct}%` }}
+                title={`${s.number} · ${dur.toFixed(1)}s`}
+              >
+                {s.artwork
+                  ? <AnimaticThumb prodId={prodId} shotId={s.id} artwork={s.artwork} />
+                  : <div className="prod-animatic-block-slate">SLATE<br /><strong>{s.number}</strong></div>}
+                <span className="prod-animatic-block-num">{s.number}</span>
+                <span className="prod-animatic-block-dur">{dur.toFixed(1)}s</span>
+                <div
+                  className="prod-animatic-block-handle"
+                  onPointerDown={(e) => onHandleDown(e, s.id)}
+                  onPointerMove={onHandleMove}
+                  onPointerUp={onHandleUp}
+                  onPointerCancel={onHandleUp}
+                  title="Drag to set the length of this clip"
+                />
+              </div>
+            );
+          })}
+          <div className="prod-animatic-playhead" style={{ left: `${headX}%` }} />
+        </div>
+        {voUrl && (
+          <div className="prod-animatic-wave-row" aria-label="Voiceover waveform">
+            <canvas ref={canvasRef} className="prod-animatic-waveform" />
+          </div>
+        )}
+      </div>
+
+      {/* Hidden playback elements — the animatic transport plays these; they
+          have no visible chrome (the volume sliders live next to the import
+          buttons, the waveform lives under the image strip). */}
+      <audio ref={voAudioRef} src={voUrl ?? ""} preload="auto" hidden onLoadedMetadata={(e) => {
+        const duration = e.currentTarget.duration;
+        if (Number.isFinite(duration) && duration > 0) onVoDurationKnown(duration);
+      }} />
+      <audio ref={musicAudioRef} src={musicUrl ?? ""} preload="auto" loop hidden />
+    </div>
+  );
 }
 
 /** "Next" bar shown at the bottom of every step panel — completes the step
@@ -1602,7 +2679,7 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
         ) : (
           <span className="prod-board-empty">{shot.artwork ? "…" : "no frame"}</span>
         )}
-        <button className="prod-board-zoom" title="Enlarge this frame" disabled={!img} onClick={(e) => { e.stopPropagation(); void window.cascade.boardImage(prod.meta.id, shot.id).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } }); }}>⌕</button>
+        <button className="prod-board-zoom" title="Enlarge this frame" disabled={!img} onClick={(e) => { e.stopPropagation(); void window.cascade.boardImageFull(prod.meta.id, shot.id).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } }); }}>⌕</button>
         <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(); }}>⤒</button>
         <button
           className="prod-board-edit"

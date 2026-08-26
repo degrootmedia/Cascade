@@ -24,3 +24,5 @@ probe-*.mjs
 .vscode/
 .DS_Store
 Thumbs.db
+app/release-0.6.5/Cascade Setup 0.6.5.exe
+app/release-0.6.5/Cascade Setup 0.6.5.exe.blockmap

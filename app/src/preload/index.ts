@@ -33,6 +33,11 @@ const api: CascadeApi = {
   setApiKey: (key) => ipcRenderer.invoke("settings:setApiKey", key),
   setModel: (model) => ipcRenderer.invoke("settings:setModel", model),
   setAccent: (color) => ipcRenderer.invoke("settings:setAccent", color),
+  onOpenSettings(cb: () => void) {
+    const listener = () => cb();
+    ipcRenderer.on("menu:openSettings", listener);
+    return () => ipcRenderer.removeListener("menu:openSettings", listener);
+  },
   listModels: () => ipcRenderer.invoke("models:list"),
   getCredits: () => ipcRenderer.invoke("credits:get"),
 
@@ -105,11 +110,23 @@ const api: CascadeApi = {
   pickBoardImages: () => ipcRenderer.invoke("production:pickBoardImages"),
   importBoards: (productionId, files, shotId) => ipcRenderer.invoke("production:importBoards", productionId, files, shotId),
   boardImage: (productionId, shotId, index) => ipcRenderer.invoke("production:boardImage", productionId, shotId, index),
+  boardImageFull: (productionId, shotId, index) => ipcRenderer.invoke("production:boardImageFull", productionId, shotId, index),
   boardThumbnail: (productionId, shotId, index) => ipcRenderer.invoke("production:boardThumbnail", productionId, shotId, index),
   deleteBoardImage: (productionId, shotId) => ipcRenderer.invoke("production:deleteBoardImage", productionId, shotId),
   editBoard: (productionId, shotId, model, prompt) => ipcRenderer.invoke("production:editBoard", productionId, shotId, model, prompt),
   promoteBoardHistory: (productionId, shotId, index) => ipcRenderer.invoke("production:promoteBoardHistory", productionId, shotId, index),
   planAnimatic: (productionId) => ipcRenderer.invoke("production:planAnimatic", productionId),
+  listAudioModels: () => ipcRenderer.invoke("production:listAudioModels"),
+  generateVoiceover: (productionId, opts) => ipcRenderer.invoke("production:generateVoiceover", productionId, opts),
+  importVoiceover: (productionId) => ipcRenderer.invoke("production:importVoiceover", productionId),
+  voiceoverFile: (productionId) => ipcRenderer.invoke("production:voiceoverFile", productionId),
+  voiceoverUrl: (productionId) => ipcRenderer.invoke("production:voiceoverUrl", productionId),
+  removeVoiceover: (productionId) => ipcRenderer.invoke("production:removeVoiceover", productionId),
+  importMusic: (productionId) => ipcRenderer.invoke("production:importMusic", productionId),
+  generateMusic: (productionId, opts) => ipcRenderer.invoke("production:generateMusic", productionId, opts),
+  musicFile: (productionId) => ipcRenderer.invoke("production:musicFile", productionId),
+  musicUrl: (productionId) => ipcRenderer.invoke("production:musicUrl", productionId),
+  removeMusic: (productionId) => ipcRenderer.invoke("production:removeMusic", productionId),
   onProductionEvent(cb: (e: ProductionEvent) => void) {
     const listener = (_e: unknown, ev: ProductionEvent) => cb(ev);
     ipcRenderer.on("production:event", listener);

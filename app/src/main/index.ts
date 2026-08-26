@@ -2,7 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage, protocol } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, GabClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, type ChatMessage, type AgentTool } from "@core";
@@ -11,14 +11,89 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, OpenArtModelChoice, OpenArtBoardConfig } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, OpenArtModelChoice, OpenArtBoardConfig, AudioModelInfo, VoiceoverConfig } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
+
+/**
+ * Custom scheme for streaming production assets (voiceover, music) to the
+ * renderer. Registered privileged + streaming so <audio> can range-request
+ * and play multi-MB files without base64 / data-URL length limits — the
+ * previous IPC data-URL approach silently failed for 90 s+ clips.
+ */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "cascade-media",
+    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true },
+  },
+]);
+
+/** Content-Type for a production audio asset based on its extension. */
+function audioMimeForPath(rel: string): string {
+  const ext = path.extname(rel).slice(1).toLowerCase();
+  switch (ext) {
+    case "wav": return "audio/wav";
+    case "m4a":
+    case "aac": return "audio/mp4";
+    case "ogg": return "audio/ogg";
+    case "flac": return "audio/flac";
+    default: return "audio/mpeg";
+  }
+}
+
+/**
+ * Serve `cascade-media://<productionId>/<urlencoded-relpath>` from disk with
+ * Range support so <audio> can seek and play large clips. `assetPath` guards
+ * against paths escaping the production folder.
+ */
+function registerMediaProtocol(): void {
+  protocol.handle("cascade-media", (req) => {
+    try {
+      const url = new URL(req.url);
+      const p = productions.loadProduction(url.hostname);
+      if (!p) return new Response("Unknown production", { status: 404 });
+      const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+      const abs = assetPath(p, rel);
+      const stat = fs.statSync(abs);
+      const mime = audioMimeForPath(abs);
+      const headers: Record<string, string> = {
+        "Content-Type": mime,
+        "Accept-Ranges": "bytes",
+        "Content-Length": String(stat.size),
+        "Cache-Control": "no-store",
+      };
+      const range = req.headers.get("range");
+      if (range) {
+        const m = /bytes=(\d*)-(\d*)/.exec(range);
+        if (m) {
+          const size = stat.size;
+          const start = m[1] ? Math.min(parseInt(m[1], 10), size - 1) : 0;
+          const end = m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1;
+          if (start <= end && start < size) {
+            const buf = fs.readFileSync(abs);
+            return new Response(new Uint8Array(buf.subarray(start, end + 1)), {
+              status: 206,
+              headers: {
+                ...headers,
+                "Content-Length": String(end - start + 1),
+                "Content-Range": `bytes ${start}-${end}/${size}`,
+              },
+            });
+          }
+        }
+      }
+      const buf = fs.readFileSync(abs);
+      return new Response(new Uint8Array(buf), { headers });
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  });
+}
 
 /**
  * One live chat = one in-memory session + a lazy Agent. Keeping every open/
@@ -618,7 +693,14 @@ function registerIpc() {
     existing.brand = p.brand && Array.isArray(p.brand.colors)
       ? { colors: p.brand.colors.slice(0, 5).map((c) => String(c)), font: typeof p.brand.font === "string" ? p.brand.font : "" }
       : { colors: [], font: "" };
-    existing.scenes = Array.isArray(p.scenes) ? p.scenes : [];
+    existing.scenes = Array.isArray(p.scenes) ? p.scenes.map((sc) => ({
+      ...sc,
+      shots: sc.shots.map((sh) => {
+        // Legacy fields no longer used (single-VO model, cuts-only timeline).
+        const { voiceoverPath: _v, transition: _t, ...rest } = sh as typeof sh & { voiceoverPath?: unknown; transition?: unknown };
+        return rest;
+      }),
+    })) : [];
     existing.promptOverrides =
       p.promptOverrides && typeof p.promptOverrides === "object"
         ? Object.fromEntries(Object.entries(p.promptOverrides).filter(([, v]) => typeof v === "string" && v.trim()))
@@ -630,6 +712,21 @@ function registerIpc() {
     existing.referenceCategories = Array.isArray(p.referenceCategories) ? p.referenceCategories : [];
     if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
       existing.openArt = { model: p.openArt.model, resolution: p.openArt.resolution } as OpenArtBoardConfig;
+    }
+    if (p.voiceover && typeof p.voiceover.model === "string" && typeof p.voiceover.voice === "string") {
+      existing.voiceover = { model: p.voiceover.model, voice: p.voiceover.voice } as VoiceoverConfig;
+    }
+    if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
+      existing.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;
+    }
+    if (typeof p.voiceoverVolume === "number" && Number.isFinite(p.voiceoverVolume)) {
+      existing.voiceoverVolume = Math.max(0, Math.min(1, p.voiceoverVolume));
+    }
+    if (typeof p.musicPath === "string" || p.musicPath === null) {
+      existing.musicPath = typeof p.musicPath === "string" && p.musicPath ? p.musicPath : undefined;
+    }
+    if (typeof p.musicVolume === "number" && Number.isFinite(p.musicVolume)) {
+      existing.musicVolume = Math.max(0, Math.min(1, p.musicVolume));
     }
     existing.status = p.status ?? {};
     if (typeof p.scriptSource === "string") existing.scriptSource = p.scriptSource;
@@ -851,6 +948,14 @@ function registerIpc() {
       out.push({ id, displayName, description, imageInput, cost: null });
     }
     return out;
+  }
+
+  /** "gpt-4o-mini-tts" -> "GPT-4o Mini TTS". Cosmetic only. */
+  function prettifyModelId(id: string): string {
+    return id
+      .split(/[-_]/)
+      .map((p) => (p ? p[0].toUpperCase() + p.slice(1) : p))
+      .join(" ");
   }
 
   /** Turn "auto" (or any OpenArt model id) into the id to actually call. */
@@ -1483,6 +1588,26 @@ function registerIpc() {
     }
   });
 
+  // Full-resolution board frame for the zoom lightbox — the same file as
+  // boardImage, but without the 640px downscale.
+  ipcMain.handle("production:boardImageFull", (_e, id: string, shotId: string, index?: number) => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) return null;
+    const rel = typeof index === "number" && index >= 0
+      ? shot.artworkHistory?.[Math.floor(index)]
+      : shot.artwork;
+    if (!rel) return null;
+    try {
+      const buf = fs.readFileSync(assetPath(p, rel));
+      const mime = rel.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle("production:boardThumbnail", (_e, id: string, shotId: string, index?: number) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
@@ -1545,16 +1670,16 @@ function registerIpc() {
       const gen = openArtImageGen(p, modelId);
       if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.");
       const buf = fs.readFileSync(assetPath(p, shot.artwork));
-      const dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
+      const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+      const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
       emit(`Shot ${shot.number}: editing frame${modelId ? ` via ${modelId}` : ""}...`);
       const png = await gen(
         `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${text.slice(0, 1200)}`,
         [{ name: "Current frame", dataUrl }]
       );
-      fs.mkdirSync(assetPath(p, p.assets.boardsDir), { recursive: true });
-      const rel = `${p.assets.boardsDir}/shot-${shot.number}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}.png`;
-      fs.writeFileSync(assetPath(p, rel), png);
-      recordBoardArtwork(shot, rel);
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordBoardArtwork(shot, jpegRel);
       productionEmit(id, `Shot ${shot.number}: frame edited.`);
     }, { needsApiKey: false })
   );
@@ -1565,6 +1690,244 @@ function registerIpc() {
       await planAnimatic(p, settings.getApiKey()!, settings.getModel(), emit);
     })
   );
+
+  // Step 4: TTS-capable audio models for the voiceover + music pickers.
+  /** Classify an audio model by its generation family so the VO picker shows
+   *  only tts models and the music picker only music models. */
+  const audioModelKind = (id: string): AudioModelInfo["kind"] => {
+    const i = id.toLowerCase();
+    if (i.includes("music")) return "music";
+    if (i.includes("sound") || i.includes("sfx") || i.includes("effect")) return "sfx";
+    return "tts";
+  };
+  ipcMain.handle("production:listAudioModels", async (): Promise<AudioModelInfo[]> => {
+    const apiKey = settings.getApiKey();
+    if (!apiKey) return [];
+    try {
+      const res = await fetch("https://gab.ai/v1/models", {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      const json = (await res.json()) as {
+        data?: Array<{
+          id: string;
+          capabilities?: Record<string, boolean>;
+          credit_cost?: { base_cost?: number } | null;
+        }>;
+      };
+      const out: AudioModelInfo[] = (json.data ?? [])
+        .filter((m) => m.capabilities?.audio === true)
+        .map((m) => ({
+          id: m.id,
+          displayName: prettifyModelId(m.id),
+          voices: [...voicesForModel(m.id)],
+          cost: m.credit_cost?.base_cost ?? null,
+          kind: audioModelKind(m.id),
+        }));
+      return out.length ? out : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Step 4: synthesize one voiceover clip for the whole production. Joins
+  // every non-empty shot dialogue into one TTS call and stores the resulting
+  // audio on the production itself (no per-shot field).
+  ipcMain.handle("production:generateVoiceover", (_e, id: string, opts?: { model?: string; voice?: string }) =>
+    runProductionStep(id, 4, "voiceover", async (p, emit) => {
+      const apiKey = settings.getApiKey();
+      if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+      const cfg: VoiceoverConfig = p.voiceover ?? { model: "auto", voice: voicesForModel("gpt-4o-mini-tts")[0] };
+      let model = (typeof opts?.model === "string" && opts.model && opts.model !== "auto" ? opts.model : cfg.model);
+      let voice = (typeof opts?.voice === "string" && opts.voice ? opts.voice : cfg.voice);
+      if (!model || model === "auto") {
+        const list = await (await fetch("https://gab.ai/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } })).json() as {
+          data?: Array<{ id: string; capabilities?: Record<string, boolean> }>;
+        };
+        const first = (list.data ?? []).find((m) => m.capabilities?.audio === true);
+        if (!first) throw new Error("No TTS-capable models available — add one in your Gab.ai account.");
+        model = first.id;
+      }
+      const allowed = voicesForModel(model);
+      if (!allowed.includes(voice)) voice = allowed[0];
+      await generateVoiceover(p, apiKey, { model, voice }, emit);
+    })
+  );
+
+  // Step 4: synthesize a background music clip from a text prompt using a
+  // music-capable model (music-2-0 / music-2-6).
+  ipcMain.handle("production:generateMusic", (_e, id: string, opts?: { model?: string; prompt?: string }) =>
+    runProductionStep(id, 4, "music", async (p, emit) => {
+      const apiKey = settings.getApiKey();
+      if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+      let model = typeof opts?.model === "string" && opts.model && opts.model !== "auto" ? opts.model : "";
+      const prompt = typeof opts?.prompt === "string" ? opts.prompt : "";
+      if (!model) {
+        const list = await (await fetch("https://gab.ai/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } })).json() as {
+          data?: Array<{ id: string; capabilities?: Record<string, boolean> }>;
+        };
+        const first = (list.data ?? []).find((m) => m.capabilities?.audio === true && /music/i.test(m.id));
+        if (!first) throw new Error("No music-capable models available on your account.");
+        model = first.id;
+      }
+      await generateMusic(p, apiKey, { model, prompt }, emit);
+    })
+  );
+
+  // Step 4: native voiceover picker. Copies the chosen file into
+  // voiceoverDir and stores the relative path on the production.
+  ipcMain.handle("production:importVoiceover", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Choose a voiceover clip",
+      properties: ["openFile"],
+      filters: [
+        { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const src = res.filePaths[0];
+    const ext = (path.extname(src).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
+    if (!["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) {
+      throw new Error(`Unsupported audio format: .${ext}`);
+    }
+    fs.mkdirSync(assetPath(p, p.assets.voiceoverDir), { recursive: true });
+    // Preserve the original filename (unlike the generated clip, which uses a
+    // stable voiceover.mp3 name). Renaming imports is surprising — keep the
+    // user's file as-is inside the voiceover folder.
+    let rel = `${p.assets.voiceoverDir}/${path.basename(src)}`;
+    if (fs.existsSync(assetPath(p, rel)) && p.voiceoverPath !== rel) {
+      const parsed = path.parse(path.basename(src));
+      let i = 2;
+      while (fs.existsSync(assetPath(p, `${p.assets.voiceoverDir}/${parsed.name} (${i})${parsed.ext}`))) i++;
+      rel = `${p.assets.voiceoverDir}/${parsed.name} (${i})${parsed.ext}`;
+    }
+    // Replace: archive the previous clip before it gets replaced. Unconditional
+    // because the new file may land on the same path as the current clip
+    // (e.g. re-importing a file whose name matches the generated voiceover.mp3).
+    if (p.voiceoverPath) {
+      archiveAsset(p, p.voiceoverPath);
+    }
+    fs.copyFileSync(src, assetPath(p, rel));
+    p.voiceoverPath = rel;
+    if (typeof p.voiceoverVolume !== "number") p.voiceoverVolume = 1;
+    productions.saveProduction(p);
+    productionEmit(id, `Imported voiceover → ${rel}.`);
+    return p;
+  });
+
+  // Step 4: read the production's voiceover clip as a data URL (used by the
+  // inline <audio>, the waveform, and the AudioContext playback source).
+  ipcMain.handle("production:voiceoverFile", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p?.voiceoverPath) return null;
+    try {
+      const buf = fs.readFileSync(assetPath(p, p.voiceoverPath));
+      const ext = (path.extname(p.voiceoverPath).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
+      const mime = ext === "wav" ? "audio/wav" : ext === "m4a" || ext === "aac" ? "audio/mp4" : ext === "ogg" ? "audio/ogg" : ext === "flac" ? "audio/flac" : "audio/mpeg";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  });
+
+  // Step 4: streamable protocol URL for the voiceover clip. The renderer
+  // prefers this over the base64 data URL — it bypasses data-URL length
+  // limits and lets <audio>/AudioContext fetch real bytes with range support.
+  ipcMain.handle("production:voiceoverUrl", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p?.voiceoverPath) return null;
+    return `cascade-media://${p.meta.id}/${encodeURIComponent(p.voiceoverPath)}`;
+  });
+
+  // Step 4: remove the imported/generated voiceover (archive the file + clear path).
+  ipcMain.handle("production:removeVoiceover", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (p.voiceoverPath) {
+      archiveAsset(p, p.voiceoverPath);
+      p.voiceoverPath = undefined;
+      productions.saveProduction(p);
+      productionEmit(id, "Removed voiceover (kept in archive).");
+    }
+    return p;
+  });
+
+  // Step 4: native music picker. Copies the chosen file into the production's
+  // musicDir and stores the relative path on the production.
+  ipcMain.handle("production:importMusic", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Choose a music track",
+      properties: ["openFile"],
+      filters: [
+        { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const src = res.filePaths[0];
+    const ext = (path.extname(src).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
+    if (!["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) {
+      throw new Error(`Unsupported audio format: .${ext}`);
+    }
+    fs.mkdirSync(assetPath(p, p.assets.musicDir), { recursive: true });
+    // Preserve the original filename — don't rename imported music.
+    let rel = `${p.assets.musicDir}/${path.basename(src)}`;
+    if (fs.existsSync(assetPath(p, rel)) && p.musicPath !== rel) {
+      const parsed = path.parse(path.basename(src));
+      let i = 2;
+      while (fs.existsSync(assetPath(p, `${p.assets.musicDir}/${parsed.name} (${i})${parsed.ext}`))) i++;
+      rel = `${p.assets.musicDir}/${parsed.name} (${i})${parsed.ext}`;
+    }
+    // Replace: archive the previous track before it gets replaced (also covers
+    // an import landing on the current clip's path).
+    if (p.musicPath) {
+      archiveAsset(p, p.musicPath);
+    }
+    fs.copyFileSync(src, assetPath(p, rel));
+    p.musicPath = rel;
+    if (typeof p.musicVolume !== "number") p.musicVolume = 0.5;
+    productions.saveProduction(p);
+    productionEmit(id, `Imported music → ${rel}.`);
+    return p;
+  });
+
+  // Step 4: read the imported music file as a data URL (for the inline
+  // player and the animatic AudioContext source).
+  ipcMain.handle("production:musicFile", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p?.musicPath) return null;
+    try {
+      const buf = fs.readFileSync(assetPath(p, p.musicPath));
+      const ext = (path.extname(p.musicPath).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
+      const mime = ext === "wav" ? "audio/wav" : ext === "m4a" || ext === "aac" ? "audio/mp4" : ext === "ogg" ? "audio/ogg" : ext === "flac" ? "audio/flac" : "audio/mpeg";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("production:musicUrl", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p?.musicPath) return null;
+    return `cascade-media://${p.meta.id}/${encodeURIComponent(p.musicPath)}`;
+  });
+
+  // Step 4: remove the imported music (archive the file + clears musicPath).
+  ipcMain.handle("production:removeMusic", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (p.musicPath) {
+      archiveAsset(p, p.musicPath);
+      p.musicPath = undefined;
+      productions.saveProduction(p);
+      productionEmit(id, "Removed music (kept in archive).");
+    }
+    return p;
+  });
 
   ipcMain.handle("agents:getSessionAgent", (_e, sessionId: string) => {
 
@@ -1619,6 +1982,52 @@ function appIconPath(): string {
     : path.join(__dirname, "../../build/icon.png");
 }
 
+/** Application menu (File → Settings…, standard Edit/View/Window roles). The
+ *  app keeps its own Ctrl+= / Ctrl+- / Ctrl+0 zoom handling in
+ *  before-input-event, so the View menu intentionally omits the zoom roles. */
+function installApplicationMenu() {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "Settings…",
+          accelerator: "CmdOrCtrl+,",
+          click: () => win?.webContents.send("menu:openSettings"),
+        },
+        { type: "separator" },
+        { role: "quit", label: "Quit" },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo", label: "Undo" },
+        { role: "redo", label: "Redo" },
+        { type: "separator" },
+        { role: "cut", label: "Cut" },
+        { role: "copy", label: "Copy" },
+        { role: "paste", label: "Paste" },
+        { role: "selectAll", label: "Select All" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload", label: "Reload" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "Toggle Full Screen" },
+      ],
+    },
+    {
+      role: "window",
+      label: "Window",
+      submenu: [{ role: "minimize", label: "Minimize" }, { role: "close", label: "Close" }],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1100,
@@ -1634,6 +2043,8 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  installApplicationMenu();
 
   // Zoom shortcuts. Chromium's built-in binding misses Ctrl+= / Ctrl++ on
   // some layouts, so handle the whole family explicitly (and swallow the key
@@ -1704,6 +2115,7 @@ app.whenReady().then(async () => {
   chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
   curId = s.id;
   mcp = new McpManager(path.join(app.getPath("userData"), "mcp.json"));
+  registerMediaProtocol();
   registerIpc();
   createWindow();
   // Connect MCP servers in the background; don't block window startup.

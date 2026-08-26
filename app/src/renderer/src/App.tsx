@@ -158,6 +158,9 @@ export function App() {
     if (settings && (!settings.hasApiKey || !settings.workspace)) setShowSettings(true);
   }, [settings]);
 
+  // File → Settings… from the native menu opens the settings panel.
+  useEffect(() => window.cascade.onOpenSettings(() => setShowSettings(true)), []);
+
   useEffect(() => {
     const offSwitched = window.cascade.onAgentSwitched(({ sessionId, frame }: { sessionId: string; frame: unknown }) => {
       updateTranscript(sessionId, (prev) => [...prev, frame as DisplayItem]);

@@ -5,6 +5,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { nativeImage } from "electron";
 import { GabClient } from "@core";
 import type { Production, ProductionScene, ProductionShot } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
@@ -184,6 +185,41 @@ export function assetPath(p: Production, rel: string): string {
     throw new Error(`Refusing to touch outside the production folder: ${rel}`);
   }
   return abs;
+}
+
+/**
+ * Move an audio asset into <dir>/archive instead of deleting it, so replaces
+ * and regenerations never destroy the previous take. Handles name collisions
+ * in the archive by appending a numeric suffix. No-op when the file is
+ * missing. `rel` uses forward slashes (e.g. "voiceover/voiceover.mp3").
+ */
+export function archiveAsset(p: Production, rel: string): void {
+  if (!rel) return;
+  const src = assetPath(p, rel);
+  if (!fs.existsSync(src)) return;
+  const slash = rel.lastIndexOf("/");
+  const dir = slash >= 0 ? rel.slice(0, slash) : "";
+  const archiveDir = dir ? `${dir}/archive` : "archive";
+  fs.mkdirSync(assetPath(p, archiveDir), { recursive: true });
+  const base = rel.slice(slash + 1);
+  const dot = base.lastIndexOf(".");
+  const name = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  let dest = `${archiveDir}/${base}`;
+  let i = 1;
+  while (fs.existsSync(assetPath(p, dest))) {
+    dest = `${archiveDir}/${name} (${i})${ext}`;
+    i++;
+  }
+  try {
+    fs.renameSync(src, assetPath(p, dest));
+  } catch {
+    // Fall back to copy+unlink if a straight rename isn't possible.
+    try {
+      fs.copyFileSync(src, assetPath(p, dest));
+      fs.unlinkSync(src);
+    } catch { /* leave it in place rather than destroy it */ }
+  }
 }
 
 /**
@@ -463,11 +499,82 @@ export interface GenerationRef {
   dataUrl: string;
 }
 
-/** Relative path of a shot's board frame inside the production folder. Every
- *  version gets a unique name so older frames stay intact for the history. */
-function boardRelPath(p: Production, shot: ProductionShot, ext = "png"): string {
+/** Relative path of the shot's archived original (the PNG the model returned
+ *  or the file the user imported). Kept in `boardsDir/originals/` so a
+ *  regenerate doesn't overwrite it. Never read by the renderer. */
+export function boardOriginalRelPath(p: Production, shot: ProductionShot, ext = "png"): string {
   const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  return `${p.assets.boardsDir}/shot-${shot.number}-${tag}.${ext}`;
+  return `${p.assets.boardsDir}/originals/shot-${shot.number}-${tag}.${ext}`;
+}
+
+/** Relative path of the served JPEG. The renderer's boardImage/boardThumbnail
+ *  IPCs read this file; it lives directly under `boardsDir/`. */
+export function boardJpegRelPath(p: Production, shot: ProductionShot): string {
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  return `${p.assets.boardsDir}/shot-${shot.number}-${tag}.jpg`;
+}
+
+/** Write both the archived original and the served JPEG for a frame. Returns
+ *  the JPEG rel (what `shot.artwork` should point to). The original's
+ *  extension is preserved (PNG for model output, original ext for imports). */
+export function writeBoardFrame(
+  p: Production,
+  shot: ProductionShot,
+  originalBytes: Buffer,
+  originalExt: string
+): { jpegRel: string; originalRel: string } {
+  fs.mkdirSync(assetPath(p, p.assets.boardsDir), { recursive: true });
+  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/originals`), { recursive: true });
+  const originalRel = boardOriginalRelPath(p, shot, originalExt);
+  const jpegRel = boardJpegRelPath(p, shot);
+  fs.writeFileSync(assetPath(p, originalRel), originalBytes);
+  let jpegBytes: Buffer;
+  try {
+    const img = nativeImage.createFromBuffer(originalBytes);
+    jpegBytes = img && !img.isEmpty() ? img.toJPEG(90) : originalBytes;
+  } catch {
+    jpegBytes = originalBytes;
+  }
+  fs.writeFileSync(assetPath(p, jpegRel), jpegBytes);
+  return { jpegRel, originalRel };
+}
+
+/** One-time migration: if `shot.artwork` is a legacy PNG (extension .png) that
+ *  lives directly under `boardsDir/`, convert it to a JPEG in the new layout.
+ *  Safe to call on every load; it's a no-op when the artwork is already a JPEG
+ *  or doesn't exist. */
+export function migrateBoardArtworkToJpeg(p: Production, shot: ProductionShot): boolean {
+  const rel = shot.artwork;
+  if (!rel) return false;
+  if (!rel.toLowerCase().endsWith(".png")) return false;
+  // Already in originals/ — means a newer write path already ran; the path
+  // itself is malformed (we'd never put a PNG there as the live artwork), so
+  // rebuild a JPEG path on the fly below.
+  const abs = assetPath(p, rel);
+  let bytes: Buffer;
+  try { bytes = fs.readFileSync(abs); } catch { return false; }
+  // Build a fresh JPEG rel (avoid reusing a tag we can't reconstruct) and
+  // archive the source PNG to `originals/`.
+  const jpegRel = boardJpegRelPath(p, shot);
+  const originalRel = boardOriginalRelPath(p, shot, "png");
+  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/originals`), { recursive: true });
+  let jpegBytes: Buffer;
+  try {
+    const img = nativeImage.createFromBuffer(bytes);
+    jpegBytes = img && !img.isEmpty() ? img.toJPEG(90) : bytes;
+  } catch {
+    jpegBytes = bytes;
+  }
+  fs.writeFileSync(assetPath(p, jpegRel), jpegBytes);
+  try { fs.renameSync(abs, assetPath(p, originalRel)); } catch { /* leave PNG in place; migration is best-effort */ }
+  shot.artwork = jpegRel;
+  return true;
+}
+
+/** Relative path of the production's single voiceover clip. Stable name so
+ *  a replacement overwrites the previous version in the project folder. */
+export function voiceoverRelPath(p: Production, ext = "mp3"): string {
+  return `${p.assets.voiceoverDir}/voiceover.${ext}`;
 }
 
 /** How many previous frames each shot keeps (the active one excluded). */
@@ -529,9 +636,8 @@ export async function generateBoards(
           .filter((r) => r.artwork)
           .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
         const png = await generate(openArtPrompt(p, shot), refs);
-        const rel = boardRelPath(p, shot);
-        fs.writeFileSync(assetPath(p, rel), png);
-        recordBoardArtwork(shot, rel);
+        const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+        recordBoardArtwork(shot, jpegRel);
         done++;
       } catch (e) {
         failed++;
@@ -630,9 +736,9 @@ export function importBoards(
       return false;
     }
     try {
-      const rel = boardRelPath(p, shot, ext.slice(1));
-      fs.copyFileSync(file, assetPath(p, rel));
-      recordBoardArtwork(shot, rel);
+      const bytes = fs.readFileSync(file);
+      const { jpegRel } = writeBoardFrame(p, shot, bytes, ext.slice(1));
+      recordBoardArtwork(shot, jpegRel);
       return true;
     } catch (e) {
       emit(`Couldn't import ${path.basename(file)}: ${String(e).slice(0, 120)}`, "error");
@@ -700,7 +806,7 @@ export function scanBoardImportFolder(p: Production): string[] {
     .map((n) => path.join(dir, n));
 }
 
-/** Step 4 prompt: assign durations + transitions for the animatic. */
+/** Step 4 prompt: assign durations for the animatic. Transitions are always cuts. */
 function animaticPrompt(shots: ProductionShot[]): { role: "user"; content: string } {
   const list = shots
     .map((s) => `${s.number} | audio: ${s.audio.slice(0, 120) || "(none)"} | visual: ${s.visual.slice(0, 120)}`)
@@ -711,17 +817,16 @@ function animaticPrompt(shots: ProductionShot[]): { role: "user"; content: strin
       "You are timing an animatic (storyboard slideshow) for an animated production.\n" +
       "For each shot below, assign:\n" +
       '- "durationSec": seconds on screen. Dialogue shots ≈ words ÷ 2.5 + 1.5s beat; pure-visual/SFX shots 2–4s. Keep between 1.5 and 12.\n' +
-      '- "transition": how this shot hands off to the NEXT one — "cut" (default; use it most of the time), "dissolve" (time/place shift), "fade" (scene end / open), "wipe" (rare, energetic shifts).\n' +
-      "The last shot's transition must be \"fade\".\n\n" +
-      'Reply with JSON only: { "timing": [ { "number": "0100", "durationSec": 4.5, "transition": "cut" } ] }\n\n' +
+      "All cuts are hard cuts; do not include any transition field.\n\n" +
+      'Reply with JSON only: { "timing": [ { "number": "0100", "durationSec": 4.5 } ] }\n\n' +
       "SHOTS:\n" + list,
   };
 }
 
 /**
- * Step 4 — one bounded LLM call assigns per-shot duration + transition.
- * Unmatched shots keep a 3s/cut default so the timeline is always complete.
- * Also writes out/animatic.md as the human-readable plan.
+ * Step 4 — one bounded LLM call assigns per-shot duration. Unmatched shots
+ * keep a 3s default so the timeline is always complete. Also writes
+ * out/animatic.md as the human-readable plan.
  */
 export async function planAnimatic(
   p: Production,
@@ -743,27 +848,21 @@ export async function planAnimatic(
   );
   let timed = 0;
   try {
-    const parsed = parseJsonLoose(text) as { timing?: Array<{ number?: unknown; durationSec?: unknown; transition?: unknown }> };
+    const parsed = parseJsonLoose(text) as { timing?: Array<{ number?: unknown; durationSec?: unknown }> };
     const byNumber = new Map(shots.map((s) => [s.number, s]));
     for (const t of parsed.timing ?? []) {
       const num = typeof t?.number === "string" ? t.number.padStart(4, "0") : typeof t?.number === "number" ? String(t.number).padStart(4, "0") : "";
       const shot = byNumber.get(num);
       if (!shot) continue;
       const dur = Number(t.durationSec);
-      const tr = String(t.transition ?? "cut");
       shot.durationSec = Number.isFinite(dur) ? Math.max(1.5, Math.min(dur, 12)) : 3;
-      shot.transition = (["cut", "dissolve", "fade", "wipe"].includes(tr) ? tr : "cut") as ProductionShot["transition"];
       timed++;
     }
   } catch {
     emit("Couldn't parse the timing reply — applying defaults.", "error");
   }
   // Guarantee a complete timeline even if the model missed shots.
-  for (const s of shots) {
-    s.durationSec ??= 3;
-    s.transition ??= "cut";
-  }
-  shots[shots.length - 1].transition = "fade";
+  for (const s of shots) s.durationSec ??= 3;
   const total = shots.reduce((n, s) => n + (s.durationSec ?? 3), 0);
   emit(`Timed ${timed}/${shots.length} shots via the model; total runtime ≈ ${formatRuntime(total)}.`);
 
@@ -792,18 +891,180 @@ export function animaticMarkdown(p: Production): string {
   let total = 0;
   for (const scene of p.scenes) {
     lines.push(`## Scene ${scene.number} — ${scene.title}`, "");
-    lines.push("| Shot | Duration | Transition | Audio | Visual |", "|------|----------|-----------|-------|--------|");
+    lines.push("| Shot | Duration | Audio | Visual |", "|------|----------|-------|--------|");
     for (const shot of scene.shots) {
       const d = shot.durationSec ?? 3;
       total += d;
       const a = shot.audio.replace(/\|/g, "\\|").replace(/\n/g, " ");
       const v = shot.visual.replace(/\|/g, "\\|").replace(/\n/g, " ");
-      lines.push(`| ${shot.number} | ${d.toFixed(1)}s | ${shot.transition ?? "cut"} | ${a} | ${v} |`);
+      lines.push(`| ${shot.number} | ${d.toFixed(1)}s | ${a} | ${v} |`);
     }
     lines.push("");
   }
   lines.push(`**Total runtime: ${formatRuntime(total)}**`, "");
   return lines.join("\n");
+}
+
+/** OpenAI-compatible TTS endpoint exposed by gab.ai. Override here if the
+ *  gateway shape changes. The request body is the standard `{model, input,
+ *  voice}` shape. Depending on the provider, the response is either raw audio
+ *  bytes OR a JSON envelope `{ url, content_type }` pointing at a CDN file —
+ *  `resolveAudioResponse` handles both. */
+export const VOICEOVER_ENDPOINT = "https://gab.ai/v1/audio/speech";
+
+/**
+ * Music generation reuses the same audio/speech endpoint — a music model
+ * (e.g. `music-2-0`) treats `input` as a music prompt and ignores `voice`.
+ * Kept as its own constant so it's a one-line swap if gab.ai ever exposes a
+ * dedicated music route.
+ */
+export const MUSIC_ENDPOINT = VOICEOVER_ENDPOINT;
+
+/** Resolve an audio-generation HTTP response into the actual audio bytes.
+ *  gab.ai returns raw bytes for some providers and a JSON envelope
+ *  `{ url, content_type }` for others — normalize either into bytes. */
+async function resolveAudioResponse(res: Response): Promise<{ bytes: Buffer; ext: string }> {
+  const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+  if (ct.includes("json")) {
+    const json = (await res.json()) as Record<string, unknown>;
+    const url = typeof json.url === "string" && json.url ? json.url : null;
+    if (!url) {
+      throw new Error(`Audio endpoint returned JSON without a url: ${JSON.stringify(json).slice(0, 240)}`);
+    }
+    const dl = await fetch(url);
+    if (!dl.ok) throw new Error(`Couldn't download generated audio (HTTP ${dl.status})`);
+    const bytes = Buffer.from(await dl.arrayBuffer());
+    const contentType = String(json.content_type ?? dl.headers.get("content-type") ?? "").toLowerCase();
+    const ext = contentType.includes("wav") ? "wav"
+      : contentType.includes("mp4") || contentType.includes("m4a") || contentType.includes("aac") ? "m4a"
+      : "mp3";
+    return { bytes, ext };
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (!bytes.length) throw new Error("Audio endpoint returned an empty response.");
+  return { bytes, ext: "mp3" };
+}
+
+/** OpenAI-style voice ids accepted by gab.ai's TTS gateway. */
+export const VOICEOVER_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
+/** ElevenLabs-style voice ids (sample of their stock library). */
+export const ELEVENLABS_VOICES = ["rachel", "domi", "bella", "antoni", "elli", "josh", "arnold", "adam", "sam"] as const;
+export type VoiceoverVoice = string;
+
+/** Look up the voice ids a given TTS model accepts. The registry doesn't
+ *  expose per-model voice lists yet, so this is a family-based heuristic;
+ *  update the matchers here as new model families are onboarded. */
+export function voicesForModel(modelId: string): readonly string[] {
+  const id = modelId.toLowerCase();
+  if (id.includes("elevenlabs") || id.includes("eleven_")) return ELEVENLABS_VOICES;
+  if (id.includes("qwen") || id.includes("multitalk")) return ["default", "male", "female"] as const;
+  // Default: OpenAI-style TTS (gpt-4o-mini-tts and similar).
+  return VOICEOVER_VOICES;
+}
+
+/** Workspace-relative path of the production's music file. Stored once. */
+export function musicRelPath(p: Production, ext = "mp3"): string {
+  return `${p.assets.musicDir}/music.${ext}`;
+}
+
+/**
+ * Step 4 — generate one voiceover clip for the whole production. The text is
+ * every non-empty shot dialogue joined with newlines so the model reads it
+ * as a single take. Writes the mp3 into voiceoverDir and records the
+ * relative path on the production. Returns the production (mutated).
+ */
+export async function generateVoiceover(
+  p: Production,
+  apiKey: string,
+  opts: { model: string; voice: string },
+  emit: EmitFn
+): Promise<Production> {
+  const lines = p.scenes
+    .flatMap((s) => s.shots)
+    .map((s) => s.audio.trim())
+    .filter(Boolean);
+  if (!lines.length) throw new Error("No dialogue in the script — add some in Step 1 first.");
+  const text = lines.join("\n");
+  emit(`Synthesizing voiceover (${lines.length} line${lines.length === 1 ? "" : "s"}, ${text.length} chars) with ${opts.model} (voice: ${opts.voice})…`);
+  const res = await fetch(VOICEOVER_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: opts.model, input: text, voice: opts.voice }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`TTS request failed (${res.status} ${res.statusText}): ${body.slice(0, 240)}`);
+  }
+  const { bytes, ext } = await resolveAudioResponse(res);
+  fs.mkdirSync(assetPath(p, p.assets.voiceoverDir), { recursive: true });
+  const rel = voiceoverRelPath(p, ext);
+  // Replace behavior: archive the previous clip instead of destroying it.
+  // This also covers regenerating the same stable name (voiceover.<ext>),
+  // where the old file would otherwise be overwritten in place.
+  if (p.voiceoverPath) {
+    archiveAsset(p, p.voiceoverPath);
+  }
+  // Also archive any stale voiceover.* files with different extensions.
+  try {
+    const dir = assetPath(p, p.assets.voiceoverDir);
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith("voiceover.") && `${p.assets.voiceoverDir}/${f}` !== rel) {
+        archiveAsset(p, `${p.assets.voiceoverDir}/${f}`);
+      }
+    }
+  } catch { /* ignore */ }
+  fs.writeFileSync(assetPath(p, rel), bytes);
+  p.voiceoverPath = rel;
+  if (typeof p.voiceoverVolume !== "number") p.voiceoverVolume = 1;
+  emit(`Voiceover written to ${rel} (${(bytes.length / 1024).toFixed(1)} KB).`, "done");
+  return p;
+}
+
+/**
+ * Step 4 — generate one background music clip from a text prompt. Uses the
+ * same audio/speech endpoint with a music model (music-2-0 / music-2-6), where
+ * `input` is the music prompt and `voice` is ignored. Writes the audio into
+ * musicDir as a generated track and records the relative path. Returns the
+ * production (mutated). Generated clips keep a stable name (imports keep
+ * their original filenames — see production:importMusic).
+ */
+export async function generateMusic(
+  p: Production,
+  apiKey: string,
+  opts: { model: string; prompt: string },
+  emit: EmitFn
+): Promise<Production> {
+  const prompt = opts.prompt.trim();
+  if (!prompt) throw new Error("Describe the music first (style, mood, length).");
+  emit(`Synthesizing music (${prompt.length} chars) with ${opts.model}…`);
+  const res = await fetch(MUSIC_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: opts.model, input: prompt, voice: "" }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Music request failed (${res.status} ${res.statusText}): ${body.slice(0, 240)}`);
+  }
+  const { bytes, ext } = await resolveAudioResponse(res);
+  fs.mkdirSync(assetPath(p, p.assets.musicDir), { recursive: true });
+  const rel = `${p.assets.musicDir}/music-generated.${ext}`;
+  // Replace behavior: archive the previous track instead of destroying it
+  // (also covers regenerating the same stable name).
+  if (p.musicPath) {
+    archiveAsset(p, p.musicPath);
+  }
+  fs.writeFileSync(assetPath(p, rel), bytes);
+  p.musicPath = rel;
+  if (typeof p.musicVolume !== "number") p.musicVolume = 0.5;
+  emit(`Music written to ${rel} (${(bytes.length / 1024).toFixed(1)} KB).`, "done");
+  return p;
 }
 
 /**

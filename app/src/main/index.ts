@@ -15,7 +15,7 @@ import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMar
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, OpenArtModelChoice, OpenArtBoardConfig } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, OpenArtModelChoice, OpenArtBoardConfig } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1246,6 +1246,42 @@ function registerIpc() {
     return next;
   }
 
+  /** Rebase a finished generation onto the latest on-disk production. Long
+   *  jobs (board generation, board edits) hold their own copy of the
+   *  production for minutes; meanwhile the user may edit prompts, switch the
+   *  model, etc. (each persisted immediately by the renderer). Saving the job's
+   *  stale copy would silently revert those edits. Instead: reload the current
+   *  production and copy over ONLY the fields this job actually changed,
+   *  so concurrent user edits survive. */
+  function rebaseProduction(before: Production, after: Production): Production {
+    const fresh = productions.loadProduction(after.meta.id);
+    if (!fresh) return after;
+    // Top-level fields the pipeline owns (step status markers).
+    for (const k of ["status", "currentStep"] as const) {
+      if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
+        (fresh as unknown as Record<string, unknown>)[k] = after[k];
+      }
+    }
+    const flat = (p: Production) => p.scenes.flatMap((s) => s.shots);
+    const prevById = new Map(flat(before).map((s) => [s.id, s]));
+    const nextById = new Map(flat(after).map((s) => [s.id, s]));
+    for (const shot of flat(fresh)) {
+      const prev = prevById.get(shot.id);
+      const next = nextById.get(shot.id);
+      if (!prev || !next) continue;
+      // Copy every shot field the job mutated (artwork, artworkHistory,
+      // durationSec/transition for timing, …) but leave untouched fields —
+      // e.g. prompt / style / ref overrides edited mid-run — at their
+      // fresher on-disk values.
+      for (const key of Object.keys(next) as (keyof ProductionShot)[]) {
+        if (JSON.stringify(prev[key]) !== JSON.stringify(next[key])) {
+          (shot as unknown as Record<string, unknown>)[key] = next[key];
+        }
+      }
+    }
+    return fresh;
+  }
+
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
   async function runProductionStep(
     id: string,
@@ -1270,8 +1306,9 @@ function registerIpc() {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         pq.status[step] = "running";
+        const before = structuredClone(pq);
         await fn(pq, (m, l) => productionEmit(id, m, l));
-        productions.saveProduction(pq);
+        productions.saveProduction(rebaseProduction(before, pq));
       });
     } catch (e) {
       const pErr = productions.loadProduction(id);
@@ -1442,6 +1479,28 @@ function registerIpc() {
     } catch {
       return null;
     }
+  });
+
+  // Promote a history frame back to primary: the selected history entry
+  // becomes `artwork` and the previous primary moves to the front of the
+  // history (nothing is deleted, so this is fully reversible by browsing).
+  ipcMain.handle("production:promoteBoardHistory", (_e, id: string, shotId: string, index: number) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const hist = shot.artworkHistory ?? [];
+    const i = Math.floor(index);
+    if (!hist[i]) throw new Error("That history frame no longer exists.");
+    const promoted = hist[i];
+    const current = shot.artwork;
+    shot.artwork = promoted;
+    hist.splice(i, 1);
+    if (current) hist.unshift(current);
+    shot.artworkHistory = hist;
+    productions.saveProduction(p);
+    productionEmit(id, `Shot ${shot.number}: history frame restored as the primary frame.`);
+    return p;
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a

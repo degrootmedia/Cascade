@@ -408,6 +408,12 @@ export interface CascadeApi {
    * the new current frame (the old one moves into the history).
    */
   editBoard(productionId: string, shotId: string, model: string, prompt: string): Promise<Production>;
+  /**
+   * Step 3: promote a history frame back to primary for a shot. The current
+   * `artwork` moves into `artworkHistory`; the selected history entry becomes
+   * the active frame. Returns the updated production.
+   */
+  promoteBoardHistory(productionId: string, shotId: string, index: number): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;

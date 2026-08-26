@@ -106,6 +106,7 @@ const api: CascadeApi = {
   importBoards: (productionId, files, shotId) => ipcRenderer.invoke("production:importBoards", productionId, files, shotId),
   boardImage: (productionId, shotId, index) => ipcRenderer.invoke("production:boardImage", productionId, shotId, index),
   editBoard: (productionId, shotId, model, prompt) => ipcRenderer.invoke("production:editBoard", productionId, shotId, model, prompt),
+  promoteBoardHistory: (productionId, shotId, index) => ipcRenderer.invoke("production:promoteBoardHistory", productionId, shotId, index),
   planAnimatic: (productionId) => ipcRenderer.invoke("production:planAnimatic", productionId),
   onProductionEvent(cb: (e: ProductionEvent) => void) {
     const listener = (_e: unknown, ev: ProductionEvent) => cb(ev);

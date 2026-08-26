@@ -454,9 +454,7 @@ export function ProductionWorkspace() {
         shots: sc.shots.map((s) => {
           if (s.id !== shotId) return s;
           if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined };
-          const para = styleText
-            ? `Style: ${styleText}. Render consistently with the other shots in this production.`
-            : "";
+          const para = styleText ? `Style: ${styleText}.` : "";
           // Replace the first "Style:" paragraph (up to a blank line); prepend
           // one when the manual prompt has no style section of its own.
           const rest = s.prompt.replace(/^Style:[\s\S]*?(?:\n\n|$)/, "");
@@ -587,6 +585,21 @@ export function ProductionWorkspace() {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setEditBusyIds((ids) => ids.filter((x) => x !== shotId));
+    }
+  }
+
+  /** Step 3: promote a browsed history frame back to primary for one shot.
+   *  The current frame swaps into the history (nothing is deleted). */
+  async function promoteHistory(shotId: string, index: number) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.promoteBoardHistory(prod.meta.id, shotId, index);
+      setProd(next);
+      setBoardBust((b) => b + 1);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -925,6 +938,7 @@ export function ProductionWorkspace() {
                     }
                     onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
                     onPasteRef={(dataUrl) => pasteFrameAsReference(shot.id, dataUrl)}
+                    onPromoteHistory={(index) => void promoteHistory(shot.id, index)}
                   />
                 ))}
               </div>
@@ -973,7 +987,10 @@ export function ProductionWorkspace() {
                 </div>
                 {prod.scenes.flatMap((sc) => sc.shots).map((shot) => (
                   <div key={shot.id} className="prod-timeline-row">
-                    <span className="shot-number" title={shot.id}>{shot.number}</span>
+                    <span className="prod-timeline-shotcell">
+                      <AnimaticThumb prodId={prod.meta.id} shotId={shot.id} artwork={shot.artwork} />
+                      <span className="shot-number" title={shot.id}>{shot.number}</span>
+                    </span>
                     <span className="prod-timeline-desc" title={shot.visual}>{shot.audio || shot.visual || "—"}</span>
                     <span>
                       <input
@@ -1013,6 +1030,22 @@ export function ProductionWorkspace() {
       </div>
     </div>
   );
+}
+
+/** Step 4: small thumbnail of a shot's primary frame for the animatic
+ *  timeline. Fetched on demand as a data URL, like the Step 3 contact sheet. */
+function AnimaticThumb({ prodId, shotId, artwork }: { prodId: string; shotId: string; artwork?: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setSrc(null);
+    if (artwork) {
+      window.cascade.boardImage(prodId, shotId).then((d) => { if (live) setSrc(d); }).catch(() => {});
+    }
+    return () => { live = false; };
+  }, [prodId, shotId, artwork]);
+  if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboards" />;
+  return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title="Primary frame for this shot" />;
 }
 
 /** "Next" bar shown at the bottom of every step panel — completes the step
@@ -1190,7 +1223,7 @@ function formatRuntime(totalSec: number): string {
 
 /** One storyboard frame in the Step 3 contact sheet. The PNG lives in the
  *  production folder; the thumbnail is fetched on demand as a data URL. */
-function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onEdit, onToggleRef, onToggleEntityRef, onStyleChange, onPromptChange, onRefPromptChange, onRefreshPrompt, onDropFrame, onPasteRef }: {
+function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onEdit, onToggleRef, onToggleEntityRef, onStyleChange, onPromptChange, onRefPromptChange, onRefreshPrompt, onDropFrame, onPasteRef, onPromoteHistory }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -1213,11 +1246,13 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
   onDropFrame: (source: { prodId: string; shotId: string; number: number }) => void;
   /** Attach an image pasted from the clipboard as a reference on this shot. */
   onPasteRef: (dataUrl: string) => void;
+  /** Promote the browsed history frame (by artworkHistory index) to primary. */
+  onPromoteHistory: (index: number) => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showRefs, setShowRefs] = useState(false);
-  const [expandedRef, setExpandedRef] = useState<{ id: string; name: string; artwork: string; defaultText?: string } | null>(null);
+  const [expandedRef, setExpandedRef] = useState<{ id: string; name: string; artwork: string; defaultText?: string; entity?: boolean } | null>(null);
   const [expanded, setExpanded] = useState(false); // enlarged frame lightbox
   const [promptOpen, setPromptOpen] = useState(false); // full editor drawer
   // True while a dragged board frame hovers over this card's Refs button.
@@ -1389,6 +1424,15 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
             </span>
           </>
         )}
+        {histIdx !== null && shownImg && (
+          <button
+            className="prod-board-promote"
+            title="Set this history frame as the primary frame for this shot (the current frame moves into history)"
+            onClick={() => onPromoteHistory(histIdx)}
+          >
+            Set as primary
+          </button>
+        )}
         {shownImg ? (
           <img
             src={shownImg}
@@ -1482,12 +1526,12 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
       {(entityRefs.length > 0 || customThumbRefs.length > 0) && (
         <div className="prod-board-autorefs" title="References applied to this frame (auto-matched, attached, or custom)">
           {entityRefs.map((r) => (
-            <button key={r.id} className={"prod-board-autoref" + ((r.auto && r.excluded) ? " excluded" : "") + (r.picked && !r.auto ? " picked" : "")} title={`${r.name}${r.auto ? " (auto-matched)" : " (attached)"} — click to enlarge and edit its prompt for this frame`} onClick={() => r.artwork && setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork, defaultText: r.defaultText })}>
+            <button key={r.id} className={"prod-board-autoref" + ((r.auto && r.excluded) ? " excluded" : "") + (r.picked && !r.auto ? " picked" : "")} title={`${r.name}${r.auto ? " (auto-matched)" : " (attached)"} — click to enlarge and edit its prompt for this frame`} onClick={() => r.artwork && setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork, defaultText: r.defaultText, entity: true })}>
               {r.artwork ? <img src={r.artwork} alt={r.name} /> : <span className="prod-board-autoref-blank">?</span>}
             </button>
           ))}
           {customThumbRefs.map((r) => (
-            <button key={r.id} className="prod-board-autoref custom" title={`${r.name} (custom reference) — click to enlarge and edit its prompt for this frame`} onClick={() => setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork!, defaultText: r.description })}>
+            <button key={r.id} className="prod-board-autoref custom" title={`${r.name} (custom reference) — click to enlarge and edit its prompt for this frame`} onClick={() => setExpandedRef({ id: r.id, name: r.name, artwork: r.artwork!, defaultText: r.description, entity: false })}>
               <img src={r.artwork} alt={r.name} />
             </button>
           ))}
@@ -1577,7 +1621,9 @@ function BoardCard({ prod, shot, bust, regenerating, onRegenerate, onImport, onE
                 className="prod-ref-prompt-input"
                 rows={3}
                 value={shot.refPromptOverrides?.[expandedRef.id] ?? ""}
-                placeholder={expandedRef.defaultText?.trim()
+                placeholder={expandedRef.entity
+                  ? "This is an Entity Reference — it is tied to a keyword in your prompt. To override it with your own reference prompt, type one here."
+                  : expandedRef.defaultText?.trim()
                   ? `Design prompt: ${expandedRef.defaultText.trim()}`
                   : "No prompt set in Design — type one here"}
                 title="Prompt for this reference on this frame only — leave blank to use the Design-page prompt"

@@ -953,7 +953,7 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
 .prod-timeline { display: flex; flex-direction: column; gap: 2px; margin: 14px 0; }
 .prod-timeline-row {
   display: grid;
-  grid-template-columns: 64px 1fr 90px 130px;
+  grid-template-columns: 104px 1fr 90px 130px;
   gap: 12px;
   align-items: center;
   padding: 5px 8px;
@@ -961,6 +961,19 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
 }
 .prod-timeline-row.head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
 .prod-timeline-row:not(.head):hover { background: var(--bg-raised); }
+.prod-timeline-shotcell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.prod-timeline-thumb {
+  width: 64px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  flex: none;
+}
+span.prod-timeline-thumb.blank {
+  display: inline-block;
+  background: var(--bg-raised);
+}
 .prod-timeline-desc {
   font-size: 13px;
   color: var(--text-dim);
@@ -1985,6 +1998,22 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
   z-index: 2;
 }
 .prod-board-hist-tag.old { color: var(--text-dim); }
+
+/* "Set as primary" button shown while browsing a history frame. */
+.prod-board-promote {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text);
+  font-size: 0.66rem;
+  padding: 3px 10px;
+  cursor: pointer;
+  z-index: 2;
+}
+.prod-board-promote:hover { border-color: var(--accent); color: white; }
 
 /* AI edit button on a board frame (pencil). */
 .prod-board-edit {

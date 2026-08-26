@@ -317,7 +317,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // legacy free-text visualStyle fallback for older productions).
   const paras: string[] = [];
   const style = resolveShotStyle(p, shot);
-  if (style) paras.push(`Style: ${style}. Render consistently with the other shots in this production.`);
+  if (style) paras.push(`Style: ${style}.`);
   else {
     const master = (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
     if (master) paras.push(`Style: ${master}.`);

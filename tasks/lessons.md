@@ -24,3 +24,21 @@ No session-specific lessons yet.
 - Two "fixed, still broken" rounds meant the change never reached the artifact the user actually runs. Verify the run target before iterating on the fix: a rebuilt `out/` doesn't touch a packaged `win-unpacked/Cascade.exe` or the NSIS setup exe — repackage (`npm run package`) so the tested binary carries the change.
 - On decode-audio failure, never `onVoDurationKnown(0)` if a sibling `<audio>` metadata handler can still report the real duration — a decode fallback must not clobber a valid value or the UI locks at 0:00.
 - Imported media should keep their original filenames (only synthesized/generated clips get a stable name like `voiceover.mp3`). Collision-handle (`name (2).ext`) instead of silently renaming; keep the old file unlink-on-replace so the project folder doesn't accumulate orphans.
+- Swapping `src` on a shared media element forces Chromium to re-open/demux/decode and paints the element's black backdrop — for any "switch between clips" UI, mount one element per clip (pooled, LRU-capped, visibility-toggled) so cuts become pixel swaps; proactive ±neighbour mounting masks cold loads.
+- React's delegated wheel/touch listeners are passive: `e.preventDefault()` inside a component's `onWheel` cannot stop page scroll. Attach a native listener with `{ passive: false }` when an element needs to own the wheel gesture (zooming timelines/canvases).
+- Anchoring zoom on a moving reference (playhead): compute target scrollLeft from (refTime × newScale − refTime × oldScale − oldScrollLeft), store it in a ref, apply in `useLayoutEffect` after the resized content commits. Also freeze auto-follow while the user is drag-scrubbing or it fights the cursor.
+- When a canvas visualization must redraw per scroll-frame, precompute fixed-bucket min/max peaks once from raw PCM instead of rescanning samples every frame (same idea as per-decode AudioBuffer peaks).
+- Never append to markdown files via PowerShell `Add-Content`/here-strings on this machine — backslash sequences become tabs and non-ASCII chars turn into mojibake; use file-edit tooling instead.
+
+## 2026-08-27 — OpenArt credits line missing (video modal)
+- Bug: shared parseJsonObject cut replies at the FIRST }, so any reply with a
+  nested object ({"user":{...},"credits":N}) parsed to null and the IPC silently
+  returned null -> renderer hid the credits line.
+- Rules:
+  1. Never write a JSON extractor with a first-} heuristic; parse first { to
+     last } (full parse first). Nested objects are the norm, not the exception.
+  2. When wiring a new IPC/data path, test against the REAL reply shape (probe the
+     live server first) instead of only running typecheck — silent catch -> null
+     paths hide failures from the UI.
+  3. Silent .catch(() => {}) in the renderer is fine for UX, but pairs badly with
+     a lossy parser — verify the data survives the whole chain.

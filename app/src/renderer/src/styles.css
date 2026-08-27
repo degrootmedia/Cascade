@@ -593,9 +593,10 @@ body {
 }
 .prod-board-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .prod-board-frame-img { cursor: pointer; }
+.prod-board-frame-video { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
 .prod-board-empty { color: var(--text-dim); font-size: 12px; }
 .prod-boards-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
-.prod-board-regen, .prod-board-import, .prod-board-zoom, .prod-board-delete {
+.prod-board-regen, .prod-board-import, .prod-board-zoom, .prod-board-video, .prod-board-delete {
   position: absolute;
   top: 6px;
   width: 26px;
@@ -614,15 +615,18 @@ body {
 .prod-board-regen { right: 6px; }
 .prod-board-import { right: 38px; }
 .prod-board-zoom { left: 6px; }
+.prod-board-video { left: 38px; }
 .prod-board-delete { right: 6px; bottom: 6px; top: auto; }
-.prod-board-regen:hover, .prod-board-import:hover, .prod-board-zoom:hover, .prod-board-delete:hover { border-color: var(--accent); color: var(--accent); }
-.prod-board-regen:disabled, .prod-board-import:disabled, .prod-board-zoom:disabled, .prod-board-delete:disabled { opacity: 0.4 !important; cursor: default; }
+.prod-board-regen:hover, .prod-board-import:hover, .prod-board-zoom:hover, .prod-board-video:hover, .prod-board-delete:hover { border-color: var(--accent); color: var(--accent); }
+.prod-board-regen:disabled, .prod-board-import:disabled, .prod-board-zoom:disabled, .prod-board-video:disabled, .prod-board-delete:disabled { opacity: 0.4 !important; cursor: default; }
 .prod-board-delete:disabled { opacity: 0 !important; }
 .prod-board-zoom:disabled { opacity: 0 !important; }
+.prod-board-video:disabled { opacity: 0 !important; }
 .prod-board-frame:hover .prod-board-regen,
 .prod-board-frame:hover .prod-board-edit,
 .prod-board-frame:hover .prod-board-import,
 .prod-board-frame:hover .prod-board-zoom,
+.prod-board-frame:hover .prod-board-video,
 .prod-board-frame:hover .prod-board-delete { opacity: 1; }
 .prod-board figcaption .shot-number { color: var(--text); font-variant-numeric: tabular-nums; }
 .prod-board-prompt-head { display: flex; align-items: center; min-height: 22px; gap: 8px; }
@@ -871,6 +875,13 @@ body {
   object-fit: contain;
   display: block;
   border-radius: 8px;
+}
+.prod-ref-lightbox-video {
+  max-width: 100%;
+  max-height: 70vh;
+  display: block;
+  border-radius: 8px;
+  background: #000;
 }
 .prod-ref-lightbox-card figcaption {
   font-size: 0.85rem;
@@ -1202,6 +1213,36 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-animatic-preview-slate strong { color: var(--text); font-size: 1.4rem; font-family: ui-monospace, Consolas, monospace; }
 .prod-animatic-preview-slate span { font-size: 0.7rem; letter-spacing: 0.2em; }
 .prod-animatic-preview-slate small { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; }
+.prod-animatic-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+/* Pooled preview videos: exactly one (the active shot's clip) is on screen;
+   hidden siblings stay mounted so cutting between clips never reloads. */
+.prod-animatic-video:not(.live) { visibility: hidden; }
+.prod-animatic-video.live { z-index: 2; }
+.prod-animatic-video-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1;
+  font-size: 0.9rem;
+}
+.prod-animatic-video-remove:hover { border-color: var(--danger); color: var(--danger); }
 
 .prod-animatic-transport {
   display: flex;
@@ -1311,15 +1352,23 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   outline: none;
 }
 
-.prod-animatic-strip {
-  position: relative;
-  display: flex;
-  align-items: stretch;
-  height: 96px;
+/* Zoomable scroll frame around the strip. At 1x the content fits exactly, so
+   this behaves like the old static strip; past 1x it scrolls horizontally. */
+.prod-animatic-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
+}
+.prod-animatic-scroll::-webkit-scrollbar { height: 9px; }
+.prod-animatic-scroll::-webkit-scrollbar-track { background: transparent; }
+.prod-animatic-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+.prod-animatic-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+.prod-animatic-strip {
+  position: relative;
+  height: 96px;
+  background: var(--bg);
   user-select: none;
   touch-action: none;
 }
@@ -1355,16 +1404,12 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 50%;
 }
 .prod-animatic-block {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: stretch;
+  position: absolute;
+  top: 0;
+  bottom: 0;
   border-right: 1px solid var(--border);
   background: rgba(34, 39, 44, 0.55);
   overflow: hidden;
-  flex: none;
-  min-width: 6px;
 }
 .prod-animatic-block:last-child { border-right: none; }
 .prod-animatic-block.active { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
@@ -1430,6 +1475,31 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   z-index: 3;
 }
 .prod-animatic-block-handle:hover { background: var(--accent); opacity: 0.5; }
+/* Per-clip audio mute. Only shown on clips that have a video (their own
+   embedded track); VO and music keep their global volume sliders. */
+.prod-animatic-block-mute {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  line-height: 1;
+}
+.prod-animatic-block-mute:hover { border-color: var(--accent); }
+.prod-animatic-block-mute.muted {
+  color: var(--danger);
+  border-color: rgba(207, 88, 88, 0.55);
+}
 .prod-ref {
   position: relative;
   margin: 0;
@@ -2532,3 +2602,41 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-edit-prompt:focus { outline: none; border-color: var(--accent); }
 .prod-edit-go { margin-top: 12px; align-self: flex-end; padding: 9px 20px; }
+
+/* Per-shot video-generation modal. */
+.prod-video-panel { width: min(640px, 94vw); gap: 8px; }
+.prod-video-frame-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
+.prod-video-frame {
+  width: 96px;
+  height: 64px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+.prod-video-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.prod-video-frame-label { font-size: 0.78rem; color: var(--text-dim); line-height: 1.45; }
+.prod-video-row { display: flex; gap: 14px; }
+.prod-video-row .prod-label { flex: 1; }
+.prod-video-row .prod-openart-select { width: 100%; margin-top: 4px; }
+.prod-video-prompt {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+.prod-video-prompt:focus { outline: none; border-color: var(--accent); }
+.prod-video-cost { font-size: 0.8rem; color: var(--text-dim); margin: 4px 0 0; }
+.prod-video-cost strong { color: var(--accent); }

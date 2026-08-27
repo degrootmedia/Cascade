@@ -247,3 +247,51 @@ Implemented and verified with `npm run typecheck`, `npm run build`, and `git dif
 
 - Top-navigation model menu now opens downward instead of using the chat-footer direction.
 - Verified with `npm run typecheck`, `npm run build`, and `git diff --check`.
+
+## Timeline Improvements Round 2 (mute buttons, cut perf, wheel zoom)
+
+### 1. Per-clip mute (speaker button on each block)
+- [x] Add `muted?: boolean` to `ProductionShot` (`app/src/shared/ipc.ts`) — persists automatically since `production:save` spreads shots (`main/index.ts:704`)
+- [x] Parent helper `toggleShotMuted(shotId)` beside `updateDurations` (saveField scenes patch)
+- [x] New `AnimaticTimeline` prop `onToggleMute`; inline-SVG speaker/mute button top-right of each `.prod-animatic-block`; `e.stopPropagation()` on pointerdown (lesson 17)
+- [x] Applied to pooled `<video>` elements declaratively so playback honors it immediately
+
+### 2. Black flash between clips → per-shot video pool
+Root cause: ONE shared `<video>` gets its `src` swapped per shot so Chromium reopens/demuxes/decodes while `.prod-animatic-video{background:#000}` paints black.
+- [x] Pool: one `<video>` per shot-with-video, absolutely stacked in preview, visibility toggled by `activeIdx` (no reload on cuts)
+- [x] Refactored single `shotVideoRef` sync effects to a `Map<shotId, video>` of refs
+- [x] Memoized `boardThumbnail` data URLs (module-level key cache) — used by strip + preview layers
+- [x] LRU cap 12 mounted videos (±2 window around active); evict least-recently-active beyond that
+- Answer: NO timeline rewrite needed.
+
+### 3. Mouse-wheel zoom anchored at playhead
+- [x] `zoom` state 1..24, pps = (viewportW/total)*zoom via ResizeObserver width capture
+- [x] Strip switched flex-% layout → absolute-positioned content sized `total*pps` px inside an `overflow-x:auto` scroll frame
+- [x] NATIVE non-passive wheel listener on strip-wrap (React root wheel is passive; preventDefault won't work otherwise); preserve playhead's screen X across zoom steps, clamp scrollLeft
+- [x] Waveform canvas maps time→(t*pps − scrollLeft), rAF-throttled redraw on scroll, plus one-time PCM→peak-bucket downsample so follow-playback redraws stay cheap
+- [x] Strip seek math gains scrollLeft branch (transport scrubber stays full-range overview)
+- [x] Auto-follow playhead while playing when zoomed (suppressed during drag-scrub); manual seek snaps into view
+- [x] Reset zoom to fit when prodId changes
+
+### Verify
+- [x] npm run typecheck + build pass
+- [ ] Manual dev-run walkthrough pending user test: play across cut boundaries, mute toggle persists after reload, wheel zoom near t=0/end, drag handles at high zoom
+
+Review:
+- Note: the "▶ video" badge on blocks was replaced by the speaker button itself (it only renders on clips that have a video, so it doubles as the indicator).
+- Note: preview cold-load of a never-opened clip can still flash briefly once (first approach / after LRU eviction); neighbours are proactively mounted ±2 to mask this during normal linear playback.
+
+## Storyboard modal + naming (review)
+- [x] Video-gen dialog: removed "OpenArt didn't report a cost for this model." note
+- [x] Credits line now shows the OpenArt account balance (via new openart_account_get MCP call) instead of Gab.ai credits; hidden when OpenArt isn't connected
+- [x] Renamed "Storyboards" -> "Storyboard" everywhere (ProductionWorkspace.tsx x6, ipc.ts comment)
+- [x] Verified: npm run typecheck + npm run build pass
+
+### Fix round 2 (user report: credits not showing)
+- Root cause: parseJsonObject in main/index.ts cut at the first } -> nested
+  {"user":{...},"plan":...,"credits":N} reply from openart_account_get failed
+  to parse -> handler returned null -> credits line hidden.
+- Fix: parse first { .. last } with full-JSON-first strategy; verified all
+  existing callers (openArtHistoryId PENDING replies, creation polling) still work.
+- Verified live: SDK client + stored tokens -> account_get returns credits 99849.
+- App needs a dev restart to pick up the main-process change.

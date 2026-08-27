@@ -41,9 +41,10 @@ function normalize(p: ProductionFile): ProductionFile {
   p.styles ??= [];
   p.brand ??= { colors: [], font: "" };
   p.currentStep ??= 1;
-  p.assets ??= { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out" };
+  p.assets ??= { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out" };
   p.assets.voiceoverDir ??= "voiceover";
   p.assets.musicDir ??= "music";
+  p.assets.videosDir ??= "videos";
   if (typeof (p as unknown as { voiceoverVolume?: unknown }).voiceoverVolume !== "number") {
     // Default voiceover volume when a VO exists, otherwise leave undefined for fresh projects.
     if (p.voiceoverPath) (p as ProductionFile).voiceoverVolume = 1;
@@ -148,10 +149,10 @@ export function newProduction(name: string, folder: string): ProductionFile {
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out" },
+    assets: { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out" },
   };
   // Scaffold the asset folders inside the user's production folder.
-  for (const d of [p.assets.designDir, p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.outDir]) {
+  for (const d of [p.assets.designDir, p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
     } catch {

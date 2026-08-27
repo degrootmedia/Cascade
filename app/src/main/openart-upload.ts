@@ -95,7 +95,8 @@ const refUploadCache = new Map<string, Record<string, unknown>>();
 export async function uploadDataUrlReference(
   mcp: McpManager,
   dataUrl: string,
-  label: string
+  label: string,
+  purpose: "create-image" | "create-video" = "create-image"
 ): Promise<Record<string, unknown>> {
   const m = /^data:([^;]+);base64,(.+)$/s.exec(dataUrl);
   if (!m) throw new Error("Not a base64 data-URL image.");
@@ -111,7 +112,7 @@ export async function uploadDataUrlReference(
     size,
     contentType,
     mediaType,
-    purpose: "create-image",
+    purpose,
   });
   const sign = parseJsonObject(signText);
   const signURL = sign?.signURL as string | undefined;

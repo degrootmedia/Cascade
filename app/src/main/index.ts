@@ -15,7 +15,7 @@ import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMar
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, OpenArtModelChoice, OpenArtBoardConfig, AudioModelInfo, VoiceoverConfig } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, OpenArtModelChoice, OpenArtBoardConfig, AudioModelInfo, VoiceoverConfig, VideoGenOptions, VideoModelOptions } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -33,8 +33,10 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-/** Content-Type for a production audio asset based on its extension. */
-function audioMimeForPath(rel: string): string {
+/** Content-Type for a production media asset based on its extension. The
+ *  cascade-media:// protocol serves both audio (VO / music) and video (per-shot
+ *  generated clips). */
+function mediaMimeForPath(rel: string): string {
   const ext = path.extname(rel).slice(1).toLowerCase();
   switch (ext) {
     case "wav": return "audio/wav";
@@ -42,6 +44,12 @@ function audioMimeForPath(rel: string): string {
     case "aac": return "audio/mp4";
     case "ogg": return "audio/ogg";
     case "flac": return "audio/flac";
+    case "mp4":
+    case "m4v": return "video/mp4";
+    case "webm": return "video/webm";
+    case "mov": return "video/quicktime";
+    case "mkv": return "video/x-matroska";
+    case "avi": return "video/x-msvideo";
     default: return "audio/mpeg";
   }
 }
@@ -60,7 +68,7 @@ function registerMediaProtocol(): void {
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       const abs = assetPath(p, rel);
       const stat = fs.statSync(abs);
-      const mime = audioMimeForPath(abs);
+      const mime = mediaMimeForPath(abs);
       const headers: Record<string, string> = {
         "Content-Type": mime,
         "Accept-Ranges": "bytes",
@@ -934,7 +942,7 @@ function registerIpc() {
   /** Shape the OpenArt model list into dropdown choices, prepending "Auto". */
   function openArtModelChoices(raw: string): OpenArtModelChoice[] {
     const out: OpenArtModelChoice[] = [
-      { id: "auto", displayName: "Auto", description: "Cascade picks the best image model for each run.", imageInput: false, cost: null },
+      { id: "auto", displayName: "Auto", description: "Cascade picks the best model for each run.", imageInput: false, videoInput: false, cost: null },
     ];
     for (const m of parseOpenArtModels(raw)) {
       const id = String(m.model ?? m.id ?? m.model_id ?? m.name ?? "").trim();
@@ -944,8 +952,16 @@ function registerIpc() {
       const media = Array.isArray(m.media) ? String((m.media as unknown[]).join(" ")) : String(m.media ?? "");
       const modes = Array.isArray(m.modes) ? String((m.modes as unknown[]).join(" ")) : "";
       const blob = `${media} ${modes} ${description}`.toLowerCase();
-      const imageInput = /image/i.test(blob);
-      out.push({ id, displayName, description, imageInput, cost: null });
+      // Credit cost: OpenArt sometimes reports it on the model entry — take the
+      // first plausible number; otherwise null (unknown).
+      const costRaw = m.cost ?? m.price ?? m.credit_cost ?? m.base_cost;
+      let cost: number | null = null;
+      if (typeof costRaw === "number" && Number.isFinite(costRaw)) cost = costRaw;
+      else if (costRaw && typeof costRaw === "object") {
+        const v = (costRaw as Record<string, unknown>).base_cost ?? (costRaw as Record<string, unknown>).amount;
+        if (typeof v === "number" && Number.isFinite(v)) cost = v;
+      }
+      out.push({ id, displayName, description, imageInput: /image/i.test(blob), videoInput: /video/i.test(blob), cost });
     }
     return out;
   }
@@ -1111,12 +1127,14 @@ function registerIpc() {
   // ---- async OpenArt completion helpers ------------------------------------
   const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-  /** Parse the leading JSON object out of a tool reply (schema may append prose). */
+  /** Parse the leading JSON object out of a tool reply (schema may append prose,
+   *  and nested objects are allowed). */
   const parseJsonObject = (text: string): Record<string, unknown> | null => {
-    const end = text.indexOf("}");
-    if (end === -1) return null;
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end <= start) return null;
     try {
-      const o = JSON.parse(text.slice(0, end + 1));
+      const o = JSON.parse(text.slice(start, end + 1));
       return o && typeof o === "object" ? (o as Record<string, unknown>) : null;
     } catch {
       return null;
@@ -1340,6 +1358,321 @@ function registerIpc() {
     };
   }
 
+  // ---- per-shot video generation -------------------------------------------
+
+  /** Resolve @[name] tags in a video prompt against the production's artwork
+   *  references. Returns the prompt with tags replaced by portable tokens
+   *  (@imageN) plus the referenced images, ready to upload alongside the
+   *  shot's frame. `startToken` is the token index to begin at — the shot's
+   *  own frame always occupies @image1. */
+  function resolvePromptReferences(p: Production, prompt: string, startToken: number): { resolved: string; extras: { name: string; dataUrl: string }[] } {
+    const candidates = [
+      ...p.characters.map((c) => ({ name: c.name, artwork: c.artwork })),
+      ...p.products.map((pr) => ({ name: pr.name, artwork: pr.artwork })),
+      ...(p.references ?? []).map((r) => ({ name: r.name, artwork: r.artwork })),
+    ].filter((r): r is { name: string; artwork: string } => Boolean(r.name && r.artwork));
+    const extras: { name: string; dataUrl: string }[] = [];
+    const nameToken = new Map<string, string>();
+    let resolved = prompt;
+    let token = startToken;
+    for (const m of Array.from(prompt.matchAll(/@\[([^\]]+)\]/g))) {
+      const c = candidates.find((r) => r.name.toLowerCase() === m[1].toLowerCase());
+      if (!c) continue;
+      if (!extras.some((e) => e.name === c.name)) extras.push({ name: c.name, dataUrl: c.artwork });
+      if (!nameToken.has(c.name)) nameToken.set(c.name, refToken(token++));
+      resolved = resolved.replace(m[0], nameToken.get(c.name)!);
+    }
+    return { resolved, extras };
+  }
+
+  /** Map the chosen duration onto whatever length param the video model's
+   *  schema declares (integer seconds, or an enum of second-ish labels). */
+  function videoDurationAssign(durationSec: number, props: Record<string, unknown>): Record<string, unknown> | null {
+    for (const key of Object.keys(props)) {
+      const p = props[key] as { type?: string; enum?: unknown[] } | undefined;
+      if (!p || !/duration|length|seconds|clip|frames|time/i.test(key)) continue;
+      if (p.type === "integer" || p.type === "number") return { [key]: Math.round(durationSec) };
+      if (Array.isArray(p.enum)) {
+        const want = String(durationSec);
+        const exact = p.enum.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        if (exact !== undefined) return { [key]: exact };
+        let best: unknown;
+        let bestDiff = Infinity;
+        for (const v of p.enum) {
+          const n = Number(String(v).replace(/[^0-9.]/g, ""));
+          if (Number.isFinite(n)) {
+            const diff = Math.abs(n - durationSec);
+            if (diff < bestDiff) { bestDiff = diff; best = v; }
+          }
+        }
+        if (best !== undefined) return { [key]: best };
+        continue;
+      }
+    }
+    return null;
+  }
+
+  /** Map a resolution label ("480p"/"720p"/"1080p") onto the video model's
+   *  sizing param; falls back to the model default when nothing matches. */
+  function videoResolutionAssign(resolution: string, props: Record<string, unknown>): Record<string, unknown> | null {
+    const label = String(resolution).replace(/\s+/g, "").toLowerCase();
+    for (const key of Object.keys(props)) {
+      const p = props[key] as { type?: string; enum?: unknown[] } | undefined;
+      if (!p || !/resolution|quality|definition|size/i.test(key)) continue;
+      if (Array.isArray(p.enum)) {
+        const exact = p.enum.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === label);
+        if (exact !== undefined) return { [key]: exact };
+        continue;
+      }
+      if (p.type === "boolean" && /hd|high|quality|upscale|super/i.test(key)) {
+        return { [key]: label !== "480p" && label !== "720p" };
+      }
+    }
+    return null;
+  }
+
+  /** Fit the uploaded visual references into the video model's reference field.
+ *  The workflow is always "text prompt + start frame" (image2video): the
+ *  frame is a single image, so single-image object fields (startFrame,
+ *  inputImage, …) are preferred over array-style fields (visualReferences).
+ *  Returns null when no reference field is found — the caller then falls back
+ *  to `params.visualReferences`. */
+  function videoRefsAssign(refs: Record<string, unknown>[], props: Record<string, unknown>): Record<string, unknown> | null {
+    if (!refs.length) return null;
+    const keys = Object.keys(props);
+    // Pass 1: single start-frame object fields (the common image2video shape).
+    for (const key of keys) {
+      if (!/^(startFrame|firstFrame|startImage|sourceImage|inputImage|referenceImage|imageRef|image)$/i.test(key)) continue;
+      const p = props[key] as { type?: string; items?: unknown; properties?: Record<string, unknown> } | undefined;
+      if (!p) continue;
+      if (p.type === "array" || p.items) { /* array-shaped — handle in pass 2 */ continue; }
+      if (p.properties && typeof p.properties === "object") {
+        const url = String(refs[0].url ?? refs[0].accessURL ?? "");
+        const id = String(refs[0].id ?? "");
+        const out: Record<string, unknown> = {};
+        for (const pk of Object.keys(p.properties)) {
+          if (/imageUrl|image|url|image_url|src|uri|path/i.test(pk)) out[pk] = url;
+          else if (/referenceId|refId|^id$/i.test(pk)) out[pk] = id;
+        }
+        return { [key]: Object.keys(out).length ? out : refs[0] };
+      }
+      return { [key]: refs[0] };
+    }
+    // Pass 2: array-style reference fields.
+    for (const key of keys) {
+      if (!/visualReference|references/i.test(key)) continue;
+      const p = props[key] as { type?: string; items?: unknown } | undefined;
+      if (!p) continue;
+      if (p.type === "array" || p.items) return { [key]: refs };
+    }
+    return null;
+  }
+
+  /** Build the OpenArt generate-tool args for one video clip. Mirrors the
+   *  image path: nested `{ mode, params, model?, projectId? }`, with params
+   *  matched against the resolved model's live form schema. */
+  function videoGenArgs(
+    prompt: string,
+    refs: Record<string, unknown>[],
+    opts: VideoGenOptions,
+    modelId: string,
+    projectId: string | null,
+    mode: string,
+    formProps: Record<string, unknown> | null
+  ): Record<string, unknown> {
+    const props = formProps ?? {};
+    const params: Record<string, unknown> = { prompt };
+    const res = videoResolutionAssign(opts.resolution, props);
+    if (res) Object.assign(params, res);
+    const dur = videoDurationAssign(opts.durationSec, props);
+    if (dur) Object.assign(params, dur);
+    if (refs.length) {
+      const refAssign = videoRefsAssign(refs, props);
+      if (refAssign) Object.assign(params, refAssign);
+      else params.visualReferences = refs; // last-resort fallback
+    }
+    const args: Record<string, unknown> = { mode, params };
+    if (modelId) args.model = modelId;
+    if (projectId) args.projectId = projectId;
+    return args;
+  }
+
+  const VIDEO_URL_RX = /https:\/\/[^\s"')\]}>]+\.(?:mp4|webm|mov|m4v)(?:\?[^\s"')\]}>]*)?/i;
+
+  /** How long to keep polling a video job before giving up. Video generation
+   *  routinely takes several minutes, so this is far beyond the MCP per-call
+   *  timeout (120 s) — a slow render must never look like a "connection
+   *  timed out" error, and the finished clip must still be downloaded. */
+  const VIDEO_WAIT_DEADLINE_MS = 20 * 60_000;
+
+  /** Wait for an async OpenArt video generation, returning the bytes + the
+   *  file extension to store under. Polls with the non-blocking
+   *  openart_creation_get (the blocking openart_creation_wait can exceed the
+   *  MCP client's per-call timeout on long jobs, so it's only a fallback).
+   *  A transient per-call timeout is ignored and polling continues — the
+   *  server-side job isn't cancelled by the client giving up on a response. */
+  async function waitOpenArtVideo(
+    historyId: string,
+    onStatus?: (status: string) => void
+  ): Promise<{ buf: Buffer; ext: string } | null> {
+    const rawName = (n: string) => n.replace(/^openart__/, "");
+    const tools = Object.keys(mcp.getTools());
+    const waitRaw = tools.map(rawName).find((n) => /^openart_creation_wait$/.test(n));
+    const getRaw = tools.map(rawName).find((n) => /^openart_creation_get$/.test(n));
+    if (!getRaw && !waitRaw) return null;
+
+    const deadline = Date.now() + VIDEO_WAIT_DEADLINE_MS;
+    const finalize = async (res: { text: string; images: Buffer[]; uris: string[] }): Promise<{ buf: Buffer; ext: string } | null> => {
+      if (res.images.length) return { buf: res.images[0], ext: "mp4" };
+      const videoUrl =
+        res.text.match(VIDEO_URL_RX)?.[0] ??
+        res.uris.find((u) => /\.(?:mp4|webm|mov|m4v)(?:\?|$)/i.test(u));
+      if (videoUrl) {
+        const buf = await fetchImageBuffer(videoUrl);
+        if (buf) {
+          const ext = (path.extname(new URL(videoUrl).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
+          return { buf, ext };
+        }
+      }
+      return null;
+    };
+
+    const pollOnce = async (): Promise<{ text: string; images: Buffer[]; uris: string[] } | null> => {
+      try {
+        if (getRaw) return await mcp.callRawContent("openart", getRaw, { historyId });
+        if (waitRaw) return await mcp.callRawContent("openart", waitRaw, { historyId, timeoutSeconds: 30 });
+      } catch {
+        // Transient timeout (e.g. the blocking wait exceeding the MCP client's
+        // call timeout). The creation keeps running server-side, so we just
+        // sleep and poll again instead of treating this as a failure.
+        return null;
+      }
+      return null;
+    };
+
+    let lastStatus = "";
+    while (Date.now() < deadline) {
+      const res = await pollOnce();
+      if (res) {
+        const got = await finalize(res);
+        if (got) return got;
+        const obj = parseJsonObject(res.text);
+        const status = typeof obj?.status === "string" ? obj.status : "";
+        if (status === "FAILED" || status === "CANCELLED") {
+          throw new Error(`OpenArt video generation ${status.toLowerCase()} (${historyId.slice(0, 8)}…).`);
+        }
+        if (status && status !== lastStatus) {
+          lastStatus = status;
+          onStatus?.(status);
+        }
+      }
+      await sleepMs(5000);
+    }
+    throw new Error(`OpenArt video generation timed out after ${VIDEO_WAIT_DEADLINE_MS / 60_000} minutes (${historyId.slice(0, 8)}…).`);
+  }
+
+  /** Generate one video clip for a shot. The shot's current frame (full
+   *  resolution) is always the first visual reference; any @[name] tags in the
+   *  prompt add more. Writes the finished clip into the production's videosDir
+   *  and records `shot.videoPath` (replacing an older clip if present). */
+  async function openArtVideoGen(
+    p: Production,
+    shot: ProductionShot,
+    opts: VideoGenOptions,
+    emit: (m: string, l?: ProductionEvent["level"]) => void
+  ): Promise<void> {
+    const toolName = Object.keys(mcp.getTools()).find((n) => /^openart__/.test(n) && /generate.*video/i.test(n));
+    if (!toolName) throw new Error("OpenArt MCP isn't connected (no video-generation tool found), so videos can't be generated in-app.");
+    const rawName = toolName.replace(/^openart__/, "");
+
+    let models: OpenArtModelChoice[] = [];
+    try {
+      const raw = await mcp.callRaw("openart", "openart_model_list", {});
+      models = openArtModelChoices(raw);
+    } catch { models = []; }
+
+    // References: the clicked frame first (occupies @image1), then any @[name]
+    // tags in the prompt, each uploaded as a visualReference.
+    const refs: { name: string; dataUrl: string }[] = [];
+    if (shot.artwork) {
+      const buf = fs.readFileSync(assetPath(p, shot.artwork));
+      const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+      refs.push({ name: `Shot ${shot.number} frame`, dataUrl: `data:${mime};base64,${buf.toString("base64")}` });
+    }
+    const { resolved, extras } = resolvePromptReferences(p, opts.prompt, refs.length);
+    refs.push(...extras);
+
+    const uploaded: Record<string, unknown>[] = [];
+    const tokenToId: { token: string; id: string }[] = [];
+    for (const [i, r] of refs.entries()) {
+      try {
+        // The frame + prompt references are uploaded for a *video* job, so the
+        // sign request uses purpose "create-video" — using the image purpose
+        // can make OpenArt reject the upload and silently drop the reference.
+        const vr = await uploadDataUrlReference(mcp, r.dataUrl, r.name, "create-video");
+        uploaded.push(vr);
+        const id = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim();
+        if (id) tokenToId.push({ token: refToken(i), id });
+      } catch {
+        emit(`Reference "${r.name}" couldn't be uploaded — continuing without it.`, "error");
+      }
+    }
+    let fullPrompt = resolved;
+    for (const { token, id } of tokenToId) fullPrompt = fullPrompt.split(token).join(id);
+
+    // Resolve the model id ("auto" → first video-capable model), then discover
+    // the mode the model's form accepts: image-to-video when references are
+    // present, text-to-video otherwise. Try the common OpenArt mode spellings
+    // so a slow/failed form lookup for one spelling doesn't drop the refs.
+    const modelId = opts.model && opts.model !== "auto"
+      ? opts.model
+      : (models.find((m) => m.videoInput)?.id ?? "");
+    const modeCandidates = refs.length
+      ? ["image2video", "image_to_video", "img2video", "video2video", "video"]
+      : ["text2video", "text_to_video", "video"];
+    let mode = modeCandidates[0];
+    let formProps: Record<string, unknown> | null = null;
+    if (modelId) {
+      for (const m of modeCandidates) {
+        try {
+          formProps = parseModelFormProperties(await mcp.callRaw("openart", "openart_model_form_get", { model: modelId, mode: m }));
+          if (formProps) { mode = m; break; }
+        } catch { /* try the next mode spelling */ }
+      }
+    }
+    const projectId = await resolveOpenArtProject(p).catch(() => null);
+
+    const args = videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps);
+    emit(`Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}…`);
+    const { text, images } = await mcp.callRawFull("openart", rawName, args);
+
+    const done = await (async (): Promise<{ buf: Buffer; ext: string }> => {
+      if (images.length) return { buf: images[0], ext: "mp4" };
+      const historyId = openArtHistoryId(text);
+      if (historyId) {
+        const v = await waitOpenArtVideo(historyId, (status) =>
+          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
+        );
+        if (v) return v;
+      }
+      const url = text.match(VIDEO_URL_RX)?.[0];
+      if (!url) throw new Error(`OpenArt returned no video (${text.slice(0, 120) || "empty reply"})`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Couldn't download the generated video (HTTP ${res.status})`);
+      const ext = (path.extname(new URL(url).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
+      return { buf: Buffer.from(await res.arrayBuffer()), ext };
+    })();
+
+    const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+    const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
+    const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
+    fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
+    fs.writeFileSync(assetPath(p, rel), done.buf);
+    if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
+    shot.videoPath = rel;
+  }
+
   /** Per-production FIFO so concurrent Step-3 jobs (batch generation + AI
    *  edits) don't hold stale copies of the production and overwrite each
    *  other's saved frames. Later submissions queue behind running ones. */
@@ -1418,6 +1751,32 @@ function registerIpc() {
     } catch (e) {
       const pErr = productions.loadProduction(id);
       if (pErr) { pErr.status[step] = "error"; productions.saveProduction(pErr); }
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    return productions.loadProduction(id) ?? p;
+  }
+
+  /** Background job runner for per-shot work that isn't tied to a pipeline step
+   *  (video generation, removal) — serialized per production, rebased onto the
+   *  freshest on-disk state before saving, logged via productionEmit. */
+  async function runProductionJob(
+    id: string,
+    label: string,
+    fn: (p: Production, emit: (m: string, l?: ProductionEvent["level"]) => void) => Promise<void>
+  ): Promise<Production> {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    productionEmit(id, `${label}…`);
+    try {
+      await enqueueProduction(id, async () => {
+        const pq = productions.loadProduction(id);
+        if (!pq) throw new Error("Production not found.");
+        const before = structuredClone(pq);
+        await fn(pq, (m, l) => productionEmit(id, m, l));
+        productions.saveProduction(rebaseProduction(before, pq));
+      });
+    } catch (e) {
       productionEmit(id, friendlyApiError(e), "error");
       throw new Error(friendlyApiError(e));
     }
@@ -1538,6 +1897,19 @@ function registerIpc() {
     }
   });
 
+  // Step 3: the signed-in OpenArt account's remaining credit balance (shown
+  // in the video-generation dialog). Null when OpenArt isn't connected or the
+  // account lookup fails.
+  ipcMain.handle("production:openArtCredits", async (): Promise<number | null> => {
+    try {
+      const obj = parseJsonObject(await mcp.callRaw("openart", "openart_account_get", {}));
+      const credits = obj?.credits;
+      return typeof credits === "number" && Number.isFinite(credits) ? Math.round(credits) : null;
+    } catch {
+      return null;
+    }
+  });
+
   // Step 3 manual workflow: pick generated frames anywhere on disk.
   ipcMain.handle("production:pickBoardImages", async () => {
     const res = await dialog.showOpenDialog(win!, {
@@ -1653,6 +2025,101 @@ function registerIpc() {
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: history frame restored as the primary frame.`);
     return p;
+  });
+
+  // Per-shot video generation: the shot's current frame (full resolution) plus
+  // any @[name] references in the prompt are uploaded to OpenArt as visual
+  // references; the finished clip is stored under videosDir and played by the
+  // animatic timeline for this shot's duration window.
+  ipcMain.handle("production:generateVideo", (_e, id: string, shotId: string, opts: VideoGenOptions) =>
+    runProductionJob(id, `Generating a video for a shot`, async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      if (!shot.artwork) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
+      const clean: VideoGenOptions = {
+        model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
+        resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
+        durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
+        prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
+      };
+      if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
+      emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      await openArtVideoGen(p, shot, clean, emit);
+      emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
+    })
+  );
+
+  ipcMain.handle("production:videoUrl", (_e, id: string, shotId: string): string | null => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot?.videoPath) return null;
+    return `cascade-media://${p.meta.id}/${encodeURIComponent(shot.videoPath)}`;
+  });
+
+  ipcMain.handle("production:removeVideo", (_e, id: string, shotId: string): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    if (shot.videoPath) {
+      try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* missing file is already removed */ }
+      delete shot.videoPath;
+      productions.saveProduction(p);
+      productionEmit(id, `Shot ${shot.number}: video removed.`);
+    }
+    return p;
+  });
+
+  // Per-model video options for the generation modal: read the model's live
+  // form schema and pull out the resolution / duration choices it actually
+  // accepts (they differ per model). Null when the form can't be read — the
+  // modal then falls back to a generic set.
+  ipcMain.handle("production:videoModelOptions", async (_e, modelId: string): Promise<VideoModelOptions | null> => {
+    const raw = (n: string) => n.replace(/^openart__/, "");
+    const tools = Object.keys(mcp.getTools()).map(raw);
+    const formRaw = tools.find((n) => /^openart_model_form_get$/.test(n));
+    if (!formRaw) return null;
+    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
+    const out: VideoModelOptions = { resolutions: [], durations: [] };
+    for (const mode of ["video2video", "text2video"]) {
+      let props: Record<string, unknown> | null = null;
+      try {
+        props = parseModelFormProperties(await mcp.callRaw("openart", formRaw, { model: modelId, mode }));
+      } catch { continue; }
+      if (!props) continue;
+      for (const key of Object.keys(props)) {
+        const p = props[key] as { type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown } | undefined;
+        if (!p) continue;
+        if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
+          for (const v of p.enum) {
+            const s = String(v).trim();
+            if (/^\d{3,4}p$/i.test(s) || /^\d{3,4}$/.test(s) || /^\d+\s*[x×]\s*\d+$/i.test(s)) out.resolutions.push(s);
+          }
+        }
+        if (/duration|length|seconds|clip|frames|time/i.test(key)) {
+          if (Array.isArray(p.enum)) {
+            for (const v of p.enum) {
+              const n = Number(String(v).replace(/[^0-9.]/g, ""));
+              if (Number.isFinite(n) && n > 0 && n <= 120) out.durations.push(Math.round(n));
+            }
+          } else if (p.type === "integer" || p.type === "number") {
+            const min = Number(p.minimum) > 0 ? Number(p.minimum) : 1;
+            const max = Number(p.maximum) > 0 ? Number(p.maximum) : min + 15;
+            for (let n = Math.ceil(min); n <= Math.floor(max) && n <= 120; n++) out.durations.push(n);
+          }
+        }
+      }
+      if (out.resolutions.length || out.durations.length) break;
+    }
+    out.resolutions = Array.from(new Set(out.resolutions));
+    out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
+    if (out.durations.length > 10) {
+      // Keep a manageable list when a model exposes a wide numeric range.
+      const step = Math.ceil(out.durations.length / 10);
+      out.durations = out.durations.filter((_, i) => i % step === 0);
+    }
+    return out.resolutions.length || out.durations.length ? out : null;
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a

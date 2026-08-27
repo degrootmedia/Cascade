@@ -127,6 +127,12 @@ export interface ProductionShot {
   /** Previous frames for this shot (workspace-relative paths), newest first,
    * capped at BOARD_HISTORY_CAP. The active frame is always `artwork`. */
   artworkHistory?: string[];
+  /** Step 4: workspace-relative path to a generated video for this shot. When
+   *  present, the animatic timeline plays it for this shot's duration window. */
+  videoPath?: string;
+  /** Step 4: mute the clip's own embedded audio in the animatic preview
+   *  (speaker button on its timeline block). VO and music are unaffected. */
+  muted?: boolean;
   /** Step 4: planned screen time in seconds (animatic). */
   durationSec?: number;
   /** Optional per-shot render-style override: the id of a ProductionStyle
@@ -220,7 +226,7 @@ export interface OpenArtBoardConfig {
 
 /** One named visual style in the Step 2 style set. A production keeps up to 5.
  *  The first entry is the master/fallback style; the named styles populate the
- *  per-shot style dropdown in Storyboards (Step 3). */
+ *  per-shot style dropdown in Storyboard (Step 3). */
 export interface ProductionStyle {
   /** Stable identity. */
   id: string;
@@ -239,8 +245,31 @@ export interface OpenArtModelChoice {
   description: string;
   /** Whether the model accepts reference images (extra meta for Auto). */
   imageInput: boolean;
-  /** Base credit cost for one image job (may be null for metadata). */
+  /** Whether the model generates video (surfaced in the video-generation modal). */
+  videoInput: boolean;
+  /** Base credit cost for one job (may be null for metadata). */
   cost: number | null;
+}
+
+/** Choices made in the per-shot video-generation modal. */
+export interface VideoGenOptions {
+  /** OpenArt video model id, or "auto" for Cascade to pick. */
+  model: string;
+  /** Output resolution label (e.g. "480p", "720p", "1080p"). */
+  resolution: string;
+  /** Desired clip length in seconds. */
+  durationSec: number;
+  /** Motion/animation prompt (may contain @[name] reference tags). */
+  prompt: string;
+}
+
+/** The resolution / length options a video model actually accepts, read from
+ *  its live form schema. Used to populate the video modal per model. */
+export interface VideoModelOptions {
+  /** Resolution labels the model accepts (e.g. ["720p","1080p"]). */
+  resolutions: string[];
+  /** Clip lengths in seconds the model accepts. */
+  durations: number[];
 }
 
 /** A TTS-capable audio model surfaced in the Step 4 voiceover picker. */
@@ -309,7 +338,7 @@ export interface Production {
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
-  assets: { scriptMd: string; designDir: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string };
+  assets: { scriptMd: string; designDir: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string };
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -344,6 +373,8 @@ export interface CascadeApi {
   onOpenSettings(cb: () => void): () => void;
   listModels(): Promise<ModelInfo[]>;
   getCredits(): Promise<number | null>;
+  /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
+  getOpenArtCredits(): Promise<number | null>;
 
   listSessions(): Promise<SessionMeta[]>;
   loadSession(id: string): Promise<unknown[]>; // display items
@@ -501,5 +532,18 @@ export interface CascadeApi {
   musicUrl(productionId: string): Promise<string | null>;
   /** Step 4: remove the imported music file and clear musicPath. */
   removeMusic(productionId: string): Promise<Production>;
+  /**
+   * Step 3/4: generate a video clip for one shot, using its current frame
+   * (full resolution) plus any @[name] references as visual references.
+   * Writes the clip into videosDir and stores the relative path on the shot.
+   */
+  generateVideo(productionId: string, shotId: string, opts: VideoGenOptions): Promise<Production>;
+  /** Step 4: streamable `cascade-media://` URL for a shot's generated video. */
+  videoUrl(productionId: string, shotId: string): Promise<string | null>;
+  /** Step 4: remove a shot's generated video file and clear videoPath. */
+  removeVideo(productionId: string, shotId: string): Promise<Production>;
+  /** Step 4: the resolution / length options a video model accepts (from its
+   *  live form schema). Null when the model form can't be read. */
+  videoModelOptions(modelId: string): Promise<VideoModelOptions | null>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }

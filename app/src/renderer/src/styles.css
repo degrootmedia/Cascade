@@ -312,6 +312,8 @@ body {
 /* Step 2: the up-to-5 style-set cards (generated or hand-added). */
 .prod-styles { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .prod-styles + .prod-btn { margin-top: 10px; }
+.prod-style-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+.prod-style-actions + .hint { margin-top: 6px; }
 .prod-style-card {
   display: flex;
   align-items: stretch;
@@ -407,7 +409,7 @@ body {
   border-radius: 10px;
   background: var(--bg-panel);
 }
-.prod-brand-swatch input[type="color"] {
+.prod-brand-chip {
   width: 36px;
   height: 36px;
   padding: 0;
@@ -415,7 +417,109 @@ body {
   border-radius: 8px;
   background: none;
   cursor: pointer;
+  flex-shrink: 0;
 }
+.prod-brand-chip:hover { border-color: var(--accent); }
+.prod-brand-chip.empty {
+  background:
+    linear-gradient(135deg, transparent 46%, var(--border) 46%, var(--border) 54%, transparent 54%),
+    var(--bg);
+}
+
+/* ---------- Step 2: in-app brand color picker popover ---------- */
+.prod-color-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 60;
+  width: 232px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+.prod-color-hex {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.prod-color-hex::placeholder { color: var(--text-dim); }
+.prod-color-hex:focus { outline: none; border-color: var(--accent); }
+.prod-color-sv {
+  position: relative;
+  width: 100%;
+  height: 130px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.prod-color-cursor {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.prod-color-hue {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 12px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: linear-gradient(to right, #f00 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00 100%);
+  cursor: pointer;
+}
+.prod-color-hue::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--text-dim);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.prod-color-row { display: flex; align-items: center; gap: 8px; }
+.prod-color-chip {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.prod-color-value {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+.prod-color-done {
+  margin-left: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.prod-color-done:hover { border-color: var(--accent); color: var(--accent); }
 .prod-brand-hex {
   width: 82px;
   background: none;
@@ -2602,6 +2706,11 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-edit-prompt:focus { outline: none; border-color: var(--accent); }
 .prod-edit-go { margin-top: 12px; align-self: flex-end; padding: 9px 20px; }
+
+/* Step 2: "active model can't see images" popup. */
+.prod-vision-panel { width: min(440px, 92vw); gap: 8px; }
+.prod-vision-text { color: var(--text); font-size: 0.92rem; line-height: 1.5; margin: 4px 0 8px; }
+.prod-vision-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Per-shot video-generation modal. */
 .prod-video-panel { width: min(640px, 94vw); gap: 8px; }

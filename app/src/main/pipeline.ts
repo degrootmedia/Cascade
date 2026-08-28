@@ -249,7 +249,7 @@ export async function refineStylePrompt(
           "Refine this rough visual style description into a clear, concrete master style prompt " +
           "suitable for prefixing every image-generation request in an animated production. " +
           "Keep the user's intent and named styles/artists; add useful specifics (medium, palette, " +
-          "lighting, line treatment) only where the user was vague. One paragraph, under 120 words.\n\n" +
+          "lighting, line treatment) only where the user was vague. AT MOST 3 SENTENCES.\n\n" +
           "STYLE NOTES:\n" + style +
           (scriptExcerpt ? "\n\nSCRIPT EXCERPT (for tone only — do not describe scenes):\n" + scriptExcerpt : ""),
       },
@@ -289,7 +289,7 @@ export async function generateStyleSet(
           `Turn the rough style notes below into ${maxStyles === 1 ? "1 style" : `up to ${maxStyles} distinct styles`} for one animated production. ` +
           "Each style must be a genuinely different look (different medium, palette, rendering, line treatment) so a director can assign " +
           "different scenes to different looks.\n\n" +
-          'For each style return exactly: { "name": a short intuitive label (2–4 words), "prompt": a self-contained generation prompt (~60–100 words) }.\n' +
+          'For each style return exactly: { "name": a short intuitive label (2–4 words), "prompt": a self-contained generation prompt (AT MOST 3 sentences) }.\n' +
           "Aim for the number of styles that genuinely fit the notes (2–5); never pad to the max with near-identical looks. " +
           "Keep each prompt concrete (medium, palette, lighting, texture) and usable standalone as a style prefix.\n\n" +
           'Reply with JSON only, an array: [ { "name": "...", "prompt": "..." } ]\n\n' +
@@ -318,6 +318,57 @@ export async function generateStyleSet(
   }
   if (!out.length) throw new Error("Style generation came back empty — try clearer notes.");
   return out;
+}
+
+/**
+ * Step 2 helper — one bounded multimodal LLM call that looks at a reference
+ * image and distills its look into a single named style ({ name, prompt }).
+ * The caller must verify the active model supports image input first.
+ */
+export async function stylePromptFromImage(
+  imageDataUrl: string,
+  scriptExcerpt: string,
+  apiKey: string,
+  model: string
+): Promise<{ name: string; prompt: string }> {
+  const gab = new GabClient(apiKey);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      {
+        role: "system",
+        content:
+          "You are a visual style director for an animation pipeline. Reply with JSON only — no markdown fences, no prose.",
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "Analyze the attached image's visual style and turn it into one generation style for an animated production.\n" +
+              'Return exactly: { "name": a short intuitive label for the look (2–4 words), "prompt": a self-contained style prompt }.\n' +
+              "Describe only the style (medium, palette, lighting, line/texture, rendering treatment) — never the specific subject or scene contents. " +
+              "The prompt must be AT MOST 3 sentences and usable standalone as a style prefix for image generation.\n\n" +
+              (scriptExcerpt
+                ? "SCRIPT EXCERPT (for tone only — do not describe scenes):\n" + scriptExcerpt + "\n\n"
+                : "") +
+              "IMAGE:",
+          },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ],
+      },
+    ],
+    700
+  );
+  const parsed = parseJsonLoose(text);
+  const name = String(parsed.name ?? "").trim();
+  const prompt = String(parsed.prompt ?? "").trim();
+  if (!prompt) throw new Error("Style generation from image came back empty — try a different image.");
+  return {
+    name: (name || "From image").slice(0, 60),
+    prompt: prompt.slice(0, 600),
+  };
 }
 
 /**

@@ -11,7 +11,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
@@ -847,6 +847,29 @@ function registerIpc() {
       const styles = await generateStyleSet(notes.trim(), excerpt, apiKey, settings.getModel());
       productionEmit(id, `Generated ${styles.length} style${styles.length === 1 ? "" : "s"}.`, "done");
       return styles;
+    } catch (e) {
+      const msg = friendlyApiError(e);
+      productionEmit(id, msg, "error");
+      throw new Error(msg);
+    }
+  });
+
+  // Step 2: look at a reference image and distill one named style from it.
+  // Returns { name, prompt }; the renderer appends it to the style set.
+  ipcMain.handle("production:styleFromImage", async (_e, id: string, imageDataUrl: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/")) {
+      throw new Error("Pick or paste an image first.");
+    }
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    productionEmit(id, "Generating a style prompt from the image…");
+    try {
+      const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
+      const style = await stylePromptFromImage(imageDataUrl, excerpt, apiKey, settings.getModel());
+      productionEmit(id, `Style "${style.name}" generated from the image.`, "done");
+      return style;
     } catch (e) {
       const msg = friendlyApiError(e);
       productionEmit(id, msg, "error");
@@ -2520,17 +2543,25 @@ function createWindow() {
     if (input.type !== "keyDown" || !input.control || input.alt || !win) return;
     const wc = win.webContents;
     const level = wc.getZoomLevel();
+    const zoomTo = (next: number) => {
+      wc.setZoomLevel(next);
+      // Chromium doesn't fire a DOM resize for zoom changes, so tell the
+      // renderer to re-rasterize (canvas backing stores) at the new factor.
+      wc.send("zoom:changed");
+    };
     if (input.key === "=" || input.key === "+") {
       event.preventDefault();
-      wc.setZoomLevel(Math.min(level + 0.5, 5));
+      zoomTo(Math.min(level + 0.5, 5));
     } else if (input.key === "-" || input.key === "_") {
       event.preventDefault();
-      wc.setZoomLevel(Math.max(level - 0.5, -5));
+      zoomTo(Math.max(level - 0.5, -5));
     } else if (input.key === "0") {
       event.preventDefault();
-      wc.setZoomLevel(0);
+      zoomTo(0);
     }
   });
+  // Pinch / Ctrl+wheel zoom also changes the zoom level; notify for those too.
+  win.webContents.on("zoom-changed", () => win?.webContents.send("zoom:changed"));
 
   // Bringing the window forward cancels any attention flash.
   win.on("focus", () => win?.flashFrame(false));

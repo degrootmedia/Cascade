@@ -38,6 +38,11 @@ const api: CascadeApi = {
     ipcRenderer.on("menu:openSettings", listener);
     return () => ipcRenderer.removeListener("menu:openSettings", listener);
   },
+  onZoomChanged(cb: () => void) {
+    const listener = () => cb();
+    ipcRenderer.on("zoom:changed", listener);
+    return () => ipcRenderer.removeListener("zoom:changed", listener);
+  },
   listModels: () => ipcRenderer.invoke("models:list"),
   getCredits: () => ipcRenderer.invoke("credits:get"),
 
@@ -96,6 +101,7 @@ const api: CascadeApi = {
   ingestScript: (productionId, source) => ipcRenderer.invoke("production:ingest", productionId, source),
   refineStylePrompt: (productionId, style) => ipcRenderer.invoke("production:refineStyle", productionId, style),
   generateStyles: (productionId, notes) => ipcRenderer.invoke("production:generateStyles", productionId, notes),
+  styleFromImage: (productionId, imageDataUrl) => ipcRenderer.invoke("production:styleFromImage", productionId, imageDataUrl),
   insertShot: (productionId, sceneNumber, index) => ipcRenderer.invoke("production:insertShot", productionId, sceneNumber, index),
   deleteShot: (productionId, shotId) => ipcRenderer.invoke("production:deleteShot", productionId, shotId),
   updateShot: (productionId, shotId, patch) => ipcRenderer.invoke("production:updateShot", productionId, shotId, patch),

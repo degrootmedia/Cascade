@@ -445,7 +445,7 @@ export function App() {
           </main>
         </div>
       ) : (
-        <ProductionWorkspace />
+        <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />
       )}
       {approval && (
         <ApprovalModal

@@ -371,6 +371,8 @@ export interface CascadeApi {
   setAccent(color: string): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
   onOpenSettings(cb: () => void): () => void;
+  /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
+  onZoomChanged(cb: () => void): () => void;
   listModels(): Promise<ModelInfo[]>;
   getCredits(): Promise<number | null>;
   /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
@@ -439,6 +441,12 @@ export interface CascadeApi {
    * persists them as the production's `styles` set.
    */
   generateStyles(productionId: string, notes: string): Promise<{ name: string; prompt: string }[]>;
+  /**
+   * Step 2: look at a reference image (data URL) and distill one named style
+   * from it. The caller is responsible for checking the active model supports
+   * image input first.
+   */
+  styleFromImage(productionId: string, imageDataUrl: string): Promise<{ name: string; prompt: string }>;
   /** Insert a shot (mid-numbered) before the given position; returns updated production. */
   insertShot(productionId: string, sceneNumber: number, index: number): Promise<Production>;
   /** Remove a shot by its stable id. */

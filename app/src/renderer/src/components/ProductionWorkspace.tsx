@@ -28,14 +28,6 @@ function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-/** Coerce a color value for a native <input type="color"> value attribute. */
-function colorInputValue(v: string): string {
-  const t = String(v).trim().replace(/^#/, "");
-  if (/^[0-9a-fA-F]{6}$/.test(t)) return `#${t.toLowerCase()}`;
-  if (/^[0-9a-fA-F]{3}$/.test(t)) return `#${t.split("").map((c) => c + c).join("").toLowerCase()}`;
-  return "#000000";
-}
-
 /** Normalize an entered/pasted hex on blur: allow shorthand, fill to 6 hex. */
 function normalizeHex(v: string): string {
   const t = String(v).trim().replace(/^#/, "");
@@ -45,6 +37,54 @@ function normalizeHex(v: string): string {
   return String(v).trim(); // not a full color yet — keep what they typed
 }
 
+/** True when the text is a complete hex color (3 or 6 digits, optional #). */
+function isCompleteHex(v: string): boolean {
+  const t = String(v).trim().replace(/^#/, "");
+  return /^[0-9a-fA-F]{3}$/.test(t) || /^[0-9a-fA-F]{6}$/.test(t);
+}
+
+/** #RGB / #RRGGBB → normalized "#RRGGBB" for the chip preview; "" when invalid. */
+function previewHex(v: string): string {
+  const t = String(v).trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{6}$/.test(t)) return `#${t.toUpperCase()}`;
+  if (/^[0-9a-fA-F]{3}$/.test(t)) return `#${t.split("").map((c) => c + c).join("").toUpperCase()}`;
+  return "";
+}
+
+/** #RGB / #RRGGBB → { h: 0..360, s: 0..1, v: 0..1 }; null when not valid hex. */
+function hexToHsv(hex: string): { h: number; s: number; v: number } | null {
+  const t = String(hex).trim().replace(/^#/, "");
+  const full = /^[0-9a-fA-F]{6}$/.test(t) ? t
+    : /^[0-9a-fA-F]{3}$/.test(t) ? t.split("").map((c) => c + c).join("")
+    : null;
+  if (!full) return null;
+  const r = parseInt(full.slice(0, 2), 16) / 255;
+  const g = parseInt(full.slice(2, 4), 16) / 255;
+  const b = parseInt(full.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s: max === 0 ? 0 : d / max, v: max };
+}
+
+/** { h: 0..360, s: 0..1, v: 0..1 } → "#RRGGBB". */
+function hsvToHex(h: number, s: number, v: number): string {
+  const f = (n: number) => {
+    const k = (n + h / 60) % 6;
+    const x = v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
+    return Math.round(255 * x).toString(16).padStart(2, "0");
+  };
+  return `#${f(5)}${f(3)}${f(1)}`.toUpperCase();
+}
+
 interface LogLine {
   id: string;
   at: string;
@@ -52,7 +92,7 @@ interface LogLine {
   level: "info" | "error" | "done";
 }
 
-export function ProductionWorkspace() {
+export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const [list, setList] = useState<ProductionMeta[]>([]);
   const [prod, setProd] = useState<Production | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
@@ -68,6 +108,10 @@ export function ProductionWorkspace() {
   const [nameDraft, setNameDraft] = useState("");
   // step 2: per-style refinement (tracks which style card is refining)
   const [refiningStyleId, setRefiningStyleId] = useState<string | null>(null);
+  // step 2: generating a style from an imported/pasted image (spinner on buttons)
+  const [styleImgBusy, setStyleImgBusy] = useState(false);
+  // step 2: set when the active chat model can't see images (shows a popup)
+  const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
   // step 3: board generation
   const [boardCap, setBoardCap] = useState(50);
   const [frameZoom, setFrameZoom] = useState(250);
@@ -395,6 +439,84 @@ export function ProductionWorkspace() {
     });
   }
 
+  /**
+   * Step 2: distill a style (name + prompt) from an image the user imported or
+   * pasted. Refuses up front — with a popup — when the active chat model can't
+   * see images.
+   */
+  async function styleFromImageDataUrl(dataUrl: string) {
+    if (!prod || styleImgBusy) return;
+    if ((prod.styles?.length ?? 0) >= MAX_STYLES) {
+      setErr(`Style list is full — remove a style before adding one from an image.`);
+      return;
+    }
+    setErr(null);
+    // Vision check against the live model list; if it can't be verified we let
+    // the request run and surface whatever the API reports.
+    try {
+      const [s, models] = await Promise.all([window.cascade.getSettings(), window.cascade.listModels()]);
+      const info = models.find((m) => m.id === s.model);
+      if (info && !info.vision) {
+        setVisionWarnModel(info.id);
+        return;
+      }
+    } catch { /* fall through — the generation call reports its own errors */ }
+    setStyleImgBusy(true);
+    try {
+      const style = await window.cascade.styleFromImage(prod.meta.id, dataUrl);
+      saveField({
+        styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: style.name, prompt: style.prompt }],
+      });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setStyleImgBusy(false);
+    }
+  }
+
+  /** Step 2: pick an image file and generate a style from it. */
+  async function pickStyleImage() {
+    if (!prod || styleImgBusy) return;
+    const dataUrl = await window.cascade.pickReferenceImage();
+    if (!dataUrl) return;
+    await styleFromImageDataUrl(dataUrl);
+  }
+
+  /** Step 2: paste an image from the clipboard (Ctrl+V) to generate a style. */
+  async function styleFromPastedImage(file: File) {
+    if (!prod || styleImgBusy) return;
+    if (file.size > 15 * 1024 * 1024) {
+      setErr("That image is larger than 15 MB — use a smaller one.");
+      return;
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    await styleFromImageDataUrl(dataUrl);
+  }
+
+  // Step 2: while the Design panel is open, Ctrl+V with an image in the
+  // clipboard generates a style from it. Text pastes are untouched.
+  useEffect(() => {
+    if (prod?.currentStep !== 2) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      let file: File | null = null;
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) { file = item.getAsFile(); break; }
+      }
+      if (!file) return;
+      e.preventDefault();
+      void styleFromPastedImage(file);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [prod, styleImgBusy]);
+
   /** Step 2: remove a style and renumber the rest. */
   function removeStyle(idx: number) {
     if (!prod) return;
@@ -407,8 +529,9 @@ export function ProductionWorkspace() {
   function setBrandColor(idx: number, value: string) {
     if (!prod) return;
     const colors = [...(prod.brand?.colors ?? [])].slice(0, 5);
-    while (colors.length < 5) colors.push("");
-    colors[idx] = value;
+    // Grow only as far as the touched slot — never pad the whole palette.
+    while (colors.length <= Math.min(idx, 4)) colors.push("");
+    colors[Math.min(idx, 4)] = value;
     saveField({ brand: { colors, font: prod.brand?.font ?? "" } });
   }
   function removeBrandColor(idx: number) {
@@ -936,6 +1059,14 @@ export function ProductionWorkspace() {
   // elevenlabs-sound-effects-v2); the music picker shows music + sound-effects.
   const ttsModels = audioModels.filter((m) => m.kind === "tts" || m.kind === "sfx");
   const musicModels = audioModels.filter((m) => m.kind === "music" || m.kind === "sfx");
+  // Brand swatches actually shown: trailing empty slots (saved by an older
+  // version's pad-to-5 bug) are hidden but stay addressable for edits.
+  const brandColors = (() => {
+    const all = (prod.brand?.colors ?? []).slice(0, 5);
+    let last = all.length - 1;
+    while (last >= 0 && !String(all[last]).trim()) last--;
+    return all.slice(0, last + 1);
+  })();
 
   return (
     <div className="prod-workspace">
@@ -1047,9 +1178,20 @@ export function ProductionWorkspace() {
                 ))}
               </div>
             )}
-            <button className="prod-btn" disabled={(prod.styles?.length ?? 0) >= MAX_STYLES} onClick={addStyle}>
-              ＋ Add style
-            </button>
+            <div className="prod-style-actions">
+              <button className="prod-btn" disabled={(prod.styles?.length ?? 0) >= MAX_STYLES} onClick={addStyle}>
+                ＋ Add style
+              </button>
+              <button
+                className="prod-btn"
+                disabled={styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES}
+                onClick={() => void pickStyleImage()}
+                title="Generate a style prompt from an image that captures the look you're after"
+              >
+                {styleImgBusy ? "Reading image…" : "🖼 From image…"}
+              </button>
+            </div>
+            <p className="hint">You can also paste an image (Ctrl+V) straight into this page while it's open.</p>
 
             <div className="prod-brand">
               <label className="prod-label">Brand identity — global</label>
@@ -1058,29 +1200,17 @@ export function ProductionWorkspace() {
                 so the brand look stays consistent across all frames.
               </p>
               <div className="prod-brand-swatches">
-                {(prod.brand?.colors ?? []).slice(0, 5).map((c, i) => (
-                  <div key={i} className="prod-brand-swatch" title={`Palette color ${i + 1} — pick or paste a hex value`}>
-                    <input
-                      type="color"
-                      value={colorInputValue(c)}
-                      onChange={(e) => setBrandColor(i, e.target.value)}
-                      aria-label={`Palette color ${i + 1} picker`}
-                    />
-                    <input
-                      className="prod-brand-hex"
-                      value={c}
-                      placeholder="#1A2B3C"
-                      spellCheck={false}
-                      onChange={(e) => setBrandColor(i, e.target.value)}
-                      onBlur={(e) => setBrandColor(i, normalizeHex(e.target.value))}
-                      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                      aria-label={`Palette color ${i + 1} hex`}
-                    />
-                    <button className="prod-brand-remove" title="Remove this swatch" onClick={() => removeBrandColor(i)}>×</button>
-                  </div>
+                {brandColors.map((c, i) => (
+                  <BrandSwatchRow
+                    key={i}
+                    index={i}
+                    value={c}
+                    onChange={(hex) => setBrandColor(i, hex)}
+                    onRemove={() => removeBrandColor(i)}
+                  />
                 ))}
-                {(prod.brand?.colors ?? []).length < 5 && (
-                  <button className="prod-brand-add" title="Add a palette swatch" onClick={() => setBrandColor((prod.brand?.colors ?? []).length, "#1A2B3C")}>＋</button>
+                {brandColors.length < 5 && (
+                  <button className="prod-brand-add" title="Add a palette swatch" onClick={() => setBrandColor(brandColors.length, "#1A2B3C")}>＋</button>
                 )}
               </div>
               <label className="prod-brand-font">
@@ -1463,6 +1593,32 @@ export function ProductionWorkspace() {
           </section>
         )}
       </div>
+
+      {visionWarnModel && (
+        <div className="prod-edit-overlay" onClick={() => setVisionWarnModel(null)}>
+          <div className="prod-edit-panel prod-vision-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="prod-edit-head">
+              <span className="prod-edit-title">⚠ Vision-capable model needed</span>
+              <button className="prod-btn" onClick={() => setVisionWarnModel(null)}>×</button>
+            </div>
+            <p className="prod-vision-text">
+              The active model (<strong>{visionWarnModel}</strong>) can't see images. Switch to a
+              vision-capable model in Settings, then try generating the style again.
+            </p>
+            <div className="prod-vision-actions">
+              {onOpenSettings && (
+                <button
+                  className="prod-btn primary"
+                  onClick={() => { setVisionWarnModel(null); onOpenSettings(); }}
+                >
+                  Open Settings
+                </button>
+              )}
+              <button className="prod-btn" onClick={() => setVisionWarnModel(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2192,6 +2348,24 @@ function AnimaticTimeline({
     return () => {
       wrap.removeEventListener("scroll", schedule);
       window.cancelAnimationFrame(queuedRaf);
+    };
+  }, [drawWaveform]);
+  // Page zoom (Ctrl+/-/0) rescales content without resizing the waveform's CSS
+  // box, so the ResizeObserver never fires; devicePixelRatio also updates late.
+  // Redraw on zoom notification and window resize, with retries to catch the
+  // late dpr change.
+  useEffect(() => {
+    let timers: number[] = [];
+    const schedule = () => {
+      for (const t of timers) window.clearTimeout(t);
+      timers = [0, 150, 600].map((d) => window.setTimeout(drawWaveform, d));
+    };
+    window.addEventListener("resize", schedule);
+    const offZoom = window.cascade.onZoomChanged(schedule);
+    return () => {
+      for (const t of timers) window.clearTimeout(t);
+      window.removeEventListener("resize", schedule);
+      offZoom();
     };
   }, [drawWaveform]);
 
@@ -3331,6 +3505,172 @@ function EditBoardModal({ shotNumber, models, onSubmit, onClose }: {
           onClick={() => onSubmit(model, prompt)}
         >
           Edit frame
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One brand-palette swatch row: color chip (opens the in-app picker) + a hex
+ * text field that accepts pastes with or without the leading "#" and commits
+ * live once the text is a complete color.
+ */
+function BrandSwatchRow({ index, value, onChange, onRemove }: {
+  index: number;
+  value: string;
+  onChange: (hex: string) => void;
+  onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Local edit draft so partial/untagged text can be typed freely; committed
+  // to the production only once it forms a valid hex color.
+  const [draft, setDraft] = useState<string | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (rowRef.current && !rowRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
+
+  const shown = draft ?? value;
+  const chip = previewHex(shown) || previewHex(value);
+
+  return (
+    <div ref={rowRef} className="prod-brand-swatch" title={`Palette color ${index + 1} — pick or paste a hex value`}>
+      <button
+        type="button"
+        className={"prod-brand-chip" + (chip ? "" : " empty")}
+        style={chip ? { background: chip } : undefined}
+        aria-label={`Palette color ${index + 1} picker`}
+        onClick={() => setOpen((o) => !o)}
+      />
+      <input
+        className="prod-brand-hex"
+        value={shown}
+        placeholder="#1A2B3C"
+        spellCheck={false}
+        onChange={(e) => {
+          const v = e.target.value;
+          setDraft(v);
+          if (isCompleteHex(v)) onChange(normalizeHex(v));
+        }}
+        onBlur={() => setDraft(null)}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        aria-label={`Palette color ${index + 1} hex`}
+      />
+      <button className="prod-brand-remove" title="Remove this swatch" onClick={onRemove}>×</button>
+      {open && (
+        <BrandColorPicker
+          value={value}
+          onPick={(hex) => { onChange(hex); setDraft(null); }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * In-app color popover (matches the app's dark UI, unlike the native dialog):
+ * a hex field (autofocused — hex is the default mode) above a saturation/
+ * value square and hue slider. Drag commits on release; hex commits live.
+ */
+function BrandColorPicker({ value, onPick, onClose }: {
+  value: string;
+  onPick: (hex: string) => void;
+  onClose: () => void;
+}) {
+  const initial = hexToHsv(value) ?? { h: 210, s: 0.57, v: 0.24 };
+  const [hsv, setHsv] = useState(initial);
+  const squareRef = useRef<HTMLDivElement>(null);
+  const hsvRef = useRef(hsv);
+  hsvRef.current = hsv;
+  const draggingRef = useRef(false);
+
+  const hex = hsvToHex(hsv.h, hsv.s, hsv.v);
+  const commit = () => onPick(hsvToHex(hsvRef.current.h, hsvRef.current.s, hsvRef.current.v));
+
+  const setFromSquare = (clientX: number, clientY: number) => {
+    const el = squareRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const s = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    const v = 1 - Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+    setHsv((p) => ({ ...p, s, v }));
+  };
+
+  return (
+    <div className="prod-color-pop">
+      <input
+        className="prod-color-hex"
+        autoFocus
+        defaultValue={hsvToHex(initial.h, initial.s, initial.v)}
+        placeholder="1A2B3C or #1A2B3C"
+        spellCheck={false}
+        onChange={(e) => {
+          if (isCompleteHex(e.target.value)) {
+            const next = hexToHsv(e.target.value);
+            if (next) setHsv(next);
+          }
+        }}
+        onBlur={(e) => {
+          const t = e.target.value;
+          if (isCompleteHex(t)) onPick(normalizeHex(t));
+          e.target.value = isCompleteHex(t) ? normalizeHex(t) : hex; // snap back when incomplete
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && isCompleteHex((e.target as HTMLInputElement).value)) {
+            onPick(normalizeHex((e.target as HTMLInputElement).value));
+          }
+        }}
+        aria-label="Hex color"
+      />
+      <div
+        ref={squareRef}
+        className="prod-color-sv"
+        style={{ background: `linear-gradient(to top, #000, rgba(0, 0, 0, 0)), linear-gradient(to right, #fff, hsl(${Math.round(hsv.h)} 100% 50%))` }}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          draggingRef.current = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setFromSquare(e.clientX, e.clientY);
+        }}
+        onPointerMove={(e) => { if (draggingRef.current) setFromSquare(e.clientX, e.clientY); }}
+        onPointerUp={() => { draggingRef.current = false; commit(); }}
+        onPointerCancel={() => { draggingRef.current = false; }}
+        role="presentation"
+      >
+        <span
+          className="prod-color-cursor"
+          style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }}
+        />
+      </div>
+      <input
+        type="range"
+        className="prod-color-hue"
+        min={0}
+        max={359}
+        value={Math.round(hsv.h)}
+        onChange={(e) => setHsv((p) => ({ ...p, h: Number(e.target.value) }))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        aria-label="Hue"
+      />
+      <div className="prod-color-row">
+        <span className="prod-color-chip" style={{ background: hex }} />
+        <span className="prod-color-value">{hex}</span>
+        <button type="button" className="prod-color-done" onClick={() => { commit(); onClose(); }}>
+          Done
         </button>
       </div>
     </div>

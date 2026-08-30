@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.0",
+    "@xyflow/react": "^12.11.5",
     "dompurify": "^3.1.0",
     "mammoth": "^1.12.1",
     "marked": "^14.1.0",

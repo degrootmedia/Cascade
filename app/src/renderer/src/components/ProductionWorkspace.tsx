@@ -4,8 +4,10 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions } from "../../../shared/ipc.js";
+import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout } from "../../../shared/ipc.js";
 import { ShotTable } from "./ShotTable.js";
+import { NodeGraphModal, addRefTag, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
+import { TriplePrompt, parsePromptBoxes, composePromptBoxes } from "./TriplePrompt.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
@@ -151,6 +153,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [videoBusyIds, setVideoBusyIds] = useState<string[]>([]);
   const [promptShotId, setPromptShotId] = useState<string | null>(null);
   const [focusedPrompt, setFocusedPrompt] = useState("");
+  // Step 3 node graph: opens for the focused shot; overlays the storyboard.
+  const [graphShotId, setGraphShotId] = useState<string | null>(null);
   const promptSaveQueue = useRef(Promise.resolve());
   const latestPromptRef = useRef<Record<string, string>>({});
   const promptCacheRef = useRef<Record<string, string>>({});
@@ -331,25 +335,34 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
   }
 
-  /** Attach/remove a reference image on a character or product. */
+  /** Attach/remove a reference image on a character or product. Images are
+   *  saved into the production's referencesDir on disk (imagePath), not inline. */
   async function attachArtwork(kind: "characters" | "products", id: string) {
     if (!prod) return;
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return;
-    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, artwork: dataUrl } : c)) } as Partial<Production>);
+    const item = prod[kind].find((c) => c.id === id);
+    const imagePath = await persistRefImage(dataUrl, item?.name ?? kind);
+    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, imagePath, artwork: undefined } : c)) } as Partial<Production>);
   }
   function removeArtwork(kind: "characters" | "products", id: string) {
     if (!prod) return;
-    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, artwork: undefined } : c)) } as Partial<Production>);
+    const item = prod[kind].find((c) => c.id === id);
+    if (item?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, item.imagePath).catch(() => {});
+    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, artwork: undefined, imagePath: undefined } : c)) } as Partial<Production>);
   }
 
   /** Add a brand-new custom reference (materials, textures, hero props). */
-  function addRef(name: string, categoryId?: string, artwork?: string) {
+  async function addRef(name: string, categoryId?: string, artwork?: string) {
     if (!prod || !name.trim()) return;
-    saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name: name.trim(), categoryId, artwork, shotIds: [] }] });
+    const imagePath = artwork ? await persistRefImage(artwork, name) : undefined;
+    saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name: name.trim(), categoryId, imagePath, shotIds: [] }] });
   }
   function removeRef(id: string) {
     if (!prod) return;
+    const ref = (prod.references ?? []).find((r) => r.id === id);
+    if (ref?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, ref.imagePath).catch(() => {});
+    if (ref?.mediaPath) void window.cascade.removeReferenceFile(prod.meta.id, ref.mediaPath).catch(() => {});
     saveField({ references: (prod.references ?? []).filter((r) => r.id !== id) });
   }
   /** Rename a custom reference in place. */
@@ -361,11 +374,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return;
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: dataUrl } : r)) });
+    const ref = (prod.references ?? []).find((r) => r.id === id);
+    const imagePath = await persistRefImage(dataUrl, ref?.name ?? "reference");
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, imagePath, artwork: undefined } : r)) });
   }
   function removeRefArtwork(id: string) {
     if (!prod) return;
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined } : r)) });
+    const ref = (prod.references ?? []).find((r) => r.id === id);
+    if (ref?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, ref.imagePath).catch(() => {});
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
   }
   /** Add a person/product the script-detection missed. */
   function addPerson(name: string, key: string) {
@@ -669,16 +686,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  async function deleteBoard(shotId: string) {
-    if (!prod) return;
-    try {
-      const next = await window.cascade.deleteBoardImage(prod.meta.id, shotId);
-      setProd(next);
-      setBoardBust((b) => b + 1);
-      void refreshList();
-    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
-  }
-
   /** Step 4: synthesize one voiceover clip for the whole production. */
   async function generateVo() {
     if (!prod || voBusy) return;
@@ -822,13 +829,33 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  its leading "Style:" paragraph and keep every other edit intact. */
   async function updateShotStyle(shotId: string, styleId: string) {
     if (!prod) return;
+    // "None": strip the style section entirely. On an auto-derived prompt we
+    // manualize it (with the Style paragraph removed) so the master style
+    // doesn't sneak back on the next derive — the equivalent of dragging the
+    // style link off in the node graph.
+    if (!styleId) {
+      const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      if (!target) return;
+      const base = target.promptManual && target.prompt?.trim()
+        ? target.prompt
+        : await window.cascade.getBoardPrompt(prod.meta.id, shotId).then((p) => p ?? "").catch(() => "");
+      const stripped = base.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").replace(/\n{3,}/g, "\n\n").trim();
+      const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => s.id === shotId ? { ...s, style: undefined, prompt: stripped, promptManual: true } : s),
+      })) };
+      setProd(next);
+      if (promptShotId === shotId) setFocusedPrompt(stripped);
+      void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
+      return;
+    }
     const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
     const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
       ...sc,
       shots: sc.shots.map((s) => {
         if (s.id !== shotId) return s;
         if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined };
-        const para = styleText ? `Style: ${styleText}.` : "";
+        const para = styleText ? `Style: ${styleText}` : "";
         const rest = s.prompt.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").trim();
         return { ...s, style: styleId || undefined, prompt: para ? (rest ? `${para}\n\n${rest}` : para) : s.prompt };
       }),
@@ -848,29 +875,106 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
 
+  /** Create/reuse a reference, optionally recording its shot association.
+ *  Returns the new references array (undefined when the production is gone). */
+  function upsertReference(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }, shotId?: string): Production["references"] | undefined {
+    if (!prod) return undefined;
+    const existing = (prod.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) {
+      return (prod.references ?? []).map((r) => r.id === existing.id ? {
+        ...r,
+        artwork: r.artwork ?? ref.artwork,
+        imagePath: r.imagePath ?? ref.imagePath,
+        media: r.media ?? ref.media,
+        mediaPath: r.mediaPath ?? ref.mediaPath,
+        ...(shotId ? { shotIds: Array.from(new Set([...(r.shotIds ?? []), shotId])) } : {}),
+      } : r);
+    }
+    return [...(prod.references ?? []), { id: uid("ref"), name, artwork: ref.artwork, imagePath: ref.imagePath, media: ref.media, mediaPath: ref.mediaPath, ...(shotId ? { shotIds: [shotId] } : {}) }];
+  }
+
+  /** Step 3: attach a reference (image file, or an on-disk video/audio file)
+   *  to a shot and tag it at the end of that shot's prompt, reusing an
+   *  existing reference of the same name. Used by frame drops. */
+  async function attachReferenceToPrompt(shotId: string, name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      if (!target) { setErr("Couldn't find the destination frame."); return; }
+      const currentPrompt = target.prompt?.trim() || await window.cascade.getBoardPrompt(prod.meta.id, shotId) || "";
+      const prompt = addRefTag(currentPrompt, name);
+      if (promptShotId === shotId) setFocusedPrompt(prompt);
+      saveField({
+        references: upsertReference(name, ref, shotId),
+        scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, prompt, promptManual: true } : s) })),
+      });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  /** Create/reuse a dropped reference WITHOUT tagging the prompt — node-graph
+   *  drops just add the reference node, and connecting it to the prompt is an
+   *  explicit socket action. */
+  function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): void {
+    if (!prod) return;
+    const references = upsertReference(name, ref);
+    if (references) saveField({ references });
+  }
+
+  /** Save a dropped/picked reference image (inline data URL) into the
+   *  production's referencesDir on disk and return its workspace-relative
+   *  path — image references live as files, not JSON data URLs. */
+  async function persistRefImage(dataUrl: string, baseName: string): Promise<string | undefined> {
+    if (!prod) return undefined;
+    try {
+      const res = await window.cascade.addReferenceImage(prod.meta.id, `${baseName}.png`, dataUrl);
+      return res?.path;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Step 3: a completed frame dragged onto another frame becomes a reference
    *  and is tagged at the end of the destination prompt. */
   async function dropFrameAsReference(shotId: string, source: { prodId: string; shotId: string; number: number }) {
     if (!prod) return;
-    setErr(null);
     try {
       const dataUrl = await window.cascade.boardImage(source.prodId, source.shotId);
       if (!dataUrl) { setErr("Couldn't load the dropped frame."); return; }
-      const num = String(source.number).padStart(4, "0");
-      const name = `Frame ${num}`;
-      const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      if (!target) { setErr("Couldn't find the destination frame."); return; }
-      const currentPrompt = target.prompt?.trim() || await window.cascade.getBoardPrompt(prod.meta.id, shotId) || "";
-      const existing = (prod.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
-      const tag = `@[${name}]`;
-      const prompt = currentPrompt.includes(tag) ? currentPrompt : `${currentPrompt.trim()}\n\n${tag}`.trim();
-      if (promptShotId === shotId) setFocusedPrompt(prompt);
-      saveField({
-        references: existing
-          ? (prod.references ?? []).map((r) => r.id === existing.id ? { ...r, artwork: r.artwork ?? dataUrl, shotIds: Array.from(new Set([...(r.shotIds ?? []), shotId])) } : r)
-          : [...(prod.references ?? []), { id: uid("ref"), name, artwork: dataUrl, shotIds: [shotId] }],
-        scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, prompt, promptManual: true } : s) })),
-      });
+      const imagePath = await persistRefImage(dataUrl, `Frame ${String(source.number).padStart(4, "0")}`);
+      await attachReferenceToPrompt(shotId, `Frame ${String(source.number).padStart(4, "0")}`, { imagePath });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
+  /** Step 3: any image/video/audio dropped into the node graph automatically
+   *  becomes a reference: all files are written into the production's
+   *  referencesDir on disk. The reference is NOT tagged into the prompt —
+   *  connecting it to the prompt node is an explicit socket action. */
+  async function addFileReference(shotId: string, file: File) {
+    if (!prod) return;
+    const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
+    if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return; }
+    const name = file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference";
+    try {
+      if (kind === "image") {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => { if (typeof reader.result === "string") resolve(reader.result); else reject(reader.error ?? new Error("Couldn't read the file.")); };
+          reader.onerror = () => reject(reader.error ?? new Error("Couldn't read the file."));
+          reader.readAsDataURL(file);
+        });
+        const imagePath = await persistRefImage(dataUrl, name);
+        if (!imagePath) { setErr("Couldn't save the dropped image."); return; }
+        saveRefOnly(name, { imagePath });
+      } else {
+        const saved = await window.cascade.addReferenceMedia(prod.meta.id, file.name, file.type, await file.arrayBuffer());
+        if (!saved) { setErr("Couldn't save the dropped media file."); return; }
+        saveRefOnly(name, { media: saved.kind, mediaPath: saved.path });
+      }
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -902,14 +1006,227 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setFocusedPrompt(promptCacheRef.current[shotId] ?? "");
   }
 
+  /** Step 3 node graph: the style link was detached — clear the shot's style
+   *  flag so the storyboard dropdown shows None. Runs BEFORE the prompt
+   *  change so the queued prompt save lands on the cleared disk state. */
+  function detachGraphStyle(shotId: string) {
+    if (!prod) return;
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => s.id === shotId ? { ...s, style: undefined } : s),
+      })),
+    });
+  }
+
+  /** Step 3 node graph: merge shot-level graph fields (video prompt text,
+   *  cycle index, pipes). */
+  function saveGraphShotFields(shotId: string, patch: Partial<ProductionShot>) {
+    if (!prod) return;
+    saveField({ scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) });
+  }
+
+  /** Step 3 node graph: make a generation node's selected output the shot's
+   *  primary output (artwork / videoPath). */
+  async function applyGraphOutput(shotId: string, kind: "image" | "video", path: string) {
+    if (!prod) return;
+    try {
+      const next = await window.cascade.applyGraphOutput(prod.meta.id, shotId, { kind, path });
+      setProd(next);
+      setBoardBust((b) => b + 1);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
+  /** Step 3 node graph: pipe the image node's output into the video node's
+   *  image input. Independent of the output feed — both can be wired at once. */
+  function pipeImageToVideo(shotId: string) {
+    if (!prod) return;
+    saveGraphShotFields(shotId, { graphImageToVideo: true });
+  }
+
+  /** Step 3 node graph: unpin the image node from the video node's image
+   *  input (the output feed, if any, is untouched). */
+  function unpipeImageToVideo(shotId: string) {
+    if (!prod) return;
+    saveGraphShotFields(shotId, { graphImageToVideo: undefined });
+  }
+
+  /** Step 3 node graph: pipe the image node's output into the output — binds
+   *  it as the feed and applies its currently selected generation. The
+   *  storyboard mirrors the output node: a leftover video path is cleared, and
+   *  an empty image node leaves the frame blank. */
+  function pipeImageToOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const path = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "imagegen",
+      graphOutputRefId: undefined,
+      videoPath: undefined,
+      ...(path ? {} : { artwork: undefined }),
+    });
+    if (path) void applyGraphOutput(shotId, "image", path);
+  }
+
+  /** Step 3 node graph: pipe a reference node into the output — binds it as
+   *  the feed and applies its media to the shot (image → boards, video →
+   *  videoPath). The storyboard mirrors the output node: the stale field of
+   *  the other kind is cleared. */
+  async function pipeRefToOutput(shotId: string, refId: string) {
+    if (!prod) return;
+    setErr(null);
+    const ref = promptRefsForShot(prod, shotId).find((r) => r.id === refId);
+    const isVideo = ref?.media === "video";
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "ref",
+      graphOutputRefId: refId,
+      ...(isVideo ? { artwork: undefined } : { videoPath: undefined }),
+    });
+    try {
+      const next = await window.cascade.applyGraphRefOutput(prod.meta.id, shotId, refId);
+      setProd(next);
+      setBoardBust((b) => b + 1);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
+  /** Step 3 node graph: pipe the video node's output into the output — binds
+   *  it as the feed and applies its currently selected clip. The storyboard
+   *  mirrors the output node: a leftover frame is cleared, and an empty video
+   *  node leaves the frame blank. */
+  function pipeVideoToOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const path = shot.graphVideoGens?.[shot.graphVideoGenIndex ?? 0]?.path;
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "videogen",
+      graphOutputRefId: undefined,
+      artwork: undefined,
+      ...(path ? {} : { videoPath: undefined }),
+    });
+    if (path) void applyGraphOutput(shotId, "video", path);
+  }
+
+  /** Step 3 node graph: unbind the image node's output feed (and the output
+   *  feed if it was routed there). The storyboard frame comes from the pipe,
+   *  so unpiping leaves it blank. */
+  function unpipeImageGen(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    saveGraphShotFields(shotId, {
+      graphImageToVideo: undefined,
+      ...(shot.graphOutputSource === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
+    });
+  }
+
+  /** Step 3 node graph: unbind the video node's output feed (the animatic
+   *  clip goes with it — it lives in the node's history). */
+  function unpipeVideoGen(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    if (shot.graphOutputSource === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+  }
+
+  /** Step 3 node graph: unbind whatever currently feeds the output — the
+   *  storyboard frame goes blank until a generation is piped back in. Other
+   *  pipes (e.g. imagegen → videogen) are untouched. */
+  function unpipeOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputRefId: undefined, artwork: undefined, videoPath: undefined });
+  }
+
+  /** Step 3 node graph: run the image generation node (prompt = the
+   *  composer's text; result stored on the node, applied when piped). */
+  async function runImageGenNode(shotId: string, model: string, resolution: string) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution });
+      setProd(next);
+      setBoardBust((b) => b + 1);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
+  /** Step 3 node graph: run the video generation node (prompt = the
+   *  video-prompt node; source = piped frame or the shot's frame). */
+  async function runVideoGenNode(shotId: string, model: string, resolution: string, durationSec: number) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      const sourcePath = cur?.graphImageToVideo ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path : undefined;
+      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [] });
+      setProd(next);
+      setBoardBust((b) => b + 1);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
+  /** Step 3 node graph: select a generation node's stored output by index;
+   *  the piped node's selection becomes the shot's primary output. */
+  function selectGraphGen(shotId: string, kind: "image" | "video", index: number) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const items = kind === "image" ? shot.graphImageGens : shot.graphVideoGens;
+    if (!items || !items[index]) return;
+    saveGraphShotFields(shotId, kind === "image" ? { graphImageGenIndex: index } : { graphVideoGenIndex: index });
+    const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : shot.graphOutputSource === "videogen";
+    if (bound) void applyGraphOutput(shotId, kind, items[index].path);
+  }
+
+  /** Step 3 node graph: cycle a generation node's stored outputs; the piped
+   *  node's selection becomes the shot's primary output. */
+  function cycleGraphGen(shotId: string, kind: "image" | "video", dir: 1 | -1) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const items = kind === "image" ? shot.graphImageGens : shot.graphVideoGens;
+    if (!items || items.length === 0) return;
+    const cur = (kind === "image" ? shot.graphImageGenIndex : shot.graphVideoGenIndex) ?? 0;
+    selectGraphGen(shotId, kind, (cur + dir + items.length) % items.length);
+  }
+
+  /** Step 3: persist the node graph's canvas state for a shot (node positions
+   *  and/or viewport), merged into whatever was saved before. */
+  function saveGraphLayout(shotId: string, layout: GraphLayout) {
+    if (!prod) return;
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => s.id === shotId ? { ...s, graphLayout: { ...s.graphLayout, ...layout } } : s),
+      })),
+    });
+  }
+
   async function setBrandForShot(shotId: string, include: boolean) {
     if (!prod) return;
-    const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, includeBrandIdentity: include } : s) })) };
+    const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!target) return;
+    const BRAND_PARA = /(?:^|\n\n)Brand identity: [^\n]*(?=\n\n|$)/;
+    let prompt = target.prompt?.trim() ?? "";
+    // Manual prompts carry their own Brand paragraph: physically add/remove
+    // it so the toggle is real — OFF strips it, ON inserts the freshly
+    // generated clause (picking up current wording). Auto-derived prompts
+    // handle the flag at derive time.
+    if (target.promptManual && prompt) {
+      if (!include) {
+        prompt = prompt.replace(BRAND_PARA, "").replace(/\n{3,}/g, "\n\n").trim();
+      } else if (!/(?:^|\n\n)Brand identity: /.test(prompt)) {
+        const clause = brandClause(prod);
+        if (clause) prompt = prompt ? `${prompt}\n\nBrand identity: ${clause}` : `Brand identity: ${clause}`;
+      }
+    }
+    const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, includeBrandIdentity: include, ...(target.promptManual ? { prompt } : {}) } : s) })) };
     setProd(next);
     try {
       await window.cascade.saveProduction(next);
-      const prompt = await window.cascade.getBoardPrompt(next.meta.id, shotId);
-      setFocusedPrompt(prompt ?? "");
+      const fresh = await window.cascade.getBoardPrompt(next.meta.id, shotId);
+      setFocusedPrompt(fresh ?? "");
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1049,7 +1366,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
-  const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork).length;
+  const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
   const imageModels = openArtModels.filter((m) => m.imageInput);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
@@ -1242,6 +1559,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </section>
             )}
             <ReferenceCategorySection
+              prodId={prod.meta.id}
               categories={prod.referenceCategories ?? []}
               items={prod.references ?? []}
               onAddCategory={addCategory}
@@ -1337,7 +1655,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     selected={promptShotId === shot.id}
                     onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
                     onPromoteHistory={(index) => void promoteHistory(shot.id, index)}
-                    onDelete={() => void deleteBoard(shot.id)}
                   />
                 ))}
               </div>
@@ -1352,11 +1669,52 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
                 submitting={!!promptShotId && regenIds.has(promptShotId)}
+                onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
               />
               </div>
             )}
             {shotCount > 0 && <label className="prod-frame-zoom">Frame size <input type="range" min={180} max={440} step={10} value={frameZoom} onChange={(e) => setFrameZoom(Number(e.target.value))} /><span>{frameZoom}px</span></label>}
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {graphShotId && (() => {
+              const gs = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === graphShotId);
+              return gs ? (
+                <NodeGraphModal
+                  prod={prod}
+                  shot={gs}
+                  bust={boardBust}
+                  prompt={focusedPrompt}
+                  references={promptRefsForShot(prod, graphShotId)}
+                  styles={prod.styles ?? []}
+                  styleValue={shotStyleSelectValue(gs, prod)}
+                  includeBrand={gs.includeBrandIdentity !== false}
+                  initialLayout={gs.graphLayout}
+                  onPromptChange={(value) => { setFocusedPrompt(value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
+                  onStyleChange={(style) => updateShotStyle(graphShotId, style)}
+                  onToggleBrand={(include) => { if (graphShotId) void setBrandForShot(graphShotId, include); }}
+                  onDropFile={(file) => { if (graphShotId) void addFileReference(graphShotId, file); }}
+                  onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
+                  imageModels={imageModels}
+                  videoModels={openArtModels.filter((m) => m.videoInput)}
+                  defaultImageModel={prod.openArt?.model ?? "auto"}
+                  defaultImageResolution={prod.openArt?.resolution ?? "1k"}
+                  onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
+                  onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
+                  onSelectGraphGen={(kind, index) => { if (graphShotId) selectGraphGen(graphShotId, kind, index); }}
+                  onCycleGraphGen={(kind, dir) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir); }}
+                  onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
+                  onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
+                  onPipeImageToOutput={() => { if (graphShotId) pipeImageToOutput(graphShotId); }}
+                  onPipeVideoToOutput={() => { if (graphShotId) pipeVideoToOutput(graphShotId); }}
+                  onPipeRefToOutput={(refId) => { if (graphShotId) void pipeRefToOutput(graphShotId, refId); }}
+                  onUnpipeImageGen={() => { if (graphShotId) unpipeImageGen(graphShotId); }}
+                  onUnpipeImageToVideo={() => { if (graphShotId) unpipeImageToVideo(graphShotId); }}
+                  onUnpipeVideoGen={() => { if (graphShotId) unpipeVideoGen(graphShotId); }}
+                  onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
+                  onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
+                  onClose={() => setGraphShotId(null)}
+                />
+              ) : null;
+            })()}
             {editShotId && (() => {
               const es = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === editShotId);
               return es ? (
@@ -2837,7 +3195,8 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-function ReferenceCategorySection({ categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove }: {
+function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove }: {
+  prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
   onAddCategory: (name: string) => void;
@@ -2878,14 +3237,22 @@ function ReferenceCategorySection({ categories, items, onAddCategory, onRenameCa
             }}>
               <div className="prod-category-head"><input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} /><span className="hint">{groupItems.length}</span></div>
               <div className="prod-ref-grid">
-                {groupItems.map((r) => (
+                {groupItems.map((r) => {
+                  const imgUrl = r.imagePath ? cascadeMedia(prodId, r.imagePath) : r.artwork;
+                  const isVideo = r.media === "video" && !!r.mediaPath;
+                  return (
                     <figure key={r.id} className="prod-ref">
-                    {r.artwork ? <img src={r.artwork} alt={r.name} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "move"; }} /> : <div className="prod-ref-blank">＋</div>}
-                    <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
-                    {!r.artwork && <button className="prod-ref-addimg" title="Attach a reference image" onClick={() => void onAttach(r.id)}>＋</button>}
-                    <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
-                  </figure>
-                ))}
+                      {imgUrl
+                        ? <img src={imgUrl} alt={r.name} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "move"; }} />
+                        : isVideo
+                          ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "move"; }} />
+                          : <div className="prod-ref-blank">＋</div>}
+                      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
+                      {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Attach a reference image" onClick={() => void onAttach(r.id)}>＋</button>}
+                      <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
+                    </figure>
+                  );
+                })}
                 {!groupItems.length && <span className="hint">Drop references here.</span>}
               </div>
             </section>
@@ -2918,36 +3285,42 @@ interface PromptReference {
   id: string;
   name: string;
   artwork: string;
+  media?: "video" | "audio";
+  mediaPath?: string;
 }
 
-/** Textarea with human-readable reference tags and an @ autocomplete menu. */
-function ReferencePromptEditor({ value, onChange, references, className, rows, autoFocus, placeholder, onKeyDown, onFocus }: {
+/** Three-box prompt editor (Style / Content / Brand) with human-readable
+ *  reference tags and an @ autocomplete menu on the content box. */
+function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, onKeyDown, onFocus }: {
   value: string;
+  includeBrand: boolean;
   onChange: (value: string) => void;
   references: PromptReference[];
   className: string;
   rows: number;
+  resizable?: boolean;
   autoFocus?: boolean;
   placeholder: string;
   onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onFocus?: () => void;
 }) {
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const contentRef = useRef<HTMLTextAreaElement>(null);
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
   const matches = query === null ? [] : references.filter((r) => r.name.toLowerCase().includes(query.toLowerCase()));
   const tags = Array.from(value.matchAll(/@\[([^\]]+)\]/g)).map((m) => m[1]);
+  const content = parsePromptBoxes(value).content;
 
-  function update(valueNext: string, caret = inputRef.current?.selectionStart ?? valueNext.length) {
-    onChange(valueNext);
-    const before = valueNext.slice(0, caret);
+  /** Autocomplete tracking lives on the content box only. */
+  function updateQuery(next: string, caret = contentRef.current?.selectionStart ?? next.length) {
+    const before = next.slice(0, caret);
     const open = before.lastIndexOf("@");
     const tail = open >= 0 ? before.slice(open + 1) : "";
     const nextQuery = open >= 0 && !/[\s\[\]]/.test(tail) ? tail : null;
     setQuery(nextQuery);
-    if (nextQuery !== null && inputRef.current) {
-      const rect = inputRef.current.getBoundingClientRect();
+    if (nextQuery !== null && contentRef.current) {
+      const rect = contentRef.current.getBoundingClientRect();
       const line = before.slice(0, open).split("\n").length - 1;
       const column = before.slice(before.lastIndexOf("\n") + 1).length;
       const left = Math.min(rect.left + column * 8, window.innerWidth - 220);
@@ -2957,14 +3330,15 @@ function ReferencePromptEditor({ value, onChange, references, className, rows, a
     setSelected(0);
   }
   function choose(ref: PromptReference) {
-    const el = inputRef.current;
+    const el = contentRef.current;
     if (!el) return;
     const caret = el.selectionStart;
-    const before = value.slice(0, caret);
+    const before = content.slice(0, caret);
     const open = before.lastIndexOf("@");
-    const next = `${value.slice(0, open)}@[${ref.name}]${value.slice(caret)}`;
+    if (open < 0) return;
+    const next = `${content.slice(0, open)}@[${ref.name}]${content.slice(caret)}`;
     const nextCaret = open + ref.name.length + 3;
-    onChange(next);
+    onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: next }));
     setQuery(null);
     requestAnimationFrame(() => { el.focus(); el.setSelectionRange(nextCaret, nextCaret); });
   }
@@ -2979,23 +3353,28 @@ function ReferencePromptEditor({ value, onChange, references, className, rows, a
   }
   return (
     <div className="prod-ref-prompt-editor">
-      <textarea
-        ref={inputRef}
+      <TriplePrompt
+        contentRef={contentRef}
         className={className}
-        rows={rows}
-        autoFocus={autoFocus}
+        contentRows={rows}
+        sideRows={2}
+        resizable={resizable}
         value={value}
+        includeBrand={includeBrand}
         placeholder={placeholder}
-        onChange={(e) => update(e.target.value, e.target.selectionStart)}
-        onKeyDown={keyDown}
+        onChange={onChange}
+        onContentChange={updateQuery}
+        onContentKeyDown={keyDown}
         onFocus={onFocus}
         onBlur={() => window.setTimeout(() => {
-          if (document.activeElement === inputRef.current || query === null) return;
-          const caret = inputRef.current?.selectionStart ?? value.length;
-          const before = value.slice(0, caret);
+          if (document.activeElement === contentRef.current || query === null) return;
+          const caret = contentRef.current?.selectionStart ?? content.length;
+          const before = content.slice(0, caret);
           const open = before.lastIndexOf("@");
           const tail = open >= 0 ? before.slice(open + 1) : "";
-          if (open >= 0 && !/[\s\[\]]/.test(tail)) onChange(value.slice(0, open) + value.slice(caret));
+          if (open >= 0 && !/[\s\[\]]/.test(tail)) {
+            onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: content.slice(0, open) + content.slice(caret) }));
+          }
           setQuery(null);
         }, 120)}
       />
@@ -3003,7 +3382,7 @@ function ReferencePromptEditor({ value, onChange, references, className, rows, a
         <div className="prod-ref-autocomplete" style={{ left: menuPos.left, top: menuPos.top }}>
           {matches.map((r, i) => (
             <button key={r.id} className={i === selected ? "selected" : ""} onMouseDown={(e) => { e.preventDefault(); choose(r); }}>
-              <img src={r.artwork} alt="" /><span>@[{r.name}]</span>
+              {r.artwork ? <img src={r.artwork} alt="" /> : <RefMediaGlyph media={r.media} />}<span>@[{r.name}]</span>
             </button>
           ))}
         </div>
@@ -3012,7 +3391,7 @@ function ReferencePromptEditor({ value, onChange, references, className, rows, a
         <div className="prod-ref-tag-previews">
           {tags.map((tag, i) => {
             const ref = references.find((r) => r.name.toLowerCase() === tag.toLowerCase());
-            return ref ? <span key={`${ref.id}-${i}`} title={`Reference @[${ref.name}]`}><img src={ref.artwork} alt={ref.name} />@[{ref.name}]</span> : null;
+            return ref ? <span key={`${ref.id}-${i}`} title={`Reference @[${ref.name}]`}>{ref.artwork ? <img src={ref.artwork} alt={ref.name} /> : <RefMediaGlyph media={ref.media} />}@[{ref.name}]</span> : null;
           })}
         </div>
       )}
@@ -3020,23 +3399,59 @@ function ReferencePromptEditor({ value, onChange, references, className, rows, a
   );
 }
 
+/** cascade-media:// URL for any workspace-relative asset in the production
+ *  (references are stored as files on disk now, so thumbnails + previews load
+ *  through the streaming protocol rather than inline data URLs). */
+function cascadeMedia(prodId: string, rel: string): string {
+  return `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
+}
+
 function promptRefsForShot(prod: Production, shotId: string): PromptReference[] {
+  const img = (r: { artwork?: string; imagePath?: string }) => r.imagePath ? cascadeMedia(prod.meta.id, r.imagePath) : r.artwork ?? "";
   return [
-    ...prod.characters.filter((r) => r.name && r.artwork).map((r) => ({ id: r.id, name: r.name, artwork: r.artwork! })),
-    ...prod.products.filter((r) => r.name && r.artwork).map((r) => ({ id: r.id, name: r.name, artwork: r.artwork! })),
-    ...(prod.references ?? []).filter((r) => r.name && r.artwork).map((r) => ({ id: r.id, name: r.name, artwork: r.artwork! })),
+    ...prod.characters.filter((r) => r.name && (r.artwork || r.imagePath)).map((r) => ({ id: r.id, name: r.name, artwork: img(r) })),
+    ...prod.products.filter((r) => r.name && (r.artwork || r.imagePath)).map((r) => ({ id: r.id, name: r.name, artwork: img(r) })),
+    ...(prod.references ?? []).filter((r) => r.name && (r.artwork || r.imagePath || r.media)).map((r) => ({ id: r.id, name: r.name, artwork: img(r), media: r.media, mediaPath: r.mediaPath })),
   ];
 }
 
-function PromptSidePanel({ shotNumber, value, includeBrand, scriptVisual, scriptAudio, references, onChange, onToggleBrand, onSubmit, submitting }: { shotNumber?: string; value: string; includeBrand: boolean; scriptVisual?: string; scriptAudio?: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; onSubmit: () => void; submitting: boolean }) {
+/** The generated brand clause (palette + font) — mirrors brandPrompt() in
+ *  pipeline.ts so the renderer can insert it into manual prompts on toggle. */
+function brandClause(prod: Production): string {
+  const colors = (prod.brand?.colors ?? [])
+    .map((c) => String(c).trim().replace(/^#/, ""))
+    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
+    .slice(0, 5)
+    .map((c) => `#${c.toLowerCase()}`);
+  const font = (prod.brand?.font ?? "").trim();
+  const parts: string[] = [];
+  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
+  if (font) parts.push(`Font: ${font}.`);
+  return parts.join(" ");
+}
+
+/** Select value for a shot's style dropdown: "" = None (manual prompt with
+ *  no Style section), otherwise the shot's style or the master fallback. */
+function shotStyleSelectValue(shot: ProductionShot, prod: Production): string {
+  if (!shot.style && shot.promptManual && shot.prompt && !/^Style:/m.test(shot.prompt)) return "";
+  return shot.style ?? prod.styles?.[0]?.id ?? "";
+}
+
+/** Small glyph for media references that have no image thumbnail. */
+function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
+  return <span className="prod-ref-chip-ico">{media === "audio" ? "♪" : "▶"}</span>;
+}
+
+function PromptSidePanel({ shotNumber, value, includeBrand, scriptVisual, scriptAudio, references, onChange, onToggleBrand, onSubmit, submitting, onOpenGraph }: { shotNumber?: string; value: string; includeBrand: boolean; scriptVisual?: string; scriptAudio?: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void }) {
   return (
     <aside className="prod-prompt-sidepanel">
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber} prompt` : "Frame prompt"}</span>
+        {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt">Nodes</button>}
         {shotNumber && <label className="prod-brand-toggle"><input type="checkbox" checked={includeBrand} onChange={(e) => onToggleBrand(e.target.checked)} /> Include Brand Identity</label>}
       </div>
       {shotNumber ? <>
-        <ReferencePromptEditor className="prod-prompt-drawer-text" rows={12} value={value} references={references} placeholder="Generation prompt — type @ to add a reference" onChange={onChange} />
+        <ReferencePromptEditor className="prod-prompt-drawer-text" rows={12} resizable value={value} includeBrand={includeBrand} references={references} placeholder="Generation prompt — type @ to add a reference" onChange={onChange} />
         <div className="prod-prompt-script"><span className="prod-prompt-script-title">Visual direction from the script</span><div className="prod-prompt-script-body">{scriptVisual || <em>No visual direction recorded for this shot.</em>}{scriptAudio && <p className="prod-prompt-script-audio">Audio: {scriptAudio}</p>}</div></div>
         <button className="prod-btn prod-prompt-submit" disabled={submitting} onClick={onSubmit}>{submitting ? "Generating…" : "Submit frame"}</button>
       </> : <p className="hint">Click a storyboard prompt to edit it here.</p>}
@@ -3053,7 +3468,7 @@ function formatRuntime(totalSec: number): string {
 
 /** One storyboard frame in the Step 3 contact sheet. The PNG lives in the
  *  production folder; the thumbnail is fetched on demand as a data URL. */
-function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, onDelete }: {
+function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -3072,7 +3487,6 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
   onDropFrame: (source: { prodId: string; shotId: string; number: number }) => void;
   /** Promote the browsed history frame (by artworkHistory index) to primary. */
   onPromoteHistory: (index: number) => void;
-  onDelete: () => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -3099,7 +3513,7 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
       window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => { if (live) setImg(d); }).catch(() => {});
     }
     return () => { live = false; };
-  }, [prod.meta.id, shot.id, shot.artwork, bust]);
+  }, [prod.meta.id, shot.id, shot.artwork, shot.videoPath, bust]);
 
   // Lazily load the history frame being viewed.
   useEffect(() => {
@@ -3124,9 +3538,9 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
   const designSig = JSON.stringify([
     prod.styles ?? [],
     prod.brand ?? {},
-    prod.characters.map((c) => [c.id, c.name, c.key, !!c.artwork]),
-    prod.products.map((pr) => [pr.id, pr.name, !!pr.artwork]),
-    (prod.references ?? []).map((r) => [(r.shotIds ?? []).includes(shot.id), r.name, !!r.artwork]),
+    prod.characters.map((c) => [c.id, c.name, c.key, !!(c.artwork || c.imagePath)]),
+    prod.products.map((pr) => [pr.id, pr.name, !!(pr.artwork || pr.imagePath)]),
+    (prod.references ?? []).map((r) => [(r.shotIds ?? []).includes(shot.id), r.name, !!(r.artwork || r.imagePath || r.media)]),
     shot.refIds ?? [],
     shot.audio,
     shot.visual,
@@ -3208,7 +3622,7 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
             Set as primary
           </button>
         )}
-        {shownImg && histIdx === null && shot.videoPath && !videoFailed ? (
+        {histIdx === null && shot.videoPath && !videoFailed ? (
           <video
             ref={boardVideoRef}
             className="prod-board-frame-video"
@@ -3257,7 +3671,7 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
         <button
           className="prod-board-zoom"
           title={shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
-          disabled={!img}
+          disabled={!img && !shot.videoPath}
           onClick={(e) => {
             e.stopPropagation();
             if (shot.videoPath) {
@@ -3295,15 +3709,15 @@ function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, on
         >
           {regenerating ? "…" : "↻"}
         </button>
-        <button className="prod-board-delete" title="Delete this frame" disabled={regenerating || !shot.artwork} onClick={(e) => { e.stopPropagation(); onDelete(); }}>×</button>
       </div>
       <div className="prod-board-style-row">
         <select
           className="prod-board-style"
-          value={shot.style ?? prod.styles?.[0]?.id ?? ""}
+          value={shotStyleSelectValue(shot, prod)}
           onChange={(e) => onStyleChange(e.target.value)}
           title="Render style for this frame (from the styles created in Design, Step 2)"
         >
+          <option value="">None</option>
           {(prod.styles ?? []).map((s) => (
             <option key={s.id} value={s.id}>{s.index}. {s.name || `Style ${s.index}`}</option>
           ))}
@@ -3350,13 +3764,14 @@ function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
   const [credits, setCredits] = useState<number | null>(null);
   const [frame, setFrame] = useState<string | null>(null);
   // Resolution / length options are model-specific — fetch them from the
-  // model's live form schema whenever the model changes.
+  // model's live form schema whenever the model changes. The shot's frame is
+  // always the source, so the image-to-video form is the one that matters.
   const [modelOpts, setModelOpts] = useState<VideoModelOptions | null>(null);
   useEffect(() => {
     let live = true;
     setModelOpts(null);
     if (model && model !== "auto") {
-      window.cascade.videoModelOptions(model)
+      window.cascade.videoModelOptions(model, true)
         .then((o) => { if (live) setModelOpts(o); })
         .catch(() => {});
     }
@@ -3379,7 +3794,7 @@ function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
   const cost = selected && typeof selected.cost === "number" ? selected.cost : null;
   const references = promptRefsForShot(prod, shot.id);
   return (
-    <div className="prod-edit-overlay" onClick={onClose}>
+    <div className="prod-edit-overlay prod-video-overlay" onClick={onClose}>
       <div className="prod-edit-panel prod-video-panel" onClick={(e) => e.stopPropagation()}>
         <div className="prod-edit-head">
           <span className="prod-edit-title">Shot {shot.number} — generate video</span>
@@ -3425,6 +3840,7 @@ function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
           className="prod-video-prompt"
           rows={4}
           value={prompt}
+          includeBrand={false}
           references={references}
           placeholder="Motion prompt — type @ to add a reference"
           onChange={setPrompt}

@@ -1,3 +1,170 @@
+# References on disk + organized boards + video refs viewable + no design folder
+
+User requests (4 items):
+
+## 1. Video references are actually viewable
+- Video refs were copied to `references/` but only ever shown as a ▶ glyph. The node
+  graph's ref node now renders a playable `<video>` (hover to play) via a new `mediaUrl`
+  (`cascade-media://`) on the ref node data; the Step 2 category cards do the same
+  (`.prod-ref-video`, hover-to-play) for `media === "video"` refs.
+
+## 2. Image references copied to the project folder (full path-only migration)
+- Image refs were inline data URLs in the JSON. Now every reference image lives as a file in
+  `references/`: new `CustomRef/CharacterSheet/ProductRef.imagePath`, a new
+  `production:addReferenceImage` IPC (data URL → file, MIME-derived extension, collision
+  handled), and `production:removeReferenceFile` (unlink on reference/image removal).
+- **Migration** (`migrateReferenceArtwork`, runs on load): legacy `artwork` data URLs on
+  characters/products/references are written out to `references/` and cleared. Generation
+  resolves artwork at call time via `refArtworkDataUrl` (reads `imagePath` from disk);
+  the UI shows refs via `cascade-media://` URLs (`promptRefsForShot`, category cards).
+
+## 3. boards/ organized per shot
+- New layout: `boards/<shot>/shot-<shot>-<tag>.jpg` + `boards/<shot>/originals/…` (was a
+  flat pile + one `originals/`). `boardJpegRelPath`/`boardOriginalRelPath`/`writeBoardFrame`
+  changed; `relocateBoardLayout` (runs on load) moves existing flat files (artwork, history,
+  node-gen paths) and the archived originals into the per-shot folders, idempotently.
+
+## 4. Don't create the unused design/ folder
+- `assets.designDir` removed from the type, normalize defaults, and the scaffold loop.
+
+## Verify
+- [x] npm run typecheck + build
+- [ ] Manual: dropping a video on the canvas shows a playable video in the node + Step 2 card
+- [ ] Manual: image refs (picked/dropped/frame-drop) land in references/ as files, display correctly, generate fine
+- [ ] Manual: existing flat boards/ files migrate into per-shot folders on load; frames still show
+- [ ] Manual: new production has no design/ folder
+
+## Review
+
+- **Restart required** (main process changed: new IPCs, migrations).
+- Typecheck + build clean.
+
+---
+
+# Node Graph: ref→output, multi-target image pipe, video-option cache, extra video refs
+
+User requests (4 items) on the storyboard node graph (`NodeGraphModal.tsx`):
+
+## 1. Reference nodes can feed the frame output node
+- `graphOutputSource` union gains `"ref"` + new `graphOutputRefId?: string`.
+- New IPC `production:applyGraphRefOutput(id, shotId, refId)`: image ref (artwork data URL)
+  → `writeBoardFrame` + `recordBoardArtwork` (JPEG to boardsDir); video ref (`mediaPath`)
+  → `shot.videoPath = mediaPath`. **Piping a ref into the output applies it to the shot**
+  (user's call: "also apply to the shot").
+- Output node preview: image ref → data URL `<img>`; video ref → `cascade-media://` `<video>`.
+- Edge `e-ref-out` when `graphOutputSource === "ref"`; connect ref→output routes to the new
+  `pipeRefToOutput`; disconnect via output's in-out drag-off (existing `unpipeOutput`, now
+  also clears `graphOutputRefId`) or ref-node source drag-off.
+- Audio refs are rejected as output sources (`isValidConnection`).
+
+## 2. Image gen node pipes to video gen AND output simultaneously
+- Replace `graphImageOutTarget` (`"videogen" | "output"`) with `graphImageToVideo?: boolean`.
+  Migration in `migrateBoardArtwork` (productions.ts): `graphImageOutTarget === "videogen"`
+  → `graphImageToVideo = true`; always delete the old field.
+- Output feed stays single-source (`graphOutputSource`); the image node can now ALSO feed the
+  video node at the same time (`graphImageToVideo && graphOutputSource === "imagegen"`).
+- `pipeImageToVideo` no longer clears `graphOutputSource`; new `unpipeImageToVideo` only
+  clears `graphImageToVideo`; `unpipeImageGen` (source drag-off) disconnects BOTH pipes.
+
+## 3. Cache video model resolution/length options at app open
+- Main-process module cache `videoOptionsCache: Map<"model|withImage", VideoModelOptions|null>`
+  in `index.ts`; `production:videoModelOptions` reads/writes it (extract `fetchVideoModelOptions`).
+- Warm-up: `production:openArtModels` fires background prefetch for every video-capable model
+  in both modes after listing. Renderer caches (NodeGraphModal) now hit the instant main cache.
+
+## 4. Always-open additional reference sockets on the video gen node
+- New `graphVideoRefIds?: string[]` (ref ids feeding the node's extra reference inputs, in order).
+- Node renders per-connected-ref sockets (`in-vref-<i>`) + one always-open socket
+  (`in-vref-open`), composer-style (labels + `useUpdateNodeInternals`), below the main
+  `in-image` frame pipe. Connect via open socket appends; drag-off removes; select+Delete works.
+- Only refs with `artwork` (image refs) connect; video/audio refs rejected.
+- `generateVideoNode` opts gain `refIds?: string[]`; main resolves to `{name, dataUrl}` and
+  passes them into `openArtVideoGen` as extra uploaded visual references (before prompt tags).
+- `hasImageSource` for the video node's options fetch = image pipe OR any extra ref connected.
+
+## Verify
+- [x] npm run typecheck + build
+- [ ] Manual: ref→output previews image/video AND updates storyboard/animatic; unpipe ref blanks output
+- [ ] Manual: image node piped to both video node + output at once (both edges visible)
+- [ ] Manual: opening a shot graph shows resolution/length instantly (warmed cache)
+- [ ] Manual: connecting refs to video node's open socket grows the socket list; gen uploads them
+
+## Review
+
+Implemented across `app/src/shared/ipc.ts`, `app/src/main/{index,productions}.ts`,
+`app/src/preload/index.ts`, `app/src/renderer/src/components/{NodeGraphModal,ProductionWorkspace}.tsx`,
+and `styles.css`. Typecheck + build clean.
+
+- **Ref → output**: `graphOutputSource` gains `"ref"` + `graphOutputRefId`. New IPC
+  `production:applyGraphRefOutput` applies the ref to the shot (image → `writeBoardFrame` +
+  `recordBoardArtwork`; video → `videoPath`). Output node previews the ref (data-URL `<img>` for
+  images, `cascade-media://` `<video>` for video refs via `GraphRef.mediaPath`). Audio refs are
+  rejected at connect time. Unpipe via the output's in-out drag-off (existing `unpipeOutput`, now
+  clears `graphOutputRefId`) or the ref node's source drag-off. Stale/deleted refs never dangle —
+  the `e-ref-out`/`e-vref-` edges are guarded by a membership check.
+- **Multi-target image pipe**: `graphImageOutTarget` replaced by `graphImageToVideo?: boolean`
+  (migrated in `migrateBoardArtwork`; the old field is deleted). The image node feeds the video
+  node and/or the output independently (`graphImageToVideo` + `graphOutputSource === "imagegen"`).
+  `pipeImageToVideo` no longer clears the output feed; new `unpipeImageToVideo` unbinds only the
+  video pipe; `unpipeImageGen` (source drag-off) disconnects both. `unpipeOutput` no longer touches
+  the video pipe.
+- **Video options cache**: main-process cache keyed `model|withImage` with a null-result TTL
+  (2 min) so transient form failures self-heal while successful options stay instant for the
+  session. `production:openArtModels` fires a background prewarm for every video model × both modes
+  after a successful model list (MCP is guaranteed connected at that point). Both the node graph
+  and the classic video modal now populate instantly.
+- **Extra reference sockets on the video node**: new `graphVideoRefIds?: string[]`. The node
+  renders Prompt / Source (main image pipe) / one socket per connected ref / one always-open
+  Reference socket (composer pattern: labels, `useUpdateNodeInternals`, `padding-left: 84px`
+  gutter). Connecting through the open socket appends the ref id; drag-off or select+Delete
+  removes it. Only refs with `artwork` (image refs) connect. `generateVideoNode` accepts
+  `refIds`; main resolves them to `{name, dataUrl}` and `openArtVideoGen` uploads them as extra
+  visual references (before prompt `@[name]` tags). The node's `hasImageSource` flag — which
+  drives the mode-aware option fetch — is true when the image pipe OR any extra ref is wired.
+- **Migration note**: `graphImageOutTarget` → `graphImageToVideo` happens on `loadProduction`;
+  requires an app restart (main process changed).
+
+## Review (round 3: storyboard mirrors the output node)
+
+- **Storyboard = output node.** The storyboard card is now a strict mirror of the graph's
+  frame output node. Piping a gen node in with no generation yet clears `artwork`/`videoPath`
+  so the frame goes blank ("no frame") instead of showing a stale frame — the reported bug
+  (videogen piped but empty → old frame lingered). Pipe transitions also clear the stale
+  cross-kind field: imagegen takes over → `videoPath` cleared; videogen takes over → `artwork`
+  cleared; a ref pipe clears whichever field the other media kind left behind.
+- **Video-only shots render in the storyboard** — `BoardCard` dropped the `shownImg`
+  gate on the `<video>` branch, so a shot whose output is a video clip shows the clip's
+  first frame even with no `artwork` (previously "no frame"). `videoFailed` now resets when
+  `shot.videoPath` changes, and the zoom button is enabled for video-only shots.
+- Renderer-only change — no main-process restart needed for this round.
+- Typecheck + build clean.
+
+## Review (round 2: classic-flow auto-hook + node video options)
+
+- **Classic flows auto-hook into the node view** — the round-21 strict model kept the
+  storyboard frame owned by the output pipe, so classic regeneration on an unpiped shot
+  landed in the node's history but never reached the storyboard/output (and `editBoard` /
+  `importBoards` bypassed the model inconsistently by forcing `shot.artwork`). New shared
+  helpers `hookImageGenToOutput` / `hookVideoGenToOutput` (pipeline.ts) run after every
+  classic generation records into the node: when nothing is piped they bind the gen node as
+  the output feed and apply the newest frame/clip; when that node is already the feed they
+  still auto-apply the new generation; a deliberate `videogen`/`ref` pipe is never displaced.
+  Wired into `generateBoards` (batch + regenerate + submit-frame), `importBoards`,
+  `editBoard`, and the classic `generateVideo`. `editBoard`/`importBoards` dropped their
+  unconditional `recordBoardArtwork` so every classic flow follows the same pipe rule.
+- **Video node options corrected** — the node always animates a source frame (the piped
+  frame or the shot's own), so it now always probes the **image-to-video** form
+  (`onModelOptions(model, true)`) instead of gating on `hasImageSource` (which only tracked
+  the image pipe and wrongly fell back to text-to-video options). The classic `VideoGenModal`
+  does the same (`videoModelOptions(model, true)`) so both surfaces agree. The node also
+  gained the modal's selection-validation effect (a new option set re-validates the current
+  resolution/duration) and its richer fallback lists (`["480p","720p","1080p"]` / `[5,10,15,20]`)
+  instead of the sparse `["1080p"]`/`[5]`.
+- **Restart required** — main process changed (new pipeline helpers + hooks).
+- Typecheck + build clean.
+
+---
+
 # Animatic Page Rework (Step 4)
 
 Step 4 becomes two sections: **(1) generate VO per shot** using an audio model, **(2) drag-to-time timeline with realtime playback**. Stays a single step in nav; the existing per-shot grid table is replaced.
@@ -288,10 +455,509 @@ Review:
 - [x] Verified: npm run typecheck + npm run build pass
 
 ### Fix round 2 (user report: credits not showing)
-- Root cause: parseJsonObject in main/index.ts cut at the first } -> nested
-  {"user":{...},"plan":...,"credits":N} reply from openart_account_get failed
-  to parse -> handler returned null -> credits line hidden.
+- Root cause: shared parseJsonObject cut replies at the FIRST }, so any reply with a
+  nested object ({"user":{...},"credits":N}) parsed to null and the IPC silently
+  returned null -> renderer hid the credits line.
 - Fix: parse first { .. last } with full-JSON-first strategy; verified all
   existing callers (openArtHistoryId PENDING replies, creation polling) still work.
 - Verified live: SDK client + stored tokens -> account_get returns credits 99849.
 - App needs a dev restart to pick up the main-process change.
+
+---
+
+# Storyboard Node Graph (visual prompt construction)
+
+A button in the prompt side panel opens a node graph for the focused shot. The graph is a
+**projection + editor over `shot.prompt`** (source of truth stays the prompt text with
+`@[Name]` tags + `promptManual`), so `pipeline.ts` boardPrompt/openArtPrompt, history,
+and the export fallback all keep working untouched. OpenArt MCP stays host-side; the graph
+just composes prompt + refs and triggers the existing IPCs.
+
+## Layout model (constrained, prompt-centric)
+
+```
+[Ref: Character X]──┐
+[Ref: Product Y] ───┼──▶ [Prompt composer] ──▶ [Output: frame | generate image | generate video]
+[Style node]     ───┤
+[Brand node]     ───┘
+```
+
+- Ref nodes = `@[Name]` tags found in `shot.prompt` (plus an "available" tray of untagged refs)
+- Style node shows the resolved style (read-only display + per-shot style select)
+- Brand node mirrors `includeBrandIdentity` (edit → existing toggle IPC)
+- Composer node = prompt body text (edit → `saveShotPrompt` flow, serialized queue)
+- Output node = current artwork thumbnail + history count + generate/regen buttons
+- OpenArt MCP: output node's generate actions call existing `regenBoard` / video-gen paths;
+  no direct renderer→MCP calls (approval gating + token mapping stay in main)
+
+## Phase 1 — Read-only graph
+- [x] Add `@xyflow/react` dep to `app/package.json`
+- [x] `NodeGraphModal.tsx` renderer component: React Flow canvas, modal overlay chrome
+- [x] Build nodes/edges from `shot.prompt` tags + `promptRefsForShot` + styles + brand
+- [x] Ref thumbnails via existing `boardThumbnail`/ref artwork data URLs (lazy, cached)
+- [x] Sidepanel button opens graph for `promptShotId`
+
+## Phase 2 — Editing (two-way sync with prompt text)
+- [x] Connect ref→composer = insert `@[Name]` tag; disconnect = remove tag (paragraph-safe)
+- [x] Composer node textarea edits prompt through the same serialized save queue as the sidepanel
+- [x] Brand node toggle reuses existing brand toggle handler
+- [x] Graph and sidepanel textarea stay in sync when modal open
+
+## Phase 3 — Drag-drop files + generate
+- [x] Drop image/video/audio onto canvas → create `CustomRef` (image: data URL, ≤15MB, reuse
+      existing pattern; video/audio: flag for on-disk storage follow-up) + connect + insert tag
+      *(implemented for images; video/audio drops surface a hint — see review)*
+- [x] Output node: "Generate frame" (regenBoard) + "Video" (VideoGenModal path)
+- [x] Artwork/history refresh while modal open (bust-aware thumbnail refetch)
+
+## Phase 4 — Optional polish (defer unless trivial)
+- [ ] Per-node prompt overrides, style-override node, audio refs feeding video-gen
+- [ ] On-disk storage for large video/audio refs (CustomRef schema addition + cascade-media://)
+
+## Verify
+- [x] `npm run typecheck` + `npm run build`
+- [ ] Manual: graph matches sidepanel tags 1:1; connect/disconnect updates prompt text;
+      edit in composer updates sidepanel; drop file creates ref + tag; generate works
+
+## Review
+
+Implemented in `app/src/renderer/src/components/NodeGraphModal.tsx` (new), wired through
+`app/src/renderer/src/components/ProductionWorkspace.tsx` + `styles.css`. Typecheck and
+build pass clean.
+
+- **Graph = prompt projection.** Nodes derive from `shot.prompt` each render: tagged refs
+  (in tag order, incl. dangling "missing" tags shown dashed so they can be cleaned up),
+  untagged refs (dimmed, connectable), style, brand, composer, output. The prompt text
+  stays the source of truth; no pipeline changes.
+- **Connect/disconnect three ways:** drag an edge from a ref to the composer, use the ＋/×
+  buttons on ref nodes, or select a ref edge + Backspace (nodes are `deletable: false`;
+  structural style/brand/output edges are not deletable). `addRefTag` appends
+  `\n\n@[Name]` (idempotent, case-insensitive); `removeRefTag` strips all occurrences and
+  collapses blank lines — token-scoped, no end-of-string wildcards (lesson).
+- **Composer edits** flow through the same wiring as the sidepanel textarea:
+  `setFocusedPrompt` + `promptCacheRef` + serialized `saveShotPrompt`; `regenBoard`
+  already flushes the save queue before generating. Textarea uses React Flow's
+  `nodrag`/`nowheel` so typing/dragging don't fight.
+- **File drops** create a `CustomRef` via a new shared `attachReferenceToPrompt` helper
+  (extracted from `dropFrameAsReference`, which now delegates to it) and tag the prompt.
+  Dropped files keep their filename (minus extension, ≤60 chars) as the ref name and reuse
+  an existing same-named ref — same semantics as frame drops.
+- **Scope note:** only image drops are accepted for now; audio/video drops show a hint
+  ("later pass") because `CustomRef.artwork` is an inline data-URL image — video/audio
+  needs the Phase 4 on-disk storage + `cascade-media://` work to avoid multi-MB JSON.
+- **OpenArt MCP** is reached through the existing host-side paths only (regenBoard →
+  `openArtImageGen`; Video… opens the existing modal → `runVideoGen`). No renderer→MCP
+  calls; approval gating and `@imageN` token mapping stay in main.
+- User node positions persist per modal session (positions map overrides the default
+  column layout); `fitView` on open. React Flow attribution kept visible (MIT license).
+
+## Graph layout persistence (round 2)
+
+- Node graph canvas state now saves **per shot** in the production JSON:
+  `ProductionShot.graphLayout?: GraphLayout` (`app/src/shared/ipc.ts`) =
+  `{ positions?: Record<nodeId, {x,y}>, viewport?: {x,y,zoom} }`. New shot fields ride the
+  existing `production:save` shot-spread (main/index.ts:706) — no main-process change.
+- Restore: positions initialize from the saved map (default column layout fills the rest);
+  `defaultViewport` restores pan/zoom and `fitView` is skipped when a saved viewport exists.
+- Save points: one write per **drag gesture** (final position change with `dragging !== true`,
+  via `saveLayoutRef` so the handler stays stable), and on **pan/zoom end** (`onMoveEnd`).
+  Parent `saveGraphLayout(shotId, layout)` merges into `shot.graphLayout` via `saveField`.
+- Saved positions are pruned to currently-live node ids so deleted references don't leave
+  stale entries in the JSON. Typecheck + build pass clean.
+- Interaction round: left-drag moves nodes, right-drag pans (`panOnDrag={[2]}`), Controls
+  cluster and React Flow attribution removed (`proOptions`).
+
+## Interaction round 3 (selection, layout, dedicated sockets)
+
+- **Box select** — `selectionOnDrag` (left-drag on empty canvas draws the selection rect,
+  right-drag still pans); node `select` changes now applied via a `selectedNodes` set so
+  box-selected groups drag together; selected nodes get an accent outline (CSS).
+- **Default layout split** — unused refs keep the x=0 column; tagged refs get their own
+  column one step right (`TAGGED_X = REF_W + 56`), closer to the prompt node; composer
+  moved to x=620, output x=1040 to clear the new column. Saved user positions still win.
+- **Dedicated composer inputs** — composer renders one `Position.Left` target handle per
+  connected reference (`in-ref-<i>`, evenly spread vertically), plus dedicated style
+  (`in-style`, top edge) and brand (`in-brand`, bottom edge) sockets. Ref edges bind
+  `targetHandle: in-ref-<i>`; style/brand edges bind their sockets and are
+  `reconnectable: false`.
+- **Drag-away disconnect** — ref edges are reconnectable (`onReconnect` no-op — edges are
+  prompt-derived so any reconnect snaps back); `onReconnectEnd` removes the tag when the
+  edge end is dropped away from any handle (`!connectionState.isValid`). Note:
+  `OnReconnectEnd` type isn't exported by @xyflow/react — callback typed inline with
+  exported `HandleType`/`FinalConnectionState`.
+- Typecheck + build pass clean.
+
+## Socket naming/color round (round 4)
+
+- All composer input sockets now sit on the **left edge** (style/brand moved off the
+  top/bottom edges), spread evenly: Style top, one socket per Reference in prompt order,
+  Brand bottom.
+- Sockets are **named + color-coded** by input type: Reference = accent, Style = violet
+  `#a78bfa`, Brand = amber `#f59e0b` (CSS vars `--graph-socket-*` on `.prod-graph-canvas`,
+  shared by handles, labels, and edge strokes). Labels render in a reserved gutter
+  (`.prod-graph-composer { padding-left: 84px }`) so they never cover prompt text.
+- Edges stroke-match their socket color; output edge keeps the default.
+- Typecheck + build pass clean.
+
+## Always-open reference drop node (round 5)
+
+- New `dropzone` node type (`NodeGraphModal.tsx`): a dashed, always-present "Drop an image
+  here to add a reference" node in the left column (below brand; `STRUCTURAL_IDS` includes
+  it so its position persists + is pruned correctly).
+- Dropping an image onto it creates the reference, tags it into the prompt, **and seeds the
+  new ref node at the drop position** (dropzone's live `positionAbsoluteX/Y`) in the same
+  production save — `attachReferenceToPrompt` gained `opts {refId, position}` and
+  `addFileReference` a `position` param; refId is generated in the caller so the seed and
+  the new `CustomRef.id` match.
+- Drop onto bare canvas still works (previous behavior, no position seed); non-image drops
+  on the node surface the same "images only" hint. Highlights on dragover. Non-image drop
+  hint uses `showHint` (moved above the nodes memo — it was used before declaration).
+- Typecheck + build pass clean.
+
+## Drop node removed; media refs + open input (round 6 — supersedes round 5)
+
+User clarification: no drop node; any image/video/audio dropped on the canvas auto-becomes
+a reference; the prompt node needs an always-open Reference input; left column ordered
+style-top → refs-middle → brand-bottom to mirror the prompt's sockets; style = green;
+node output handles/edges colored to match their input sockets.
+
+- **Dropzone node removed** (component, types, nodeTypes, CSS). `onDropFile` now passes the
+  raw `File` to the parent; the canvas routes by MIME — image → data URL ref, video/audio →
+  new `production:addReferenceMedia` IPC.
+- **Video/audio refs on disk** (lesson 23 — no media base64 in JSON): `CustomRef.media`
+  ("video" | "audio") + `CustomRef.mediaPath` (workspace-relative); new
+  `assets.referencesDir` (default "references", normalize/scaffold backfill); handler
+  preserves the original filename with music-import-style collision handling. Nodes render
+  a ♪/▶ glyph instead of a thumbnail; sidepanel chips + autocomplete get the same glyph
+  (`RefMediaGlyph`). Generation paths filter refs to those with `artwork`
+  (pipeline.ts:397,687; index.ts:1396), so media refs are safely skipped until
+  video-gen upload wiring lands (follow-up).
+- **Always-open Reference input** on the prompt node: composer renders tagged sockets +
+  one extra hollow socket (`in-ref-open`, class `socket-ref open`); connecting through it
+  adds the tag like any other — the edge snaps to its own socket and the open one remains.
+- **Left column order** matches the prompt's input order: Style at top (y=20), reference
+  band in the middle (`REF_COL_TOP` = 116; unused refs left column, tagged refs at
+  TAGGED_X), Brand at the bottom of the column.
+- **Output matches input**: source handles on ref/style/brand nodes now carry the socket
+  classes (`socket-ref/style/brand`); edge strokes already matched. Style color changed to
+  green `#34d399` (`--graph-socket-style`).
+- **Requires a dev restart** — main process changed (new IPC + assets backfill).
+- Typecheck + build pass clean.
+
+## Selection fix, bezier edges, zoom lightbox, drag-off polish (round 7)
+
+- **Box-select bug** (`autoPanOnSelection={false}`): with selection auto-pan on (RF
+  default), dragging the rect near the canvas edge auto-scrolls the viewport under the
+  fixed rect — nodes flicker in/out of selection ("flashes") and a runaway pan sweeps the
+  rect across the whole graph ("selects the whole graph"). Disabling it fixes both.
+- **Curved edges**: dropped `type: "smoothstep"` (RF default = bezier curves) and set
+  `connectionLineType={ConnectionLineType.Bezier}` so the drag-preview line curves too.
+- **Magnifier on ref nodes**: hover 🔍 button (inline SVG, `nodrag`) on image refs opens
+  the existing `prod-ref-lightbox` (reused styles; `prod-graph-lightbox` z-index 120 so it
+  stacks over the graph overlay). Escape closes the lightbox first, then the graph.
+  Buttons live in a `prod-graph-ref-actions` row next to the ×/＋ toggle.
+- **Drag-off disconnect reliability**: added explicit `edgesReconnectable` and
+  `reconnectRadius={20}` (was default 10 — the end anchors were easy to miss, which read
+  as "can't drag off"). The round-3 `onReconnectEnd` removal logic is unchanged; hint text
+  now teaches "drag an edge end away from its socket to disconnect".
+- Typecheck + build pass clean.
+
+## Selection flash root-caused; drag-from-socket disconnect (round 8)
+
+**Box-select flash — root cause found in RF source** (`react/dist/esm/index.js`):
+`commitUserSelectionRect` calls `getSelectionChanges(nodeLookup, ids, /* mutateItem */ true)`
+— React Flow **mutates `node.selected` directly on our node objects** ("the onNodesChange
+callback comes too late here" — their comment) and the store notification renders those
+flags immediately. Our previous design re-derived every node object each render with
+`selected` from a separate `selectedNodes` set + recreated objects on identity-churning
+deps, so RF's in-place flags and our derived flags raced → whole-graph flash as the rect
+touched a new node.
+
+- **Fix — canonical controlled pattern**: persistent `nodes` state; `onNodesChange` =
+  `applyNodeChanges(changes, nodesRef.current)` in one pass (position/select/dimension all
+  applied the same way RF expects); derived definitions (prompt tags, refs, styles,
+  thumbnail) reconciled in via effect that **preserves `position`, `selected`, `measured`**
+  for surviving ids. Deleted: `positions`/`positionsRef`/`selectedNodes` bespoke tracking.
+- **Node identity stabilization**: parent callbacks (new identity every render) now route
+  through a `stable` ref-wrapper object, so node data objects only change when real inputs
+  change (prompt, refs, styles, thumbnail) — no more `replace` churn per render.
+- Layout saves unchanged (drag-stop → `onSaveLayout({ positions })`, now read straight off
+  the applied node state; no pruning needed since state only holds live nodes).
+- **Drag-from-socket disconnect** (`onConnectEnd`): dragging FROM a composer reference
+  input (`fromHandle.type === "target"`, id `in-ref-<i>`) and dropping on empty canvas
+  (`!state.isValid`) removes that reference's tag. Dropping on a valid handle still lands
+  as a normal connect. This is the exact "drag the connection off of the input" gesture —
+  prior rounds only covered grabbing the tiny edge-end anchors.
+- Edge end anchors styled (`--edgeupdater` accent fill, `cursor: grab`) for discoverability.
+- Typecheck + build pass clean.
+
+## MMB pan + input-socket drag-off (round 10)
+
+- **MMB pan**: `panOnDrag={[1, 2]}` — middle and right mouse buttons both pan.
+- **Input-socket drag-off**: occupied input sockets were `isConnectable={false}`, so drags
+  couldn't START from them. They're connectable again (drag-off works), but
+  `isValidConnection` now only accepts `targetHandle === "in-ref-open"` — occupied sockets
+  are never drop targets, so new links still always land on the open socket.
+- **Blender cut rule**: `onConnectEnd` disconnects only when the link is released into
+  empty space (`!isValid && !toHandle`); releasing on/near any socket snaps back instead of
+  cutting — prevents accidental disconnects when missing a socket.
+- Typecheck + build pass clean.
+
+## Detachable style/brand + white-box fix (round 11)
+
+- **White box behind the output node**: the node type was literally `"output"` — a built-in
+  React Flow type whose default CSS paints a white background on the wrapper behind custom
+  content. Renamed the type to `"frame"` (nodeTypes key + type field); box gone.
+- **Detachable style/brand** — edges now mirror the prompt sections, same projection model
+  as reference tags:
+  - Style edge exists iff the prompt has a `Style:` paragraph; brand edge iff
+    `includeBrandIdentity`.
+  - **Detach** (drag the link off either end into empty space) removes the `Style:`
+    paragraph (paragraph-scoped regex matching `updateShotStyle`'s format — lesson:
+    never end-of-string wildcards) or toggles `includeBrandIdentity` off (existing
+    `setBrandForShot` path, which strips the brand clause server-side too).
+  - **Attach** (connect style/brand output → its input socket) re-inserts the paragraph
+    from the currently selected style (`addStyleParagraph`, idempotent) or toggles brand
+    back on. `isValidConnection` now routes style→`in-style`, brand→`in-brand`,
+    ref→`in-ref-open`.
+  - Choosing a different style in the dropdown still swaps just the style paragraph
+    (re-attaching if detached) — unchanged sidepanel semantics.
+- Typecheck + build pass clean.
+
+## Tag placement above the brand section (round 12)
+
+- `addRefTag` now inserts the `@[Name]` tag **beneath the content paragraphs** — before the
+  generated `Brand identity:` section when one is present — instead of appending at the
+  very end (which landed after the brand). Prompt order is now:
+  `Style:` → content → `@[tags]` → `Brand identity:`.
+- All attachment paths share the helper: graph connect / ＋ button (modal) and file drops +
+  frame drops (`attachReferenceToPrompt` now calls the imported `addRefTag`, which also
+  upgrades its exact-match dedupe to case-insensitive).
+- Typecheck + build pass clean.
+
+## Color-coded prompt sections (round 13)
+
+- New shared `SectionedPrompt.tsx`: a **mirror-under-textarea** — the same text rendered
+  transparently behind the textarea (identical class → identical padding/border/font/size),
+  with each classified paragraph tinted: `Style:` green, content (incl. tag paragraphs)
+  purple, `Brand identity:` orange. `box-decoration-break: clone` keeps wrapped lines
+  tinted per line; scroll is synced (textarea onScroll → mirror.scrollTop); the mirror's
+  hidden webkit scrollbar reserves the same gutter as the textarea's so wrapped lines stay
+  pixel-aligned. Purely decorative — the value is never modified.
+- Paragraph classification is prefix-based (`^Style:`, `^Brand identity:`), matching the
+  generated-section formats; unknown prefixes fall to content.
+- Integrated in both surfaces: `ReferencePromptEditor` (side panel — keeps its caret ref,
+  autocomplete, blur cleanup) and the node graph composer (`nodrag`/`nowheel` stay on the
+  textarea).
+- **Fix: doubled text** — the mirror carries the same class as the textarea, whose
+  `color: var(--text)` rules (`.prod-prompt-drawer-text`, `.prod-graph-composer-text`)
+  overrode `color: transparent` at equal specificity → both copies painted. The mirror
+  rule is now `.prod-prompt-sections .prod-prompt-sections-mirror` (0,2,0) so the
+  transparent color always wins.
+- Typecheck + build pass clean.
+
+## Three-box prompt — mirror reverted (round 14)
+
+User call: the mirror overlay still wasn't clean → **reverted** (SectionedPrompt.tsx
+deleted, CSS removed) and replaced with **three individual stacked text boxes**:
+Style (green label) / Content (purple) / Brand identity (orange, hidden when the brand
+section is off).
+
+- New `TriplePrompt.tsx`: `parsePromptBoxes` (paragraph classification — first `Style:`,
+  first `Brand identity:`, rest incl. `@[tag]` paragraphs = content) + `composePromptBoxes`
+  (style → content → brand) + the component. The composed prompt stays the single source
+  of truth: boxes are a live decomposition; an echo-suppression ref prevents re-parse
+  flicker from our own emits; external changes (generation refresh, style dropdown, brand
+  toggle, graph connect) re-decompose.
+- Clearing the Style box detaches the style section (matches the graph's style edge);
+  clearing Brand empties the paragraph (backend regenerates it on refresh while the
+  checkbox is on — the checkbox/brand node still owns existence).
+- `ReferencePromptEditor` now hosts TriplePrompt; the @-autocomplete + caret math + blur
+  cleanup operate on the **content box** (`contentRef`, `onContentChange`,
+  `onContentKeyDown` hooks on TriplePrompt). Tag previews unchanged.
+- Composer node uses TriplePrompt too (`ComposerData.includeBrand`); VideoGenModal's motion
+  prompt uses it with `includeBrand={false}`.
+- Typecheck + build pass clean.
+
+## Detachable style box + "None" style option (round 15)
+
+- **Style box existence mirrors the prompt** (same as brand): TriplePrompt renders the
+  Style box only while the prompt has a `Style:` paragraph — graph detach or dropdown
+  "None" hides it; reconnecting/choosing a style brings it back.
+- **"None" option** in both style dropdowns (per-shot BoardCard select + graph style node):
+  `updateShotStyle("")` strips the `Style:` paragraph (paragraph-scoped regex) and
+  **manualizes** auto-derived prompts (via `getBoardPrompt` display text) so the master
+  style doesn't sneak back on the next derive. Picking a real style re-inserts the
+  paragraph (re-attaches).
+- **Select value** via `shotStyleSelectValue(shot, prod)`: "" (None) when the shot is
+  manual with no Style paragraph, else `shot.style` with the master fallback — so detached
+  shots show None while legacy shots still show their effective (master) style.
+- **Graph detach → dropdown None**: dragging the style link off now also clears the shot's
+  `style` flag (`detachGraphStyle` → saveField) BEFORE the prompt change, so
+  `shotStyleSelectValue` sees flag-cleared + manual + no Style paragraph → None. Ordering
+  matters: saveField's saveProduction IPC lands before the queued updateBoardPrompt
+  (invoke calls preserve order), avoiding the stale-prompt writeback hazard.
+- **"Brand typeface" → "Font"** in the generated brand clause (`brandPrompt`,
+  pipeline.ts) — requires a dev restart (main process).
+- **Brand toggle now regenerates the clause**: `effectivePrompt` only appended when the
+  paragraph was absent and stripped at display time, so the persisted old wording
+  ("Brand typeface") survived every toggle. `setBrandForShot` now physically strips the
+  paragraph (OFF) / inserts a fresh renderer-side clause (`brandClause`, OFF→ON picks up
+  current wording) in manual prompts; auto-derived prompts regenerate at derive time.
+- **Resizable prompt boxes** (side panel): `TriplePrompt resizable` renders drag dividers
+  between the stacked boxes — pointer-captured drag resizes the adjacent Style/Brand box
+  (36–420px clamp, content keeps `min-height: 96px`), double-click resets to rows-based
+  auto height. Divider has a visible grab bar + `row-resize` cursor (lesson 15).
+- **Doubled period on style paragraphs**: every `Style:` composer appended a `.` after the
+  style text, which already ends with its own → "render..". Removed the auto-period in all
+  four paths (pipeline boardPrompt per-shot + master, renderer dropdown swap, graph
+  attach); style text is now used verbatim, consistent with TriplePrompt's composer.
+  Requires a dev restart (main process).
+- **Resizable boxes in the graph composer**: same `TriplePrompt resizable` dividers;
+  corner resizers removed (`resize: none` on `.prod-prompt-box` and the composer class).
+  RF re-measures the node on height change so socket bounds stay correct.
+- **Video modal stacks above the graph**: the graph overlay is z-index 90, the
+  `prod-edit-overlay` dialogs 80 — Video… from the output node opened underneath. The
+  video overlay now carries `prod-video-overlay` (z-index 100); the graph's Escape handler
+  ignores keypresses while that overlay exists so closing the dialog doesn't close the
+  graph under it.
+- Typecheck + build pass clean.
+
+## Generation nodes (image / video / video-prompt) — round 17
+
+New structural nodes in the graph (ids `imagegen`, `videogen`, `videoprompt`; positions
+persisted via STRUCTURAL_IDS):
+
+- **Image generation node**: prompt input (structural pipe from the composer), model +
+  resolution selects (OpenArt image models), Generate, stored generations with ‹ n/m ›
+  cycling, two output sockets (`out-image` → video node image input, `out-main` → output).
+- **Video generation node**: prompt input (from the video-prompt node), image input
+  (`in-image`, piped from the image node or falls back to the shot's frame), model +
+  resolution + length selects (length/resolutions fetched live per model via
+  `videoModelOptions` like the panel), Generate, cycled clip storage (inline `<video>`
+  preview), output socket.
+- **Video-prompt node**: textarea persisting `shot.graphVideoPrompt` (seeded with the
+  video panel's default motion prompt), piped structurally into the video node.
+- **Piping = binding**: connecting `out-main` → output sets `graphOutputSource` and
+  applies the selected generation to the shot (`applyGraphOutput` IPC → artwork /
+  videoPath) — storyboard + animatic follow automatically. Dragging the pipe off
+  unbinds (falls back to the classic composer→output flow). Piping imagegen→videogen
+  sets `graphVideoImageSource`; new generations in a piped node auto-apply.
+
+Main process:
+
+- `openArtImageGen` gained a resolution override; `openArtVideoGen` gained a
+  `sourcePathOverride` param, returns `{ rel }` and no longer mutates `videoPath` itself
+  (the classic `production:generateVideo` handler applies it as before).
+- New IPCs: `production:generateFrameNode` (custom prompt via `resolvePromptReferences`
+  tag→token conversion; writes via `writeBoardFrame`; stores a `GraphGenItem`; applies
+  artwork when piped), `production:generateVideoNode` (same pattern for clips),
+  `production:applyGraphOutput` (sets artwork/videoPath).
+- Schema: `ProductionShot.graphImageGens/graphImageGenIndex/graphVideoGens/
+  graphVideoGenIndex/graphVideoPrompt/graphVideoImageSource/graphOutputSource` +
+  `GraphGenItem` — ride the shot-spread save. **Requires a dev restart.**
+- Typecheck + build pass clean.
+
+## Output-as-sink + generation history strips (round 18)
+
+- **Output node is a pure sink** fed ONLY by the generation nodes: the classic
+  composer→output edge is gone (as are the output node's Generate/Video buttons and the
+  modal's onGenerate/onVideo/submitting props — classic batch generation still lives in
+  the top toolbar). The output shows the bound node's **selected** generation (image or
+  playable video via cascade-media URLs); unpiped it shows the shot's classic artwork
+  with a "pipe image or video generation in" hint.
+- **Full history strips** on both gen nodes: every stored generation renders as a
+  clickable thumbnail (image node) / numbered chip (video node) — clicking selects;
+  selection in a piped node applies to the shot (`selectGraphGen` + cycle delegates to
+  it). Arrows kept alongside.
+- **Single output socket per gen node; output is input-only**: `graphVideoImageSource`
+  replaced by `graphImageOutTarget` ("videogen" | "output") — the image node's one output
+  feeds either the video node's image input or the output (mutually exclusive; routing to
+  one displaces the other). Video node's output only feeds the output. Output node lost
+  its history line — it just mirrors the piped input (falling back to the shot's classic
+  artwork when nothing is piped). Disconnect rules: drag-off from either end unbinds the
+  pipe the edge belongs to.
+- Typecheck + build pass clean.
+
+## Generation migration into the nodes (round 19)
+
+Existing projects kept their generations in the classic fields (`artwork` +
+`artworkHistory`, `videoPath`), so the gen nodes looked empty and the output node seemed
+to hold them.
+
+- **One-time migration** (`migrateGraphGenerations`, hooked into `loadProduction`'s
+  migration pass and persisted in place): for each shot with empty gen nodes, the current
+  artwork + history seed the image node's items (newest first), and `videoPath` seeds the
+  video node. No-op once a node holds items.
+- **All classic generation flows now also record into the nodes** via
+  `recordGraphImageGen` / `recordGraphVideoGen` (cap 20): batch board generation, AI frame
+  edit, board imports, the classic video flow, and the node-gen handlers (refactored onto
+  the same helpers).
+- **Output node shows only its pipe**: removed the unbound artwork fallback — no pipe in,
+  no preview (blank + hint). The storyboard itself is unchanged.
+- Typecheck + build pass clean.
+
+## Round 20 — connect fix, move migration, strip direction, node defaults
+
+- **Connect failure root-caused**: stale handler fragments — `isValidConnection` still
+  required the removed `out-image`/`out-main` source-handle ids (imagegen's single
+  id-less socket → `sourceHandle` null → every connection rejected), and `onConnect` had
+  lost its pipe routing. Both rewritten; style/brand re-attach branches restored.
+- **Migration is now a MOVE** (`graphMigrated` marker): classic artwork + history and
+  `videoPath` move into the gen nodes (deduped by path — covers projects already seeded
+  by the earlier copy-migration) and the classic fields clear, so the storyboard frame
+  starts empty until a generation is piped into the output.
+- **History strips reversed**: oldest → newest left-to-right (newest on the right);
+  ‹ = older, › = newer (both gen nodes; the video node's strip was missing its arrows —
+  restored).
+- **Image node defaults** come from the production's OpenArt config (model + resolution
+  pickers preselect what the top-of-page pickers chose).
+- Typecheck + build pass clean. **Restart the app to pick up the migration.**
+
+## Round 21 — strict output, no delete button, accurate video options
+
+- **Strict output model**: unpiping (any form) clears `artwork`/`videoPath` — the
+  storyboard frame goes blank the moment nothing is piped into the output. Batch board
+  generation also only reaches the storyboard when the image node is piped; otherwise it
+  lands in the node's history. "Has a frame" markers updated everywhere (batch targets
+  skip shots with node generations, `markBoardsStatus`, boardsDone counter).
+- **"Delete this frame" removed** from the storyboard card (button, prop, and the
+  renderer's `deleteBoard` — the frame is owned by the output pipe now).
+- **Accurate video options**: `videoModelOptions` is mode-aware — the caller says whether
+  it needs the image-to-video or text-to-video form (the node passes its image-source
+  state), and the first mode whose form declares options wins with NO cross-mode merging
+  and NO duration thinning (Grok Imagine 1.5 → 480p/720p + every second 1–15). Node
+  refetches when the image pipe changes.
+- **Faster population**: per-model/per-mode cache in the graph modal — each combination
+  is fetched once per session, reopens and re-renders are instant.
+- Typecheck + build pass clean.
+
+## Blender-model connect/disconnect rework (round 9)
+
+Three root causes found for "connecting/disconnecting is buggy, nodes jump, huge dots,
+can't drop on a socket":
+
+1. **Node jump**: connecting a ref changed its node id (`avail:<id>` → `ref:<id>`) → the
+   reconcile effect removed + re-added the node → it teleported from the unused column to
+   the tagged column (and back on disconnect). **Fix: unified id scheme** — refs are always
+   `ref:<refId>` whether tagged or not; toggling a tag now only changes the edge and the
+   default-column membership, never the node's position.
+2. **Huge dots**: the "dots" were the edge-update anchors (accent-styled, r=5px) from the
+   reconnect machinery. **Fix: anchors removed entirely** — all edges `reconnectable: false`,
+   `onReconnect`/`onReconnectEnd`/`edgesReconnectable`/`reconnectRadius` deleted, anchor CSS
+   removed. Disconnect is exclusively drag-off-socket.
+3. **Can't drop on a socket**: socket positions are percentage styles — when the socket
+   count changes they move without the node resizing, so RF's measured handle bounds went
+   stale and `connectionRadius` snapping missed. **Fix: `useUpdateNodeInternals` on socket
+   count change + `connectionRadius={30}`.**
+
+Blender behavior model now:
+
+- **Connect**: drag from any output socket → the open Reference input accepts the drop
+  (`isValidConnection` restricts links to `ref:* → composer`, so style/brand lines can't
+  land anywhere — they're structural); occupied sockets are `isConnectable={false}` so new
+  links always land on the open socket and never "jump" to a re-indexed one.
+- **Disconnect**: drag the link off **either** end — off an input socket (`in-ref-<i>`) or
+  off a reference node's output — and dropping on empty canvas removes the `@[Name]` tag.
+  Style/brand links are structural and can't be pulled off (nothing to remove).
+- Typecheck + build pass clean.

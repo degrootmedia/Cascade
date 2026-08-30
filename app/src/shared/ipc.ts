@@ -113,6 +113,15 @@ export interface ProductionMeta {
 }
 
 /** One shot row: the smallest Audio/Visual unit. */
+/** Step 3 node graph: saved canvas state for one shot's graph, so it reopens
+ *  the way the user left it. */
+export interface GraphLayout {
+  /** Node positions keyed by graph node id (ref/composer/style/brand/output). */
+  positions?: Record<string, { x: number; y: number }>;
+  /** Canvas pan/zoom as last left by the user. */
+  viewport?: { x: number; y: number; zoom: number };
+}
+
 export interface ProductionShot {
   /** Stable identity — survives renumbering and reordering. */
   id: string;
@@ -161,6 +170,43 @@ export interface ProductionShot {
    *  that reference's Design-page description in this shot's prompts; an
    *  empty/absent entry falls back to the Design-page text. */
   refPromptOverrides?: Record<string, string>;
+  /** Step 3 node graph: last saved node positions + canvas viewport. */
+  graphLayout?: GraphLayout;
+  /** Step 3 node graph: stored outputs of the image generation node (newest
+   *  first), plus the cycled selection index. */
+  graphImageGens?: GraphGenItem[];
+  graphImageGenIndex?: number;
+  /** Node graph video generation node: stored clips (newest first) + index. */
+  graphVideoGens?: GraphGenItem[];
+  graphVideoGenIndex?: number;
+  /** The video-prompt node's text (motion prompt for the video gen node). */
+  graphVideoPrompt?: string;
+  /** Reference ids feeding the video gen node's extra reference inputs (beyond
+   *  the main image pipe), in connection order. Only image refs connect. */
+  graphVideoRefIds?: string[];
+  /** Whether the image generation node's output also feeds the video node's
+   *  image input. Independent of the output feed — the image node can pipe to
+   *  the video node AND the output simultaneously. */
+  graphImageToVideo?: boolean;
+  /** Which node is piped into the output (becomes the shot's primary
+   *  artwork/videoPath): an image/video generation node, or a reference. */
+  graphOutputSource?: "imagegen" | "videogen" | "ref";
+  /** The reference feeding the output when `graphOutputSource === "ref"`. */
+  graphOutputRefId?: string;
+  /** One-time marker: classic generations were moved into the gen nodes. */
+  graphMigrated?: boolean;
+}
+
+/** One stored output of a node-graph generation node. */
+export interface GraphGenItem {
+  /** Workspace-relative path (boards JPEG for frames, videos file for clips). */
+  path: string;
+  /** The prompt used for this generation. */
+  prompt: string;
+  /** The model id used ("auto" when Cascade picked). */
+  model: string;
+  /** ISO timestamp. */
+  at: string;
 }
 
 export interface ProductionScene {
@@ -178,6 +224,9 @@ export interface CharacterSheet {
   key: string;
   /** Reference image (data URL) attached in Step 2. */
   artwork?: string;
+  /** Workspace-relative path of the reference image on disk (the modern
+   *  storage — images live in referencesDir, not as inline data URLs). */
+  imagePath?: string;
 }
 
 /** A product whose look must stay consistent (label, packaging, hero item). */
@@ -186,6 +235,8 @@ export interface ProductRef {
   name: string;
   /** Reference image (data URL) attached in Step 2. */
   artwork?: string;
+  /** Workspace-relative path of the reference image on disk. */
+  imagePath?: string;
 }
 
 /** A user-added reference (material, texture, mood, hero prop) that must be
@@ -195,8 +246,16 @@ export interface CustomRef {
   id: string;
   /** User label, e.g. "Gondola Interior". */
   name: string;
-  /** Reference image (data URL) attached in Step 2. */
+  /** Reference image (data URL) attached in Step 2. Legacy storage — modern
+   *  references keep their image in `imagePath` instead. */
   artwork?: string;
+  /** Workspace-relative path of the reference image on disk (referencesDir). */
+  imagePath?: string;
+  /** Non-image media kind when the reference is a dropped video/audio file. */
+  media?: "video" | "audio";
+  /** Workspace-relative path of the dropped video/audio file (on disk, not in
+   *  the JSON — data URLs are only used for images). */
+  mediaPath?: string;
   /** Shot ids this reference applies to. Empty until toggled on specific shots. */
   shotIds?: string[];
   /** User-created category; absent means uncategorized. */
@@ -338,7 +397,7 @@ export interface Production {
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
-  assets: { scriptMd: string; designDir: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string };
+  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string };
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -428,6 +487,22 @@ export interface CascadeApi {
   pickScriptFile(): Promise<string | null>;
   /** Native file dialog for a reference image. Returns a data URL or null. */
   pickReferenceImage(): Promise<string | null>;
+  /**
+   * Step 3 node graph: save a dropped video/audio file into the production's
+   * referencesDir (on disk, keeping media out of the JSON). Returns the
+   * workspace-relative path and the media kind, or null when the production
+   * is gone.
+   */
+  addReferenceMedia(productionId: string, fileName: string, mime: string, bytes: ArrayBuffer): Promise<{ path: string; kind: "video" | "audio" } | null>;
+  /**
+   * Step 2/3: save a reference image (inline data URL) into the production's
+   * referencesDir on disk and return the workspace-relative path, so image
+   * references stop riding the JSON as data URLs.
+   */
+  addReferenceImage(productionId: string, fileName: string, dataUrl: string): Promise<{ path: string } | null>;
+  /** Delete a reference's on-disk file (image or media) when the reference is
+   *  removed, so the references folder doesn't accumulate orphans. */
+  removeReferenceFile(productionId: string, rel: string): Promise<void>;
   /**
    * Step 1: ingest a script. `source` is an absolute file path or a Google
    * Docs share URL. Resolves to the updated production.
@@ -546,12 +621,38 @@ export interface CascadeApi {
    * Writes the clip into videosDir and stores the relative path on the shot.
    */
   generateVideo(productionId: string, shotId: string, opts: VideoGenOptions): Promise<Production>;
+  /**
+   * Step 3 node graph: generate one frame from a custom prompt (the prompt
+   * composer's text) without touching the shot's artwork — the result is
+   * stored on the image generation node. Returns the updated production.
+   */
+  generateFrameNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string }): Promise<Production>;
+  /**
+   * Step 3 node graph: generate one video clip for the video generation node.
+   * `sourcePath` overrides the animated source frame (workspace-relative);
+   * when absent the shot's current frame is used. The result is stored on the
+   * video generation node. Returns the updated production.
+   */
+  generateVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
+  /**
+   * Step 3 node graph: make a generation node's selected output the shot's
+   * primary output (artwork for frames, videoPath for clips). Returns the
+   * updated production.
+   */
+  applyGraphOutput(productionId: string, shotId: string, opts: { kind: "image" | "video"; path: string }): Promise<Production>;
+  /**
+   * Step 3 node graph: apply a reference as the shot's primary output (a
+   * reference piped into the frame output). Image refs are written to the
+   * boards dir as the artwork; video refs become the shot's videoPath.
+   * Returns the updated production.
+   */
+  applyGraphRefOutput(productionId: string, shotId: string, refId: string): Promise<Production>;
   /** Step 4: streamable `cascade-media://` URL for a shot's generated video. */
   videoUrl(productionId: string, shotId: string): Promise<string | null>;
   /** Step 4: remove a shot's generated video file and clear videoPath. */
   removeVideo(productionId: string, shotId: string): Promise<Production>;
   /** Step 4: the resolution / length options a video model accepts (from its
    *  live form schema). Null when the model form can't be read. */
-  videoModelOptions(modelId: string): Promise<VideoModelOptions | null>;
+  videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }

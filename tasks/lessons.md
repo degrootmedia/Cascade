@@ -2,6 +2,12 @@
 
 No session-specific lessons yet.
 
+- Renderer-only changes hot-reload, but the Electron **main process** keeps the build it
+  started with. New `ipcMain.handle`s don't exist until the main process restarts (full
+  `npm run dev` restart, or `npm run package` for the packaged exe). Symptom: renderer
+  changes all work while every new IPC errors with "No handler registered for 'X'" and
+  new main-side migrations/recorders never fire. Check `out/main/index.js` for the new
+  handler names before re-coding — if the build carries them, the fix is restarting.
 - When simplifying a UI workflow, remove its assignment dependency too; the replacement interaction must own the state transition.
 - Prompt display and transport forms must stay separate; UI refreshes should never use MCP transport tokens.
 - Generated prompt sections must be removed with paragraph-scoped matching, never an end-of-string wildcard that can consume user content.

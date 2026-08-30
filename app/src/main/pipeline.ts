@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { nativeImage } from "electron";
 import { GabClient } from "@core";
-import type { Production, ProductionScene, ProductionShot } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -432,10 +432,13 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // legacy free-text visualStyle fallback for older productions).
   const paras: string[] = [];
   const style = resolveShotStyle(p, shot);
-  if (style) paras.push(`Style: ${style}.`);
+  // No auto-appended period — style texts usually end with their own, and
+  // adding another produced "render..". Used verbatim, matching the
+  // renderer's style paragraph composer.
+  if (style) paras.push(`Style: ${style}`);
   else {
     const master = (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
-    if (master) paras.push(`Style: ${master}.`);
+    if (master) paras.push(`Style: ${master}`);
   }
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
@@ -469,7 +472,7 @@ export function brandPrompt(p: Production): string {
   const font = (p.brand?.font ?? "").trim();
   const parts: string[] = [];
   if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
-  if (font) parts.push(`Brand typeface: ${font}.`);
+  if (font) parts.push(`Font: ${font}.`);
   return parts.join(" ");
 }
 
@@ -517,6 +520,23 @@ export interface ShotRef {
   artwork?: string;
 }
 
+/** Reference artwork as an uploadable data URL: an on-disk `imagePath` is read
+ *  at call time (references live in referencesDir as files), with legacy inline
+ *  data URLs as the fallback. Returns undefined when no artwork is available. */
+export function refArtworkDataUrl(p: Production, ref: { imagePath?: string; artwork?: string }): string | undefined {
+  if (ref.imagePath) {
+    try {
+      const buf = fs.readFileSync(assetPath(p, ref.imagePath));
+      const ext = path.extname(ref.imagePath).slice(1).toLowerCase() || "png";
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/png";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return undefined;
+    }
+  }
+  return ref.artwork || undefined;
+}
+
 /**
  * Work out which references a shot should use:
  *  - characters/products whose name appears in the shot's text (auto-matched);
@@ -533,9 +553,9 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   // Only explicit human-friendly tags assign images to a shot. This prevents
   // script text, legacy shot toggles, or old associations from being uploaded.
   const candidates: ShotRef[] = [
-    ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: c.artwork })),
-    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: pr.artwork })),
-    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: r.artwork })),
+    ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
+    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
   ];
   for (const match of (shot.prompt ?? "").matchAll(/@\[([^\]]+)\]/g)) {
     const ref = candidates.find((r) => r.name.toLowerCase() === match[1].toLowerCase());
@@ -551,18 +571,18 @@ export interface GenerationRef {
 }
 
 /** Relative path of the shot's archived original (the PNG the model returned
- *  or the file the user imported). Kept in `boardsDir/originals/` so a
- *  regenerate doesn't overwrite it. Never read by the renderer. */
+ *  or the file the user imported). Kept in the shot's `originals/` subfolder
+ *  so a regenerate doesn't overwrite it. Never read by the renderer. */
 export function boardOriginalRelPath(p: Production, shot: ProductionShot, ext = "png"): string {
   const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  return `${p.assets.boardsDir}/originals/shot-${shot.number}-${tag}.${ext}`;
+  return `${p.assets.boardsDir}/${shot.number}/originals/shot-${shot.number}-${tag}.${ext}`;
 }
 
-/** Relative path of the served JPEG. The renderer's boardImage/boardThumbnail
- *  IPCs read this file; it lives directly under `boardsDir/`. */
+/** Relative path of the served JPEG, grouped by shot. The renderer's
+ *  boardImage/boardThumbnail IPCs read this file. */
 export function boardJpegRelPath(p: Production, shot: ProductionShot): string {
   const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  return `${p.assets.boardsDir}/shot-${shot.number}-${tag}.jpg`;
+  return `${p.assets.boardsDir}/${shot.number}/shot-${shot.number}-${tag}.jpg`;
 }
 
 /** Write both the archived original and the served JPEG for a frame. Returns
@@ -574,8 +594,8 @@ export function writeBoardFrame(
   originalBytes: Buffer,
   originalExt: string
 ): { jpegRel: string; originalRel: string } {
-  fs.mkdirSync(assetPath(p, p.assets.boardsDir), { recursive: true });
-  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/originals`), { recursive: true });
+  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}`), { recursive: true });
+  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}/originals`), { recursive: true });
   const originalRel = boardOriginalRelPath(p, shot, originalExt);
   const jpegRel = boardJpegRelPath(p, shot);
   fs.writeFileSync(assetPath(p, originalRel), originalBytes);
@@ -608,7 +628,7 @@ export function migrateBoardArtworkToJpeg(p: Production, shot: ProductionShot): 
   // archive the source PNG to `originals/`.
   const jpegRel = boardJpegRelPath(p, shot);
   const originalRel = boardOriginalRelPath(p, shot, "png");
-  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/originals`), { recursive: true });
+  fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}/originals`), { recursive: true });
   let jpegBytes: Buffer;
   try {
     const img = nativeImage.createFromBuffer(bytes);
@@ -620,6 +640,81 @@ export function migrateBoardArtworkToJpeg(p: Production, shot: ProductionShot): 
   try { fs.renameSync(abs, assetPath(p, originalRel)); } catch { /* leave PNG in place; migration is best-effort */ }
   shot.artwork = jpegRel;
   return true;
+}
+
+/** One-time layout migration: storyboard frames used to live flat under
+ *  `boards/` (`boards/shot-0100-<tag>.jpg` + `boards/originals/…`). They now
+ *  live in a per-shot subfolder (`boards/0100/shot-0100-<tag>.jpg`,
+ *  `boards/0100/originals/…`). Moves every referenced file (artwork, history,
+ *  node-graph generations) plus the archived originals directory. Idempotent —
+ *  already-relocated paths no longer match the flat pattern. */
+export function relocateBoardLayout(p: Production, shot: ProductionShot): boolean {
+  let changed = false;
+  const move = (rel: string): string => {
+    if (!rel) return rel;
+    const flat = /^([^/]+)\/shot-(\d{4})-[^/]+\.(?:jpg|png|webp)$/i.exec(rel);
+    if (!flat || flat[1] !== p.assets.boardsDir) return rel;
+    const newRel = `${p.assets.boardsDir}/${flat[2]}/${path.basename(rel)}`;
+    if (newRel === rel) return rel;
+    try {
+      const abs = assetPath(p, rel);
+      if (!fs.existsSync(abs)) return rel;
+      fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${flat[2]}`), { recursive: true });
+      fs.renameSync(abs, assetPath(p, newRel));
+      changed = true;
+      return newRel;
+    } catch { return rel; }
+  };
+  if (shot.artwork) shot.artwork = move(shot.artwork);
+  if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map(move);
+  if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: move(g.path) }));
+  try {
+    const originalsDir = assetPath(p, `${p.assets.boardsDir}/originals`);
+    if (fs.existsSync(originalsDir)) {
+      for (const f of fs.readdirSync(originalsDir)) {
+        const m = /^shot-(\d{4})-[^/]+\.\w+$/i.exec(f);
+        if (!m) continue;
+        const dest = assetPath(p, `${p.assets.boardsDir}/${m[1]}/originals/${f}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.renameSync(path.join(originalsDir, f), dest);
+        changed = true;
+      }
+    }
+  } catch { /* best-effort */ }
+  return changed;
+}
+
+/** One-time migration: reference images used to be stored inline in the JSON
+ *  as data URLs (`artwork`). They now live as files in referencesDir
+ *  (`imagePath`), so write every legacy data-URL artwork out to disk and clear
+ *  it. Runs for characters, products, and custom references. */
+export function migrateReferenceArtwork(p: Production): boolean {
+  let changed = false;
+  const write = (ref: { name?: string; artwork?: string; imagePath?: string }): boolean => {
+    if (!ref.artwork || !ref.artwork.startsWith("data:")) return false;
+    if (ref.imagePath) return false;
+    const comma = ref.artwork.indexOf(",");
+    if (comma === -1) return false;
+    let buf: Buffer;
+    try { buf = Buffer.from(ref.artwork.slice(comma + 1), "base64"); } catch { return false; }
+    if (!buf.length) return false;
+    const mime = ref.artwork.slice(5, comma).split(";")[0];
+    const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+    const base = (ref.name ?? "reference").trim().replace(/\s+/g, "-").replace(/[^a-z0-9_-]+/gi, "").slice(0, 60) || "reference";
+    const dir = p.assets.referencesDir;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    let rel = `${dir}/${base}.${ext}`;
+    let i = 2;
+    while (fs.existsSync(assetPath(p, rel))) { rel = `${dir}/${base}-${i}.${ext}`; i++; }
+    fs.writeFileSync(assetPath(p, rel), buf);
+    ref.imagePath = rel;
+    delete ref.artwork;
+    return true;
+  };
+  for (const c of p.characters) if (write(c)) changed = true;
+  for (const pr of p.products) if (write(pr)) changed = true;
+  for (const r of p.references ?? []) if (write(r)) changed = true;
+  return changed;
 }
 
 /** Relative path of the production's single voiceover clip. Stable name so
@@ -644,6 +739,72 @@ export function recordBoardArtwork(shot: ProductionShot, rel: string): void {
   shot.artwork = rel;
 }
 
+/** How many generations each node-graph generation node keeps. */
+export const GRAPH_HISTORY_CAP = 20;
+
+/** Store a generated frame on the shot's image generation node (newest
+ *  first) so the node history mirrors every generation. */
+export function recordGraphImageGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  shot.graphImageGens = [item, ...(shot.graphImageGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  shot.graphImageGenIndex = 0;
+}
+
+/** Store a generated clip on the shot's video generation node (newest first). */
+export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  shot.graphVideoGens = [item, ...(shot.graphVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  shot.graphVideoGenIndex = 0;
+}
+
+/** Auto-hook a classic image generation into the node graph: when nothing is
+ *  piped into the output yet, bind the image node as the feed and apply its
+ *  newest frame so the storyboard AND the node view both show the result.
+ *  When the image node is already piped, the new frame still auto-applies;
+ *  a deliberate videogen/ref pipe is never displaced. */
+export function hookImageGenToOutput(shot: ProductionShot): void {
+  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "ref") return;
+  shot.graphOutputSource = "imagegen";
+  const cur = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+  if (cur) recordBoardArtwork(shot, cur.path);
+}
+
+/** Auto-hook a classic video generation into the node graph: when nothing is
+ *  piped into the output yet, bind the video node as the feed. */
+export function hookVideoGenToOutput(shot: ProductionShot): void {
+  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "ref") return;
+  shot.graphOutputSource = "videogen";
+}
+
+/** One-time migration: MOVE the classic generations (current artwork +
+ *  history, videoPath) into the node-graph generation nodes — the nodes own
+ *  the generation history, and the storyboard frame comes from the output
+ *  node's pipe instead (so it starts empty until something is piped in).
+ *  Guarded by `graphMigrated` so it runs exactly once per shot. */
+export function migrateGraphGenerations(shot: ProductionShot): boolean {
+  if (shot.graphMigrated) return false;
+  // Move any classic frames the node doesn't already hold (deduped by path).
+  const existing = new Set((shot.graphImageGens ?? []).map((g) => g.path));
+  const items = [shot.artwork, ...(shot.artworkHistory ?? [])]
+    .filter((v): v is string => typeof v === "string" && v.length > 0 && !existing.has(v))
+    .map((path) => ({ path, prompt: "", model: "auto", at: "" }));
+  if (items.length) {
+    shot.graphImageGens = [...items, ...(shot.graphImageGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+    shot.graphImageGenIndex ??= 0;
+  }
+  if (!shot.graphVideoGens?.length && shot.videoPath) {
+    shot.graphVideoGens = [{ path: shot.videoPath, prompt: "", model: "auto", at: "" }];
+    shot.graphVideoGenIndex ??= 0;
+  }
+  // The nodes own the generations now; the storyboard frame comes from the
+  // output pipe, so it starts empty until something is piped in.
+  shot.artwork = undefined;
+  shot.artworkHistory = undefined;
+  shot.videoPath = undefined;
+  shot.graphMigrated = true;
+  return true;
+}
+
 /** Image generator injected by the caller (OpenArt MCP in production).
  *  `refs` carries the shot's reference artwork (if any) for image-input models. */
 export type ImageGenFn = (prompt: string, refs: GenerationRef[]) => Promise<Buffer>;
@@ -665,7 +826,7 @@ export async function generateBoards(
   const targets = all.filter((s) =>
     opts.onlyShotId ? s.id === opts.onlyShotId
     : opts.shotIds?.length ? (opts.shotIds as string[]).includes(s.id)
-    : opts.regenerateAll || !s.artwork
+    : opts.regenerateAll || !(s.artwork || s.graphImageGens?.length)
   ).slice(0, max);
   if (!targets.length) {
     emit(opts.onlyShotId ? "That shot wasn't found." : "Nothing to generate — every shot already has a board.", "error");
@@ -686,9 +847,14 @@ export async function generateBoards(
         const refs = shotReferences(p, shot)
           .filter((r) => r.artwork)
           .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
-        const png = await generate(openArtPrompt(p, shot), refs);
+        const genPrompt = openArtPrompt(p, shot);
+        const png = await generate(genPrompt, refs);
         const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-        recordBoardArtwork(shot, jpegRel);
+        recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
+        // Classic flow: the storyboard frame comes from the output pipe — if
+        // nothing is piped yet, hook the image node in so the new frame shows
+        // in the storyboard AND the node view (never displaces a pipe).
+        hookImageGenToOutput(shot);
         done++;
       } catch (e) {
         failed++;
@@ -708,10 +874,11 @@ export async function generateBoards(
   return p;
 }
 
-/** Step 3 is "done" once every shot has a frame. */
+/** Step 3 is "done" once every shot has a frame — either the piped output or
+ *  generations waiting on its node. */
 function markBoardsStatus(p: Production): void {
   const all = p.scenes.flatMap((s) => s.shots);
-  if (all.length && all.every((s) => s.artwork)) p.status[3] = "done";
+  if (all.length && all.every((s) => s.artwork || s.graphImageGens?.length)) p.status[3] = "done";
 }
 
 /**
@@ -789,7 +956,8 @@ export function importBoards(
     try {
       const bytes = fs.readFileSync(file);
       const { jpegRel } = writeBoardFrame(p, shot, bytes, ext.slice(1));
-      recordBoardArtwork(shot, jpegRel);
+      recordGraphImageGen(shot, jpegRel, "", "import");
+      hookImageGenToOutput(shot);
       return true;
     } catch (e) {
       emit(`Couldn't import ${path.basename(file)}: ${String(e).slice(0, 120)}`, "error");

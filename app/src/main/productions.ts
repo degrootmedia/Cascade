@@ -7,8 +7,8 @@
 import { app } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Production, ProductionMeta } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg } from "./pipeline.js";
+import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
+import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork } from "./pipeline.js";
 
 export interface ProductionFile extends Production {}
 
@@ -41,10 +41,11 @@ function normalize(p: ProductionFile): ProductionFile {
   p.styles ??= [];
   p.brand ??= { colors: [], font: "" };
   p.currentStep ??= 1;
-  p.assets ??= { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out" };
+  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" };
   p.assets.voiceoverDir ??= "voiceover";
   p.assets.musicDir ??= "music";
   p.assets.videosDir ??= "videos";
+  p.assets.referencesDir ??= "references";
   if (typeof (p as unknown as { voiceoverVolume?: unknown }).voiceoverVolume !== "number") {
     // Default voiceover volume when a VO exists, otherwise leave undefined for fresh projects.
     if (p.voiceoverPath) (p as ProductionFile).voiceoverVolume = 1;
@@ -84,9 +85,10 @@ function summary(p: ProductionFile): ProductionMeta {
 export function loadProduction(id: string): ProductionFile | null {
   try {
     const p = normalize(JSON.parse(fs.readFileSync(filePath(id), "utf8")));
-    // One-time board migration (legacy PNGs → JPEGs). Persist in place so the
-    // very next read sees the new layout — done directly here to avoid a
-    // self-reference to this module.
+    // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
+    // node-graph generation nodes). Persist in place so the very next read
+    // sees the new layout — done directly here to avoid a self-reference to
+    // this module.
     if (migrateBoardArtwork(p)) {
       try { fs.writeFileSync(filePath(p.meta.id), JSON.stringify(p, null, 2), "utf8"); } catch { /* best-effort */ }
     }
@@ -108,12 +110,15 @@ function migrateBoardArtwork(p: Production): boolean {
   let changed = false;
   for (const sc of p.scenes) {
     for (const s of sc.shots) {
+      if (migrateGraphGenerations(s)) changed = true;
+      if (migrateGraphPipes(s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
+      if (relocateBoardLayout(p, s)) changed = true;
       if (s.artworkHistory) {
         const next = s.artworkHistory.map((rel) => rel);
         let hChanged = false;
         for (let i = 0; i < next.length; i++) {
-          const fake = { artwork: next[i] } as Parameters<typeof migrateBoardArtworkToJpeg>[1];
+          const fake = { artwork: next[i], number: s.number } as Parameters<typeof migrateBoardArtworkToJpeg>[1];
           if (migrateBoardArtworkToJpeg(p, fake)) {
             next[i] = fake.artwork!;
             hChanged = true;
@@ -123,7 +128,23 @@ function migrateBoardArtwork(p: Production): boolean {
       }
     }
   }
+  if (migrateReferenceArtwork(p)) changed = true;
   return changed;
+}
+
+/** One-time field migration: the image gen node used to route its single
+ *  output to exactly one destination (`graphImageOutTarget: "videogen" |
+ *  "output"`). It can now feed the video node AND the output simultaneously,
+ *  so the routing is two independent booleans — `graphImageToVideo` (video
+ *  node feed) and `graphOutputSource === "imagegen"` (output feed). */
+function migrateGraphPipes(shot: ProductionShot): boolean {
+  const legacy = (shot as unknown as { graphImageOutTarget?: string }).graphImageOutTarget;
+  if (legacy === undefined) return false;
+  if (legacy === "videogen") shot.graphImageToVideo = true;
+  // "output" needs no extra flag — graphOutputSource === "imagegen" already
+  // described the output feed.
+  delete (shot as unknown as { graphImageOutTarget?: string }).graphImageOutTarget;
+  return true;
 }
 
 export function newProduction(name: string, folder: string): ProductionFile {
@@ -149,10 +170,10 @@ export function newProduction(name: string, folder: string): ProductionFile {
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", designDir: "design", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" },
   };
   // Scaffold the asset folders inside the user's production folder.
-  for (const d of [p.assets.designDir, p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir]) {
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
     } catch {

@@ -756,6 +756,10 @@ body {
 .prod-ref-autocomplete button:hover, .prod-ref-autocomplete button.selected { background: var(--accent); color: white; }
 .prod-ref-autocomplete img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
 .prod-ref-tag-previews { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+
+/* Media references (video/audio) have no thumbnail — show a glyph instead. */
+.prod-ref-chip-ico { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 14px; font-size: 0.62rem; line-height: 1; color: var(--text-dim); }
+.prod-ref-autocomplete .prod-ref-chip-ico { width: 26px; height: 26px; font-size: 0.8rem; }
 .prod-ref-tag-previews span { position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); font-size: .68rem; cursor: help; }
 .prod-ref-tag-previews img { display: none; position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 90; width: 96px; height: 72px; object-fit: cover; border: 1px solid var(--border); border-radius: 5px; box-shadow: 0 5px 16px rgba(0,0,0,.5); }
 .prod-ref-tag-previews span:hover img { display: block; }
@@ -1614,6 +1618,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   overflow: hidden;
 }
 .prod-ref img { width: 100%; height: 110px; object-fit: cover; display: block; }
+.prod-ref-video { width: 100%; height: 110px; object-fit: cover; display: block; background: #000; }
 .prod-ref figcaption {
   padding: 6px 8px;
   font-size: 0.8rem;
@@ -2749,3 +2754,208 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-video-prompt:focus { outline: none; border-color: var(--accent); }
 .prod-video-cost { font-size: 0.8rem; color: var(--text-dim); margin: 4px 0 0; }
 .prod-video-cost strong { color: var(--accent); }
+
+/* ---------- Node graph (visual prompt construction) ---------- */
+.prod-graph-open { margin-left: auto; flex-shrink: 0; }
+.prod-prompt-drawer-head .prod-brand-toggle { margin-left: 0; }
+.prod-graph-overlay { z-index: 90; }
+/* The video dialog can open FROM the node graph (output node) — stack it above. */
+.prod-video-overlay { z-index: 100; }
+.prod-graph-panel {
+  width: min(1500px, 96vw);
+  height: min(920px, 94vh);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.prod-graph-head { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.prod-graph-title { font-weight: 600; color: var(--text); white-space: nowrap; }
+.prod-graph-hint { flex: 1; min-width: 0; font-size: 0.74rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prod-graph-canvas { flex: 1; min-height: 0; position: relative; --graph-socket-ref: var(--accent); --graph-socket-style: #34d399; --graph-socket-brand: #f59e0b; }
+.prod-graph-drop-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.prod-graph-node {
+  width: 236px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  color: var(--text);
+  font-size: 0.78rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.prod-graph-node-title { font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 7px; }
+.prod-graph-node .react-flow__handle { width: 9px; height: 9px; background: var(--accent); border: 2px solid var(--bg-raised); }
+.prod-graph-canvas .react-flow__node.selected .prod-graph-node {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.prod-graph-canvas .react-flow__selection {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid var(--accent);
+}
+
+/* Input sockets: named + color-coded by the type of input they accept. */
+.prod-graph-node .react-flow__handle.socket-ref { background: var(--graph-socket-ref); }
+.prod-graph-node .react-flow__handle.socket-style { background: var(--graph-socket-style); }
+.prod-graph-node .react-flow__handle.socket-brand { background: var(--graph-socket-brand); }
+/* The always-open reference socket renders hollow until a connection lands. */
+.prod-graph-node .react-flow__handle.socket-ref.open { background: var(--bg); border-color: var(--graph-socket-ref); box-shadow: 0 0 0 1px var(--graph-socket-ref); }
+.prod-graph-socket-label {
+  position: absolute;
+  left: 12px;
+  transform: translateY(-50%);
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+.prod-graph-socket-label.ref { color: var(--graph-socket-ref); }
+.prod-graph-socket-label.style { color: var(--graph-socket-style); }
+.prod-graph-socket-label.brand { color: var(--graph-socket-brand); }
+/* Reserve a left gutter in the prompt node so the labels don't cover text. */
+.prod-graph-composer { padding-left: 84px; }
+/* The video gen node has the same socket labels on its left edge. */
+.prod-graph-videogen { padding-left: 84px; }
+
+.prod-graph-ref { display: flex; align-items: center; gap: 9px; }
+.prod-graph-ref img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 64px; height: 48px; flex-shrink: 0; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
+.prod-graph-ref-video { background: #000; }
+.prod-graph-ref-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-weight: 700; }
+.prod-graph-ref-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.prod-graph-ref-name { font-size: 0.72rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prod-graph-ref-btn {
+  align-self: flex-start;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.prod-graph-ref-btn:hover { border-color: var(--accent); color: var(--accent); }
+.prod-graph-ref-actions { display: flex; gap: 6px; }
+.prod-graph-ref-zoom {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: zoom-in;
+}
+.prod-graph-ref-zoom:hover { border-color: var(--accent); color: var(--accent); }
+.prod-graph-lightbox { z-index: 120; }
+.prod-graph-ref.avail { opacity: 0.62; }
+.prod-graph-ref.missing { border-style: dashed; }
+.prod-graph-ref.missing .prod-graph-ref-name { color: var(--text-dim); font-style: italic; }
+
+.prod-graph-composer { width: 360px; }
+.prod-graph-composer-text {
+  width: 100%;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 9px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  resize: none;
+}
+.prod-graph-composer-text:focus { outline: none; border-color: var(--accent); }
+
+.prod-graph-style .prod-openart-select, .prod-graph-brand .prod-brand-toggle { width: 100%; }
+.prod-graph-brand .prod-brand-toggle { justify-content: flex-start; margin-left: 0; color: var(--text); }
+
+.prod-graph-output { width: 300px; display: flex; flex-direction: column; gap: 7px; }
+.prod-graph-output-img { width: 100%; height: 150px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-raised); }
+.prod-graph-output-blank { width: 100%; height: 150px; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); background: var(--bg-raised); }
+.prod-graph-output-hist { font-size: 0.7rem; color: var(--text-dim); }
+.prod-graph-output-actions { display: flex; gap: 8px; }
+.prod-graph-output-actions .prod-btn { flex: 1; padding: 7px 10px; font-size: 0.78rem; }
+
+/* Generation nodes (image / video) + the video-prompt node. */
+.prod-graph-gen { width: 300px; display: flex; flex-direction: column; gap: 7px; }
+.prod-graph-gen-controls { display: flex; gap: 6px; }
+.prod-graph-gen-controls .prod-openart-select { flex: 1; min-width: 0; }
+.prod-graph-gen-preview { width: 100%; height: 120px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-raised); display: block; }
+.prod-graph-gen-preview.blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.72rem; border-style: dashed; }
+.prod-graph-gen-cycle { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); font-size: 0.72rem; }
+.prod-graph-gen-hint { font-size: 0.68rem; color: var(--text-dim); }
+.prod-graph-gen-go { padding: 7px 10px; font-size: 0.78rem; }
+.prod-graph-videoprompt { width: 280px; }
+/* Generation history strip: every stored generation, click to select. */
+.prod-graph-gen-strip { display: flex; flex-wrap: wrap; gap: 4px; max-height: 84px; overflow-y: auto; }
+.prod-graph-gen-strip button {
+  width: 46px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+.prod-graph-gen-strip button img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.prod-graph-gen-strip button.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.prod-graph-output-hint { font-size: 0.68rem; color: var(--text-dim); line-height: 1.4; }
+
+/* ---------- Three-box prompt (Style / Content / Brand) ---------- */
+.prod-prompt-triple { display: flex; flex-direction: column; gap: 4px; min-height: 0; width: 100%; }
+.prod-prompt-box-label { font-size: 0.62rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+.prod-prompt-box-label.style { color: #34d399; }
+.prod-prompt-box-label.content { color: #a78bfa; }
+.prod-prompt-box-label.brand { color: #f59e0b; }
+.prod-prompt-box { width: 100%; flex: 1 1 auto; min-height: 0; resize: none; }
+.prod-prompt-box.side { flex: 0 0 auto; }
+.prod-prompt-box:focus { outline: none; border-color: var(--accent); }
+.prod-prompt-sidepanel .prod-prompt-triple { flex: 1; min-height: 0; }
+.prod-prompt-sidepanel .prod-prompt-box.content { min-height: 96px; }
+/* Drag divider between stacked prompt boxes: visible grab bar + cursor. */
+.prod-prompt-divider {
+  flex: 0 0 auto;
+  height: 10px;
+  margin: -1px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+}
+.prod-prompt-divider::before { content: ""; width: 40px; height: 2px; border-radius: 2px; background: var(--border); }
+.prod-prompt-divider:hover::before, .prod-prompt-divider:active::before { background: var(--accent); }

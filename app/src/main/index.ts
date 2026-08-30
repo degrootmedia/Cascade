@@ -11,7 +11,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, recordBoardArtwork, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, openArtPrompt, effectivePrompt, stripReferenceClause, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool, uploadDataUrlReference } from "./openart-upload.js";
@@ -335,6 +335,110 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 
 // ---- IPC ------------------------------------------------------------------
 function registerIpc() {
+  // Per-model/per-mode cache for video form options — the MCP form lookup is
+  // slow (multi-second), so resolve each combination once and warm it when the
+  // OpenArt models are listed so modals and node graphs populate instantly.
+  // Successful options are cached for the whole session; null results (a
+  // transient form failure) only briefly, so they self-heal on the next open.
+  const videoOptionsCache = new Map<string, { o: VideoModelOptions | null; at: number }>();
+  const VIDEO_OPTIONS_NULL_TTL_MS = 2 * 60_000;
+  const videoOptionsKey = (modelId: string, withImage: boolean) => `${modelId}|${withImage ? 1 : 0}`;
+
+  /** Cached options for a model+mode, honoring the null-result TTL. */
+  function cachedVideoOptions(modelId: string, withImage: boolean): VideoModelOptions | null | undefined {
+    const hit = videoOptionsCache.get(videoOptionsKey(modelId, withImage));
+    if (!hit) return undefined;
+    if (hit.o !== null || Date.now() - hit.at < VIDEO_OPTIONS_NULL_TTL_MS) return hit.o;
+    return undefined;
+  }
+
+  /** Does a form enum label look like a video resolution? Accepts "4K"/"2K"/
+   *  "8K" (incl. "4K Ultra HD"), "480p"/"1080p"/"2160p", "1920x1080", bare
+   *  numbers like "1080", and "HD"/"FHD"/"QHD"/"UHD"/"Full HD" — plus annotated
+   *  labels like "4K Ultra HD (3840x2160)" that contain a resolution token. */
+  function looksLikeResolution(s: string): boolean {
+    const t = s.trim();
+    if (/\d+(?:\.\d+)?\s*k|\d{3,4}\s*p|\d+\s*[x×]\s*\d+/i.test(t)) return true;
+    if (/^\d{3,4}$/.test(t)) return true;
+    return /^(?:full\s+hd|fhd|qhd|uhd|hd)$/i.test(t);
+  }
+
+  /** Resolve a video model's accepted resolutions/lengths from its live form
+   *  schema. Mode-aware: image-to-video and text-to-video forms declare
+   *  different option sets, so the caller says which one it needs. */
+  async function fetchVideoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
+    const raw = (n: string) => n.replace(/^openart__/, "");
+    const formRaw = Object.keys(mcp.getTools()).map(raw).find((n) => /^openart_model_form_get$/.test(n));
+    if (!formRaw) return null;
+    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
+    const modes = withImage
+      ? ["image2video", "image_to_video", "img2video", "video2video"]
+      : ["text2video", "text_to_video", "video2video"];
+    for (const mode of modes) {
+      let props: Record<string, unknown> | null = null;
+      try {
+        props = parseModelFormProperties(await mcp.callRaw("openart", formRaw, { model: modelId, mode }));
+      } catch { continue; }
+      if (!props) continue;
+      const out: VideoModelOptions = { resolutions: [], durations: [] };
+      for (const key of Object.keys(props)) {
+        const p = props[key] as { type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown } | undefined;
+        if (!p) continue;
+        if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
+          for (const v of p.enum) {
+            const s = String(v).trim();
+            if (looksLikeResolution(s)) out.resolutions.push(s);
+          }
+        }
+        if (/duration|length|seconds|clip|frames|time/i.test(key)) {
+          if (Array.isArray(p.enum)) {
+            for (const v of p.enum) {
+              const n = Number(String(v).replace(/[^0-9.]/g, ""));
+              if (Number.isFinite(n) && n > 0 && n <= 120) out.durations.push(Math.round(n));
+            }
+          } else if (p.type === "integer" || p.type === "number") {
+            const min = Number(p.minimum) > 0 ? Number(p.minimum) : 1;
+            const max = Number(p.maximum) > 0 ? Number(p.maximum) : min + 15;
+            for (let n = Math.ceil(min); n <= Math.floor(max) && n <= 120; n++) out.durations.push(n);
+          }
+        }
+      }
+      out.resolutions = Array.from(new Set(out.resolutions));
+      out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
+      // First mode whose form actually declares options wins — no cross-mode
+      // merging (a text2video enum must not leak 1080p into an image2video
+      // node that the site limits to 480p/720p) and no thinning (1–15s stays
+      // every single second).
+      if (out.resolutions.length || out.durations.length) return out;
+    }
+    return null;
+  }
+
+  /** Resolve (from cache when fresh) + store options for a model+mode. */
+  async function resolveVideoOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
+    const cached = cachedVideoOptions(modelId, withImage);
+    if (cached !== undefined) return cached;
+    const o = await fetchVideoModelOptions(modelId, withImage);
+    videoOptionsCache.set(videoOptionsKey(modelId, withImage), { o, at: Date.now() });
+    return o;
+  }
+
+  /** Warm the per-model option cache for every video-capable model in both
+   *  modes. Fire-and-forget: the caller returns immediately so listing models
+   *  never waits on form lookups. */
+  function prewarmVideoOptions(models: OpenArtModelChoice[]): void {
+    const seen = new Set<string>();
+    for (const m of models) {
+      if (!m.videoInput) continue;
+      for (const withImage of [true, false]) {
+        const key = videoOptionsKey(m.id, withImage);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        void resolveVideoOptions(m.id, withImage).catch(() => {});
+      }
+    }
+  }
+
   ipcMain.handle("chat:send", async (_e, sessionId: string, text: string, images?: string[]) => {
     const entry = live(sessionId);
     curId = sessionId;
@@ -1295,7 +1399,7 @@ function registerIpc() {
    * prompts for manual generation + import. `modelOverride` forces a specific
    * OpenArt model id (per-frame edit runs); "auto"/undefined uses the config.
    */
-  function openArtImageGen(p: Production, modelOverride?: string): ImageGenFn | null {
+  function openArtImageGen(p: Production, modelOverride?: string, resolutionOverride?: string): ImageGenFn | null {
     const toolName = Object.keys(mcp.getTools()).find((n) => /^openart__/.test(n) && /generate.*image/i.test(n));
     if (!toolName) return null;
     const rawName = toolName.replace(/^openart__/, "");
@@ -1315,6 +1419,7 @@ function registerIpc() {
       const cfgUsed: OpenArtBoardConfig = {
         ...(p.openArt ?? { model: "auto", resolution: "1k" }),
         ...(modelOverride ? { model: modelOverride } : {}),
+        ...(resolutionOverride ? { resolution: resolutionOverride } as Partial<OpenArtBoardConfig> : {}),
       };
 
       // Upload reference art (deduped) so image-capable models can use it.
@@ -1390,9 +1495,9 @@ function registerIpc() {
    *  own frame always occupies @image1. */
   function resolvePromptReferences(p: Production, prompt: string, startToken: number): { resolved: string; extras: { name: string; dataUrl: string }[] } {
     const candidates = [
-      ...p.characters.map((c) => ({ name: c.name, artwork: c.artwork })),
-      ...p.products.map((pr) => ({ name: pr.name, artwork: pr.artwork })),
-      ...(p.references ?? []).map((r) => ({ name: r.name, artwork: r.artwork })),
+      ...p.characters.map((c) => ({ name: c.name, artwork: refArtworkDataUrl(p, c) })),
+      ...p.products.map((pr) => ({ name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+      ...(p.references ?? []).map((r) => ({ name: r.name, artwork: refArtworkDataUrl(p, r) })),
     ].filter((r): r is { name: string; artwork: string } => Boolean(r.name && r.artwork));
     const extras: { name: string; dataUrl: string }[] = [];
     const nameToken = new Map<string, string>();
@@ -1602,8 +1707,10 @@ function registerIpc() {
     p: Production,
     shot: ProductionShot,
     opts: VideoGenOptions,
-    emit: (m: string, l?: ProductionEvent["level"]) => void
-  ): Promise<void> {
+    emit: (m: string, l?: ProductionEvent["level"]) => void,
+    sourcePathOverride?: string,
+    extraRefs?: { name: string; dataUrl: string }[]
+  ): Promise<{ rel: string }> {
     const toolName = Object.keys(mcp.getTools()).find((n) => /^openart__/.test(n) && /generate.*video/i.test(n));
     if (!toolName) throw new Error("OpenArt MCP isn't connected (no video-generation tool found), so videos can't be generated in-app.");
     const rawName = toolName.replace(/^openart__/, "");
@@ -1614,15 +1721,20 @@ function registerIpc() {
       models = openArtModelChoices(raw);
     } catch { models = []; }
 
-    // References: the clicked frame first (occupies @image1), then any @[name]
-    // tags in the prompt, each uploaded as a visualReference.
+    // References: the source frame first (occupies @image1) — the shot's own
+    // artwork unless a node-graph pipe supplies another frame — then any extra
+    // references wired into the video node's reference sockets, then the
+    // @[name] tags in the prompt, each uploaded as a visualReference.
+    const sourceRel = sourcePathOverride?.trim() || shot.artwork;
+    if (!sourceRel) throw new Error("No source frame — pipe a frame into the video node or generate one first.");
     const refs: { name: string; dataUrl: string }[] = [];
-    if (shot.artwork) {
-      const buf = fs.readFileSync(assetPath(p, shot.artwork));
-      const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+    {
+      const buf = fs.readFileSync(assetPath(p, sourceRel));
+      const ext = (path.extname(sourceRel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
       const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
       refs.push({ name: `Shot ${shot.number} frame`, dataUrl: `data:${mime};base64,${buf.toString("base64")}` });
     }
+    refs.push(...(extraRefs ?? []));
     const { resolved, extras } = resolvePromptReferences(p, opts.prompt, refs.length);
     refs.push(...extras);
 
@@ -1692,8 +1804,9 @@ function registerIpc() {
     const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
     fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
     fs.writeFileSync(assetPath(p, rel), done.buf);
-    if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
-    shot.videoPath = rel;
+    // The caller owns what happens with the clip: the classic flow makes it
+    // the shot's videoPath; the node graph stores it on its generation node.
+    return { rel };
   }
 
   /** Per-production FIFO so concurrent Step-3 jobs (batch generation + AI
@@ -1914,6 +2027,9 @@ function registerIpc() {
     try {
       const raw = await mcp.callRaw("openart", "openart_model_list", {});
       const choices = openArtModelChoices(raw);
+      // Prefetch the video models' resolution/length options in the background
+      // so the video modal and node graph populate instantly on first open.
+      prewarmVideoOptions(choices);
       return choices.length > 1 ? choices : [{ id: "auto", displayName: "Auto", description: "Cascade picks the best image model for each run.", imageInput: false, cost: null }];
     } catch {
       return [{ id: "auto", displayName: "Auto", description: "Cascade picks the best image model for each run.", imageInput: false, cost: null }];
@@ -2067,7 +2183,11 @@ function registerIpc() {
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      await openArtVideoGen(p, shot, clean, emit);
+      const { rel } = await openArtVideoGen(p, shot, clean, emit);
+      if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
+      shot.videoPath = rel;
+      recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
+      hookVideoGenToOutput(shot);
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
     })
   );
@@ -2079,6 +2199,125 @@ function registerIpc() {
     if (!shot?.videoPath) return null;
     return `cascade-media://${p.meta.id}/${encodeURIComponent(shot.videoPath)}`;
   });
+
+  // Step 3 node graph: generate one frame from a custom prompt (the prompt
+  // composer's text) without touching the shot's artwork — the result is
+  // stored on the image generation node and cycled/applied from there.
+  ipcMain.handle("production:generateFrameNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string }) =>
+    runProductionStep(id, 3, "generating a frame (node graph)", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const prompt = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
+      if (!prompt) throw new Error("The prompt is empty — write something in the prompt node first.");
+      const gen = openArtImageGen(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined);
+      if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be generated in-app.");
+      // References: the @[name] tags the composer prompt actually cites.
+      const { resolved, extras } = resolvePromptReferences(p, prompt, 0);
+      emit(`Shot ${shot.number}: generating a node-graph frame…`);
+      const png = await gen(resolved, extras);
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
+      if (shot.graphOutputSource === "imagegen") shot.artwork = jpegRel;
+      emit(`Shot ${shot.number}: node frame ready.`, "done");
+    }, { needsApiKey: false })
+  );
+
+  // Step 3 node graph: generate one video clip for the video generation node.
+  // The animated source frame comes from the node's image pipe when one is
+  // connected, otherwise the shot's current frame. The clip is stored on the
+  // node; it becomes shot.videoPath only when the node is piped to the output.
+  ipcMain.handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[] }) =>
+    runProductionJob(id, "generating a video (node graph)", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const clean: VideoGenOptions = {
+        model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
+        resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
+        durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
+        prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
+      };
+      if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
+      // Additional references plugged into the video node's open sockets: only
+      // image refs (inline artwork) can be uploaded as visual references.
+      const extraRefs: { name: string; dataUrl: string }[] = [];
+      if (Array.isArray(opts?.refIds)) {
+        const pool = [
+          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
+          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+        ];
+        for (const rid of opts.refIds) {
+          const ref = pool.find((r) => r.id === rid && r.artwork);
+          if (ref?.artwork) extraRefs.push({ name: ref.name, dataUrl: ref.artwork });
+        }
+      }
+      const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
+      emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
+      const { rel } = await openArtVideoGen(p, shot, clean, emit, sourcePath, extraRefs);
+      recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
+      if (shot.graphOutputSource === "videogen") shot.videoPath = rel;
+      emit(`Shot ${shot.number}: node video ready.`, "done");
+    })
+  );
+
+  // Step 3 node graph: make a generation node's selected output the shot's
+  // primary output — artwork for frames, videoPath for clips.
+  ipcMain.handle("production:applyGraphOutput", (_e, id: string, shotId: string, opts: { kind?: string; path?: string }): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const rel = typeof opts?.path === "string" ? opts.path.trim() : "";
+    if (!rel) throw new Error("No output selected — generate something first.");
+    if (opts?.kind === "video") shot.videoPath = rel;
+    else shot.artwork = rel;
+    productions.saveProduction(p);
+    productionEmit(id, `Shot ${shot.number}: node output applied (${opts?.kind === "video" ? "video" : "frame"}).`);
+    return p;
+  });
+
+  /** Decode a `data:<mime>;base64,<payload>` URL into raw bytes. */
+  function dataUrlToBuffer(dataUrl: string): Buffer | null {
+    const comma = dataUrl.indexOf(",");
+    if (comma === -1) return null;
+    try {
+      return Buffer.from(dataUrl.slice(comma + 1), "base64");
+    } catch {
+      return null;
+    }
+  }
+
+  // Step 3 node graph: apply a reference piped into the frame output as the
+  // shot's primary output. Image refs (inline data-URL artwork) are written to
+  // the boards dir like any other frame; video refs become the shot's videoPath.
+  ipcMain.handle("production:applyGraphRefOutput", (_e, id: string, shotId: string, refId: string): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const ref = [
+      ...p.characters.map((c) => ({ id: c.id, imagePath: c.imagePath, artwork: c.artwork, media: undefined as string | undefined, mediaPath: undefined as string | undefined })),
+      ...p.products.map((pr) => ({ id: pr.id, imagePath: pr.imagePath, artwork: pr.artwork, media: undefined as string | undefined, mediaPath: undefined as string | undefined })),
+      ...(p.references ?? []).map((r) => ({ id: r.id, imagePath: r.imagePath, artwork: r.artwork, media: r.media, mediaPath: r.mediaPath })),
+    ].find((r) => r.id === refId);
+    if (!ref) throw new Error("Reference not found.");
+    if (ref.media === "video" && ref.mediaPath) {
+      shot.videoPath = ref.mediaPath;
+      productions.saveProduction(p);
+      productionEmit(id, `Shot ${shot.number}: reference video applied to the output.`, "done");
+      return p;
+    }
+    // Image refs live on disk (imagePath) — read the bytes (legacy inline data
+    // URLs fall back).
+    const bytes = ref.imagePath ? (() => { try { return fs.readFileSync(assetPath(p, ref.imagePath!)); } catch { return null; } })() : ref.artwork ? dataUrlToBuffer(ref.artwork) : null;
+    if (!bytes || !bytes.length) throw new Error("This reference has no usable image — only image and video references can feed the output.");
+    const { jpegRel } = writeBoardFrame(p, shot, bytes, "png");
+    recordBoardArtwork(shot, jpegRel);
+    productions.saveProduction(p);
+    productionEmit(id, `Shot ${shot.number}: reference image applied to the output.`, "done");
+    return p;
+  });
+
 
   ipcMain.handle("production:removeVideo", (_e, id: string, shotId: string): Production => {
     const p = productions.loadProduction(id);
@@ -2094,55 +2333,15 @@ function registerIpc() {
     return p;
   });
 
-  // Per-model video options for the generation modal: read the model's live
-  // form schema and pull out the resolution / duration choices it actually
-  // accepts (they differ per model). Null when the form can't be read — the
-  // modal then falls back to a generic set.
-  ipcMain.handle("production:videoModelOptions", async (_e, modelId: string): Promise<VideoModelOptions | null> => {
-    const raw = (n: string) => n.replace(/^openart__/, "");
-    const tools = Object.keys(mcp.getTools()).map(raw);
-    const formRaw = tools.find((n) => /^openart_model_form_get$/.test(n));
-    if (!formRaw) return null;
-    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
-    const out: VideoModelOptions = { resolutions: [], durations: [] };
-    for (const mode of ["video2video", "text2video"]) {
-      let props: Record<string, unknown> | null = null;
-      try {
-        props = parseModelFormProperties(await mcp.callRaw("openart", formRaw, { model: modelId, mode }));
-      } catch { continue; }
-      if (!props) continue;
-      for (const key of Object.keys(props)) {
-        const p = props[key] as { type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown } | undefined;
-        if (!p) continue;
-        if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
-          for (const v of p.enum) {
-            const s = String(v).trim();
-            if (/^\d{3,4}p$/i.test(s) || /^\d{3,4}$/.test(s) || /^\d+\s*[x×]\s*\d+$/i.test(s)) out.resolutions.push(s);
-          }
-        }
-        if (/duration|length|seconds|clip|frames|time/i.test(key)) {
-          if (Array.isArray(p.enum)) {
-            for (const v of p.enum) {
-              const n = Number(String(v).replace(/[^0-9.]/g, ""));
-              if (Number.isFinite(n) && n > 0 && n <= 120) out.durations.push(Math.round(n));
-            }
-          } else if (p.type === "integer" || p.type === "number") {
-            const min = Number(p.minimum) > 0 ? Number(p.minimum) : 1;
-            const max = Number(p.maximum) > 0 ? Number(p.maximum) : min + 15;
-            for (let n = Math.ceil(min); n <= Math.floor(max) && n <= 120; n++) out.durations.push(n);
-          }
-        }
-      }
-      if (out.resolutions.length || out.durations.length) break;
-    }
-    out.resolutions = Array.from(new Set(out.resolutions));
-    out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
-    if (out.durations.length > 10) {
-      // Keep a manageable list when a model exposes a wide numeric range.
-      const step = Math.ceil(out.durations.length / 10);
-      out.durations = out.durations.filter((_, i) => i % step === 0);
-    }
-    return out.resolutions.length || out.durations.length ? out : null;
+  // Per-model video options for the generation modal/node: read the model's
+  // live form schema and pull out the resolution / duration choices it
+  // actually accepts. Mode-aware — image-to-video and text-to-video forms
+  // declare different option sets, so the caller says which one it needs.
+  // Cached per model+mode (warmed when the OpenArt models are listed) so
+  // repeated lookups are instant. Null when the form can't be read — the
+  // caller falls back to a generic set.
+  ipcMain.handle("production:videoModelOptions", async (_e, modelId: string, withImage?: boolean): Promise<VideoModelOptions | null> => {
+    return resolveVideoOptions(String(modelId ?? ""), withImage === true);
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a
@@ -2169,7 +2368,11 @@ function registerIpc() {
         [{ name: "Current frame", dataUrl }]
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordBoardArtwork(shot, jpegRel);
+      recordGraphImageGen(shot, jpegRel, text, modelId ?? "auto");
+      // The storyboard frame comes from the output pipe: hook the image node
+      // in (auto-apply when unpiped or already the feed; never displace a
+      // deliberate videogen/ref pipe).
+      hookImageGenToOutput(shot);
       productionEmit(id, `Shot ${shot.number}: frame edited.`);
     }, { needsApiKey: false })
   );
@@ -2383,6 +2586,67 @@ function registerIpc() {
     productions.saveProduction(p);
     productionEmit(id, `Imported music → ${rel}.`);
     return p;
+  });
+
+  // Step 3 node graph: save a dropped video/audio file into the production's
+  // referencesDir (on disk — media never rides the JSON as a data URL).
+  // Preserves the original filename; collision-handled like the music import.
+  ipcMain.handle("production:addReferenceMedia", (_e, id: string, fileName: string, mime: string, bytes: ArrayBuffer) => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const kind = mime.startsWith("video/") ? "video" as const : mime.startsWith("audio/") ? "audio" as const : null;
+    if (!kind) throw new Error(`Unsupported reference media type: ${mime || "unknown"}`);
+    const base = path.basename(String(fileName || "clip")).trim() || "clip";
+    const parsed = path.parse(base);
+    const dir = p.assets.referencesDir;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    let rel = `${dir}/${base}`;
+    let i = 2;
+    while (fs.existsSync(assetPath(p, rel))) {
+      rel = `${dir}/${parsed.name} (${i})${parsed.ext}`;
+      i++;
+    }
+    fs.writeFileSync(assetPath(p, rel), Buffer.from(bytes));
+    productionEmit(id, `Added ${kind} reference → ${rel}.`);
+    return { path: rel, kind };
+  });
+
+  // Step 2/3: save a reference image (inline data URL) into the production's
+  // referencesDir on disk and return its workspace-relative path. Image
+  // references stop riding the JSON as data URLs; the file keeps the original
+  // extension (derived from the MIME) and is collision-handled like media.
+  ipcMain.handle("production:addReferenceImage", (_e, id: string, fileName: string, dataUrl: string): { path: string } | null => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) throw new Error("Not a data-URL image.");
+    const comma = dataUrl.indexOf(",");
+    if (comma === -1) throw new Error("Not a data-URL image.");
+    const mime = dataUrl.slice(5, comma).split(";")[0];
+    const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+    let buf: Buffer;
+    try { buf = Buffer.from(dataUrl.slice(comma + 1), "base64"); } catch { throw new Error("Couldn't decode the image."); }
+    if (!buf.length) throw new Error("The image is empty.");
+    const base = path.basename(String(fileName ?? "reference")).replace(/\.[^.]+$/, "").trim() || "reference";
+    const dir = p.assets.referencesDir;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    let rel = `${dir}/${base}.${ext}`;
+    let i = 2;
+    while (fs.existsSync(assetPath(p, rel))) {
+      rel = `${dir}/${base} (${i}).${ext}`;
+      i++;
+    }
+    fs.writeFileSync(assetPath(p, rel), buf);
+    productionEmit(id, `Added image reference → ${rel}.`);
+    return { path: rel };
+  });
+
+  // Delete a reference's on-disk file (image or media) when the reference is
+  // removed, so referencesDir doesn't accumulate orphans.
+  ipcMain.handle("production:removeReferenceFile", (_e, id: string, rel: string): void => {
+    const p = productions.loadProduction(id);
+    if (!p) return;
+    if (typeof rel !== "string" || !rel) return;
+    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already gone */ }
   });
 
   // Step 4: read the imported music file as a data URL (for the inline

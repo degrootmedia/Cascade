@@ -7,7 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout } from "../../../shared/ipc.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, addRefTag, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
-import { TriplePrompt, parsePromptBoxes, composePromptBoxes } from "./TriplePrompt.js";
+import { TriplePrompt, parsePromptBoxes, composePromptBoxes, type PromptContentHandle } from "./TriplePrompt.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
@@ -3301,10 +3301,10 @@ function ReferencePromptEditor({ value, includeBrand, onChange, references, clas
   resizable?: boolean;
   autoFocus?: boolean;
   placeholder: string;
-  onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
 }) {
-  const contentRef = useRef<HTMLTextAreaElement>(null);
+  const contentRef = useRef<PromptContentHandle>(null);
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
@@ -3320,12 +3320,12 @@ function ReferencePromptEditor({ value, includeBrand, onChange, references, clas
     const nextQuery = open >= 0 && !/[\s\[\]]/.test(tail) ? tail : null;
     setQuery(nextQuery);
     if (nextQuery !== null && contentRef.current) {
-      const rect = contentRef.current.getBoundingClientRect();
-      const line = before.slice(0, open).split("\n").length - 1;
-      const column = before.slice(before.lastIndexOf("\n") + 1).length;
-      const left = Math.min(rect.left + column * 8, window.innerWidth - 220);
-      const cursorBottom = rect.top + Math.min(rect.height - 4, 8 + line * 21 + 21);
-      setMenuPos({ left: Math.max(8, left), top: Math.min(cursorBottom, window.innerHeight - 220) });
+      // Anchor the menu to the actual caret (accurate with variable-width tag
+      // chips), falling back to the box's top-left corner.
+      const rect = contentRef.current.caretRect?.() ?? contentRef.current.getBoundingClientRect();
+      const left = Math.min(rect.left, window.innerWidth - 220);
+      const top = Math.min(rect.bottom + 4, window.innerHeight - 220);
+      setMenuPos({ left: Math.max(8, left), top: Math.max(8, top) });
     }
     setSelected(0);
   }
@@ -3342,7 +3342,7 @@ function ReferencePromptEditor({ value, includeBrand, onChange, references, clas
     setQuery(null);
     requestAnimationFrame(() => { el.focus(); el.setSelectionRange(nextCaret, nextCaret); });
   }
-  function keyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+  function keyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (query !== null && matches.length) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSelected((n) => (n + 1) % matches.length); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); setSelected((n) => (n + matches.length - 1) % matches.length); return; }
@@ -3356,7 +3356,6 @@ function ReferencePromptEditor({ value, includeBrand, onChange, references, clas
       <TriplePrompt
         contentRef={contentRef}
         className={className}
-        contentRows={rows}
         sideRows={2}
         resizable={resizable}
         value={value}
@@ -3367,7 +3366,7 @@ function ReferencePromptEditor({ value, includeBrand, onChange, references, clas
         onContentKeyDown={keyDown}
         onFocus={onFocus}
         onBlur={() => window.setTimeout(() => {
-          if (document.activeElement === contentRef.current || query === null) return;
+          if (contentRef.current?.isActive() || query === null) return;
           const caret = contentRef.current?.selectionStart ?? content.length;
           const before = content.slice(0, caret);
           const open = before.lastIndexOf("@");

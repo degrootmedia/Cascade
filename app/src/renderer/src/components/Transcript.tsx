@@ -29,7 +29,7 @@ function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(html, { FORBID_TAGS: ["style", "form", "input"], FORBID_ATTR: ["style"] });
 }
 
-export function Transcript({ items }: { items: DisplayItem[] }) {
+export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; pureChat?: boolean }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -40,7 +40,11 @@ export function Transcript({ items }: { items: DisplayItem[] }) {
       {items.length === 0 && (
         <div className="empty">
           <h2>Cascade</h2>
-          <p>Your AI agent for local files. Pick a workspace, then ask it to create, edit, or organize.</p>
+          {pureChat ? (
+            <p>Plain chat — no file access. Pick a folder in the header to let Cascade create, edit, or organize files.</p>
+          ) : (
+            <p>Your AI agent for local files. Pick a workspace, then ask it to create, edit, or organize.</p>
+          )}
         </div>
       )}
       {groupToolRuns(items).map((entry, i) => {

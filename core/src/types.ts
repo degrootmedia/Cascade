@@ -94,8 +94,11 @@ export interface AgentConfig {
   apiKey: string;
   model: string;
   baseUrl?: string;
-  workspaceRoot: string;
+  /** Folder the agent may touch; omitted in pure-chat mode. */
+  workspaceRoot?: string;
   maxIterations?: number;
+  /** Pure chat: no tools, no workspace, minimal prompt — web-chat-like. */
+  pureChat?: boolean;
   /** Agent persona prompt injected before the Cascade base prompt. */
   agentPrompt?: string;
   /** Skills advertised in the system prompt; content is fetched via a read_skill tool. */

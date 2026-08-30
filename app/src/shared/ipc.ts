@@ -422,6 +422,10 @@ export interface CascadeApi {
   pickWorkspace(): Promise<string | null>; // default folder (Settings)
   pickSessionWorkspace(): Promise<string | null>; // current chat's folder
   setSessionWorkspace(dir: string): Promise<void>; // set current chat's folder (from a recent)
+  /** Switch the current chat to pure chat (no folder, no tools). */
+  setSessionWorkspaceNone(): Promise<void>;
+  /** Clear the default folder for new chats (Settings → None). */
+  clearDefaultWorkspace(): Promise<void>;
   getRecentWorkspaces(): Promise<string[]>; // recent folders
   getCurrentWorkspace(): Promise<string | null>;
   getSettings(): Promise<SettingsView>;

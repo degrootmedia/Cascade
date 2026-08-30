@@ -15,6 +15,8 @@ export interface SessionFile {
   updatedAt: string;
   /** Working folder for this chat; null falls back to the default in settings. */
   workspace: string | null;
+  /** Pure chat: no workspace, no tools. When true, `workspace` is ignored. */
+  pureChat: boolean;
   /** Agent bound to this chat; null = Default (no agent). */
   agentId: string | null;
   history: unknown[]; // core ChatMessage[]
@@ -68,6 +70,10 @@ export function saveSession(s: SessionFile): void {
   s.updatedAt = new Date().toISOString();
   if (!Array.isArray(s.mentionImages)) s.mentionImages = [];
   if (!("agentId" in s) || s.agentId === undefined) (s as SessionFile).agentId = null;
+  if (typeof (s as { pureChat?: unknown }).pureChat !== "boolean") {
+    // Back-fill legacy sessions: pure chat unless a workspace was bound.
+    (s as SessionFile).pureChat = !s.workspace;
+  }
   fs.writeFileSync(path.join(sessionsDir(), `${s.id}.json`), JSON.stringify(s), "utf8");
 }
 
@@ -79,6 +85,7 @@ export function newSessionFile(workspace: string | null = null, agentId: string 
     createdAt: now,
     updatedAt: now,
     workspace,
+    pureChat: !workspace, // None by default unless a default folder is configured
     agentId: agentId ?? null,
     history: [],
     display: [],

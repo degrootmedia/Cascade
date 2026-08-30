@@ -138,8 +138,9 @@ function broadcastSessions(): void {
   win?.webContents.send("sessions:updated", sessions.listSessions());
 }
 
-/** Working folder for a given chat: per-session first, default second. */
+/** Working folder for a given chat: pure chat wins, then per-session, then default. */
 function workspaceFor(e: LiveChat | null): string | null {
+  if (e?.session.pureChat) return null;
   return e?.session.workspace ?? settings.getWorkspace();
 }
 
@@ -193,10 +194,26 @@ function filterTools(
 /** Create (lazily) the Agent that streams a specific chat, bound to its entry. */
 function ensureAgent(entry: LiveChat): Agent {
   const apiKey = settings.getApiKey();
-  const workspace = workspaceFor(entry);
   if (!apiKey) throw new Error("NO_API_KEY");
-  if (!workspace) throw new Error("NO_WORKSPACE");
+  const workspace = workspaceFor(entry);
   if (!entry.agent) {
+    // Pure chat: no folder selected → web-chat-like mode with no tools at all.
+    if (!workspace) {
+      const pureAgent = new Agent({
+        apiKey,
+        model: settings.getModel(),
+        pureChat: true,
+        requestApproval: (req) => requestApprovalFromUser(req),
+        onEvent: (e) => {
+          if (entry.agent === pureAgent) {
+            win?.webContents.send("agent:event", { sessionId: entry.session.id, event: e as AgentEventIpc });
+          }
+        },
+      });
+      if (entry.session.history.length) pureAgent.loadHistory(entry.session.history as ChatMessage[]);
+      entry.agent = pureAgent;
+      return pureAgent;
+    }
     const agentId = (entry.session.agentId as string | null) ?? null;
     const agentMeta = agentId ? agents.getAgentMeta(agentId) : null;
     const agentPrompt = agentId ? agents.getAgentPrompt(agentId) : "";
@@ -521,7 +538,10 @@ function registerIpc() {
     if (res.canceled || !res.filePaths[0]) return null;
     const entry = cur();
     const dir = res.filePaths[0];
-    if (entry) entry.session.workspace = dir;
+    if (entry) {
+      entry.session.workspace = dir;
+      entry.session.pureChat = false;
+    }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
     if (!settings.getWorkspace()) settings.setWorkspace(dir); // first folder becomes the default
@@ -536,7 +556,10 @@ function registerIpc() {
   ipcMain.handle("workspace:setSession", (_e, dir: string) => {
     if (typeof dir !== "string" || !dir) return;
     const entry = cur();
-    if (entry) entry.session.workspace = dir;
+    if (entry) {
+      entry.session.workspace = dir;
+      entry.session.pureChat = false;
+    }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
     if (!settings.getWorkspace()) settings.setWorkspace(dir);
@@ -544,6 +567,24 @@ function registerIpc() {
       entry.agent?.stop();
       entry.agent = null;
     }
+  });
+
+  // Switch the current chat to pure-chat mode (no folder, no tools).
+  ipcMain.handle("workspace:setSessionNone", () => {
+    const entry = cur();
+    if (!entry) return;
+    entry.session.workspace = null;
+    entry.session.pureChat = true;
+    entry.session.agentId = null; // agents require a workspace — drop the binding
+    sessions.saveSession(entry.session);
+    entry.agent?.stop();
+    entry.agent = null; // rebuild as a pure-chat agent next message
+  });
+
+  // Clear the default folder for new chats (Settings → None).
+  ipcMain.handle("settings:clearWorkspace", () => {
+    settings.setWorkspace(null);
+    resetAllAgents();
   });
 
   // Recent folders for the header dropdown.

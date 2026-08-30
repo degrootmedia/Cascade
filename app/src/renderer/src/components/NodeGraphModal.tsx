@@ -266,7 +266,6 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
       <div className="prod-graph-node-title">Prompt</div>
       <TriplePrompt
         className="prod-graph-composer-text nodrag nowheel"
-        contentRows={12}
         sideRows={3}
         resizable
         value={data.value}

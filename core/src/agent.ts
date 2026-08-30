@@ -7,7 +7,7 @@
  */
 import { GabClient, friendlyApiError } from "./gab.js";
 import { TOOLS } from "./tools.js";
-import { systemPrompt } from "./prompts.js";
+import { systemPrompt, pureChatSystemPrompt } from "./prompts.js";
 import { loadWorkspaceInstructions, resolveSafe, WorkspaceError } from "./workspace.js";
 import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
@@ -43,23 +43,26 @@ export class Agent {
 
   constructor(private config: AgentConfig) {
     this.client = new GabClient(config.apiKey, config.baseUrl);
-    this.tools = { ...TOOLS, ...config.extraTools };
-    this.lazyTools = config.lazyTools ?? {};
+    const pureChat = config.pureChat === true;
+    this.tools = pureChat ? {} : { ...TOOLS, ...config.extraTools };
+    this.lazyTools = pureChat ? {} : (config.lazyTools ?? {});
     this.toolDefinitions = Object.values(this.tools).map((t) => t.definition);
     const lazyNote =
-      config.lazyGroupNotes?.length && Object.keys(this.lazyTools).length
+      !pureChat && config.lazyGroupNotes?.length && Object.keys(this.lazyTools).length
         ? `\n\nOptional tools — kept out of the normal request to stay lean. You can use them only after the user explicitly asks by name (for example, "use ${config.lazyGroupNotes[0].name}" or "with ${config.lazyGroupNotes[0].name}"). Available on request:\n` +
           config.lazyGroupNotes.map((g) => `- ${g.name}: ${g.hint}`).join("\n")
         : "";
     this.messages.push({
       role: "system",
-      content: systemPrompt(
-        config.workspaceRoot,
-        config.skills,
-        loadWorkspaceInstructions(config.workspaceRoot),
-        lazyNote,
-        config.agentPrompt
-      ),
+      content: pureChat
+        ? pureChatSystemPrompt()
+        : systemPrompt(
+            config.workspaceRoot ?? "",
+            config.skills,
+            config.workspaceRoot ? loadWorkspaceInstructions(config.workspaceRoot) : "",
+            lazyNote,
+            config.agentPrompt
+          ),
     });
   }
 
@@ -219,6 +222,7 @@ export class Agent {
     requestApproval: AgentConfig["requestApproval"]
   ): Promise<string> {
     const { onEvent, workspaceRoot } = this.config;
+    const ws = workspaceRoot ?? ""; // pure-chat agents never reach here (no tools)
     const spec = this.tools[call.function.name];
     if (!spec) return `ERROR: unknown tool ${call.function.name}`;
 
@@ -239,7 +243,7 @@ export class Agent {
       let req;
       try {
         req = spec.describe
-          ? spec.describe(args, workspaceRoot)
+          ? spec.describe(args, ws)
           : {
               tool: call.function.name,
               summary: `Call ${call.function.name}`,
@@ -267,7 +271,7 @@ export class Agent {
       const rel = args.path;
       if (typeof rel === "string") {
         try {
-          this.journal.snapshotFile(resolveSafe(workspaceRoot, rel));
+          this.journal.snapshotFile(resolveSafe(ws, rel));
         } catch {
           // Path escapes/errors will surface from the tool run itself.
         }
@@ -278,7 +282,7 @@ export class Agent {
     let images: string[] | undefined;
     let isError = false;
     try {
-      const out = await spec.run(args, workspaceRoot);
+      const out = await spec.run(args, ws);
       result = typeof out === "string" ? out : out.text;
       images = typeof out === "string" ? undefined : out.images;
       isError = result.startsWith("ERROR");

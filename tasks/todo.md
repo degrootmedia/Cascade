@@ -1,3 +1,39 @@
+# Draggable reference-tag chips in the prompt text boxes
+
+The `@[Name]` reference tags in the prompt content box are now little **purple chips**
+(`#a78bfa`, matching the node graph's reference color) instead of plain text, and they can be
+**dragged to anywhere in the paragraph**.
+
+## What changed
+- New `PromptContentEditor.tsx`: a contenteditable replacement for the content `<textarea>`.
+  The plain text stays the single source of truth — chips are a live view, and every edit
+  (typing, paste, chip drag) serializes back to text and fires the normal prompt-save flow.
+  `@[Name]` chips render as non-editable `inline-block` spans; dragging one moves the tag to
+  the drop caret (native drag events + `caretRangeFromPoint`).
+- `TriplePrompt` uses it for the content box (Style/Brand boxes stay textareas — tags only
+  live in content). Exposes a textarea-compatible handle (`selectionStart/End`,
+  `setSelectionRange`, `caretRect`, `isActive`) so the existing `@` autocomplete, caret math,
+  Enter handling, and blur cleanup keep working. `onContentKeyDown` is now `HTMLDivElement`.
+- `ReferencePromptEditor`: `contentRef` typed to the new handle; the autocomplete menu is now
+  anchored to the actual caret rect (accurate with variable-width chips) instead of the old
+  `column * 8` heuristic; blur cleanup uses `isActive()`.
+- CSS: `.prompt-tag-chip` (purple, `cursor: grab`, dragging state), `.prompt-content-editor`
+  (`white-space: pre-wrap`, `overflow-y: auto`, `:empty::before` placeholder), and a
+  min-height for the node graph composer's box (replaces the old `rows`-driven height).
+- The `contentRows` prop was removed (textareas were the only consumers).
+
+## Verify
+- [x] npm run typecheck + build
+- [ ] Manual: type a prompt with `@[Name]`, see purple chips; drag a chip to reorder; type `@`
+      and confirm the autocomplete + blur cleanup still behave; composer box edits/saves.
+
+## Notes
+- Chips only appear in the Content box (Style/Brand never contain tags).
+- Dragging a chip within the box moves it; dragging it out and dropping on the canvas is a
+  no-op (the tag stays put).
+
+---
+
 # References on disk + organized boards + video refs viewable + no design folder
 
 User requests (4 items):

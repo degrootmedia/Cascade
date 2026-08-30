@@ -1,5 +1,11 @@
 import type { SkillMeta } from "./types.js";
 
+/** Minimal prompt for pure-chat mode (no tools, no workspace). */
+export function pureChatSystemPrompt(): string {
+  return `You are Cascade, a helpful AI assistant. Answer the user's questions directly and conversationally. You do not have access to the user's files, folders, or computer — this is a plain chat, so just respond to what the user asks.
+The operating system is ${process.platform === "win32" ? "Windows" : process.platform}.`;
+}
+
 export function systemPrompt(
   workspaceRoot: string,
   skills?: SkillMeta[],

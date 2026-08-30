@@ -6,15 +6,20 @@ export function FolderPicker({
   current,
   recents,
   instructions,
+  pureChat,
   onPick,
   onSelect,
+  onNone,
   onOpenInstructions,
 }: {
   current: string | null;
   recents: string[];
   instructions: WorkspaceInstructionsInfo | null;
+  /** Pure chat (no folder) — shows the "None" chip and a chat-only option. */
+  pureChat: boolean;
   onPick: () => void;
   onSelect: (dir: string) => void;
+  onNone: () => void;
   onOpenInstructions: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -44,13 +49,13 @@ export function FolderPicker({
     <div className="folder-picker" ref={ref}>
       <button
         className="folder-chip"
-        title={current ?? "Choose a working folder for this chat"}
+        title={pureChat ? "Chat only — no file access. Pick a folder to enable the agent." : (current ?? "Choose a working folder for this chat")}
         onClick={() => setOpen(!open)}
       >
-        📁 {currentName ?? "Choose folder…"}
+        {pureChat ? "💬 Chat only" : `📁 ${currentName ?? "Choose folder…"}`}
         <span className="folder-caret">▾</span>
       </button>
-      {instructions?.active && (
+      {!pureChat && instructions?.active && (
         <button
           className="instructions-badge"
           title={instructions.file ?? "Folder instructions (CASCADE.md)"}
@@ -61,6 +66,17 @@ export function FolderPicker({
       )}
       {open && (
         <div className="folder-menu">
+          <button
+            className={`folder-option${pureChat ? " current" : ""}`}
+            onClick={() => {
+              onNone();
+              setOpen(false);
+            }}
+            title="No folder, no tools — plain chat"
+          >
+            <span className="folder-label">None — chat only</span>
+            <span className="folder-path">No file access; replies like a plain chat</span>
+          </button>
           {
             // Only show the current folder row if it's selected but not in recents.
             current && (

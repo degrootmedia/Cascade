@@ -111,6 +111,8 @@ export function App() {
   const currentModel = settings?.model ?? "arya";
   const effectiveModel = activeMeta?.model ?? currentModel;
   const modelInfo = models.find((m) => m.id === effectiveModel);
+  /** Pure chat = no folder selected for this chat. */
+  const pureChat = !workspace;
 
   const refreshAgents = useCallback(async () => {
     try { setAgents(await window.cascade.listAgents()); } catch {}
@@ -153,9 +155,9 @@ export function App() {
     void refreshMeta();
   }, [refreshMeta]);
 
-  // First-run: open settings if no key or workspace yet.
+  // First-run: open settings if there's no API key yet (workspace is optional — pure chat works without one).
   useEffect(() => {
-    if (settings && (!settings.hasApiKey || !settings.workspace)) setShowSettings(true);
+    if (settings && !settings.hasApiKey) setShowSettings(true);
   }, [settings]);
 
   // File → Settings… from the native menu opens the settings panel.
@@ -231,12 +233,10 @@ export function App() {
       const msg = String(err);
       const friendly = msg.includes("NO_API_KEY")
         ? "Add your Gab.ai API key in Settings first."
-        : msg.includes("NO_WORKSPACE")
-          ? "Pick a workspace folder in Settings first."
-          : msg;
+        : msg;
       updateTranscript(id, (prev) => [...prev, { kind: "notice", text: friendly }]);
       setBusyIds((p) => ({ ...p, [id]: false }));
-      if (msg.includes("NO_API_KEY") || msg.includes("NO_WORKSPACE")) setShowSettings(true);
+      if (msg.includes("NO_API_KEY")) setShowSettings(true);
     }
   }
 
@@ -302,6 +302,7 @@ export function App() {
       setWorkspace(dir);
       void window.cascade.getRecentWorkspaces().then(setRecents);
       void window.cascade.getWorkspaceInstructions().then(setInstructions);
+      void refreshActiveAgent(currentId);
     }
   }
 
@@ -310,6 +311,14 @@ export function App() {
     setWorkspace(dir);
     void window.cascade.getRecentWorkspaces().then(setRecents);
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
+    void refreshActiveAgent(currentId);
+  }
+
+  async function clearChatFolder() {
+    await window.cascade.setSessionWorkspaceNone();
+    setWorkspace(null);
+    void window.cascade.getWorkspaceInstructions().then(setInstructions);
+    void refreshActiveAgent(currentId);
   }
 
   return (
@@ -350,20 +359,24 @@ export function App() {
           <div className="sidebar-resizer" onMouseDown={startSidebarResize} title="Drag to resize chat history panel" />
           <main className="chat">
         <div className="chat-header">
-          <AgentPicker agents={agents} activeAgentId={activeAgentId} activeMeta={activeMeta} onChange={(id) => { if (!currentId) return; void window.cascade.setSessionAgent(currentId, id); }} onManage={() => setShowAgents(true)} />
+          {!pureChat && (
+            <AgentPicker agents={agents} activeAgentId={activeAgentId} activeMeta={activeMeta} onChange={(id) => { if (!currentId) return; void window.cascade.setSessionAgent(currentId, id); }} onManage={() => setShowAgents(true)} />
+          )}
           <FolderPicker
             current={workspace}
             recents={recents}
             instructions={instructions}
+            pureChat={pureChat}
             onPick={() => void pickChatFolder()}
             onSelect={(dir) => void selectRecentFolder(dir)}
+            onNone={() => void clearChatFolder()}
             onOpenInstructions={() => {
               void window.cascade.openWorkspaceInstructions();
               void window.cascade.getWorkspaceInstructions().then(setInstructions);
             }}
           />
         </div>
-        <Transcript items={items} />
+        <Transcript items={items} pureChat={pureChat} />
         {images.length > 0 && (
           <div className="attachments">
             {images.map((src, i) => (
@@ -404,7 +417,7 @@ export function App() {
             ref={textareaRef}
             maxHeight={Math.round(window.innerHeight * 0.4)}
             value={input}
-            placeholder={busy ? "Working…" : "Ask Cascade to do something in your workspace…"}
+            placeholder={busy ? "Working…" : pureChat ? "Ask Cascade anything…" : "Ask Cascade to do something in your workspace…"}
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -433,14 +446,16 @@ export function App() {
           )}
         </div>
         <div className="composer-footer">
-          <button
-            className="undo"
-            title="Restore files changed by the last response"
-            disabled={busy}
-            onClick={() => void undoLast()}
-          >
-            ↩ Undo
-          </button>
+          {!pureChat && (
+            <button
+              className="undo"
+              title="Restore files changed by the last response"
+              disabled={busy}
+              onClick={() => void undoLast()}
+            >
+              ↩ Undo
+            </button>
+          )}
         </div>
           </main>
         </div>

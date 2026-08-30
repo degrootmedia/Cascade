@@ -2944,6 +2944,41 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-prompt-box { width: 100%; flex: 1 1 auto; min-height: 0; resize: none; }
 .prod-prompt-box.side { flex: 0 0 auto; }
 .prod-prompt-box:focus { outline: none; border-color: var(--accent); }
+/* The content box is a contenteditable (prompt tags render as chips). */
+.prompt-content-editor {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-y: auto;
+  cursor: text;
+  outline: none;
+}
+.prompt-content-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-dim);
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+.prompt-content-editor:focus { outline: none; border-color: var(--accent); }
+.prod-graph-composer .prompt-content-editor { min-height: 180px; }
+/* Draggable @[Name] reference chips — purple to match the node graph's
+   reference color. */
+.prompt-tag-chip {
+  display: inline-block;
+  padding: 1px 5px;
+  margin: 0 1px;
+  border-radius: 5px;
+  background: color-mix(in srgb, #a78bfa 20%, transparent);
+  color: #a78bfa;
+  border: 1px solid color-mix(in srgb, #a78bfa 50%, transparent);
+  font-weight: 600;
+  cursor: grab;
+  user-select: none;
+  white-space: nowrap;
+  vertical-align: baseline;
+  line-height: 1.4;
+}
+.prompt-tag-chip:active { cursor: grabbing; }
+.prompt-tag-chip.dragging { opacity: 0.55; box-shadow: 0 0 0 2px color-mix(in srgb, #a78bfa 35%, transparent); }
 .prod-prompt-sidepanel .prod-prompt-triple { flex: 1; min-height: 0; }
 .prod-prompt-sidepanel .prod-prompt-box.content { min-height: 96px; }
 /* Drag divider between stacked prompt boxes: visible grab bar + cursor. */

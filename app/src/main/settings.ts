@@ -89,7 +89,7 @@ export function getWorkspace(): string | null {
   return load().workspace;
 }
 
-export function setWorkspace(dir: string): void {
+export function setWorkspace(dir: string | null): void {
   load().workspace = dir;
   save();
 }

@@ -58,7 +58,7 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
     void window.cascade.setAccent(color);
   }
 
-  const ready = hasKey && workspace;
+  const ready = hasKey;
 
   return (
     <div className="modal-backdrop">
@@ -86,12 +86,20 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
 
         <label>Default folder for new chats</label>
         <div className="row">
-          <span className="path">{workspace ?? "No folder selected"}</span>
+          <span className="path">{workspace ?? "None — pure chat"}</span>
           <button onClick={() => void pickWorkspace()}>Choose…</button>
+          <button
+            onClick={() => {
+              setWorkspace(null);
+              void window.cascade.clearDefaultWorkspace();
+            }}
+          >
+            None
+          </button>
         </div>
         <p className="hint">
-          Each chat can use its own folder — click the 📁 chip above the conversation to change it. Cascade can
-          only read and change files inside the chat's folder.
+          "None" makes new chats plain chat (no file access). Each chat can use its own folder — click the chip above
+          the conversation to change it. Cascade can only read and change files inside the chat's folder.
         </p>
 
         <label>Model</label>
@@ -148,7 +156,7 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
 
         <div className="modal-actions">
           <button className="primary" onClick={onClose} disabled={!ready}>
-            {ready ? "Done" : "Add key and workspace to continue"}
+            {ready ? "Done" : "Add your API key to continue"}
           </button>
         </div>
       </div>

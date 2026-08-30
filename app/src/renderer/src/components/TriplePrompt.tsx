@@ -6,6 +6,9 @@
  * stored separately.
  */
 import { useEffect, useRef, useState } from "react";
+import { PromptContentEditor, type PromptContentHandle } from "./PromptContentEditor.js";
+
+export type { PromptContentHandle } from "./PromptContentEditor.js";
 
 export interface PromptBoxes {
   style: string;
@@ -41,23 +44,22 @@ export function composePromptBoxes(b: PromptBoxes): string {
   return paras.join("\n\n");
 }
 
-export function TriplePrompt({ value, includeBrand, className, contentRows, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur }: {
   value: string;
   /** When false the Brand box is hidden (the brand checkbox/node owns existence). */
   includeBrand: boolean;
   /** Applied to all three boxes so they share the surface styling. */
   className?: string;
-  contentRows?: number;
   sideRows?: number;
   /** Show drag dividers between the boxes that resize the two neighbors. */
   resizable?: boolean;
   placeholder?: string;
-  /** Ref to the content textarea (autocomplete caret math). */
-  contentRef?: { current: HTMLTextAreaElement | null };
+  /** Ref to the content editor (autocomplete caret math). */
+  contentRef?: { current: PromptContentHandle | null };
   onChange: (value: string) => void;
   /** Fires with the raw content-box text on every content edit. */
   onContentChange?: (content: string) => void;
-  onContentKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onContentKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
 }) {
@@ -135,13 +137,12 @@ export function TriplePrompt({ value, includeBrand, className, contentRows, side
         </>
       )}
       <span className="prod-prompt-box-label content">Content</span>
-      <textarea
+      <PromptContentEditor
         ref={(el) => { if (contentRef) contentRef.current = el; }}
         className={`prod-prompt-box content${cls}`}
-        rows={contentRows}
-        value={boxes.content}
+        text={boxes.content}
         placeholder={placeholder}
-        onChange={(e) => { emit({ ...boxes, content: e.target.value }); onContentChange?.(e.target.value); }}
+        onChange={(text) => { emit({ ...boxes, content: text }); onContentChange?.(text); }}
         onKeyDown={onContentKeyDown}
         onFocus={onFocus}
         onBlur={onBlur}

@@ -27,6 +27,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { GraphGenItem, GraphLayout, OpenArtModelChoice, Production, ProductionShot, ProductionStyle, VideoModelOptions } from "../../../shared/ipc.js";
+import { addRefTag, addStyleParagraph, removeRefTag, removeStyleParagraph, refTagNames } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
 
 /** Default motion prompt for the video-prompt node (matches the video panel). */
@@ -49,52 +50,6 @@ export interface GraphRef {
   media?: "video" | "audio";
   /** Workspace-relative media path (video/audio refs), for cascade-media URLs. */
   mediaPath?: string;
-}
-
-/* ------------------------------------------------------------------ */
-/* Prompt tag helpers                                                  */
-/* ------------------------------------------------------------------ */
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Append an `@[Name]` tag beneath the content paragraphs — before the
- *  generated `Brand identity:` section when one is present, so tags never
- *  land after the brand. Idempotent (case-insensitive). */
-export function addRefTag(prompt: string, name: string): string {
-  const tag = `@[${name}]`;
-  if (new RegExp(`@\\[${escapeRegExp(name)}\\]`, "i").test(prompt)) return prompt;
-  const brand = /(?:^|\n\n)Brand identity: /.exec(prompt);
-  if (brand) {
-    const start = brand.index + (brand[0].startsWith("\n\n") ? 2 : 0);
-    const before = prompt.slice(0, start).trimEnd();
-    const after = prompt.slice(start);
-    return before ? `${before}\n\n${tag}\n\n${after}` : `${tag}\n\n${after}`;
-  }
-  const base = prompt.trimEnd();
-  return base ? `${base}\n\n${tag}` : tag;
-}
-
-/** Remove every `@[Name]` occurrence and tidy up leftover blank lines. */
-export function removeRefTag(prompt: string, name: string): string {
-  return prompt.replace(new RegExp(`@\\[${escapeRegExp(name)}\\]`, "gi"), "").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-/** Paragraph-scoped `Style:` section — same shape updateShotStyle writes. */
-const STYLE_PARA_RE = /(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/;
-
-/** Insert (or replace) the leading `Style:` paragraph. */
-function addStyleParagraph(prompt: string, styleText: string): string {
-  if (!styleText) return prompt;
-  const para = `Style: ${styleText}`;
-  const rest = prompt.replace(STYLE_PARA_RE, "").trim();
-  return rest ? `${para}\n\n${rest}` : para;
-}
-
-/** Remove the `Style:` paragraph entirely (style node detached). */
-function removeStyleParagraph(prompt: string): string {
-  return prompt.replace(STYLE_PARA_RE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /* ------------------------------------------------------------------ */
@@ -657,7 +612,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   }, [prod.meta.id, shot.id, shot.artwork, bust]);
 
   const taggedNames = useMemo(
-    () => Array.from(prompt.matchAll(/@\[([^\]]+)\]/g)).map((m) => m[1]),
+    () => refTagNames(prompt),
     [prompt],
   );
 

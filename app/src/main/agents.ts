@@ -1,11 +1,12 @@
 /**
  * Agent persistence: one JSON meta file + one .md prompt file per agent
  * under userData/agents/. Avatars are stored as agents/<id>.avatar.* when
- * custom images are used.
+ * custom images are used. The meta JSON goes through the shared store; the
+ * prompt and avatar side files ride along via the store's sideFiles hooks.
  */
-import { app } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createStore } from "./store.js";
 
 export type AvatarKind = { kind: "emoji"; value: string } | { kind: "image"; path: string } | null;
 
@@ -32,15 +33,6 @@ export interface AgentMetaIpc {
   hasPrompt: boolean;
 }
 
-function agentsDir(): string {
-  const dir = path.join(app.getPath("userData"), "agents");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function metaPath(id: string): string {
-  return path.join(agentsDir(), `${id}.json`);
-}
 function promptPath(id: string): string {
   return path.join(agentsDir(), `${id}.md`);
 }
@@ -48,39 +40,49 @@ function archiveDir(): string {
   return path.join(agentsDir(), "archive");
 }
 
+const store = createStore<AgentFile>({
+  dirName: "agents",
+  idOf: (a) => a.id,
+  sortKey: (a) => a.updatedAt,
+  // The store moves/deletes the meta .json; the prompt .md and avatar files
+  // follow it into archive/ (or are removed) here.
+  sideFiles: {
+    archive: (id, archiveDir) => {
+      const md = promptPath(id);
+      if (fs.existsSync(md)) fs.renameSync(md, path.join(archiveDir, `${id}.md`));
+      for (const f of fs.readdirSync(agentsDir())) {
+        if (f.startsWith(`${id}.avatar.`)) {
+          try { fs.renameSync(path.join(agentsDir(), f), path.join(archiveDir, f)); } catch { /* best-effort */ }
+        }
+      }
+    },
+    remove: (id) => {
+      fs.rmSync(promptPath(id), { force: true });
+      for (const f of fs.readdirSync(agentsDir())) {
+        if (f.startsWith(`${id}.avatar.`)) {
+          try { fs.unlinkSync(path.join(agentsDir(), f)); } catch { /* best-effort */ }
+        }
+      }
+    },
+  },
+});
+
+function agentsDir(): string {
+  return store.dir();
+}
+
 function toMeta(f: AgentFile, hasPrompt: boolean): AgentMetaIpc {
   return { ...f, hasPrompt };
 }
 
 export function listAgents(): AgentMetaIpc[] {
-  const dir = agentsDir();
-  const out: AgentMetaIpc[] = [];
-  for (const f of fs.readdirSync(dir)) {
-    if (!f.endsWith(".json")) continue;
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as AgentFile;
-      const hasPrompt = fs.existsSync(promptPath(meta.id));
-      out.push(toMeta(meta, hasPrompt));
-    } catch {
-      /* skip corrupt */
-    }
-  }
-  return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return store.list().map((meta) => toMeta(meta, fs.existsSync(promptPath(meta.id))));
 }
 
 export function getAgent(id: string): { meta: AgentMetaIpc; prompt: string } | null {
-  try {
-    const meta = JSON.parse(fs.readFileSync(metaPath(id), "utf8")) as AgentFile;
-    let prompt = "";
-    try {
-      prompt = fs.readFileSync(promptPath(id), "utf8");
-    } catch {
-      /* no prompt yet */
-    }
-    return { meta: toMeta(meta, !!prompt), prompt };
-  } catch {
-    return null;
-  }
+  const meta = store.load(id);
+  if (!meta) return null;
+  return { meta: toMeta(meta, fs.existsSync(promptPath(id))), prompt: getAgentPrompt(id) };
 }
 
 export function getAgentPrompt(id: string): string {
@@ -92,13 +94,8 @@ export function getAgentPrompt(id: string): string {
 }
 
 export function getAgentMeta(id: string): AgentMetaIpc | null {
-  try {
-    const meta = JSON.parse(fs.readFileSync(metaPath(id), "utf8")) as AgentFile;
-    const hasPrompt = fs.existsSync(promptPath(meta.id));
-    return toMeta(meta, hasPrompt);
-  } catch {
-    return null;
-  }
+  const meta = store.load(id);
+  return meta ? toMeta(meta, fs.existsSync(promptPath(meta.id))) : null;
 }
 
 function slugFor(name: string): string {
@@ -115,7 +112,7 @@ export function createAgent(data: {
 }): string {
   const name = data.name?.trim();
   if (!name) throw new Error("Agent name is required");
-  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const id = store.newId();
   const now = new Date().toISOString();
   const meta: AgentFile = {
     id,
@@ -127,7 +124,7 @@ export function createAgent(data: {
     createdAt: now,
     updatedAt: now,
   };
-  fs.writeFileSync(metaPath(id), JSON.stringify(meta, null, 2), "utf8");
+  store.save(meta);
   fs.writeFileSync(promptPath(id), data.prompt ?? "", "utf8");
   return id;
 }
@@ -136,8 +133,8 @@ export function updateAgent(
   id: string,
   patch: Partial<Omit<AgentFile, "id" | "createdAt">> & { prompt?: string }
 ): void {
-  const raw = fs.readFileSync(metaPath(id), "utf8");
-  const meta = JSON.parse(raw) as AgentFile;
+  const meta = store.load(id);
+  if (!meta) throw new Error("Agent not found");
   if (patch.name !== undefined) {
     const n = patch.name.trim();
     if (!n) throw new Error("Agent name is required");
@@ -148,7 +145,7 @@ export function updateAgent(
   if (patch.model !== undefined) meta.model = patch.model.trim() || meta.model;
   if (patch.allowedTools !== undefined) meta.allowedTools = patch.allowedTools;
   meta.updatedAt = new Date().toISOString();
-  fs.writeFileSync(metaPath(id), JSON.stringify(meta, null, 2), "utf8");
+  store.save(meta);
   if (patch.prompt !== undefined) {
     fs.writeFileSync(promptPath(id), patch.prompt, "utf8");
   }
@@ -169,7 +166,6 @@ export function saveAgentAvatar(id: string, dataUrl: string): string {
   }
   const filename = `${id}.avatar.${ext}`;
   fs.writeFileSync(path.join(agentsDir(), filename), buf);
-  // also generate 512px thumbnail if possible via nativeImage (best-effort)
   return filename;
 }
 
@@ -189,7 +185,7 @@ export function getAvatarDataUrl(id: string, avatar: AvatarKind): string | null 
 export function duplicateAgent(id: string): string {
   const src = getAgent(id);
   if (!src) throw new Error("Agent not found");
-  const newId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const newId = store.newId();
   const now = new Date().toISOString();
   const meta: AgentFile = {
     ...src.meta,
@@ -210,46 +206,17 @@ export function duplicateAgent(id: string): string {
       meta.avatar = null;
     }
   }
-  // strip hasPrompt helper
-  const { hasPrompt: _hp, ...cleanMeta } = meta as AgentMetaIpc & { hasPrompt: boolean };
-  void _hp;
-  fs.writeFileSync(metaPath(newId), JSON.stringify(cleanMeta, null, 2), "utf8");
+  store.save(meta);
   fs.writeFileSync(promptPath(newId), src.prompt, "utf8");
   return newId;
 }
 
 export function deleteAgent(id: string): boolean {
-  try {
-    fs.rmSync(metaPath(id), { force: true });
-    fs.rmSync(promptPath(id), { force: true });
-    for (const f of fs.readdirSync(agentsDir())) {
-      if (f.startsWith(`${id}.avatar.`)) {
-        try { fs.unlinkSync(path.join(agentsDir(), f)); } catch {}
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return store.remove(id);
 }
 
 export function archiveAgent(id: string): boolean {
-  const dir = archiveDir();
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.renameSync(metaPath(id), path.join(dir, `${id}.json`));
-    if (fs.existsSync(promptPath(id))) {
-      fs.renameSync(promptPath(id), path.join(dir, `${id}.md`));
-    }
-    for (const f of fs.readdirSync(agentsDir())) {
-      if (f.startsWith(`${id}.avatar.`)) {
-        try { fs.renameSync(path.join(agentsDir(), f), path.join(dir, f)); } catch {}
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return store.archive(id);
 }
 
 export function importAgent(jsonText: string, mdText: string): string {

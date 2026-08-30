@@ -5,8 +5,25 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { nativeImage } from "electron";
+// Soft dependency: JPEG conversion needs Electron's nativeImage, but this
+// module must also load outside Electron (vitest). Files still save without
+// it — only the JPEG conversion falls back to the original bytes.
+let nativeImage: typeof import("electron").nativeImage | undefined;
+void import("electron")
+  .then((m) => {
+    nativeImage = m.nativeImage;
+  })
+  .catch(() => {});
 import { GabClient } from "@core";
+import {
+  escapeRegExp,
+  insertBrandParagraph,
+  parseJsonLooseArray,
+  parseJsonLooseObject,
+  refTagMatches,
+  stripBrandParagraph,
+  stripReferenceClause,
+} from "../shared/prompt-grammar.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
@@ -59,21 +76,10 @@ function breakdownPrompt(scriptText: string): { role: "user"; content: string } 
   };
 }
 
-/** Parse a JSON object from a model reply, tolerating fences and stray prose. */
-export function parseJsonLoose(raw: string): Record<string, unknown> {
-  let s = raw.trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) s = fence[1].trim();
-  const start = s.indexOf("{");
-  const end = s.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) throw new Error("Model reply contained no JSON object");
-  return JSON.parse(s.slice(start, end + 1));
-}
-
 /** Parse the model's reply as JSON, tolerating fences and stray prose around it. */
 export function parseBreakdownJson(raw: string): { scenes: RawScene[]; characters?: RawCharacter[]; products?: unknown[] } {
-  const parsed = parseJsonLoose(raw);
-  if (!Array.isArray(parsed.scenes)) throw new Error("Model JSON is missing the scenes array");
+  const parsed = parseJsonLooseObject(raw);
+  if (!parsed || !Array.isArray(parsed.scenes)) throw new Error("Model reply contained no JSON object");
   return parsed as { scenes: RawScene[]; characters?: RawCharacter[]; products?: unknown[] };
 }
 
@@ -300,14 +306,8 @@ export async function generateStyleSet(
     2000
   );
   // Parse a top-level JSON array (tolerate fences / trailing prose).
-  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let arr: unknown = null;
-  try { arr = JSON.parse(t); } catch {
-    const s = t.indexOf("["); const e = t.lastIndexOf("]");
-    if (s === -1 || e <= s) throw new Error("Style generation returned no JSON array.");
-    try { arr = JSON.parse(t.slice(s, e + 1)); } catch { throw new Error("Style generation returned unreadable JSON."); }
-  }
-  if (!Array.isArray(arr)) throw new Error("Style generation returned no JSON array.");
+  const arr = parseJsonLooseArray(text);
+  if (!arr) throw new Error("Style generation returned no JSON array.");
   const out: { name: string; prompt: string }[] = [];
   for (const item of arr.slice(0, maxStyles)) {
     const o = (item ?? {}) as Record<string, unknown>;
@@ -361,9 +361,9 @@ export async function stylePromptFromImage(
     ],
     700
   );
-  const parsed = parseJsonLoose(text);
-  const name = String(parsed.name ?? "").trim();
-  const prompt = String(parsed.prompt ?? "").trim();
+  const parsed = parseJsonLooseObject(text);
+  const name = String(parsed?.name ?? "").trim();
+  const prompt = String(parsed?.prompt ?? "").trim();
   if (!prompt) throw new Error("Style generation from image came back empty — try a different image.");
   return {
     name: (name || "From image").slice(0, 60),
@@ -403,8 +403,7 @@ export function refTokens(p: Production, shot: ProductionShot): Map<string, stri
 export function resolveReferenceTags(p: Production, shot: ProductionShot, prompt: string): string {
   let resolved = prompt;
   for (const [name, token] of refTokens(p, shot)) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    resolved = resolved.replace(new RegExp(`@\\[${escaped}\\]`, "gi"), token);
+    resolved = resolved.replace(new RegExp(`@\\[${escapeRegExp(name)}\\]`, "gi"), token);
   }
   return resolved;
 }
@@ -484,19 +483,11 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
   if (shot.prompt?.trim()) {
     const base = shot.prompt.trim();
     const brand = brandPrompt(p);
-    const generatedBrand = /(?:^|\n\n)Brand identity: [^\n]*(?=\n\n|$)/;
-    if (shot.includeBrandIdentity === false) return base.replace(generatedBrand, "").trim();
-    if (brand && !/\n\nBrand identity: /.test(base)) return `${base}\n\nBrand identity: ${brand}`;
+    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
+    if (brand) return insertBrandParagraph(base, brand);
     return base;
   }
   return boardPrompt(p, shot);
-}
-
-const REFERENCE_CLAUSE_RE = /(?:\n+|^)Reference images by id[^\n]*(?:\n*)$/;
-
-/** Remove an obsolete alias clause from a stored or edited prompt. */
-export function stripReferenceClause(prompt: string): string {
-  return prompt.replace(REFERENCE_CLAUSE_RE, "").trim();
 }
 
 /**
@@ -557,8 +548,8 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
     ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
     ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
   ];
-  for (const match of (shot.prompt ?? "").matchAll(/@\[([^\]]+)\]/g)) {
-    const ref = candidates.find((r) => r.name.toLowerCase() === match[1].toLowerCase());
+  for (const { name } of refTagMatches(shot.prompt ?? "")) {
+    const ref = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
     if (ref) push(ref);
   }
   return out;
@@ -601,7 +592,7 @@ export function writeBoardFrame(
   fs.writeFileSync(assetPath(p, originalRel), originalBytes);
   let jpegBytes: Buffer;
   try {
-    const img = nativeImage.createFromBuffer(originalBytes);
+    const img = nativeImage?.createFromBuffer(originalBytes);
     jpegBytes = img && !img.isEmpty() ? img.toJPEG(90) : originalBytes;
   } catch {
     jpegBytes = originalBytes;
@@ -631,7 +622,7 @@ export function migrateBoardArtworkToJpeg(p: Production, shot: ProductionShot): 
   fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}/originals`), { recursive: true });
   let jpegBytes: Buffer;
   try {
-    const img = nativeImage.createFromBuffer(bytes);
+    const img = nativeImage?.createFromBuffer(bytes);
     jpegBytes = img && !img.isEmpty() ? img.toJPEG(90) : bytes;
   } catch {
     jpegBytes = bytes;
@@ -755,6 +746,19 @@ export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: s
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
   shot.graphVideoGens = [item, ...(shot.graphVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
   shot.graphVideoGenIndex = 0;
+}
+
+/** Apply a video clip as the shot's output AND guarantee it has a still frame.
+ *  When the shot has no primary artwork yet (the video was animated from a
+ *  node-graph image pipe, not from the shot's own frame), the video's source
+ *  frame — the image node's current output, or the piped `sourceFallback` —
+ *  becomes the still, so the animatic timeline always has a frame to show. */
+export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string): void {
+  shot.videoPath = rel;
+  if (!shot.artwork) {
+    const source = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path ?? sourceFallback;
+    if (source) shot.artwork = source;
+  }
 }
 
 /** Auto-hook a classic image generation into the node graph: when nothing is
@@ -1067,9 +1071,10 @@ export async function planAnimatic(
   );
   let timed = 0;
   try {
-    const parsed = parseJsonLoose(text) as { timing?: Array<{ number?: unknown; durationSec?: unknown }> };
+    const parsed = parseJsonLooseObject(text);
+    const timing = parsed?.timing;
     const byNumber = new Map(shots.map((s) => [s.number, s]));
-    for (const t of parsed.timing ?? []) {
+    for (const t of Array.isArray(timing) ? (timing as Array<{ number?: unknown; durationSec?: unknown }>) : []) {
       const num = typeof t?.number === "string" ? t.number.padStart(4, "0") : typeof t?.number === "number" ? String(t.number).padStart(4, "0") : "";
       const shot = byNumber.get(num);
       if (!shot) continue;

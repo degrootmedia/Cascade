@@ -8,6 +8,7 @@
  * working against it.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { refTagMatches } from "../../../shared/prompt-grammar.js";
 
 export interface PromptContentHandle {
   focus(): void;
@@ -20,8 +21,6 @@ export interface PromptContentHandle {
   /** Whether the content box currently holds focus. */
   isActive(): boolean;
 }
-
-const TAG_RE = /@\[([^\]]+)\]/g;
 
 /** Text length (in the box's serialized form) before a range's start. */
 function textLengthBeforeRange(el: HTMLElement, range: Range): number {
@@ -111,19 +110,19 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     el.textContent = "";
     const frag = document.createDocumentFragment();
     let last = 0;
-    for (const m of t.matchAll(TAG_RE)) {
-      const idx = m.index ?? 0;
+    for (const m of refTagMatches(t)) {
+      const idx = m.index;
       if (idx > last) frag.appendChild(document.createTextNode(t.slice(last, idx)));
       const chip = document.createElement("span");
       chip.className = "prompt-tag-chip nodrag";
       chip.setAttribute("contenteditable", "false");
       chip.draggable = true;
-      chip.dataset.tag = m[0];
-      chip.textContent = m[0];
+      chip.dataset.tag = m.tag;
+      chip.textContent = m.tag;
       chip.addEventListener("dragstart", (e) => {
         if (!e.dataTransfer) return;
-        dragState.current = { tag: m[0], pos: textOffsetOfNode(el, chip) };
-        e.dataTransfer.setData("text/plain", m[0]);
+        dragState.current = { tag: m.tag, pos: textOffsetOfNode(el, chip) };
+        e.dataTransfer.setData("text/plain", m.tag);
         e.dataTransfer.effectAllowed = "move";
         chip.classList.add("dragging");
       });
@@ -132,7 +131,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
         dragState.current = null;
       });
       frag.appendChild(chip);
-      last = idx + m[0].length;
+      last = idx + m.tag.length;
     }
     if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last)));
     el.appendChild(frag);

@@ -2,25 +2,16 @@
  * Production persistence: one JSON file per production under
  * userData/productions/, mirroring the sessions.ts pattern. The production's
  * own folder (anywhere on disk) holds generated assets; this file holds the
- * pipeline state.
+ * pipeline state. The document lifecycle is the shared store; this module owns
+ * the normalize-on-read pass and the asset-folder scaffolding.
  */
-import { app } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork } from "./pipeline.js";
+import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
-
-function productionsDir(): string {
-  const dir = path.join(app.getPath("userData"), "productions");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function filePath(id: string): string {
-  return path.join(productionsDir(), `${id}.json`);
-}
 
 /** Back-fill fields so older files keep parsing as the schema grows. */
 function normalize(p: ProductionFile): ProductionFile {
@@ -56,19 +47,12 @@ function normalize(p: ProductionFile): ProductionFile {
   return p;
 }
 
-export function listProductions(): ProductionMeta[] {
-  const metas: ProductionMeta[] = [];
-  for (const f of fs.readdirSync(productionsDir())) {
-    if (!f.endsWith(".json")) continue;
-    try {
-      const p = normalize(JSON.parse(fs.readFileSync(filePath(f.replace(/\.json$/, "")), "utf8")));
-      metas.push(summary(p));
-    } catch {
-      /* skip corrupt files */
-    }
-  }
-  return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-}
+const store = createStore<ProductionFile>({
+  dirName: "productions",
+  idOf: (p) => p.meta.id,
+  decode: normalize,
+  sortKey: (p) => p.meta.updatedAt,
+});
 
 /** List payload: just the meta plus a status peek. */
 function summary(p: ProductionFile): ProductionMeta {
@@ -82,26 +66,82 @@ function summary(p: ProductionFile): ProductionMeta {
   };
 }
 
+export function listProductions(): ProductionMeta[] {
+  return store.list().map(summary);
+}
+
 export function loadProduction(id: string): ProductionFile | null {
-  try {
-    const p = normalize(JSON.parse(fs.readFileSync(filePath(id), "utf8")));
-    // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
-    // node-graph generation nodes). Persist in place so the very next read
-    // sees the new layout — done directly here to avoid a self-reference to
-    // this module.
-    if (migrateBoardArtwork(p)) {
-      try { fs.writeFileSync(filePath(p.meta.id), JSON.stringify(p, null, 2), "utf8"); } catch { /* best-effort */ }
-    }
-    return p;
-  } catch {
-    return null;
-  }
+  const p = store.load(id);
+  if (!p) return null;
+  // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
+  // node-graph generation nodes). Persist in place so the very next read
+  // sees the new layout.
+  if (migrateBoardArtwork(p)) store.save(p);
+  return p;
 }
 
 export function saveProduction(p: ProductionFile): void {
   normalize(p);
   p.meta.updatedAt = new Date().toISOString();
-  fs.writeFileSync(filePath(p.meta.id), JSON.stringify(p, null, 2), "utf8");
+  store.save(p);
+}
+
+/** Merge renderer-owned state onto the freshest on-disk production.
+ *
+ *  `fresh` is the document just loaded from disk — it is never clobbered
+ *  wholesale (concurrent edits from other long-running jobs must survive).
+ *  Only the known renderer-editable fields are copied from `incoming`, and
+ *  legacy fields (single-VO model, cuts-only timeline) are stripped so they
+ *  don't resurface. This is the write-side counterpart to `normalize`'s
+ *  read-side back-fill; both live here so the production document's shape
+ *  rules have one home. */
+export function applyRendererState(fresh: ProductionFile, incoming: Production): ProductionFile {
+  const p = incoming;
+  fresh.currentStep = p.currentStep;
+  fresh.visualStyle = p.visualStyle ?? "";
+  fresh.styles = Array.isArray(p.styles) ? p.styles : [];
+  fresh.brand = p.brand && Array.isArray(p.brand.colors)
+    ? { colors: p.brand.colors.slice(0, 5).map((c) => String(c)), font: typeof p.brand.font === "string" ? p.brand.font : "" }
+    : { colors: [], font: "" };
+  fresh.scenes = Array.isArray(p.scenes) ? p.scenes.map((sc) => ({
+    ...sc,
+    shots: sc.shots.map((sh) => {
+      // Legacy fields no longer used (single-VO model, cuts-only timeline).
+      const { voiceoverPath: _v, transition: _t, ...rest } = sh as typeof sh & { voiceoverPath?: unknown; transition?: unknown };
+      return rest;
+    }),
+  })) : [];
+  fresh.promptOverrides =
+    p.promptOverrides && typeof p.promptOverrides === "object"
+      ? Object.fromEntries(Object.entries(p.promptOverrides).filter(([, v]) => typeof v === "string" && v.trim()))
+      : {};
+  fresh.characters = Array.isArray(p.characters) ? p.characters : [];
+  fresh.products = Array.isArray(p.products) ? p.products : [];
+  fresh.references = Array.isArray(p.references) ? p.references : [];
+  fresh.suggestedReferences = Array.isArray(p.suggestedReferences) ? p.suggestedReferences : [];
+  fresh.referenceCategories = Array.isArray(p.referenceCategories) ? p.referenceCategories : [];
+  if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
+    fresh.openArt = { model: p.openArt.model, resolution: p.openArt.resolution };
+  }
+  if (p.voiceover && typeof p.voiceover.model === "string" && typeof p.voiceover.voice === "string") {
+    fresh.voiceover = { model: p.voiceover.model, voice: p.voiceover.voice };
+  }
+  if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
+    fresh.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;
+  }
+  if (typeof p.voiceoverVolume === "number" && Number.isFinite(p.voiceoverVolume)) {
+    fresh.voiceoverVolume = Math.max(0, Math.min(1, p.voiceoverVolume));
+  }
+  if (typeof p.musicPath === "string" || p.musicPath === null) {
+    fresh.musicPath = typeof p.musicPath === "string" && p.musicPath ? p.musicPath : undefined;
+  }
+  if (typeof p.musicVolume === "number" && Number.isFinite(p.musicVolume)) {
+    fresh.musicVolume = Math.max(0, Math.min(1, p.musicVolume));
+  }
+  fresh.status = p.status ?? {};
+  if (typeof p.scriptSource === "string") fresh.scriptSource = p.scriptSource;
+  if (typeof p.meta.name === "string" && p.meta.name.trim()) fresh.meta.name = p.meta.name.trim();
+  return fresh;
 }
 
 /** Walk every shot's artwork + history and convert any legacy PNG paths to
@@ -150,7 +190,7 @@ function migrateGraphPipes(shot: ProductionShot): boolean {
 export function newProduction(name: string, folder: string): ProductionFile {
   const now = new Date().toISOString();
   const meta: ProductionMeta = {
-    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    id: store.newId(),
     name: name.trim() || path.basename(folder) || "Untitled production",
     folder,
     createdAt: now,
@@ -185,22 +225,9 @@ export function newProduction(name: string, folder: string): ProductionFile {
 }
 
 export function deleteProduction(id: string): boolean {
-  try {
-    fs.rmSync(filePath(id), { force: true });
-    return true;
-  } catch {
-    return false;
-  }
+  return store.remove(id);
 }
 
 export function archiveProduction(id: string): boolean {
-  const src = filePath(id);
-  const archiveDir = path.join(productionsDir(), "archive");
-  try {
-    fs.mkdirSync(archiveDir, { recursive: true });
-    fs.renameSync(src, path.join(archiveDir, `${id}.json`));
-    return true;
-  } catch {
-    return false;
-  }
+  return store.archive(id);
 }

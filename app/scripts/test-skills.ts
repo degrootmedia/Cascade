@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./src/main/skills.js";
+import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "../src/main/skills.js";
 
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-skills-"));

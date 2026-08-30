@@ -24,6 +24,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { McpOAuthProvider, waitForAuthorizationCode } from "./mcp-auth.js";
 import type { AgentTool } from "@core";
+import { IMAGE_URL_RX } from "../shared/prompt-grammar.js";
 
 export interface McpServerConfig {
   command?: string;
@@ -354,7 +355,6 @@ function processContent(content: unknown, workspaceRoot: string): { text: string
   return { text: texts.join("\n").slice(0, 20_000), images: images.length ? images : undefined };
 }
 
-const IMAGE_URL_RX = /https:\/\/[^\s"')\]}>]+\.(?:png|jpe?g|webp|gif)(?:\?[^\s"')\]}>]*)?/gi;
 const MAX_AUTO_IMAGES = 4;
 
 /** Pull display-worthy image URLs out of result text so the UI can show them immediately. */

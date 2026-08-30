@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { dialog, type BrowserWindow } from "electron";
 import type { AgentTool } from "@core";
 import type { McpManager } from "./mcp.js";
+import { parseJsonLooseObject } from "../shared/prompt-grammar.js";
 
 /** The MCP server name that hosts the OpenArt tools (matches mcp.json). */
 const SERVER = "openart";
@@ -56,27 +57,6 @@ const DIALOG_FILTERS = [
   { name: "All files", extensions: ["*"] },
 ];
 
-/** Best-effort JSON object parse (MCP returns the value as JSON text). */
-function parseJsonObject(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim();
-  if (trimmed.startsWith("{")) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      /* fall through to regex extraction */
-    }
-  }
-  const match = trimmed.match(/\{[\s\S]*\}/);
-  if (match) {
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      /* fall through */
-    }
-  }
-  return null;
-}
-
 /** A data-URL reference image uploaded to OpenArt as a ready visualReference. */
 export interface UploadedRef {
   name: string;
@@ -114,7 +94,7 @@ export async function uploadDataUrlReference(
     mediaType,
     purpose,
   });
-  const sign = parseJsonObject(signText);
+  const sign = parseJsonLooseObject(signText);
   const signURL = sign?.signURL as string | undefined;
   if (!signURL) throw new Error(`OpenArt did not return a signed URL: ${signText.slice(0, 300)}`);
 
@@ -180,7 +160,7 @@ export function makeOpenArtUploadTool(
       return `ERROR: couldn't get an OpenArt upload URL: ${e instanceof Error ? e.message : String(e)}`;
     }
 
-    const sign = parseJsonObject(signText);
+    const sign = parseJsonLooseObject(signText);
     const signURL = sign?.signURL as string | undefined;
     if (!signURL) return `ERROR: OpenArt did not return a signed URL. Response: ${signText.slice(0, 500)}`;
 

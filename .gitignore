@@ -9,7 +9,7 @@ release-builds/
 win-unpacked/
 
 # Release snapshots
-release-v*/
+release-*/
 
 # Logs & temp files
 *.log

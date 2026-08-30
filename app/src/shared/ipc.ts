@@ -417,6 +417,16 @@ export interface ChatAttachment {
   mime: string;
 }
 
+/** Items rendered in the chat transcript. Owned by the renderer, persisted via
+ *  `syncDisplay` so the transcript survives a reload. */
+export type DisplayItem =
+  | { kind: "user"; text: string; attachments?: ChatAttachment[]; images?: string[] }
+  | { kind: "assistant"; text: string; streaming?: boolean }
+  | { kind: "tool"; name: string; args: string; result?: string; isError?: boolean; images?: string[] }
+  | { kind: "mention"; filename: string; image: string }
+  | { kind: "agent-switch"; agentId: string | null; name: string; description?: string; model?: string; avatar: { kind: "emoji"; value: string } | { kind: "image"; path: string } | null; avatarDataUrl?: string | null; at: string }
+  | { kind: "notice"; text: string };
+
 /** API exposed to the renderer via contextBridge. */
 export interface CascadeApi {
   sendMessage(sessionId: string, text: string, attachments?: ChatAttachment[]): Promise<void>;
@@ -452,9 +462,11 @@ export interface CascadeApi {
   getOpenArtCredits(): Promise<number | null>;
 
   listSessions(): Promise<SessionMeta[]>;
-  loadSession(id: string): Promise<unknown[]>; // display items
+  loadSession(id: string): Promise<DisplayItem[]>;
   /** Tell main which chat is now focused (keeps its active-chat pointer in sync). */
   activateSession(id: string): void;
+  /** Mirror the renderer's transcript into the session file so it survives a reload. */
+  syncDisplay(sessionId: string, display: DisplayItem[]): void;
   newSession(): Promise<string>; // returns the new session id
   getCurrentSessionId(): Promise<string>;
   removeSession(id: string, mode: "delete" | "archive"): Promise<boolean>;
@@ -487,7 +499,7 @@ export interface CascadeApi {
   importAgent(json: string, md: string): Promise<string>;
   getSessionAgent(sessionId: string): Promise<string | null>;
   setSessionAgent(sessionId: string, agentId: string | null): Promise<void>;
-  onAgentSwitched(cb: (e: { sessionId: string; agentId: string | null; frame: unknown }) => void): () => void;
+  onAgentSwitched(cb: (e: { sessionId: string; agentId: string | null; frame: DisplayItem }) => void): () => void;
 
   /* Production Assistant */
   listProductions(): Promise<ProductionMeta[]>;
@@ -670,3 +682,151 @@ export interface CascadeApi {
   videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }
+
+/* ---------- IPC channel contract ----------
+ *
+ * The single wiring map between renderer-facing methods (CascadeApi) and the
+ * IPC channels main listens on. The preload adapter builds `window.cascade`
+ * from this map mechanically, so adding a channel means editing ONE entry here
+ * instead of three files (ipc.ts + preload + main handlers). Main validates
+ * every handler's channel against this map at startup. `kind` records whether
+ * the renderer side is a request/response (`invoke`) or fire-and-forget
+ * (`send`); the `on*` subscriptions are hand-wired in preload (they take
+ * callbacks, not payloads).
+ */
+export interface IpcChannelSpec {
+  /** The CascadeApi method that fronts this channel. */
+  method: keyof CascadeApi;
+  kind: "invoke" | "send";
+}
+
+export const ipcContract = {
+  "chat:send": { method: "sendMessage", kind: "invoke" },
+  "chat:stop": { method: "stop", kind: "send" },
+  "chat:undo": { method: "undoLast", kind: "invoke" },
+  "approval:response": { method: "respondApproval", kind: "send" },
+  "display:sync": { method: "syncDisplay", kind: "send" },
+
+  "workspace:pick": { method: "pickWorkspace", kind: "invoke" },
+  "workspace:pickSession": { method: "pickSessionWorkspace", kind: "invoke" },
+  "workspace:setSession": { method: "setSessionWorkspace", kind: "invoke" },
+  "workspace:setSessionNone": { method: "setSessionWorkspaceNone", kind: "invoke" },
+  "settings:clearWorkspace": { method: "clearDefaultWorkspace", kind: "invoke" },
+  "workspace:recent": { method: "getRecentWorkspaces", kind: "invoke" },
+  "workspace:current": { method: "getCurrentWorkspace", kind: "invoke" },
+  "settings:get": { method: "getSettings", kind: "invoke" },
+  "settings:setApiKey": { method: "setApiKey", kind: "invoke" },
+  "settings:setModel": { method: "setModel", kind: "invoke" },
+  "settings:setAccent": { method: "setAccent", kind: "invoke" },
+  "models:list": { method: "listModels", kind: "invoke" },
+  "credits:get": { method: "getCredits", kind: "invoke" },
+
+  "sessions:list": { method: "listSessions", kind: "invoke" },
+  "sessions:load": { method: "loadSession", kind: "invoke" },
+  "sessions:activate": { method: "activateSession", kind: "send" },
+  "sessions:new": { method: "newSession", kind: "invoke" },
+  "sessions:current": { method: "getCurrentSessionId", kind: "invoke" },
+  "sessions:remove": { method: "removeSession", kind: "invoke" },
+  "sessions:rename": { method: "renameSession", kind: "invoke" },
+
+  "skills:list": { method: "listSkills", kind: "invoke" },
+  "skills:openFolder": { method: "openSkillsFolder", kind: "invoke" },
+  "workspace:instructions": { method: "getWorkspaceInstructions", kind: "invoke" },
+  "workspace:openInstructions": { method: "openWorkspaceInstructions", kind: "invoke" },
+
+  "mcp:getConfig": { method: "getMcpConfig", kind: "invoke" },
+  "mcp:setConfig": { method: "setMcpConfig", kind: "invoke" },
+  "mcp:status": { method: "getMcpStatus", kind: "invoke" },
+  "mcp:reload": { method: "reloadMcp", kind: "invoke" },
+  "mcp:onDemand": { method: "getMcpOnDemand", kind: "invoke" },
+  "mcp:setOnDemand": { method: "setMcpOnDemand", kind: "invoke" },
+
+  "agents:list": { method: "listAgents", kind: "invoke" },
+  "agents:get": { method: "getAgent", kind: "invoke" },
+  "agents:create": { method: "createAgent", kind: "invoke" },
+  "agents:update": { method: "updateAgent", kind: "invoke" },
+  "agents:uploadAvatar": { method: "uploadAgentAvatar", kind: "invoke" },
+  "agents:duplicate": { method: "duplicateAgent", kind: "invoke" },
+  "agents:remove": { method: "removeAgent", kind: "invoke" },
+  "agents:export": { method: "exportAgent", kind: "invoke" },
+  "agents:import": { method: "importAgent", kind: "invoke" },
+  "agents:getSessionAgent": { method: "getSessionAgent", kind: "invoke" },
+  "agents:setSessionAgent": { method: "setSessionAgent", kind: "invoke" },
+
+  /* Production Assistant */
+  "production:list": { method: "listProductions", kind: "invoke" },
+  "production:pickFolder": { method: "pickProductionFolder", kind: "invoke" },
+  "production:create": { method: "createProduction", kind: "invoke" },
+  "production:load": { method: "loadProduction", kind: "invoke" },
+  "production:save": { method: "saveProduction", kind: "invoke" },
+  "production:remove": { method: "removeProduction", kind: "invoke" },
+  "production:pickScriptFile": { method: "pickScriptFile", kind: "invoke" },
+  "production:pickReferenceImage": { method: "pickReferenceImage", kind: "invoke" },
+  "production:addReferenceMedia": { method: "addReferenceMedia", kind: "invoke" },
+  "production:addReferenceImage": { method: "addReferenceImage", kind: "invoke" },
+  "production:removeReferenceFile": { method: "removeReferenceFile", kind: "invoke" },
+  "production:ingest": { method: "ingestScript", kind: "invoke" },
+  "production:refineStyle": { method: "refineStylePrompt", kind: "invoke" },
+  "production:generateStyles": { method: "generateStyles", kind: "invoke" },
+  "production:styleFromImage": { method: "styleFromImage", kind: "invoke" },
+  "production:insertShot": { method: "insertShot", kind: "invoke" },
+  "production:deleteShot": { method: "deleteShot", kind: "invoke" },
+  "production:updateShot": { method: "updateShot", kind: "invoke" },
+  "production:generateBoards": { method: "generateBoards", kind: "invoke" },
+  "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
+  "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },
+  "production:boardPrompts": { method: "exportBoardPrompts", kind: "invoke" },
+  "production:boardPrompt": { method: "getBoardPrompt", kind: "invoke" },
+  "production:updateBoardPrompt": { method: "updateBoardPrompt", kind: "invoke" },
+  "production:refreshBoardPrompt": { method: "refreshBoardPrompt", kind: "invoke" },
+  "production:openArtModels": { method: "listOpenArtModels", kind: "invoke" },
+  "production:openArtCredits": { method: "getOpenArtCredits", kind: "invoke" },
+  "production:pickBoardImages": { method: "pickBoardImages", kind: "invoke" },
+  "production:importBoards": { method: "importBoards", kind: "invoke" },
+  "production:boardImage": { method: "boardImage", kind: "invoke" },
+  "production:boardImageFull": { method: "boardImageFull", kind: "invoke" },
+  "production:boardThumbnail": { method: "boardThumbnail", kind: "invoke" },
+  "production:deleteBoardImage": { method: "deleteBoardImage", kind: "invoke" },
+  "production:editBoard": { method: "editBoard", kind: "invoke" },
+  "production:promoteBoardHistory": { method: "promoteBoardHistory", kind: "invoke" },
+  "production:planAnimatic": { method: "planAnimatic", kind: "invoke" },
+  "production:listAudioModels": { method: "listAudioModels", kind: "invoke" },
+  "production:generateVoiceover": { method: "generateVoiceover", kind: "invoke" },
+  "production:importVoiceover": { method: "importVoiceover", kind: "invoke" },
+  "production:voiceoverFile": { method: "voiceoverFile", kind: "invoke" },
+  "production:voiceoverUrl": { method: "voiceoverUrl", kind: "invoke" },
+  "production:removeVoiceover": { method: "removeVoiceover", kind: "invoke" },
+  "production:importMusic": { method: "importMusic", kind: "invoke" },
+  "production:generateMusic": { method: "generateMusic", kind: "invoke" },
+  "production:musicFile": { method: "musicFile", kind: "invoke" },
+  "production:musicUrl": { method: "musicUrl", kind: "invoke" },
+  "production:removeMusic": { method: "removeMusic", kind: "invoke" },
+  "production:generateVideo": { method: "generateVideo", kind: "invoke" },
+  "production:generateFrameNode": { method: "generateFrameNode", kind: "invoke" },
+  "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
+  "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
+  "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },
+  "production:videoUrl": { method: "videoUrl", kind: "invoke" },
+  "production:removeVideo": { method: "removeVideo", kind: "invoke" },
+  "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
+} as const satisfies Record<string, IpcChannelSpec>;
+
+/** The subscription methods on CascadeApi, which preload wires by hand. */
+type SubscriptionMethod =
+  | "onAgentEvent"
+  | "onApprovalRequest"
+  | "onMentionAdded"
+  | "onOpenSettings"
+  | "onZoomChanged"
+  | "onSessionRenamed"
+  | "onAgentSwitched"
+  | "onProductionEvent";
+
+/** Every non-subscription method on CascadeApi must be wired in ipcContract,
+ *  and every contract method must exist on CascadeApi — a type-level drift
+ *  guard so the two can't fall out of sync without failing typecheck. */
+type ContractMethod = (typeof ipcContract)[keyof typeof ipcContract]["method"];
+type ExposedMethod = Exclude<keyof CascadeApi, SubscriptionMethod>;
+type AssertEqual<A, B> = A extends B ? (B extends A ? true : false) : false;
+const _ipcContractCoversApi: AssertEqual<ExposedMethod, ContractMethod> = true;
+

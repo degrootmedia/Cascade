@@ -169,9 +169,9 @@ export function App() {
   useEffect(() => window.cascade.onOpenSettings(() => setShowSettings(true)), []);
 
   useEffect(() => {
-    const offSwitched = window.cascade.onAgentSwitched(({ sessionId, frame }: { sessionId: string; frame: unknown }) => {
-      updateTranscript(sessionId, (prev) => [...prev, frame as DisplayItem]);
-      window.cascadeSync.syncDisplay(sessionId, transcriptsRef.current[sessionId] ?? []);
+    const offSwitched = window.cascade.onAgentSwitched(({ sessionId, frame }) => {
+      updateTranscript(sessionId, (prev) => [...prev, frame]);
+      window.cascade.syncDisplay(sessionId, transcriptsRef.current[sessionId] ?? []);
       if (sessionId === currentId) void refreshActiveAgent(sessionId);
     });
     const offEvent = window.cascade.onAgentEvent(({ sessionId, event }) => {
@@ -180,7 +180,7 @@ export function App() {
         setBusyIds((p) => ({ ...p, [sessionId]: false }));
         // Persist the completed transcript to this chat's session file, even
         // if it finished in the background.
-        window.cascadeSync.syncDisplay(sessionId, nextItems);
+        window.cascade.syncDisplay(sessionId, nextItems);
         void window.cascade.listSessions().then(setSessionList);
         void window.cascade.getCredits().then(setCredits);
       }
@@ -271,7 +271,7 @@ export function App() {
     setCurrentId(id);
     window.cascade.activateSession(id);
     if (!transcriptsRef.current[id]) {
-      const display = (await window.cascade.loadSession(id)) as DisplayItem[];
+      const display = await window.cascade.loadSession(id);
       setTranscript(id, clearStreaming(display));
     }
     void window.cascade.getCurrentWorkspace().then(setWorkspace);

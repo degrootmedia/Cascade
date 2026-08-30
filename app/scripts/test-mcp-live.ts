@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { McpManager } from "./src/main/mcp.js";
+import { McpManager } from "../src/main/mcp.js";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-mcp-"));
 const configPath = path.join(dir, "mcp.json");

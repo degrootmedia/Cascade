@@ -997,3 +997,164 @@ Blender behavior model now:
   off a reference node's output â€” and dropping on empty canvas removes the `@[Name]` tag.
   Style/brand links are structural and can't be pulled off (nothing to remove).
 - Typecheck + build pass clean.
+---
+
+## Architecture review 2026-08-30 — OpenArt module extraction (candidate 1)
+
+- New pp/src/main/openart.ts: `OpenArtClient` owns the whole OpenArt vertical slice that
+  lived inside `index.ts`'s `registerIpc()` — model discovery/parsing, live form-schema
+  introspection, per-model option assignment (aspect/resolution/count/duration/refs), async
+  image+video generation incl. the PENDING -> creation_wait polling loop, project resolution,
+  the per-model video-options cache, and reference upload/token-swap. `McpManager` is injected
+  (the seam); nothing in the module touches Electron.
+- `index.ts` shrank 2937 -> 2051 lines: 8 channels now delegate to `openart.*`; the
+  per-production queue + rebase stayed (production concurrency, not OpenArt). Restored
+  `prettifyModelId` (general helper that had sat inside the deleted block).
+- First app/ test harness: vitest (`npm test`), `vitest.config.ts` with the `@core` alias,
+  `test/openart.test.ts` = 12 tests against a fake `McpManager` (parsing, assignment,
+  token swap, PENDING loop, FAILED path, credits, caching). `vi.mock("electron")` +
+  `vi.mock("scripting")` keep the Electron/scripting modules out of the node test process.
+- Verified: typecheck clean, 12/12 tests pass, production build succeeds.
+
+---
+
+## Architecture review 2026-08-30 — IPC contract (candidate 2)
+
+- `shared/ipc.ts` now carries a single channel contract (`ipcContract`): a map of
+  channel -> { method, kind: invoke|send }. The `CascadeApi` interface stays the documented
+  renderer surface; a type-level drift guard (`AssertEqual<ExposedMethod, ContractMethod>`)
+  forces the two to match exactly — a channel/method typo now fails typecheck.
+- `preload/index.ts` collapsed from a 155-line 1:1 stub list to a ~40-line generic adapter
+  that builds `window.cascade` by walking the contract; the 8 `on*` subscriptions stay
+  hand-wired. Adding a channel is now ONE entry in `ipcContract` instead of three files.
+- Main side: `ipcMain.handle/on` calls go through `handle()`/`on()` wrappers that reject
+  undeclared channels and, at the end of `registerIpc()`, throw if any declared channel has
+  no handler — contract drift fails loudly at startup.
+- "Types stop lying": `SessionFile.history` is now `ChatMessage[]` and `.display` is
+  `DisplayItem[]` (moved to shared/ipc.ts; renderer re-exports). Dropped the 5 `as
+  ChatMessage[]` casts, the `as DisplayItem[]` cast, the untyped `cascadeSync` second
+  bridge (folded into `cascade.syncDisplay`), the `frame: unknown` agent-switch leak, and
+  dead `hasMentionImages`.
+- Verified: typecheck clean (incl. drift-guard firing test), 12/12 tests pass, production
+  build succeeds (preload bundle 12.0 kB -> 9.4 kB).
+
+---
+
+## Architecture review 2026-08-30 — prompt grammar consolidation (candidate 3)
+
+- New `app/src/shared/prompt-grammar.ts` — the one home for the prompt serialization
+  protocol, imported by main, renderer, and OpenArtClient:
+  - `@[name]` tags: `refTagMatches`/`refTagNames`/`hasRefTag`/`addRefTag`/`removeRefTag`
+    (folded NodeGraphModal's escape+tag+style helpers; 6 parse sites -> one module).
+  - `Style:` / `Brand identity:` paragraphs: `parsePromptBoxes`/`composePromptBoxes`
+    (moved from TriplePrompt), `stripBrandParagraph`/`insertBrandParagraph`/
+    `stripStyleParagraph`/`addStyleParagraph` (folded pipeline.effectivePrompt,
+    ProductionWorkspace, NodeGraphModal), plus legacy `stripReferenceClause`.
+  - Loose JSON: `parseJsonLooseObject`/`parseJsonLooseArray` replaced pipeline's throwing
+    `parseJsonLoose` + 3 bespoke openart fence-strip parsers + openart-upload's copy.
+    Pipeline's callers now handle null (parseBreakdownJson/styleFromImage/planAnimatic keep
+    today's error messages); no throwing variant survives.
+  - Media: `dataUrlToBytes` (chunked atob, env-agnostic) replaces index.ts `dataUrlToBuffer`
+    + ProductionWorkspace's base64ToBytes; `IMAGE_URL_RX`/`VIDEO_URL_RX`/uri-ext regexes
+    fold mcp.ts + openart.ts.
+- core/ keeps its own `decodeDataUrlText` — it is a standalone package that must not import
+  app/shared (noted in CONTEXT.md).
+- New `test/prompt-grammar.test.ts` (18 tests) pins the moved behavior; suite is 30/30
+  (12 openart + 18 grammar). Typecheck + production build pass.
+
+---
+
+## Architecture review 2026-08-30 — pipeline testability seam (candidate 6)
+
+- `pipeline.ts` dropped its top-level `import { nativeImage } from "electron"` for the soft
+  import pattern mcp.ts already used (`let nativeImage; void import("electron").then(...)`).
+  The two JPEG-conversion call sites fall back to the original bytes when nativeImage is
+  unavailable (they were already wrapped in try/catch). The module's pure prompt-derivation
+  core now loads in plain node — no electron mock required.
+- New `test/pipeline.test.ts` (21 tests) covering parseBreakdownJson, normalizeScenes,
+  mergeCharacters/mergeProducts, resolveShotStyle, brandPrompt, boardPrompt (style/brand/
+  character-key/action, per-shot override, brand-off, refExcluded), effectivePrompt (manual
+  wins, brand appended exactly once incl. the insertBrandParagraph regression, brand-off
+  strip, auto fallback), shotReferences/refTokens/resolveReferenceTags, scriptMarkdown,
+  formatRuntime. Reuses the scripting.js mock (pdf-parse transform issue).
+- Suite now 52/52 (12 openart + 19 grammar + 21 pipeline). Typecheck + production build pass.
+
+---
+
+## Architecture review 2026-08-30 — document store deep module (candidate 4)
+
+- New `app/src/main/store.ts`: `createStore<T>({ dirName, idOf, sortKey, decode?, encode?, sideFiles? })`
+  owns the whole JSON-document lifecycle — atomic temp+rename writes (a crash can no longer
+  truncate a session/production/agent file), newest-first `list()`, `load/save/remove/archive`,
+  and `newId()`. Side-file hooks let agents move/delete its .md + avatar files alongside the meta.
+- `sessions.ts`, `productions.ts`, `agents.ts` now thin: each configures the store and keeps
+  its bespoke logic (typed SessionFile factory; productions' normalize-as-decode + summary +
+  asset-folder scaffold + in-place migration persist; agents' .md/avatar side files + hasPrompt +
+  import/export/duplicate + avatar helpers). `settings.ts` stays bespoke on purpose — it's a
+  singleton doc with safeStorage encryption + a deliberate memo cache, not a keyed collection.
+- New `test/store.test.ts` (7 tests): atomic round-trip (no .tmp leftovers), newest-first sort,
+  corrupt-file tolerance, decode hook, archive/remove with side-file hooks, newId. Suite is now
+  64/64 (12 openart + 19 grammar + 21 pipeline + 7 store + 5 video-fix). Typecheck + build pass.
+- Deferred (noted, not re-litigated): the `production:save` handler's field-whitelist merge is a
+  deliberate renderer-state merge, distinct from `normalize`'s back-fill — folding them is
+  behavior-sensitive and left for a future pass. Follow-up: animatic timeline doesn't show a still
+  when a video node is plugged into the frame output.
+
+---
+
+## Architecture review 2026-08-30 — ProductionWorkspace split (candidate 5)
+
+- `ProductionWorkspace.tsx` 4072 -> 1805 lines by extracting the ~14 module-scope components
+  into `components/production/` (pure moves, zero behavior change):
+  - `hex.ts` — color/uid utils (pure, no React).
+  - `animatic.tsx` — the Step 4 playback engine + timeline (AnimaticThumb, MiniAudioPlayer,
+    VolumeSlider, AnimaticTimeline, StepFooter, ProdLog, LogLine) + shared timeline helpers
+    (flatShots/totalDuration/dataUrlToArrayBuffer/cascadeMedia/formatRuntime) + STEPS /
+    VIDEO_POOL_MAX / ANIMATIC_MAX_ZOOM consts.
+  - `references.tsx` — Step 2/3 reference sections + PromptReference/promptRefsForShot/
+    brandClause/shotStyleSelectValue/RefMediaGlyph.
+  - `prompt-panel.tsx` — ReferencePromptEditor + PromptSidePanel.
+  - `boards.tsx` — BoardCard + VideoGenModal + EditBoardModal.
+  - `brand.tsx` — BrandSwatchRow + BrandColorPicker.
+- Each file owns its imports (shared/ipc types, prompt-grammar, TriplePrompt, cross-file deps:
+  boards->references/prompt-panel, references->animatic for cascadeMedia). The orchestrator now
+  imports the six modules and keeps the 5-step state handlers + JSX.
+- Verified: typecheck clean, 64/64 tests pass, production build succeeds (renderer 219 modules).
+
+---
+
+## Architecture review 2026-08-30 — repo hygiene (candidate 7)
+
+- Deleted tracked junk: `app/decrypt-key.js` (decrypts the installed app's API key — the
+  security liability), `extract-asar.cjs` + the 1,926-line `installed-main.txt` dump,
+  `mcp-init.mjs`, `scan-ico.{mjs,ps1}`, `sess-summary.cjs`/`sess-view.cjs`,
+  `find-test.cjs`, the repo-root `` file, `core/src/.fuse_hidden*`, and the tracked
+  `app/release-0.6.5/` build output (icon + builder-debug.yml).
+- Keepers moved to `app/scripts/`: `test-mcp-live.ts` + `test-skills.ts` (documented live
+  integration checks; relative imports fixed to `../src/main/...`).
+- Deleted untracked disk junk: repo-root `_bundle_*`/`_classes.txt`/`_seg.txt`/
+  `tmp_modal.txt`, app `dev-*.log`/`typecheck.log`/`probe-*.mjs`/`tmp_probe*`, and the
+  whole `app/release-0.6.5/` output dir. `phase0/` kept (intentional API-probe scripts).
+- `.gitignore`: `release-v*/` -> `release-*/` so future electron-builder output
+  (`app/release-0.6.5` and the root snapshots) stays untracked.
+- Verified: typecheck clean, 64/64 tests pass, production build succeeds. Nothing references the
+  deleted files (electron-builder output path is regenerated on `npm run package`).
+
+---
+
+## Deferred issues resolved 2026-08-30
+
+- **Animatic still frame**: `pipeline.applyVideoOutput(shot, rel, sourceFallback?)` sets the
+  shot's `videoPath` AND, when the shot has no primary artwork, adopts the video's source
+  frame (the image node's current output, else the piped source) as the still — so the animatic
+  timeline always has a frame. Used by `production:generateVideoNode` and
+  `production:applyGraphOutput` (kind=video). 4 new tests in pipeline.test.ts.
+- **production:save merge folded**: the inline whitelist merge moved out of index.ts into
+  `productions.applyRendererState(fresh, incoming)` — the write-side counterpart to
+  `normalize`'s read-side back-fill, so the production document's shape rules live in one
+  module (and are unit-testable). Handler is now a thin call. 8 new tests in
+  test/productions.test.ts. Suite is now 76/76.
+- **New skill**: `.opencode/skills/cascade-architecture/SKILL.md` — future agents read it
+  (with CONTEXT.md) before touching the codebase; it encodes the deep-module rules (seams to
+  inject, where code lives, the deletion test, interface-as-test-surface, no-scratch-files) and
+  the verification gate (typecheck/test/build).

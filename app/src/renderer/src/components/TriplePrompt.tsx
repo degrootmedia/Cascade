@@ -7,42 +7,10 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { PromptContentEditor, type PromptContentHandle } from "./PromptContentEditor.js";
+import { composePromptBoxes, parsePromptBoxes, type PromptBoxes } from "../../../shared/prompt-grammar.js";
 
 export type { PromptContentHandle } from "./PromptContentEditor.js";
-
-export interface PromptBoxes {
-  style: string;
-  content: string;
-  brand: string;
-}
-
-/** Split a prompt into its Style / content / Brand paragraphs. The first
- *  `Style:` and `Brand identity:` paragraphs become the boxes; everything
- *  else (including @[tag] paragraphs) is content. */
-export function parsePromptBoxes(prompt: string): PromptBoxes {
-  const boxes: PromptBoxes = { style: "", content: "", brand: "" };
-  const content: string[] = [];
-  for (const para of prompt.split(/\n\n+/)) {
-    const p = para.trim();
-    if (!p) continue;
-    if (!boxes.style && /^Style:[ \t]*/.test(p)) { boxes.style = p.replace(/^Style:[ \t]*/, ""); continue; }
-    if (!boxes.brand && /^Brand identity:[ \t]*/.test(p)) { boxes.brand = p.replace(/^Brand identity:[ \t]*/, ""); continue; }
-    content.push(p);
-  }
-  boxes.content = content.join("\n\n");
-  return boxes;
-}
-
-/** Rebuild the prompt from the three boxes (style → content → brand). */
-export function composePromptBoxes(b: PromptBoxes): string {
-  const paras: string[] = [];
-  const style = b.style.replace(/\n\s*\n/g, "\n").trim();
-  if (style) paras.push(`Style: ${style}`);
-  const content = b.content.trim();
-  if (content) paras.push(content);
-  if (b.brand.trim()) paras.push(`Brand identity: ${b.brand.replace(/\n\s*\n/g, "\n").trimEnd()}`);
-  return paras.join("\n\n");
-}
+export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
 export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur }: {
   value: string;

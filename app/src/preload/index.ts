@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { CascadeApi, ChatEvent, ApprovalRequestIpc, ApprovalDecisionIpc, ProductionEvent } from "../shared/ipc.js";
 
 const api: CascadeApi = {
-  sendMessage: (sessionId, text, images) => ipcRenderer.invoke("chat:send", sessionId, text, images),
+  sendMessage: (sessionId, text, attachments) => ipcRenderer.invoke("chat:send", sessionId, text, attachments),
   stop: (sessionId) => ipcRenderer.send("chat:stop", sessionId),
   undoLast: (sessionId) => ipcRenderer.invoke("chat:undo", sessionId),
   respondApproval: (id: number, decision: ApprovalDecisionIpc) =>

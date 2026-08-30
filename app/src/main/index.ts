@@ -456,7 +456,7 @@ function registerIpc() {
     }
   }
 
-  ipcMain.handle("chat:send", async (_e, sessionId: string, text: string, images?: string[]) => {
+  ipcMain.handle("chat:send", async (_e, sessionId: string, text: string, attachments?: import("@core").Attachment[]) => {
     const entry = live(sessionId);
     curId = sessionId;
     if (entry.running) throw new Error("BUSY");
@@ -468,7 +468,7 @@ function registerIpc() {
       sessions.saveSession(entry.session);
       broadcastSessions();
       const a = ensureAgent(entry);
-      await a.send(text, images);
+      await a.send(text, attachments);
       if (token !== entry.sendToken) return; // superseded by Stop — don't clobber newer state
       entry.session.history = a.getHistory();
       if (entry.session.title === "New chat") {

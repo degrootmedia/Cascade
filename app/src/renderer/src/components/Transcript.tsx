@@ -51,19 +51,27 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
         if (entry.kind === "toolRun") return <ToolGroup key={i} items={entry.items} />;
         const item = entry.item;
         switch (item.kind) {
-          case "user":
+          case "user": {
+            const atts =
+              item.attachments ??
+              (item.images?.map((src) => ({ dataUrl: src, name: "image", mime: "image/*" })) ?? []);
             return (
               <div key={i} className="msg user">
-                {item.images && (
-                  <div className="msg-images">
-                    {item.images.map((src, j) => (
-                      <img key={j} src={src} alt={`sent image ${j + 1}`} />
-                    ))}
+                {atts.length > 0 && (
+                  <div className="msg-attachments">
+                    {atts.map((a, j) =>
+                      a.mime.startsWith("image/") ? (
+                        <img key={j} src={a.dataUrl} alt={a.name} />
+                      ) : (
+                        <span key={j} className="msg-file" title={a.name}>{a.name}</span>
+                      )
+                    )}
                   </div>
                 )}
                 {item.text}
               </div>
             );
+          }
           case "assistant":
             return (
               <div

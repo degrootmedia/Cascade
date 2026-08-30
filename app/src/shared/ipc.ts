@@ -407,9 +407,19 @@ export interface ProductionEvent {
   level: "info" | "error" | "done";
 }
 
+/** A file attached to a chat message (image, PDF, document, etc.). */
+export interface ChatAttachment {
+  /** Data URL of the file (any MIME: `data:image/png;base64,…`, `data:application/pdf;base64,…`, …). */
+  dataUrl: string;
+  /** Original filename. */
+  name: string;
+  /** MIME type. */
+  mime: string;
+}
+
 /** API exposed to the renderer via contextBridge. */
 export interface CascadeApi {
-  sendMessage(sessionId: string, text: string, images?: string[]): Promise<void>;
+  sendMessage(sessionId: string, text: string, attachments?: ChatAttachment[]): Promise<void>;
   stop(sessionId: string): void;
   /** Undo the file changes made by a chat's most recent agent turn. */
   undoLast(sessionId: string): Promise<UndoResultIpc>;

@@ -115,7 +115,6 @@ export function Sidebar({
 
   return (
     <aside className="sidebar" style={width ? { width } : undefined}>
-      <div className="brand">Cascade</div>
       <button className="new-chat" onClick={onNew}>
         + New chat
       </button>

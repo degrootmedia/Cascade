@@ -11,7 +11,7 @@ import { systemPrompt, pureChatSystemPrompt } from "./prompts.js";
 import { loadWorkspaceInstructions, resolveSafe, WorkspaceError } from "./workspace.js";
 import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
-import { contentText, type AgentConfig, type AgentTool, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
+import { contentText, attachmentParts, type AgentConfig, type AgentTool, type Attachment, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
 
 /** Cheap model used for background summarization. */
 const COMPACT_MODEL = "arya";
@@ -144,13 +144,13 @@ export class Agent {
     this.config.onEvent({ type: "group-enabled", group });
   }
 
-  /** Run one user turn to completion. Images are data URLs (vision models only). */
-  async send(userText: string, images?: string[]): Promise<void> {
+  /** Run one user turn to completion. Attachments are files (images, PDFs,
+   *  documents) sent as data URLs; images and PDFs go as media parts, plain
+   *  text files are inlined so any model can read them. */
+  async send(userText: string, attachments?: Attachment[]): Promise<void> {
     const { onEvent, requestApproval } = this.config;
     const maxIter = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
-    const content: ChatMessage["content"] = images?.length
-      ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url" as const, image_url: { url } }))]
-      : userText;
+    const content: ChatMessage["content"] = attachmentParts(userText, attachments);
     this.messages.push({ role: "user", content });
     this.abort = new AbortController();
     // Each send() is one undo unit: start capturing this turn's file states.

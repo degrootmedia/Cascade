@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
-import type { DisplayItem } from "./types.js";
+import type { ChatAttachment, DisplayItem } from "./types.js";
 import { Transcript } from "./components/Transcript.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
@@ -15,7 +15,12 @@ import { AutoTextarea } from "./components/AutoTextarea.js";
 
 import { applyAccent } from "./theme.js";
 
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+/** Whether an attachment is an image (rendered as a thumbnail, not a file chip). */
+function isImage(a: ChatAttachment): boolean {
+  return a.mime.startsWith("image/");
+}
 
 export function App() {
   const [transcripts, setTranscripts] = useState<Record<string, DisplayItem[]>>({});
@@ -28,7 +33,7 @@ export function App() {
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [credits, setCredits] = useState<number | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [images, setImages] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
   const [instructions, setInstructions] = useState<WorkspaceInstructionsInfo | null>(null);
@@ -195,11 +200,10 @@ export function App() {
     };
   }, [currentId, refreshActiveAgent]);
 
-  async function attachImages(files: FileList | null) {
+  async function attachFiles(files: FileList | null) {
     if (!files) return;
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
-      if (file.size > MAX_IMAGE_BYTES) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
         if (currentId)
           updateTranscript(currentId, (prev) => [...prev, { kind: "notice", text: `${file.name} is over 8 MB — skipped.` }]);
         continue;
@@ -210,24 +214,24 @@ export function App() {
         r.onerror = reject;
         r.readAsDataURL(file);
       });
-      setImages((prev) => [...prev, dataUrl]);
+      setAttachments((prev) => [...prev, { dataUrl, name: file.name, mime: file.type }]);
     }
   }
 
   async function send() {
     const text = input.trim();
     const id = currentId;
-    if ((!text && images.length === 0) || !id || busy) return;
-    const sendImages = images;
+    if ((!text && attachments.length === 0) || !id || busy) return;
+    const sendAttachments = attachments;
     setInput("");
-    setImages([]);
+    setAttachments([]);
     setBusyIds((p) => ({ ...p, [id]: true }));
     // Make the chat visible in the sidebar the moment the question is asked,
     // before the response starts arriving.
     void window.cascade.listSessions().then(setSessionList);
-    updateTranscript(id, (prev) => [...prev, { kind: "user", text, images: sendImages.length ? sendImages : undefined }]);
+    updateTranscript(id, (prev) => [...prev, { kind: "user", text, attachments: sendAttachments.length ? sendAttachments : undefined }]);
     try {
-      await window.cascade.sendMessage(id, text, sendImages.length ? sendImages : undefined);
+      await window.cascade.sendMessage(id, text, sendAttachments.length ? sendAttachments : undefined);
       void window.cascade.listSessions().then(setSessionList);
     } catch (err) {
       const msg = String(err);
@@ -377,15 +381,15 @@ export function App() {
           />
         </div>
         <Transcript items={items} pureChat={pureChat} />
-        {images.length > 0 && (
+        {attachments.length > 0 && (
           <div className="attachments">
-            {images.map((src, i) => (
-              <div key={i} className="attachment">
-                <img src={src} alt={`attachment ${i + 1}`} />
-                <button onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}>×</button>
+            {attachments.map((a, i) => (
+              <div key={i} className={`attachment${isImage(a) ? "" : " file"}`}>
+                {isImage(a) ? <img src={a.dataUrl} alt={a.name} /> : <span className="attach-file">{a.name}</span>}
+                <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>×</button>
               </div>
             ))}
-            {modelInfo && !modelInfo.vision && (
+            {attachments.some(isImage) && modelInfo && !modelInfo.vision && (
               <span className="attach-warning">⚠ {effectiveModel} can't see images — pick a model with image input</span>
             )}
           </div>
@@ -394,18 +398,18 @@ export function App() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf,text/*,.md,.csv,.json,.xml,.yaml,.yml,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.epub,.odt,.ods,.odp,.tex"
             multiple
             hidden
             onChange={(e) => {
-              void attachImages(e.target.files);
+              void attachFiles(e.target.files);
               e.target.value = "";
             }}
           />
           <button
             className="attach"
-            title="Attach image"
-            aria-label="Attach image"
+            title="Attach image, PDF, or document"
+            aria-label="Attach image, PDF, or document"
             disabled={busy}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -440,7 +444,7 @@ export function App() {
               Stop
             </button>
           ) : (
-            <button className="send" onClick={() => void send()} disabled={!input.trim() && images.length === 0}>
+            <button className="send" onClick={() => void send()} disabled={!input.trim() && attachments.length === 0}>
               Send
             </button>
           )}

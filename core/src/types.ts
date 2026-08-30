@@ -11,6 +11,16 @@ export type ContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
 
+/** A file attached to a user message (image, PDF, document, etc.). */
+export interface Attachment {
+  /** Data URL of the file (any MIME: `data:image/png;base64,…`, `data:application/pdf;base64,…`, …). */
+  dataUrl: string;
+  /** Original filename. */
+  name: string;
+  /** MIME type. */
+  mime: string;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentPart[] | null;
@@ -25,6 +35,82 @@ export function contentText(content: ChatMessage["content"]): string {
   return content
     .map((p) => (p.type === "text" ? p.text : "[image]"))
     .join(" ");
+}
+
+/** MIME types whose bytes can be read as plain text by any frontier model. */
+const INLINE_TEXT_MIMES = new Set([
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "text/x-csv",
+  "text/tab-separated-values",
+  "text/html",
+  "text/xml",
+  "text/css",
+  "text/javascript",
+  "text/x-tex",
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/typescript",
+  "application/yaml",
+  "application/x-yaml",
+  "application/sql",
+]);
+
+/** Cap for files inlined as text so a huge document can't blow up the context. */
+const MAX_INLINE_TEXT_CHARS = 100_000;
+
+/** Decode a `data:` URL into its raw text payload (base64 or percent-encoded). */
+function decodeDataUrlText(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1) return "";
+  const header = dataUrl.slice(0, comma);
+  const body = dataUrl.slice(comma + 1);
+  if (header.includes(";base64")) {
+    try {
+      const bin = atob(body);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    } catch {
+      return "";
+    }
+  }
+  try {
+    return decodeURIComponent(body);
+  } catch {
+    return body;
+  }
+}
+
+/**
+ * Build the content parts for a user message with attachments. Images and
+ * opaque media (PDF, office docs) pass through as OpenAI-style media parts
+ * (`image_url` with a data URL — the only media part chat-completions speaks,
+ * and how Gemini-style endpoints accept PDFs); plain-text documents are
+ * inlined as a labeled text part so every model can read them.
+ */
+export function attachmentParts(text: string, attachments?: Attachment[]): ChatMessage["content"] {
+  if (!attachments?.length) return text;
+  const parts: ContentPart[] = [{ type: "text", text }];
+  for (const a of attachments) {
+    const base = a.mime.split(";")[0].trim().toLowerCase();
+    if (base.startsWith("image/")) {
+      parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+    } else if (INLINE_TEXT_MIMES.has(base)) {
+      let body = decodeDataUrlText(a.dataUrl).trim();
+      if (body.length > MAX_INLINE_TEXT_CHARS) {
+        body = body.slice(0, MAX_INLINE_TEXT_CHARS) + "\n…(truncated — file too large to inline fully)";
+      }
+      if (body) parts.push({ type: "text", text: `\n[Attached file: ${a.name}]\n${body}` });
+      else parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+    } else {
+      // PDFs, office documents, etc. — the OpenAI-compatible endpoint decides
+      // whether the model can ingest them.
+      parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+    }
+  }
+  return parts;
 }
 
 export interface Usage {

@@ -2406,7 +2406,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   cursor: pointer;
 }
 
-/* ---------- image attachments ---------- */
+/* ---------- attachments (images + documents) ---------- */
 .attachments {
   display: flex;
   gap: 10px;
@@ -2420,6 +2420,26 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 8px;
   border: 1px solid var(--border);
   display: block;
+}
+.attachment.file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 26px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.attach-file {
+  font-size: 0.78rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-file::before {
+  content: "📄 ";
 }
 .attachment button {
   position: absolute;
@@ -2466,8 +2486,23 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   stroke-width: 1.75;
   flex-shrink: 0;
 }
-.msg-images { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
-.msg-images img { max-height: 140px; border-radius: 8px; }
+.msg-attachments { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.msg-attachments img { max-height: 140px; border-radius: 8px; }
+.msg-file {
+  font-size: 0.75rem;
+  color: var(--text);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  border-radius: 6px;
+  padding: 2px 8px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-file::before {
+  content: "📄 ";
+}
 
 /* ---------- agents ---------- */
 .chat-header { gap: 10px; }

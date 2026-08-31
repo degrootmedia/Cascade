@@ -100,10 +100,17 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
-}>(function PromptContentEditor({ text, placeholder, className, onChange, onKeyDown, onFocus, onBlur }, ref) {
+  deferExternalWhileFocused?: boolean;
+}>(function PromptContentEditor({ text, placeholder, className, onChange, onKeyDown, onFocus, onBlur, deferExternalWhileFocused }, ref) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const dragState = useRef<{ tag: string; pos: number } | null>(null);
   const pendingCaret = useRef<number | null>(null);
+  // Every raw text this editor produced from the user's own editing. The
+  // parent echoes values back (the graph's reconcile lags one render, and
+  // composed/serialized variants can arrive in sequence), so suppression must
+  // be a SET — a one-shot flag let the second echo slip through and force a
+  // rebuild that dropped the caret to the end.
+  const emitted = useRef<Set<string>>(new Set());
 
   /** Build the box DOM from plain text: text nodes + non-editable tag chips. */
   function buildDom(el: HTMLElement, t: string) {
@@ -138,16 +145,48 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   }
 
   // External text changes rebuild the box (chips); our own edits leave the DOM
-  // alone so the caret survives. A pending caret (chip drag) is restored.
+  // alone so the caret survives. When a rebuild does fire while the caret
+  // lives in the box (a stale echo slipping through, or a Chromium DOM
+  // restructure around the non-editable chips), the caret is mapped through
+  // the edit via a common prefix/suffix diff: inside the unchanged prefix it
+  // stays put, at the divergence it lands after the inserted region (typing),
+  // and past it, it keeps its distance from the end — never a jump to
+  // text.length. Focus is detected by the SELECTION living inside the box
+  // (not activeElement, which is unreliable around non-editable chip
+  // children).
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
+    if (emitted.current.has(text)) return;
     if (el.textContent === text) return;
-    buildDom(el, text);
-    const at = pendingCaret.current ?? text.length;
-    pendingCaret.current = null;
-    const r = offsetToRange(el, at);
     const sel = window.getSelection();
+    const inBox = !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
+    if (deferExternalWhileFocused && inBox && pendingCaret.current === null) return;
+    const oldText = el.textContent ?? "";
+    const oldCaret = pendingCaret.current ?? (inBox ? selectionOffsets(el).start : null);
+    buildDom(el, text);
+    pendingCaret.current = null;
+    let at = text.length;
+    if (oldCaret !== null) {
+      if (oldCaret >= oldText.length) {
+        at = text.length;
+      } else {
+        let p = 0;
+        const maxP = Math.min(oldText.length, text.length);
+        while (p < maxP && oldText[p] === text[p]) p++;
+        if (oldCaret < p) {
+          at = oldCaret;
+        } else {
+          let s = 0;
+          const maxS = Math.min(oldText.length - p, text.length - p);
+          while (s < maxS && oldText[oldText.length - 1 - s] === text[text.length - 1 - s]) s++;
+          at = oldCaret === p
+            ? text.length - s // typing at the caret: land after the inserted region
+            : Math.max(0, text.length - (oldText.length - oldCaret));
+        }
+      }
+    }
+    const r = offsetToRange(el, at);
     if (sel) { sel.removeAllRanges(); sel.addRange(r); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
@@ -190,7 +229,20 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
       aria-multiline="true"
       data-placeholder={placeholder}
       spellCheck={false}
-      onInput={() => { const el = elRef.current; if (el) onChange(el.textContent ?? ""); }}
+      // Stop React Flow's pane/node drag handling from stealing pointer
+      // events while the user is editing - without this the viewport's
+      // transform/pan handlers can blur the editor every other keystroke
+      // when the node's height changes and a dimensions update cycles.
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onInput={() => {
+        const el = elRef.current;
+        if (!el) return;
+        const t = el.textContent ?? "";
+        if (emitted.current.size > 100) emitted.current.clear();
+        emitted.current.add(t);
+        onChange(t);
+      }}
       onKeyDown={(e) => {
         onKeyDown?.(e);
         if (!e.defaultPrevented && e.key === "Enter") {
@@ -219,6 +271,8 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
         const out = next.slice(0, at) + st.tag + next.slice(at);
         pendingCaret.current = at + st.tag.length;
         dragState.current = null;
+        if (emitted.current.size > 100) emitted.current.clear();
+        emitted.current.add(out);
         onChange(out);
       }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}

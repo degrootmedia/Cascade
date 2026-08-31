@@ -27,7 +27,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { GraphGenItem, GraphLayout, OpenArtModelChoice, Production, ProductionShot, ProductionStyle, VideoModelOptions } from "../../../shared/ipc.js";
-import { addRefTag, addStyleParagraph, removeRefTag, removeStyleParagraph, refTagNames } from "../../../shared/prompt-grammar.js";
+import { addRefTag, addStyleParagraph, hasBrandParagraph, refTagNames, removeRefTag, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
 
 /** Default motion prompt for the video-prompt node (matches the video panel). */
@@ -90,8 +90,7 @@ interface StyleData extends Record<string, unknown> {
 type StyleFlowNode = Node<StyleData, "style">;
 
 interface BrandData extends Record<string, unknown> {
-  include: boolean;
-  onToggle: (include: boolean) => void;
+  // Freely pluggable source — no toggle; plugging adds Brand paragraph to the target prompt
 }
 type BrandFlowNode = Node<BrandData, "brand">;
 
@@ -124,11 +123,6 @@ interface VideoGenData extends Record<string, unknown> {
   items: { url: string; prompt: string }[];
   selected: number;
   hasImageSource: boolean;
-  /** One dedicated input-socket id per connected additional reference, in
-   *  connection order (ids are `in-vref-<i>`). */
-  refHandles: { id: string; name: string }[];
-  /** Always-open reference socket so new refs can always be attached. */
-  openHandleId: string;
   onGenerate: (model: string, resolution: string, durationSec: number) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -136,13 +130,41 @@ interface VideoGenData extends Record<string, unknown> {
 }
 type VideoGenFlowNode = Node<VideoGenData, "videogen">;
 
+interface EditGenData extends Record<string, unknown> {
+  models: OpenArtModelChoice[];
+  /** Default from the production's OpenArt config (matches the image node). */
+  defaultResolution: string;
+  items: { url: string; prompt: string }[];
+  selected: number;
+  /** Where the source image comes from (drives the hint + the onGenerate path). */
+  sourceHint: string;
+  onGenerate: (model: string, resolution: string) => Promise<void>;
+  onSelect: (index: number) => void;
+  onCycle: (dir: 1 | -1) => void;
+}
+type EditGenFlowNode = Node<EditGenData, "editgen">;
+
 interface VideoPromptData extends Record<string, unknown> {
+  /** The motion prompt, synced with the classic VideoGenModal (`shot.graphVideoPrompt`). */
   value: string;
+  refHandles: string[];
+  openHandleId: string;
+  includeBrand: boolean;
   onChange: (text: string) => void;
 }
 type VideoPromptFlowNode = Node<VideoPromptData, "videoprompt">;
 
-type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode | OutputFlowNode | ImageGenFlowNode | VideoGenFlowNode | VideoPromptFlowNode;
+interface EditPromptData extends Record<string, unknown> {
+  /** The edit instructions, synced with the classic EditBoardModal (`shot.graphEditPrompt`). */
+  value: string;
+  refHandles: string[];
+  openHandleId: string;
+  includeBrand: boolean;
+  onChange: (text: string) => void;
+}
+type EditPromptFlowNode = Node<EditPromptData, "editprompt">;
+
+type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode | OutputFlowNode | ImageGenFlowNode | VideoGenFlowNode | EditGenFlowNode | VideoPromptFlowNode | EditPromptFlowNode;
 
 /* ------------------------------------------------------------------ */
 /* Custom node views                                                   */
@@ -195,6 +217,43 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     // they move without the node resizing, so force a bounds re-measure.
     updateNodeInternals(id);
   }, [id, data.refHandles.length, updateNodeInternals]);
+  // The prompt text is now a local draft while this node holds focus.
+  // Updating the parent (`focusedPrompt` + side panel + prod) on every
+  // keystroke re-renders the whole workspace, churns `buildDerived` with a
+  // fresh `references` array, and `setNodes` remounts the composer — the
+  // purple focus ring vanishes every other keystroke. Local draft + sync on
+  // blur/close keeps the side panel stable and the caret put.
+  const [localValue, setLocalValue] = useState(data.value);
+  const emitted = useRef<Set<string>>(new Set([data.value]));
+  const rootRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef(localValue);
+  const dataRef = useRef(data);
+  useEffect(() => { draftRef.current = localValue; }, [localValue]);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  const syncToParent = () => {
+    const latest = draftRef.current;
+    const cur = dataRef.current.value;
+    if (latest !== cur) {
+      emitted.current.add(latest);
+      if (emitted.current.size > 100) emitted.current.clear();
+      dataRef.current.onChange(latest);
+    }
+  };
+  const handleBlur = () => {
+    setTimeout(() => {
+      if (!rootRef.current?.contains(document.activeElement)) syncToParent();
+    }, 0);
+  };
+  useEffect(() => {
+    if (rootRef.current?.contains(document.activeElement)) return;
+    if (emitted.current.has(data.value)) return;
+    emitted.current.clear();
+    emitted.current.add(data.value);
+    setLocalValue(data.value);
+    draftRef.current = data.value;
+  }, [data.value]);
+  // Flush any pending draft when the modal closes / node unmounts.
+  useEffect(() => () => { syncToParent(); }, []);
   const n = data.refHandles.length + 1;
   const total = n + 2;
   const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
@@ -204,7 +263,7 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
   ];
   return (
-    <div className="prod-graph-node prod-graph-composer">
+    <div ref={rootRef} className="prod-graph-node prod-graph-composer">
       {sockets.map((s) => (
         <Fragment key={s.id}>
           <Handle
@@ -223,10 +282,18 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
         className="prod-graph-composer-text nodrag nowheel"
         sideRows={3}
         resizable
-        value={data.value}
+        deferExternalWhileFocused
+        value={localValue}
         includeBrand={data.includeBrand}
         placeholder="Describe the frame — connect references, type @, or edit the boxes"
-        onChange={data.onChange}
+        onBlur={handleBlur}
+        onChange={(v) => {
+          setLocalValue(v);
+          draftRef.current = v;
+          const s = emitted.current;
+          if (s.size > 100) s.clear();
+          s.add(v);
+        }}
       />
       <Handle type="source" position={Position.Right} />
     </div>
@@ -253,14 +320,11 @@ const StyleNodeView = memo(function StyleNodeView({ data }: NodeProps<StyleFlowN
   );
 });
 
-const BrandNodeView = memo(function BrandNodeView({ data }: NodeProps<BrandFlowNode>) {
+const BrandNodeView = memo(function BrandNodeView({}: NodeProps<BrandFlowNode>) {
   return (
     <div className="prod-graph-node prod-graph-brand">
       <div className="prod-graph-node-title">Brand identity</div>
-      <label className="prod-brand-toggle nodrag">
-        <input type="checkbox" checked={data.include} onChange={(e) => data.onToggle(e.target.checked)} />
-        Include in prompt
-      </label>
+      <div className="hint" style={{ fontSize: "0.7rem", color: "var(--text-dim)" }}>Pluggable brand — connect to any prompt</div>
       <Handle type="source" position={Position.Right} className="socket-brand" />
     </div>
   );
@@ -336,7 +400,7 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
   );
 });
 
-const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<VideoGenFlowNode>) {
+const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<VideoGenFlowNode>) {
   const [model, setModel] = useState(data.models[0]?.id ?? "auto");
   const [resolution, setResolution] = useState("1080p");
   const [durationSec, setDurationSec] = useState(5);
@@ -359,41 +423,16 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
     if (durations.length && !durations.includes(durationSec)) setDurationSec(durations[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts]);
-  // Socket positions are percentage styles — when the ref count changes they
-  // move without the node resizing, so force a bounds re-measure.
-  const updateNodeInternals = useUpdateNodeInternals();
-  useEffect(() => {
-    updateNodeInternals(id);
-  }, [id, data.refHandles.length, updateNodeInternals]);
-  // Left-edge sockets: prompt at the top, the main source frame, one per
-  // connected additional reference, then an always-open reference socket.
-  const n = data.refHandles.length + 1;
-  const total = n + 2;
-  const sockets: { id: string; kind: "prompt" | "ref"; open: boolean; label: string; top: number }[] = [
-    { id: "in-prompt", kind: "prompt", open: false, label: "Prompt", top: (1 / (total + 1)) * 100 },
-    { id: "in-image", kind: "ref", open: false, label: "Source", top: (2 / (total + 1)) * 100 },
-    ...data.refHandles.map((h, i) => ({ id: h.id, kind: "ref" as const, open: false, label: h.name || "Reference", top: ((i + 3) / (total + 1)) * 100 })),
-    { id: data.openHandleId, kind: "ref", open: true, label: "Reference", top: ((n + 2) / (total + 1)) * 100 },
-  ];
   const run = async () => {
     setBusy(true);
     try { await data.onGenerate(model, resolution, durationSec); } finally { setBusy(false); }
   };
   return (
     <div className="prod-graph-node prod-graph-gen prod-graph-videogen">
-      {sockets.map((s) => (
-        <Fragment key={s.id}>
-          <Handle
-            id={s.id}
-            type="target"
-            position={Position.Left}
-            className={`socket-${s.kind}` + (s.open ? " open" : "")}
-            style={{ top: `${s.top}%` }}
-            title={s.open ? "Additional reference input — always open, drop a connection here" : `${s.label} input`}
-          />
-          <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
-        </Fragment>
-      ))}
+      <Handle id="in-prompt" type="target" position={Position.Left} className="socket-ref" style={{ top: "33%" }} title="Prompt input — from the video-prompt node" />
+      <span className="prod-graph-socket-label ref" style={{ top: "33%" }}>Prompt</span>
+      <Handle id="in-image" type="target" position={Position.Left} className="socket-ref" style={{ top: "67%" }} title="Source image — pipe the frame in" />
+      <span className="prod-graph-socket-label ref" style={{ top: "67%" }}>Source</span>
       <Handle type="source" position={Position.Right} title="Clip out — pipe into the output" />
       <div className="prod-graph-node-title">Video generation</div>
       <div className="prod-graph-gen-controls">
@@ -442,18 +481,206 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   );
 });
 
-const VideoPromptNodeView = memo(function VideoPromptNodeView({ data }: NodeProps<VideoPromptFlowNode>) {
+const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGenFlowNode>) {
+  const [model, setModel] = useState(data.models[0]?.id ?? "auto");
+  const [resolution, setResolution] = useState(data.defaultResolution);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try { await data.onGenerate(model, resolution); } finally { setBusy(false); }
+  };
+  const sockets: { id: string; kind: "ref"; label: string; top: number }[] = [
+    { id: "in-prompt", kind: "ref", label: "Prompt", top: 33 },
+    { id: "in-image", kind: "ref", label: "Source", top: 67 },
+  ];
   return (
-    <div className="prod-graph-node prod-graph-videoprompt">
-      <Handle type="source" position={Position.Right} title="Prompt out" />
+    <div className="prod-graph-node prod-graph-gen prod-graph-editgen">
+      {sockets.map((s) => (
+        <Fragment key={s.id}>
+          <Handle
+            id={s.id}
+            type="target"
+            position={Position.Left}
+            className={`socket-${s.kind}`}
+            style={{ top: `${s.top}%` }}
+            title={s.id === "in-prompt" ? "Prompt input — from the edit-prompt node" : "Source image — pipe a frame or reference in"}
+          />
+          <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
+        </Fragment>
+      ))}
+      <Handle type="source" position={Position.Right} title="Edit out — pipe into the output" />
+      <div className="prod-graph-node-title">Edit image</div>
+      <div className="prod-graph-gen-controls">
+        <select className="prod-openart-select nodrag" value={model} onChange={(e) => setModel(e.target.value)} title="Image model that accepts a reference image">
+          <option value="auto">Auto</option>
+          {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
+        </select>
+        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
+          <option value="1k">1k</option>
+          <option value="2k">2k</option>
+          <option value="4k">4k</option>
+        </select>
+      </div>
+      <span className="prod-graph-gen-hint">Source: {data.sourceHint}</span>
+      {data.items[data.selected]
+        ? <img className="prod-graph-gen-preview" src={data.items[data.selected].url} alt="Edited frame" draggable={false} />
+        : <div className="prod-graph-gen-preview blank">No edits yet</div>}
+      {data.items.length > 0 && (
+        <div className="prod-graph-gen-strip nodrag nowheel">
+          {[...data.items].map((it, i) => ({ it, i })).reverse().map(({ it, i }) => (
+            <button
+              key={i}
+              className={i === data.selected ? "sel" : ""}
+              title={it.prompt || `Edit ${i + 1}`}
+              onClick={() => data.onSelect(i)}
+            >
+              <img src={it.url} alt="" draggable={false} />
+            </button>
+          ))}
+        </div>
+      )}
+      {data.items.length > 1 && (
+        <div className="prod-graph-gen-cycle">
+          <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(1)} title="Older edit">‹</button>
+          <span>{data.selected + 1} / {data.items.length}</span>
+          <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(-1)} title="Newer edit">›</button>
+        </div>
+      )}
+      <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
+        {busy ? "Editing…" : "Edit"}
+      </button>
+    </div>
+  );
+});
+
+/** External prompt nodes — exactly like the image-gen composer prompt node: left
+ *  sockets for Style / Reference(s) / Brand, right source handle, TriplePrompt
+ *  with local draft while focused. Each prompt's Style/Brand presence and @-tags
+ *  drive its own edges, mirroring the composer. */
+const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: NodeProps<VideoPromptFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  useEffect(() => { updateNodeInternals(id); }, [id, data.refHandles.length, updateNodeInternals]);
+  const [localValue, setLocalValue] = useState(data.value);
+  const emitted = useRef<Set<string>>(new Set([data.value]));
+  const rootRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef(localValue);
+  const dataRef = useRef(data);
+  useEffect(() => { draftRef.current = localValue; }, [localValue]);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  const syncToParent = () => {
+    const latest = draftRef.current;
+    const cur = dataRef.current.value;
+    if (latest !== cur) {
+      emitted.current.add(latest);
+      if (emitted.current.size > 100) emitted.current.clear();
+      dataRef.current.onChange(latest);
+    }
+  };
+  const handleBlur = () => {
+    setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
+  };
+  useEffect(() => {
+    if (rootRef.current?.contains(document.activeElement)) return;
+    if (emitted.current.has(data.value)) return;
+    emitted.current.clear();
+    emitted.current.add(data.value);
+    setLocalValue(data.value);
+    draftRef.current = data.value;
+  }, [data.value]);
+  useEffect(() => () => { syncToParent(); }, []);
+  const n = data.refHandles.length + 1;
+  const total = n + 2;
+  const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
+    { id: "in-style", kind: "style", open: false, label: "Style", top: (1 / (total + 1)) * 100 },
+    ...data.refHandles.map((h, i) => ({ id: h, kind: "ref" as const, open: false, label: "Reference", top: ((i + 2) / (total + 1)) * 100 })),
+    { id: data.openHandleId, kind: "ref", open: true, label: "Reference", top: ((n + 1) / (total + 1)) * 100 },
+    { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
+  ];
+  return (
+    <div ref={rootRef} className="prod-graph-node prod-graph-composer prod-graph-videoprompt">
+      {sockets.map((s) => (
+        <Fragment key={s.id}>
+          <Handle id={s.id} type="target" position={Position.Left} className={`socket-${s.kind}` + (s.open ? " open" : "")} style={{ top: `${s.top}%` }} title={s.open ? "Reference input — always open, drop a connection here" : `${s.label} input`} />
+          <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
+        </Fragment>
+      ))}
       <div className="prod-graph-node-title">Video prompt</div>
-      <textarea
+      <TriplePrompt
         className="prod-graph-composer-text nodrag nowheel"
-        rows={4}
-        value={data.value}
-        placeholder="Motion prompt — e.g. camera pans left, leaves drift"
-        onChange={(e) => data.onChange(e.target.value)}
+        sideRows={3}
+        resizable
+        deferExternalWhileFocused
+        value={localValue}
+        includeBrand={data.includeBrand}
+        placeholder="Motion prompt — connect references, type @, or edit the boxes"
+        onBlur={handleBlur}
+        onChange={(v) => { setLocalValue(v); draftRef.current = v; const s = emitted.current; if (s.size > 100) s.clear(); s.add(v); }}
       />
+      <Handle type="source" position={Position.Right} />
+    </div>
+  );
+});
+
+const EditPromptNodeView = memo(function EditPromptNodeView({ id, data }: NodeProps<EditPromptFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  useEffect(() => { updateNodeInternals(id); }, [id, data.refHandles.length, updateNodeInternals]);
+  const [localValue, setLocalValue] = useState(data.value);
+  const emitted = useRef<Set<string>>(new Set([data.value]));
+  const rootRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef(localValue);
+  const dataRef = useRef(data);
+  useEffect(() => { draftRef.current = localValue; }, [localValue]);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  const syncToParent = () => {
+    const latest = draftRef.current;
+    const cur = dataRef.current.value;
+    if (latest !== cur) {
+      emitted.current.add(latest);
+      if (emitted.current.size > 100) emitted.current.clear();
+      dataRef.current.onChange(latest);
+    }
+  };
+  const handleBlur = () => {
+    setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
+  };
+  useEffect(() => {
+    if (rootRef.current?.contains(document.activeElement)) return;
+    if (emitted.current.has(data.value)) return;
+    emitted.current.clear();
+    emitted.current.add(data.value);
+    setLocalValue(data.value);
+    draftRef.current = data.value;
+  }, [data.value]);
+  useEffect(() => () => { syncToParent(); }, []);
+  const n = data.refHandles.length + 1;
+  const total = n + 2;
+  const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
+    { id: "in-style", kind: "style", open: false, label: "Style", top: (1 / (total + 1)) * 100 },
+    ...data.refHandles.map((h, i) => ({ id: h, kind: "ref" as const, open: false, label: "Reference", top: ((i + 2) / (total + 1)) * 100 })),
+    { id: data.openHandleId, kind: "ref", open: true, label: "Reference", top: ((n + 1) / (total + 1)) * 100 },
+    { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
+  ];
+  return (
+    <div ref={rootRef} className="prod-graph-node prod-graph-composer prod-graph-editprompt">
+      {sockets.map((s) => (
+        <Fragment key={s.id}>
+          <Handle id={s.id} type="target" position={Position.Left} className={`socket-${s.kind}` + (s.open ? " open" : "")} style={{ top: `${s.top}%` }} title={s.open ? "Reference input — always open, drop a connection here" : `${s.label} input`} />
+          <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
+        </Fragment>
+      ))}
+      <div className="prod-graph-node-title">Edit prompt</div>
+      <TriplePrompt
+        className="prod-graph-composer-text nodrag nowheel"
+        sideRows={3}
+        resizable
+        deferExternalWhileFocused
+        value={localValue}
+        includeBrand={data.includeBrand}
+        placeholder="Edit instructions — connect references, type @, or edit the boxes"
+        onBlur={handleBlur}
+        onChange={(v) => { setLocalValue(v); draftRef.current = v; const s = emitted.current; if (s.size > 100) s.clear(); s.add(v); }}
+      />
+      <Handle type="source" position={Position.Right} />
     </div>
   );
 });
@@ -468,8 +695,13 @@ const nodeTypes = {
   frame: OutputNodeView,
   imagegen: ImageGenNodeView,
   videogen: VideoGenNodeView,
+  editgen: EditGenNodeView,
   videoprompt: VideoPromptNodeView,
+  editprompt: EditPromptNodeView,
 };
+
+/** Exported for the renderer-component tests (the node graph uses it directly). */
+export const graphNodeTypes = nodeTypes;
 
 /* ------------------------------------------------------------------ */
 /* Layout                                                              */
@@ -483,13 +715,14 @@ const REF_STEP = 128;
 const TAGGED_X = REF_W + 56;
 const COMPOSER_X = 620;
 const IMGGEN_X = 1080;
+const EDITGEN_X = 1320;
 const VIDGEN_X = 1520;
 const OUTPUT_X = 1960;
 const STYLE_STEP = 96;
 /** Top of the reference band: the style node sits above it, brand below. */
 const REF_COL_TOP = 20 + STYLE_STEP;
 /** Node ids that always exist regardless of prompt/reference content. */
-const STRUCTURAL_IDS = ["composer", "style", "brand", "output", "imagegen", "videogen", "videoprompt"];
+const STRUCTURAL_IDS = ["composer", "style", "brand", "output", "imagegen", "videogen", "editgen", "videoprompt", "editprompt"];
 /** Edge strokes match the input-socket colors (see styles.css). */
 const SOCKET_COLORS = { ref: "var(--graph-socket-ref)", style: "var(--graph-socket-style)", brand: "var(--graph-socket-brand)" } as const;
 
@@ -504,8 +737,10 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
   if (id === "brand") return { x: REF_X, y: REF_COL_TOP + band + 16 };
   if (id === "composer") return { x: COMPOSER_X, y: Math.max(20, midY - 140) };
   if (id === "imagegen") return { x: IMGGEN_X, y: Math.max(20, midY - 170) };
+  if (id === "editprompt") return { x: EDITGEN_X, y: Math.max(20, midY + 140) };
+  if (id === "editgen") return { x: EDITGEN_X, y: Math.max(20, midY - 170) };
+  if (id === "videoprompt") return { x: VIDGEN_X, y: Math.max(20, midY + 140) };
   if (id === "videogen") return { x: VIDGEN_X, y: Math.max(20, midY - 190) };
-  if (id === "videoprompt") return { x: VIDGEN_X, y: Math.max(20, midY + 190) };
   if (id === "output") return { x: OUTPUT_X, y: Math.max(20, midY - 150) };
   const availIdx = availIds.indexOf(id);
   if (availIdx >= 0) return { x: REF_X, y: REF_COL_TOP + availIdx * REF_STEP };
@@ -518,7 +753,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, imageModels, videoModels, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeOutput, onSaveLayout, onClose }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, imageModels, videoModels, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -548,10 +783,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onRunImageGen: (model: string, resolution: string) => Promise<void>;
   /** Run the video generation node (prompt = the video-prompt node). */
   onRunVideoGen: (model: string, resolution: string, durationSec: number) => Promise<void>;
+  /** Run the edit-image node (prompt = the edit-prompt node). */
+  onRunEditGen: (model: string, resolution: string) => Promise<void>;
   /** Select a generation node's stored output by index. */
-  onSelectGraphGen: (kind: "image" | "video", index: number) => void;
+  onSelectGraphGen: (kind: "image" | "video" | "edit", index: number) => void;
   /** Cycle a generation node's stored outputs. */
-  onCycleGraphGen: (kind: "image" | "video", dir: 1 | -1) => void;
+  onCycleGraphGen: (kind: "image" | "video" | "edit", dir: 1 | -1) => void;
   /** Merge shot-level graph fields (video prompt text, cycle index, pipes). */
   onGraphField: (patch: Partial<ProductionShot>) => void;
   /** Pipe the image node's output into the video node's image input. */
@@ -560,6 +797,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onPipeImageToOutput: () => void;
   /** Pipe the video node's output into the output (and apply its selection). */
   onPipeVideoToOutput: () => void;
+  /** Pipe the edit-image node's output into the output (and apply its selection). */
+  onPipeEditToOutput: () => void;
   /** Pipe a reference node's output into the output (applies its media to the shot). */
   onPipeRefToOutput: (refId: string) => void;
   /** Unbind the image node's output entirely (video feed + any output feed). */
@@ -568,6 +807,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onUnpipeImageToVideo: () => void;
   /** Unbind the video node's output. */
   onUnpipeVideoGen: () => void;
+  /** Unbind the edit-image node's output. */
+  onUnpipeEditGen: () => void;
   /** Unbind whatever feeds the output. */
   onUnpipeOutput: () => void;
   /** Persist part of the canvas state (positions and/or viewport). */
@@ -611,13 +852,19 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     return () => { live = false; };
   }, [prod.meta.id, shot.id, shot.artwork, bust]);
 
+  const videoPromptValue = shot.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT;
+  const editPromptValue = shot.graphEditPrompt ?? "";
+
   const taggedNames = useMemo(
     () => refTagNames(prompt),
     [prompt],
   );
+  const taggedVideoNames = useMemo(() => refTagNames(videoPromptValue), [videoPromptValue]);
+  const taggedEditNames = useMemo(() => refTagNames(editPromptValue), [editPromptValue]);
 
   // Tagged refs in prompt order; dangling tags (no matching ref) render as
-  // "missing" so the user can see and clean them up.
+  // "missing" so the user can see and clean them up. Image prompt drives the
+  // original `tagged` list; video/edit prompts have their own per-prompt lists.
   const tagged = useMemo(
     () => taggedNames.map((name) => ({
       name,
@@ -625,21 +872,51 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     })),
     [taggedNames, references],
   );
+  const taggedVideo = useMemo(
+    () => taggedVideoNames.map((name) => ({
+      name,
+      ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
+    })),
+    [taggedVideoNames, references],
+  );
+  const taggedEdit = useMemo(
+    () => taggedEditNames.map((name) => ({
+      name,
+      ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
+    })),
+    [taggedEditNames, references],
+  );
 
-  const taggedKey = useMemo(() => new Set(taggedNames.map((n) => n.toLowerCase())), [taggedNames]);
+  // Union of all tags across the three prompts — every reference that appears
+  // in ANY prompt gets a node (tagged), the rest are available. This keeps the
+  // reference tray complete while each prompt node's sockets are driven by its
+  // own tag list.
+  const unionTagged = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { name: string; ref: GraphRef | null }[] = [];
+    for (const name of [...taggedNames, ...taggedVideoNames, ...taggedEditNames]) {
+      const lc = name.toLowerCase();
+      if (seen.has(lc)) continue;
+      seen.add(lc);
+      out.push({ name, ref: references.find((r) => r.name.toLowerCase() === lc) ?? null });
+    }
+    return out;
+  }, [taggedNames, taggedVideoNames, taggedEditNames, references]);
+
+  const unionKey = useMemo(() => new Set(unionTagged.map((t) => (t.ref?.id ? t.ref.id : `missing:${t.name.toLowerCase()}`))), [unionTagged]);
   const available = useMemo(
-    () => references.filter((r) => !taggedKey.has(r.name.toLowerCase())),
-    [references, taggedKey],
+    () => references.filter((r) => !unionTagged.some((t) => t.ref?.id === r.id)),
+    [references, unionTagged],
   );
 
   const availIds = useMemo(() => available.map((r) => `ref:${r.id}`), [available]);
-  const taggedIds = useMemo(() => tagged.map((t, i) => `ref:${t.ref?.id ?? "missing-" + i}`), [tagged]);
+  const taggedIds = useMemo(() => unionTagged.map((t, i) => `ref:${t.ref?.id ?? "missing-" + i}`), [unionTagged]);
 
   // Node callbacks change identity every parent render; routing them through
   // a ref keeps node data (and node object identities) stable across renders,
   // which keeps React Flow's selection bookkeeping from fighting re-renders.
-  const cb = useRef({ onPromptChange, onStyleChange, onToggleBrand, prompt, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeOutput, graphVideoRefIds: shot.graphVideoRefIds ?? [], graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId });
-  cb.current = { onPromptChange, onStyleChange, onToggleBrand, prompt, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeOutput, graphVideoRefIds: shot.graphVideoRefIds ?? [], graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId };
+  const cb = useRef({ onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValue, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeEditGen, onUnpipeOutput, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditStyleConnected: shot.graphEditStyleConnected, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphEditSourceRefId: shot.graphEditSourceRefId });
+  cb.current = { onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValue, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeEditGen, onUnpipeOutput, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditStyleConnected: shot.graphEditStyleConnected, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphEditSourceRefId: shot.graphEditSourceRefId };
   const stable = useRef({
     onPromptChange: (value: string) => cb.current.onPromptChange(value),
     onStyleChange: (style: string) => cb.current.onStyleChange(style),
@@ -651,10 +928,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onZoom: (name: string, artwork: string) => cb.current.setLightbox({ name, artwork }),
     onRunImageGen: (model: string, resolution: string) => cb.current.onRunImageGen(model, resolution),
     onRunVideoGen: (model: string, resolution: string, durationSec: number) => cb.current.onRunVideoGen(model, resolution, durationSec),
+    onRunEditGen: (model: string, resolution: string) => cb.current.onRunEditGen(model, resolution),
     onSelectImageGen: (index: number) => cb.current.onSelectGraphGen("image", index),
     onSelectVideoGen: (index: number) => cb.current.onSelectGraphGen("video", index),
+    onSelectEditGen: (index: number) => cb.current.onSelectGraphGen("edit", index),
     onCycleImageGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("image", dir),
     onCycleVideoGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("video", dir),
+    onCycleEditGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("edit", dir),
     onModelOptions: (model: string, withImage: boolean) => {
       const key = `${model}|${withImage ? 1 : 0}`;
       const cached = videoOptionsCache.get(key);
@@ -665,13 +945,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       }).catch(() => null);
     },
     onVideoPromptChange: (text: string) => cb.current.onGraphField({ graphVideoPrompt: text }),
+    onEditPromptChange: (text: string) => cb.current.onGraphField({ graphEditPrompt: text }),
     onPipeImageToVideo: () => cb.current.onPipeImageToVideo(),
     onPipeImageToOutput: () => cb.current.onPipeImageToOutput(),
     onPipeVideoToOutput: () => cb.current.onPipeVideoToOutput(),
+    onPipeEditToOutput: () => cb.current.onPipeEditToOutput(),
     onPipeRefToOutput: (refId: string) => cb.current.onPipeRefToOutput(refId),
     onUnpipeImageGen: () => cb.current.onUnpipeImageGen(),
     onUnpipeImageToVideo: () => cb.current.onUnpipeImageToVideo(),
     onUnpipeVideoGen: () => cb.current.onUnpipeVideoGen(),
+    onUnpipeEditGen: () => cb.current.onUnpipeEditGen(),
     onUnpipeOutput: () => cb.current.onUnpipeOutput(),
   }).current;
 
@@ -679,7 +962,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const ORIGIN = { x: 0, y: 0 };
     const build = <T extends GraphNode>(node: T): T => ({ ...node, position: defaultPosition(node.id, availIds, taggedIds) });
     return [
-      ...tagged.map((t, i) => build({
+      ...unionTagged.map((t, i) => build({
         id: `ref:${t.ref?.id ?? "missing-" + i}`,
         type: "ref" as const,
         position: ORIGIN,
@@ -715,14 +998,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "brand",
         type: "brand" as const,
         position: ORIGIN,
-        data: { include: includeBrand, onToggle: stable.onToggleBrand },
+        data: {},
         deletable: false,
       }),
       build({
         id: "composer",
         type: "composer" as const,
         position: ORIGIN,
-        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand, onChange: stable.onPromptChange },
+        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(prompt), onChange: stable.onPromptChange },
         deletable: false,
       }),
       build({
@@ -739,6 +1022,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           }
           if (shot.graphOutputSource === "imagegen") {
             const sel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "image" as const, bound: true };
+          }
+          if (shot.graphOutputSource === "editgen") {
+            const sel = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
             if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "image" as const, bound: true };
           }
           if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) {
@@ -774,9 +1061,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           models: videoModels,
           items: (shot.graphVideoGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: shot.graphVideoGenIndex ?? 0,
-          hasImageSource: shot.graphImageToVideo === true || (shot.graphVideoRefIds?.length ?? 0) > 0,
-          refHandles: (shot.graphVideoRefIds ?? []).map((refId, i) => ({ id: `in-vref-${i}`, name: references.find((r) => r.id === refId)?.name ?? "Reference" })),
-          openHandleId: "in-vref-open",
+          hasImageSource: shot.graphImageToVideo === true,
           onGenerate: stable.onRunVideoGen,
           onSelect: stable.onSelectVideoGen,
           onCycle: stable.onCycleVideoGen,
@@ -785,14 +1070,41 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: false,
       }),
       build({
+        id: "editgen",
+        type: "editgen" as const,
+        position: ORIGIN,
+        data: {
+          models: imageModels,
+          defaultResolution: prod.openArt?.resolution ?? "1k",
+          items: (shot.graphEditGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
+          selected: shot.graphEditGenIndex ?? 0,
+          sourceHint: shot.graphEditImageSource
+            ? "piped frame"
+            : shot.graphEditSourceRefId
+              ? (references.find((r) => r.id === shot.graphEditSourceRefId)?.name ?? "reference")
+              : "shot frame",
+          onGenerate: stable.onRunEditGen,
+          onSelect: stable.onSelectEditGen,
+          onCycle: stable.onCycleEditGen,
+        },
+        deletable: false,
+      }),
+      build({
         id: "videoprompt",
         type: "videoprompt" as const,
         position: ORIGIN,
-        data: { value: shot.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, onChange: stable.onVideoPromptChange },
+        data: { value: videoPromptValue, refHandles: taggedVideo.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(videoPromptValue), onChange: stable.onVideoPromptChange },
+        deletable: false,
+      }),
+      build({
+        id: "editprompt",
+        type: "editprompt" as const,
+        position: ORIGIN,
+        data: { value: editPromptValue, refHandles: taggedEdit.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(editPromptValue), onChange: stable.onEditPromptChange },
         deletable: false,
       }),
     ];
-  }, [tagged, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, prompt, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphVideoPrompt, shot.graphImageToVideo, shot.graphVideoRefIds, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references]);
+  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -806,23 +1118,58 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const nodesRef = useRef(nodes);
   useEffect(() => {
     const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
-    const next = buildDerived().map((d) => {
+    const derived = buildDerived();
+    let changed = false;
+    const next = derived.map((d) => {
       const old = byId.get(d.id);
-      return old ? { ...d, position: old.position, selected: old.selected, measured: old.measured } : d;
+      if (!old) { changed = true; return d; }
+      // Keep the old node object when its visible data hasn't changed — this
+      // preserves React state and DOM focus inside the nodes (the prompt's
+      // contenteditable would lose focus every other keystroke when the parent
+      // re-renders with a fresh `references` array identity).
+      const a = d.data as Record<string, unknown>;
+      const b = old.data as Record<string, unknown>;
+      let equal = true;
+      if (d.type !== old.type) equal = false;
+      else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
+      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
+      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
+      else if (d.type === "videoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
+      else if (d.type === "editprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
+      else if (d.type === "style") equal = (a.value as string) === (b.value as string);
+      else if (d.type === "brand") equal = (a.include as boolean) === (b.include as boolean);
+      else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.missing as boolean) === (b.missing as boolean);
+      else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
+      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
+      if (equal) return old;
+      changed = true;
+      return { ...d, position: old.position, selected: old.selected, measured: old.measured };
     });
+    if (!changed && next.length === nodesRef.current.length && next.every((n, i) => n === nodesRef.current[i])) return;
     nodesRef.current = next;
     setNodes(next);
   }, [buildDerived]);
 
   const edges = useMemo<Edge[]>(() => {
-    // Style/brand edges mirror the prompt: the edge exists only while that
-    // section is present, so detaching = dragging the link off the socket.
-    const styleAttached = /^Style:/m.test(prompt);
+    // Style edges are freely pluggable — the edge shows whether the style node
+    // is plugged into that prompt, independent of the dropdown value. Switching
+    // the dropdown to "None" removes the Style paragraph but keeps the plug.
+    const styleAttached = shot.graphStyleConnected ?? /^Style:/m.test(prompt);
+    const styleAttachedVideo = shot.graphVideoStyleConnected ?? /^Style:/m.test(videoPromptValue);
+    const styleAttachedEdit = shot.graphEditStyleConnected ?? /^Style:/m.test(editPromptValue);
+    const brandAttached = hasBrandParagraph(prompt);
+    const brandAttachedVideo = hasBrandParagraph(videoPromptValue);
+    const brandAttachedEdit = hasBrandParagraph(editPromptValue);
+    const nodeIdForTag = (name: string): string => {
+      const entry = unionTagged.find((t) => t.name.toLowerCase() === name.toLowerCase());
+      const idx = unionTagged.findIndex((t) => t.name.toLowerCase() === name.toLowerCase());
+      return `ref:${entry?.ref?.id ?? "missing-" + idx}`;
+    };
     return [
       ...tagged.map((t, i) => {
-        const refNodeId = `ref:${t.ref?.id ?? "missing-" + i}`;
+        const refNodeId = nodeIdForTag(t.name);
         return {
-          id: `e-${refNodeId}`,
+          id: `e-${refNodeId}-composer-${i}`,
           source: refNodeId,
           target: "composer",
           // Each connected reference gets its own input socket on the prompt.
@@ -831,35 +1178,55 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           // No edge-end anchors — disconnecting is done by dragging the link
           // off a socket (onConnectEnd).
           reconnectable: false,
-          selected: selectedEdges.has(`e-${refNodeId}`),
+          selected: selectedEdges.has(`e-${refNodeId}-composer-${i}`),
+        };
+      }),
+      ...taggedVideo.map((t, i) => {
+        const refNodeId = nodeIdForTag(t.name);
+        return {
+          id: `e-${refNodeId}-videoprompt-${i}`,
+          source: refNodeId,
+          target: "videoprompt",
+          targetHandle: `in-ref-${i}`,
+          style: { stroke: SOCKET_COLORS.ref },
+          reconnectable: false,
+          selected: selectedEdges.has(`e-${refNodeId}-videoprompt-${i}`),
+        };
+      }),
+      ...taggedEdit.map((t, i) => {
+        const refNodeId = nodeIdForTag(t.name);
+        return {
+          id: `e-${refNodeId}-editprompt-${i}`,
+          source: refNodeId,
+          target: "editprompt",
+          targetHandle: `in-ref-${i}`,
+          style: { stroke: SOCKET_COLORS.ref },
+          reconnectable: false,
+          selected: selectedEdges.has(`e-${refNodeId}-editprompt-${i}`),
         };
       }),
       ...(styleAttached ? [{ id: "e-style", source: "style", target: "composer", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
-      ...(includeBrand ? [{ id: "e-brand", source: "brand", target: "composer", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
-      // Generation pipeline: composer feeds the image node; the video-prompt
-      // node feeds the video node; pipes into the output mirror the binding.
+      ...(styleAttachedVideo ? [{ id: "e-style-vp", source: "style", target: "videoprompt", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
+      ...(styleAttachedEdit ? [{ id: "e-style-ep", source: "style", target: "editprompt", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
+      ...(brandAttached ? [{ id: "e-brand", source: "brand", target: "composer", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
+      ...(brandAttachedVideo ? [{ id: "e-brand-vp", source: "brand", target: "videoprompt", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
+      ...(brandAttachedEdit ? [{ id: "e-brand-ep", source: "brand", target: "editprompt", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
+      // Generation pipeline: composer feeds the image node; external prompt nodes
+      // feed the video/edit nodes; pipes into the output mirror the binding.
       { id: "e-cmp-img", source: "composer", target: "imagegen", targetHandle: "in-prompt", deletable: false, reconnectable: false },
       { id: "e-vp-vid", source: "videoprompt", target: "videogen", targetHandle: "in-prompt", deletable: false, reconnectable: false },
+      { id: "e-ep-edit", source: "editprompt", target: "editgen", targetHandle: "in-prompt", deletable: false, reconnectable: false },
       ...(shot.graphImageToVideo ? [{ id: "e-img-vid", source: "imagegen", target: "videogen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
+      ...(shot.graphEditImageSource ? [{ id: "e-img-edit", source: "imagegen", target: "editgen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
+      ...(shot.graphEditSourceRefId && references.some((r) => r.id === shot.graphEditSourceRefId) ? [{ id: "e-ref-edit", source: `ref:${shot.graphEditSourceRefId}`, target: "editgen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "imagegen" ? [{ id: "e-img-out", source: "imagegen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "videogen" ? [{ id: "e-vid-out", source: "videogen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
+      ...(shot.graphOutputSource === "editgen" ? [{ id: "e-edit-out", source: "editgen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "ref" && shot.graphOutputRefId && references.some((r) => r.id === shot.graphOutputRefId) ? [{ id: "e-ref-out", source: `ref:${shot.graphOutputRefId}`, target: "output", targetHandle: "in-out", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
-      // Additional references piped into the video node's extra inputs.
-      ...(shot.graphVideoRefIds ?? []).map((refId, i) => ({ refId, i }))
-        .filter(({ refId }) => references.some((r) => r.id === refId))
-        .map(({ refId, i }) => ({
-          id: `e-vref-${refId}`,
-          source: `ref:${refId}`,
-          target: "videogen",
-          targetHandle: `in-vref-${i}`,
-          style: { stroke: SOCKET_COLORS.ref },
-          deletable: true,
-          reconnectable: false,
-        })),
       // The output is fed ONLY by the generation nodes or a reference — the
       // composer's classic straight-to-output pipe is gone.
     ];
-  }, [tagged, selectedEdges, prompt, includeBrand, shot.graphImageToVideo, shot.graphVideoRefIds, shot.graphOutputSource, shot.graphOutputRefId, references]);
+  }, [unionTagged, tagged, taggedVideo, taggedEdit, selectedEdges, prompt, videoPromptValue, editPromptValue, shot.graphImageToVideo, shot.graphEditImageSource, shot.graphEditSourceRefId, shot.graphOutputSource, shot.graphOutputRefId, references]);
 
   const onNodesChange = useCallback<OnNodesChange<GraphNode>>((changes) => {
     // Canonical controlled flow: apply every change (position, select,
@@ -879,18 +1246,27 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     for (const c of changes) {
       if (c.type === "remove") {
-        // Only reference edges are deletable; deleting one removes its binding.
-        const m = /^e-ref:(.+)$/.exec(c.id);
+        // Reference edges are deletable via keyboard (select+Delete) —
+        // ids are `e-<refId>-<target>-<idx>` for the three prompt nodes.
+        const m = /^e-ref:(.+)-(composer|videoprompt|editprompt)-(\d+)$/.exec(c.id);
         if (m) {
-          const idx = tagged.findIndex((t, i) => (t.ref?.id ?? "missing-" + i) === m[1]);
-          if (idx >= 0) onPromptChange(removeRefTag(prompt, tagged[idx].name));
+          const [, , targetKind, idxStr] = m;
+          const idx = Number(idxStr);
+          const list = targetKind === "composer" ? tagged : targetKind === "videoprompt" ? taggedVideo : taggedEdit;
+          const entry = list[idx];
+          if (entry) {
+            if (targetKind === "composer") onPromptChange(removeRefTag(prompt, entry.name));
+            else if (targetKind === "videoprompt") cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, entry.name) });
+            else cb.current.onGraphField({ graphEditPrompt: removeRefTag(cb.current.editPromptValue, entry.name) });
+          }
           setSelectedEdges(new Set());
           continue;
         }
-        const v = /^e-vref-(.+)$/.exec(c.id);
-        if (v) {
-          const list = (cb.current.graphVideoRefIds ?? []).filter((id) => id !== v[1]);
-          cb.current.onGraphField({ graphVideoRefIds: list });
+        // Legacy `e-ref:<id>` (composer) fallback for older edges.
+        const m2 = /^e-ref:(.+)$/.exec(c.id);
+        if (m2) {
+          const idx = tagged.findIndex((t, i) => (t.ref?.id ?? "missing-" + i) === m2[1]);
+          if (idx >= 0) onPromptChange(removeRefTag(prompt, tagged[idx].name));
           setSelectedEdges(new Set());
           continue;
         }
@@ -903,66 +1279,98 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         });
       }
     }
-  }, [tagged, prompt, onPromptChange]);
+  }, [tagged, taggedVideo, taggedEdit, prompt, onPromptChange]);
 
   const onConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
-    // Generation pipes: the image node's output feeds the video node's image
-    // input and/or the output (both can coexist); the video node feeds the
-    // output; a reference can feed the output or the video node's extra inputs.
+    // Generation pipes: the image node's output feeds the video/edit image
+    // inputs and/or the output (both can coexist); the video/edit nodes feed
+    // the output; a reference can feed the output or the edit node's source.
     if (conn.source === "imagegen" && conn.target === "videogen") { cb.current.onPipeImageToVideo(); return; }
     if (conn.source === "imagegen" && conn.target === "output") { cb.current.onPipeImageToOutput(); return; }
+    if (conn.source === "imagegen" && conn.target === "editgen" && conn.targetHandle === "in-image") { cb.current.onGraphField({ graphEditImageSource: true, graphEditSourceRefId: undefined }); return; }
     if (conn.source === "videogen" && conn.target === "output") { cb.current.onPipeVideoToOutput(); return; }
+    if (conn.source === "editgen" && conn.target === "output") { cb.current.onPipeEditToOutput(); return; }
     const refId = /^ref:(.+)$/.exec(conn.source)?.[1];
     if (refId) {
       if (conn.target === "output") { cb.current.onPipeRefToOutput(refId); return; }
-      if (conn.target === "videogen" && conn.targetHandle === "in-vref-open") {
-        const list = cb.current.graphVideoRefIds ?? [];
-        if (!list.includes(refId)) cb.current.onGraphField({ graphVideoRefIds: [...list, refId] });
+      if (conn.target === "editgen" && conn.targetHandle === "in-image") {
+        cb.current.onGraphField({ graphEditSourceRefId: refId, graphEditImageSource: undefined });
         return;
       }
     }
-    if (conn.target !== "composer") return;
-    if (conn.source === "style") {
-      // Re-attach the style section from the currently selected style.
-      const text = cb.current.styles.find((s) => s.id === cb.current.styleValue)?.prompt.trim() ?? "";
-      cb.current.onPromptChange(addStyleParagraph(cb.current.prompt, text));
+    // Prompt nodes: style / brand / reference inputs — exactly like composer.
+    if (conn.target === "composer" || conn.target === "videoprompt" || conn.target === "editprompt") {
+      const isComposer = conn.target === "composer";
+      const isVideo = conn.target === "videoprompt";
+      if (conn.source === "style") {
+        const text = cb.current.styles.find((s) => s.id === cb.current.styleValue)?.prompt.trim() ?? "";
+        if (isComposer) {
+          cb.current.onGraphField({ graphStyleConnected: true });
+          cb.current.onPromptChange(addStyleParagraph(cb.current.prompt, text));
+        } else if (isVideo) {
+          cb.current.onGraphField({ graphVideoStyleConnected: true, graphVideoPrompt: addStyleParagraph(cb.current.videoPromptValue, text) });
+        } else {
+          cb.current.onGraphField({ graphEditStyleConnected: true, graphEditPrompt: addStyleParagraph(cb.current.editPromptValue, text) });
+        }
+        return;
+      }
+      if (conn.source === "brand") {
+        const getBrandNext = (cur: string) => cur.trimEnd() ? `${cur.trimEnd()}\n\nBrand identity: auto` : `Brand identity: auto`;
+        if (isComposer) {
+          if (!hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(getBrandNext(cb.current.prompt));
+          return;
+        }
+        const cur = isVideo ? cb.current.videoPromptValue : cb.current.editPromptValue;
+        if (!hasBrandParagraph(cur)) {
+          const next = getBrandNext(cur);
+          if (isVideo) cb.current.onGraphField({ graphVideoPrompt: next });
+          else cb.current.onGraphField({ graphEditPrompt: next });
+        }
+        return;
+      }
+      const m = /^ref:(.+)$/.exec(conn.source);
+      if (!m) return;
+      const ref = references.find((r) => r.id === m[1]);
+      if (!ref) return;
+      if (isComposer) onPromptChange(addRefTag(prompt, ref.name));
+      else if (isVideo) cb.current.onGraphField({ graphVideoPrompt: addRefTag(cb.current.videoPromptValue, ref.name) });
+      else cb.current.onGraphField({ graphEditPrompt: addRefTag(cb.current.editPromptValue, ref.name) });
       return;
     }
-    if (conn.source === "brand") {
-      cb.current.onToggleBrand(true);
-      return;
-    }
-    const m = /^ref:(.+)$/.exec(conn.source);
-    if (!m) return;
-    const ref = references.find((r) => r.id === m[1]);
-    if (!ref) return;
-    onPromptChange(addRefTag(prompt, ref.name));
   }, [references, prompt, onPromptChange]);
 
-  /** Reference→open-input, style→style, brand→brand, imagegen→video/output
-   *  (both at once allowed), videogen→output, ref→output (image/video refs
-   *  only) and ref→video-node extra input (image refs only) — everything else
-   *  is rejected. */
+  /** Reference→open-input, style→style, brand→brand, imagegen→video/edit/output
+   *  (all at once allowed), videogen→output, editgen→output, ref→output
+   *  (image/video refs only), ref→edit-node source (image refs only), plus fixed
+   *  prompt pipes — everything else is rejected. Prompt nodes (composer,
+   *  videoprompt, editprompt) each accept Style / Reference / Brand exactly alike. */
   const isValidConnection = useCallback((c: Connection | Edge) => {
     const source = c.source ?? "";
+    if (source === "videoprompt") return c.target === "videogen" && c.targetHandle === "in-prompt";
+    if (source === "editprompt") return c.target === "editgen" && c.targetHandle === "in-prompt";
+    if (source === "composer") return c.target === "imagegen" && c.targetHandle === "in-prompt";
     if (source === "imagegen") {
       if (c.target === "videogen") return c.targetHandle === "in-image";
+      if (c.target === "editgen") return c.targetHandle === "in-image";
       if (c.target === "output") return c.targetHandle === "in-out";
       return false;
     }
     if (source === "videogen") return c.target === "output" && c.targetHandle === "in-out";
+    if (source === "editgen") return c.target === "output" && c.targetHandle === "in-out";
     const refId = /^ref:(.+)$/.exec(source)?.[1];
     if (refId) {
       const ref = references.find((r) => r.id === refId);
       if (c.target === "output") return c.targetHandle === "in-out" && !!ref && ref.media !== "audio";
-      if (c.target === "videogen") return c.targetHandle === "in-vref-open" && !!ref && !!ref.artwork;
-      if (c.target === "composer") return c.targetHandle === "in-ref-open";
+      if (c.target === "editgen") return c.targetHandle === "in-image" && !!ref && !!ref.artwork && ref.media !== "audio";
+      if (c.target === "composer" || c.target === "videoprompt" || c.target === "editprompt") return c.targetHandle === "in-ref-open" && !!ref;
       return false;
     }
-    if (c.target !== "composer") return false;
-    if (source === "style") return c.targetHandle === "in-style";
-    if (source === "brand") return c.targetHandle === "in-brand";
+    if (c.target === "composer" || c.target === "videoprompt" || c.target === "editprompt") {
+      if (source === "style") return c.targetHandle === "in-style";
+      if (source === "brand") return c.targetHandle === "in-brand";
+      return false;
+    }
     return false;
   }, [references]);
 
@@ -972,49 +1380,41 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (state.isValid || state.toHandle) return;
     const from = state.fromHandle;
     if (!from) return;
-    if (from.type === "target" && from.nodeId === "composer") {
-      // Dragged off a prompt input socket → detach that input.
-      const id = from.id ?? "";
-      if (id === "in-style") {
-        // Clear the shot's style flag first (dropdown → None), then strip the
-        // paragraph through the serialized prompt save.
-        cb.current.onStyleDetached();
-        cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
-        return;
+    const detachPrompt = (nodeId: string, handleId: string): boolean => {
+      if (nodeId === "composer") {
+        if (handleId === "in-style") { cb.current.onGraphField({ graphStyleConnected: false }); cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt)); return true; }
+        if (handleId === "in-brand") { cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt)); return true; }
+        const m = /^in-ref-(\d+)$/.exec(handleId);
+        if (m) { const t = tagged[Number(m[1])]; if (t) cb.current.onPromptChange(removeRefTag(cb.current.prompt, t.name)); return true; }
+      } else if (nodeId === "videoprompt") {
+        if (handleId === "in-style") { cb.current.onGraphField({ graphVideoStyleConnected: false, graphVideoPrompt: removeStyleParagraph(cb.current.videoPromptValue) }); return true; }
+        if (handleId === "in-brand") { cb.current.onGraphField({ graphVideoPrompt: stripBrandParagraph(cb.current.videoPromptValue) }); return true; }
+        const m = /^in-ref-(\d+)$/.exec(handleId);
+        if (m) { const t = taggedVideo[Number(m[1])]; if (t) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, t.name) }); return true; }
+      } else if (nodeId === "editprompt") {
+        if (handleId === "in-style") { cb.current.onGraphField({ graphEditStyleConnected: false, graphEditPrompt: removeStyleParagraph(cb.current.editPromptValue) }); return true; }
+        if (handleId === "in-brand") { cb.current.onGraphField({ graphEditPrompt: stripBrandParagraph(cb.current.editPromptValue) }); return true; }
+        const m = /^in-ref-(\d+)$/.exec(handleId);
+        if (m) { const t = taggedEdit[Number(m[1])]; if (t) cb.current.onGraphField({ graphEditPrompt: removeRefTag(cb.current.editPromptValue, t.name) }); return true; }
       }
-      if (id === "in-brand") {
-        cb.current.onToggleBrand(false);
-        return;
-      }
-      const m = /^in-ref-(\d+)$/.exec(id);
-      if (!m) return;
-      const t = tagged[Number(m[1])];
-      if (t) cb.current.onPromptChange(removeRefTag(cb.current.prompt, t.name));
-      return;
+      return false;
+    };
+    if (from.type === "target" && (from.nodeId === "composer" || from.nodeId === "videoprompt" || from.nodeId === "editprompt")) {
+      if (detachPrompt(from.nodeId, from.id ?? "")) return;
     }
     if (from.type === "target" && from.nodeId === "videogen" && from.id === "in-image") {
-      // Dragged the image pipe off the video node's image input → unbind only
-      // that pipe (the output feed, if wired, stays).
       cb.current.onUnpipeImageToVideo();
       return;
     }
-    if (from.type === "target" && from.nodeId === "videogen") {
-      // Dragged one of the extra reference inputs off → drop that reference.
-      const m = /^in-vref-(\d+)$/.exec(from.id ?? "");
-      if (m) {
-        const i = Number(m[1]);
-        cb.current.onGraphField({ graphVideoRefIds: (cb.current.graphVideoRefIds ?? []).filter((_, idx) => idx !== i) });
-        return;
-      }
+    if (from.type === "target" && from.nodeId === "editgen" && from.id === "in-image") {
+      cb.current.onGraphField({ graphEditImageSource: undefined, graphEditSourceRefId: undefined });
+      return;
     }
     if (from.type === "target" && from.nodeId === "output" && from.id === "in-out") {
-      // Dragged the generation pipe off the output's input → unbind.
       cb.current.onUnpipeOutput();
       return;
     }
     if (from.type === "source" && from.nodeId === "imagegen") {
-      // Dragged the image node's output off → unbind it (both the video feed
-      // and the output feed if it was routed there).
       cb.current.onUnpipeImageGen();
       return;
     }
@@ -1022,33 +1422,48 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       cb.current.onUnpipeVideoGen();
       return;
     }
+    if (from.type === "source" && from.nodeId === "editgen") {
+      cb.current.onUnpipeEditGen();
+      return;
+    }
     if (from.type === "source") {
-      // Dragged off a node's output socket → detach it.
       if (from.nodeId === "style") {
-        cb.current.onStyleDetached();
-        cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
+        const patch: Partial<ProductionShot> = { graphStyleConnected: false, graphVideoStyleConnected: false, graphEditStyleConnected: false };
+        if (/^Style:/m.test(cb.current.videoPromptValue)) patch.graphVideoPrompt = removeStyleParagraph(cb.current.videoPromptValue);
+        if (/^Style:/m.test(cb.current.editPromptValue)) patch.graphEditPrompt = removeStyleParagraph(cb.current.editPromptValue);
+        cb.current.onGraphField(patch);
+        if (/^Style:/m.test(cb.current.prompt)) cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
         return;
       }
       if (from.nodeId === "brand") {
-        cb.current.onToggleBrand(false);
+        if (hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt));
+        if (hasBrandParagraph(cb.current.videoPromptValue)) cb.current.onGraphField({ graphVideoPrompt: stripBrandParagraph(cb.current.videoPromptValue) });
+        if (hasBrandParagraph(cb.current.editPromptValue)) cb.current.onGraphField({ graphEditPrompt: stripBrandParagraph(cb.current.editPromptValue) });
         return;
       }
       const m = /^ref:(.+)$/.exec(from.nodeId ?? "");
       if (!m) return;
-      const entry = tagged.find((t) => t.ref?.id === m[1]);
-      if (entry) cb.current.onPromptChange(removeRefTag(cb.current.prompt, entry.name));
-      // If this reference also feeds the output or the video node's extra
-      // inputs, those bindings go with the dragged-off socket.
       const refId = m[1];
-      if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) {
-        cb.current.onUnpipeOutput();
+      // Remove this ref from any prompt where it is tagged
+      const stripIfTagged = (list: { name: string; ref: GraphRef | null }[], value: string, setter: (v: string) => void) => {
+        const entry = list.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId);
+        if (entry) setter(removeRefTag(value, entry.name));
+      };
+      stripIfTagged(tagged, cb.current.prompt, (v) => cb.current.onPromptChange(v));
+      stripIfTagged(taggedVideo, cb.current.videoPromptValue, (v) => cb.current.onGraphField({ graphVideoPrompt: v }));
+      stripIfTagged(taggedEdit, cb.current.editPromptValue, (v) => cb.current.onGraphField({ graphEditPrompt: v }));
+      // Also check union dangling tag by name
+      const unionEntry = unionTagged.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId);
+      if (unionEntry) {
+        // Ensure removal even if not in per-prompt list due to timing
+        if (refTagNames(cb.current.prompt).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onPromptChange(removeRefTag(cb.current.prompt, unionEntry.name));
+        if (refTagNames(cb.current.videoPromptValue).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, unionEntry.name) });
+        if (refTagNames(cb.current.editPromptValue).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onGraphField({ graphEditPrompt: removeRefTag(cb.current.editPromptValue, unionEntry.name) });
       }
-      const list = (cb.current.graphVideoRefIds ?? []).filter((id) => id !== refId);
-      if (list.length !== (cb.current.graphVideoRefIds ?? []).length) {
-        cb.current.onGraphField({ graphVideoRefIds: list });
-      }
+      if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
+      if (cb.current.graphEditSourceRefId === refId) cb.current.onGraphField({ graphEditSourceRefId: undefined });
     }
-  }, [tagged]);
+  }, [tagged, taggedVideo, taggedEdit, unionTagged]);
 
   useEffect(() => () => { if (hintTimer.current !== null) window.clearTimeout(hintTimer.current); }, []);
 

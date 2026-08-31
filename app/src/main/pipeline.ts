@@ -748,6 +748,13 @@ export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: s
   shot.graphVideoGenIndex = 0;
 }
 
+/** Store an AI-edited frame on the shot's edit-image node (newest first). */
+export function recordGraphEditGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  shot.graphEditGens = [item, ...(shot.graphEditGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  shot.graphEditGenIndex = 0;
+}
+
 /** Apply a video clip as the shot's output AND guarantee it has a still frame.
  *  When the shot has no primary artwork yet (the video was animated from a
  *  node-graph image pipe, not from the shot's own frame), the video's source
@@ -767,7 +774,7 @@ export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallba
  *  When the image node is already piped, the new frame still auto-applies;
  *  a deliberate videogen/ref pipe is never displaced. */
 export function hookImageGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "ref") return;
+  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
   shot.graphOutputSource = "imagegen";
   const cur = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
   if (cur) recordBoardArtwork(shot, cur.path);
@@ -776,7 +783,7 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
 /** Auto-hook a classic video generation into the node graph: when nothing is
  *  piped into the output yet, bind the video node as the feed. */
 export function hookVideoGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "ref") return;
+  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
   shot.graphOutputSource = "videogen";
 }
 

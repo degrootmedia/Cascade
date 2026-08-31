@@ -24,10 +24,13 @@ import {
   brandPrompt,
   effectivePrompt,
   formatRuntime,
+  hookImageGenToOutput,
+  hookVideoGenToOutput,
   mergeCharacters,
   mergeProducts,
   normalizeScenes,
   parseBreakdownJson,
+  recordGraphEditGen,
   refTokens,
   resolveReferenceTags,
   resolveShotStyle,
@@ -306,5 +309,46 @@ describe("applyVideoOutput", () => {
     applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
     expect(shot.videoPath).toBe("videos/shot-0100-abc.mp4");
     expect(shot.artwork).toBeUndefined();
+  });
+});
+
+describe("recordGraphEditGen", () => {
+  it("stores the edit newest-first and selects it", () => {
+    const shot = makeShot();
+    recordGraphEditGen(shot, "boards/0100/shot-0100-edit1.jpg", "make it night", "auto");
+    recordGraphEditGen(shot, "boards/0100/shot-0100-edit2.jpg", "add rain", "auto");
+    expect(shot.graphEditGens?.[0].path).toBe("boards/0100/shot-0100-edit2.jpg");
+    expect(shot.graphEditGens?.[1].path).toBe("boards/0100/shot-0100-edit1.jpg");
+    expect(shot.graphEditGenIndex).toBe(0);
+  });
+
+  it("caps the stored edits at GRAPH_HISTORY_CAP", () => {
+    const shot = makeShot();
+    for (let i = 0; i < 25; i++) recordGraphEditGen(shot, `boards/0100/edit-${i}.jpg`, "p", "auto");
+    expect(shot.graphEditGens?.length).toBe(20);
+  });
+});
+
+describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
+  it("never displaces a deliberate edit-image pipe", () => {
+    const shot = makeShot({
+      graphOutputSource: "editgen",
+      graphEditGens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }],
+      graphEditGenIndex: 0,
+    });
+    hookImageGenToOutput(shot);
+    expect(shot.graphOutputSource).toBe("editgen");
+    hookVideoGenToOutput(shot);
+    expect(shot.graphOutputSource).toBe("editgen");
+  });
+
+  it("hooks a classic image generation when nothing is piped", () => {
+    const shot = makeShot({
+      graphImageGens: [{ path: "boards/0100/shot-0100-gen.jpg", prompt: "p", model: "m", at: "" }],
+      graphImageGenIndex: 0,
+    });
+    hookImageGenToOutput(shot);
+    expect(shot.graphOutputSource).toBe("imagegen");
+    expect(shot.artwork).toBe("boards/0100/shot-0100-gen.jpg");
   });
 });

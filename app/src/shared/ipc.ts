@@ -175,12 +175,23 @@ export interface ProductionShot {
   /** Step 3 node graph: stored outputs of the image generation node (newest
    *  first), plus the cycled selection index. */
   graphImageGens?: GraphGenItem[];
-  graphImageGenIndex?: number;
+graphImageGenIndex?: number;
   /** Node graph video generation node: stored clips (newest first) + index. */
   graphVideoGens?: GraphGenItem[];
   graphVideoGenIndex?: number;
   /** The video-prompt node's text (motion prompt for the video gen node). */
   graphVideoPrompt?: string;
+  /** Node graph edit-image node: stored edits (newest first) + index. */
+  graphEditGens?: GraphGenItem[];
+  graphEditGenIndex?: number;
+  /** The edit-prompt node's text (edit instructions for the edit-image node). */
+  graphEditPrompt?: string;
+  /** Whether the image generation node's output feeds the edit-image node's
+   *  source input (the image being edited). */
+  graphEditImageSource?: boolean;
+  /** A reference feeding the edit-image node's source input (single source —
+   *  connecting one displaces the other). Only image refs connect. */
+  graphEditSourceRefId?: string;
   /** Reference ids feeding the video gen node's extra reference inputs (beyond
    *  the main image pipe), in connection order. Only image refs connect. */
   graphVideoRefIds?: string[];
@@ -188,9 +199,18 @@ export interface ProductionShot {
    *  image input. Independent of the output feed — the image node can pipe to
    *  the video node AND the output simultaneously. */
   graphImageToVideo?: boolean;
+  /** Whether the style node is plugged into the image prompt (composer). When
+   *  false the Style paragraph is absent from that prompt but the plug is
+   *  remembered — switching the style to None removes the paragraph without
+   *  disconnecting. */
+  graphStyleConnected?: boolean;
+  /** Whether the style node is plugged into the video-prompt node. */
+  graphVideoStyleConnected?: boolean;
+  /** Whether the style node is plugged into the edit-prompt node. */
+  graphEditStyleConnected?: boolean;
   /** Which node is piped into the output (becomes the shot's primary
    *  artwork/videoPath): an image/video generation node, or a reference. */
-  graphOutputSource?: "imagegen" | "videogen" | "ref";
+  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "ref";
   /** The reference feeding the output when `graphOutputSource === "ref"`. */
   graphOutputRefId?: string;
   /** One-time marker: classic generations were moved into the gen nodes. */
@@ -661,6 +681,13 @@ export interface CascadeApi {
    */
   generateVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
   /**
+   * Step 3 node graph: AI-edit one image for the edit-image node. The source
+   * image is the node's source pipe (image node selection, else a reference),
+   * falling back to the shot's current frame. The result is stored on the
+   * edit-image node. Returns the updated production.
+   */
+  generateEditNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string }): Promise<Production>;
+  /**
    * Step 3 node graph: make a generation node's selected output the shot's
    * primary output (artwork for frames, videoPath for clips). Returns the
    * updated production.
@@ -801,9 +828,10 @@ export const ipcContract = {
   "production:musicFile": { method: "musicFile", kind: "invoke" },
   "production:musicUrl": { method: "musicUrl", kind: "invoke" },
   "production:removeMusic": { method: "removeMusic", kind: "invoke" },
-  "production:generateVideo": { method: "generateVideo", kind: "invoke" },
+"production:generateVideo": { method: "generateVideo", kind: "invoke" },
   "production:generateFrameNode": { method: "generateFrameNode", kind: "invoke" },
   "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
+  "production:generateEditNode": { method: "generateEditNode", kind: "invoke" },
   "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
   "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },
   "production:videoUrl": { method: "videoUrl", kind: "invoke" },

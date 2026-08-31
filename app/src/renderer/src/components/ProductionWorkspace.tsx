@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout } from "../../../shared/ipc.js";
-import { addRefTag, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
+import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
@@ -800,6 +800,52 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }).catch(() => {});
   }
 
+  /** Node-graph style picker: updates the shot's style field and, like the
+   *  classic board's style dropdown, rewrites the Style paragraph in any prompt
+   *  that is currently plugged — the connection itself is unchanged, only the
+   *  text is refreshed. Plugged state is tracked via graphStyleConnected flags
+   *  so switching to "None" removes the paragraph but keeps the edge. */
+  function setGraphStyle(shotId: string, styleId: string) {
+    if (!prod) return;
+    const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
+    const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!target) return;
+    const isPlugged = (flag: boolean | undefined, cur: string | undefined) => flag ?? /^Style:/m.test(cur ?? "");
+    const rewritePlugged = (cur: string | undefined, plugged: boolean | undefined): string | undefined => {
+      if (cur == null) return cur;
+      if (!isPlugged(plugged, cur)) return cur;
+      if (!styleText) return removeStyleParagraph(cur);
+      return addStyleParagraph(cur, styleText);
+    };
+    // For the image prompt we preserve the classic manual/auto distinction
+    let nextPrompt: string | undefined = target.prompt;
+    let nextManual = target.promptManual;
+    if (target.promptManual && target.prompt?.trim() && isPlugged(target.graphStyleConnected, target.prompt)) {
+      nextPrompt = styleText ? addStyleParagraph(target.prompt, styleText) : removeStyleParagraph(target.prompt);
+      nextManual = true;
+    } else if (!target.promptManual && target.graphStyleConnected && styleText) {
+      // Auto-derived prompt that is plugged but has no Style yet — adding a style should still inject it
+      // (the derived prompt path will handle the non-manual case, but for plugged we ensure paragraph appears)
+      if (!/^Style:/m.test(target.prompt ?? "")) nextPrompt = addStyleParagraph(target.prompt ?? "", styleText);
+    }
+    const nextVideo = rewritePlugged(target.graphVideoPrompt, target.graphVideoStyleConnected);
+    const nextEdit = rewritePlugged(target.graphEditPrompt, target.graphEditStyleConnected);
+    const patch: Partial<ProductionShot> = { style: styleId || undefined };
+    if (nextPrompt !== target.prompt) { patch.prompt = nextPrompt; patch.promptManual = nextManual; }
+    if (nextVideo !== target.graphVideoPrompt) patch.graphVideoPrompt = nextVideo;
+    if (nextEdit !== target.graphEditPrompt) patch.graphEditPrompt = nextEdit;
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s),
+      })),
+    });
+    if (nextPrompt !== target.prompt && promptShotId === shotId) {
+      setFocusedPrompt(nextPrompt ?? "");
+      if (nextPrompt != null) promptCacheRef.current[shotId] = nextPrompt;
+    }
+  }
+
 
   /** Create/reuse a reference, optionally recording its shot association.
  *  Returns the new references array (undefined when the production is gone). */
@@ -1043,6 +1089,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!shot) return;
     saveGraphShotFields(shotId, {
       graphImageToVideo: undefined,
+      graphEditImageSource: undefined,
       ...(shot.graphOutputSource === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
     });
   }
@@ -1054,6 +1101,34 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
     if (shot.graphOutputSource === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+  }
+
+  /** Step 3 node graph: pipe the edit-image node's output into the output —
+   *  binds it as the feed and applies its currently selected edit. The
+   *  storyboard mirrors the output node: a leftover video path is cleared, and
+   *  an empty edit node leaves the frame blank. */
+  function pipeEditToOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const path = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0]?.path;
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "editgen",
+      graphOutputRefId: undefined,
+      videoPath: undefined,
+      ...(path ? {} : { artwork: undefined }),
+    });
+    if (path) void applyGraphOutput(shotId, "image", path);
+  }
+
+  /** Step 3 node graph: unbind the edit-image node's output feed (the edited
+   *  frame lives in the node's history; the storyboard goes blank until a
+   *  generation is piped back in). */
+  function unpipeEditGen(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    if (shot.graphOutputSource === "editgen") saveGraphShotFields(shotId, { graphOutputSource: undefined, artwork: undefined });
   }
 
   /** Step 3 node graph: unbind whatever currently feeds the output — the
@@ -1092,28 +1167,41 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
+  /** Step 3 node graph: AI-edit an image for the edit-image node (prompt = the
+   *  edit-prompt node; source = piped frame/ref or the shot's frame). */
+  async function runEditGenNode(shotId: string, model: string, resolution: string) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { prompt: cur?.graphEditPrompt ?? "", model, resolution });
+      setProd(next);
+      setBoardBust((b) => b + 1);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
   /** Step 3 node graph: select a generation node's stored output by index;
    *  the piped node's selection becomes the shot's primary output. */
-  function selectGraphGen(shotId: string, kind: "image" | "video", index: number) {
+  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit", index: number) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const items = kind === "image" ? shot.graphImageGens : shot.graphVideoGens;
+    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : shot.graphEditGens;
     if (!items || !items[index]) return;
-    saveGraphShotFields(shotId, kind === "image" ? { graphImageGenIndex: index } : { graphVideoGenIndex: index });
-    const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : shot.graphOutputSource === "videogen";
-    if (bound) void applyGraphOutput(shotId, kind, items[index].path);
+    saveGraphShotFields(shotId, kind === "image" ? { graphImageGenIndex: index } : kind === "video" ? { graphVideoGenIndex: index } : { graphEditGenIndex: index });
+    const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : kind === "video" ? shot.graphOutputSource === "videogen" : shot.graphOutputSource === "editgen";
+    if (bound) void applyGraphOutput(shotId, kind === "video" ? "video" : "image", items[index].path);
   }
 
   /** Step 3 node graph: cycle a generation node's stored outputs; the piped
    *  node's selection becomes the shot's primary output. */
-  function cycleGraphGen(shotId: string, kind: "image" | "video", dir: 1 | -1) {
+  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit", dir: 1 | -1) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const items = kind === "image" ? shot.graphImageGens : shot.graphVideoGens;
+    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : shot.graphEditGens;
     if (!items || items.length === 0) return;
-    const cur = (kind === "image" ? shot.graphImageGenIndex : shot.graphVideoGenIndex) ?? 0;
+    const cur = (kind === "image" ? shot.graphImageGenIndex : kind === "video" ? shot.graphVideoGenIndex : shot.graphEditGenIndex) ?? 0;
     selectGraphGen(shotId, kind, (cur + dir + items.length) % items.length);
   }
 
@@ -1614,7 +1702,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   includeBrand={gs.includeBrandIdentity !== false}
                   initialLayout={gs.graphLayout}
                   onPromptChange={(value) => { setFocusedPrompt(value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
-                  onStyleChange={(style) => updateShotStyle(graphShotId, style)}
+                  onStyleChange={(style) => setGraphStyle(graphShotId!, style)}
                   onToggleBrand={(include) => { if (graphShotId) void setBrandForShot(graphShotId, include); }}
                   onDropFile={(file) => { if (graphShotId) void addFileReference(graphShotId, file); }}
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
@@ -1624,16 +1712,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
+                  onRunEditGen={(model, resolution) => graphShotId ? runEditGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onSelectGraphGen={(kind, index) => { if (graphShotId) selectGraphGen(graphShotId, kind, index); }}
                   onCycleGraphGen={(kind, dir) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir); }}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
                   onPipeImageToOutput={() => { if (graphShotId) pipeImageToOutput(graphShotId); }}
                   onPipeVideoToOutput={() => { if (graphShotId) pipeVideoToOutput(graphShotId); }}
+                  onPipeEditToOutput={() => { if (graphShotId) pipeEditToOutput(graphShotId); }}
                   onPipeRefToOutput={(refId) => { if (graphShotId) void pipeRefToOutput(graphShotId, refId); }}
                   onUnpipeImageGen={() => { if (graphShotId) unpipeImageGen(graphShotId); }}
                   onUnpipeImageToVideo={() => { if (graphShotId) unpipeImageToVideo(graphShotId); }}
                   onUnpipeVideoGen={() => { if (graphShotId) unpipeVideoGen(graphShotId); }}
+                  onUnpipeEditGen={() => { if (graphShotId) unpipeEditGen(graphShotId); }}
                   onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
                   onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
                   onClose={() => setGraphShotId(null)}
@@ -1646,6 +1737,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <EditBoardModal
                   shotNumber={es.number}
                   models={openArtModels}
+                  prompt={es.graphEditPrompt ?? ""}
+                  onPromptChange={(text) => saveGraphShotFields(es.id, { graphEditPrompt: text })}
                   onSubmit={(model, prompt) => {
                     const id = editShotId;
                     setEditShotId(null); // close immediately; edit runs in background
@@ -1662,6 +1755,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   shot={vs}
                   prod={prod}
                   models={openArtModels}
+                  prompt={vs.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT}
+                  onPromptChange={(text) => saveGraphShotFields(vs.id, { graphVideoPrompt: text })}
                   onClose={() => setVideoShotId(null)}
                   onSubmit={(opts) => {
                     const id = videoShotId;

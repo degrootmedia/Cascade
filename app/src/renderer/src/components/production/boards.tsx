@@ -285,10 +285,13 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
  *  and write a motion prompt (with @[name] references, like the side panel).
  *  Shows the estimated credit cost before submitting. */
 
-export function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
+export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPromptChange, onClose, onSubmit }: {
   shot: ProductionShot;
   prod: Production;
   models: OpenArtModelChoice[];
+  /** Synced prompt — when provided, this IS the `graphVideoPrompt` source of truth shared with the node graph's video-prompt node. */
+  prompt?: string;
+  onPromptChange?: (text: string) => void;
   onClose: () => void;
   onSubmit: (opts: VideoGenOptions) => void;
 }) {
@@ -296,7 +299,25 @@ export function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
   const [model, setModel] = useState(videoModels[0]?.id ?? "auto");
   const [resolution, setResolution] = useState("1080p");
   const [durationSec, setDurationSec] = useState(5);
-  const [prompt, setPrompt] = useState("Animate this reference image with smooth, cinematic motion.");
+  const fallback = "Animate this reference image with smooth, cinematic motion.";
+  const external = externalPrompt ?? shot.graphVideoPrompt ?? fallback;
+  const [prompt, setPrompt] = useState(external);
+  const [focused, setFocused] = useState(false);
+  const emitted = useRef<Set<string>>(new Set([external]));
+  useEffect(() => {
+    if (focused) return;
+    if (emitted.current.has(external)) return;
+    emitted.current.clear();
+    emitted.current.add(external);
+    setPrompt(external);
+  }, [external, focused]);
+  const handlePromptChange = (text: string) => {
+    setPrompt(text);
+    const s = emitted.current;
+    if (s.size > 100) s.clear();
+    s.add(text);
+    onPromptChange?.(text);
+  };
   const [credits, setCredits] = useState<number | null>(null);
   const [frame, setFrame] = useState<string | null>(null);
   // Resolution / length options are model-specific — fetch them from the
@@ -379,7 +400,9 @@ export function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
           includeBrand={false}
           references={references}
           placeholder="Motion prompt — type @ to add a reference"
-          onChange={setPrompt}
+          onChange={handlePromptChange}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) onSubmit({ model, resolution, durationSec, prompt: prompt.trim() });
             if (e.key === "Escape") onClose();
@@ -403,15 +426,35 @@ export function VideoGenModal({ shot, prod, models, onClose, onSubmit }: {
  *  describe the change; the current frame is sent as the visual reference and
  *  the result becomes the new frame (previous one kept in history). */
 
-export function EditBoardModal({ shotNumber, models, onSubmit, onClose }: {
+export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onPromptChange, onSubmit, onClose }: {
   shotNumber: string;
   models: OpenArtModelChoice[];
+  /** Synced prompt — when provided, this IS the `graphEditPrompt` source of truth shared with the node graph's edit-prompt node. */
+  prompt?: string;
+  onPromptChange?: (text: string) => void;
   onSubmit: (model: string, prompt: string) => void;
   onClose: () => void;
 }) {
   const imageModels = models.filter((m) => m.imageInput);
   const [model, setModel] = useState(imageModels[0]?.id ?? "auto");
-  const [prompt, setPrompt] = useState("");
+  const external = externalPrompt ?? "";
+  const [prompt, setPrompt] = useState(external);
+  const [focused, setFocused] = useState(false);
+  const emitted = useRef<Set<string>>(new Set([external]));
+  useEffect(() => {
+    if (focused) return;
+    if (emitted.current.has(external)) return;
+    emitted.current.clear();
+    emitted.current.add(external);
+    setPrompt(external);
+  }, [external, focused]);
+  const handlePromptChange = (text: string) => {
+    setPrompt(text);
+    const s = emitted.current;
+    if (s.size > 100) s.clear();
+    s.add(text);
+    onPromptChange?.(text);
+  };
   return (
     <div className="prod-edit-overlay" onClick={onClose}>
       <div className="prod-edit-panel" onClick={(e) => e.stopPropagation()}>
@@ -441,7 +484,9 @@ export function EditBoardModal({ shotNumber, models, onSubmit, onClose }: {
           rows={4}
           value={prompt}
           placeholder='Describe the edit, e.g. "make it night time, add warm window light, light rain"'
-          onChange={(e) => setPrompt(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onChange={(e) => handlePromptChange(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) onSubmit(model, prompt);
             if (e.key === "Escape") onClose();

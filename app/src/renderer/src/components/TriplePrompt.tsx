@@ -12,7 +12,7 @@ import { composePromptBoxes, parsePromptBoxes, type PromptBoxes } from "../../..
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
-export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
   value: string;
   /** When false the Brand box is hidden (the brand checkbox/node owns existence). */
   includeBrand: boolean;
@@ -30,26 +30,48 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   onContentKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
+  /** While a box is focused, ignore EXTERNAL value changes: the user's local
+   *  edits stay authoritative until blur. This is what keeps the caret put
+   *  when the parent re-derives the prompt mid-keystroke (the node graph's
+   *  composer passes it; the side panel's @-autocomplete needs external
+   *  re-decomposes while focused, so it does not). */
+  deferExternalWhileFocused?: boolean;
 }) {
   const [boxes, setBoxes] = useState<PromptBoxes>(() => parsePromptBoxes(value));
-  const lastEmitted = useRef(value);
-  // Resizable side-box heights (px); null = fall back to the rows attribute.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Every composed value this component has emitted. The parent echoes the
+  // value back (sometimes one render late — the node graph reconciles node
+  // state in an effect), so a re-decompose must ignore OUR OWN echoes or the
+  // boxes reset and the textarea caret jumps to the end. A genuine external
+  // value (style dropdown, brand toggle, generation refresh) is never in the
+  // set and clears it.
+  const emitted = useRef<Set<string>>(new Set());
   const [styleH, setStyleH] = useState<number | null>(null);
   const [brandH, setBrandH] = useState<number | null>(null);
   const drag = useRef<{ which: "style" | "brand"; startY: number; startH: number } | null>(null);
 
   // External prompt changes (generation refresh, style dropdown, brand
-  // toggle, graph edits) re-decompose — unless they're our own echo.
+  // toggle, graph edits) re-decompose — unless they're our own echo (current
+  // or stale) or the user is actively editing a box (deferExternalWhileFocused
+  // keeps local edits authoritative until blur). Focus is read straight from
+  // the DOM at sync time — synthetic focus/blur events inside React Flow's
+  // transformed viewport are unreliable (style/brand boxes don't even wire
+  // onBlur, and bubble ordering races), while document.activeElement is
+  // authoritative. This runs once on mount too.
   useEffect(() => {
-    if (value === lastEmitted.current) return;
-    lastEmitted.current = value;
+    if (deferExternalWhileFocused && containerRef.current?.contains(document.activeElement)) return;
+    if (emitted.current.has(value)) return;
+    emitted.current.clear();
+    emitted.current.add(value);
     setBoxes(parsePromptBoxes(value));
-  }, [value]);
+  }, [value, deferExternalWhileFocused]);
 
-  const emit = (next: PromptBoxes) => {
+const emit = (next: PromptBoxes) => {
     setBoxes(next);
     const composed = composePromptBoxes(next);
-    lastEmitted.current = composed;
+    const s = emitted.current;
+    if (s.size > 100) s.clear();
+    s.add(composed);
     onChange(composed);
   };
 
@@ -79,7 +101,10 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   // the graph or the style dropdown brings it back).
   const styleAttached = /^Style:/m.test(value);
   return (
-    <div className="prod-prompt-triple">
+    <div
+      ref={containerRef}
+      className="prod-prompt-triple"
+    >
       {styleAttached && (
         <>
           <span className="prod-prompt-box-label style">Style</span>
@@ -91,6 +116,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
             placeholder="Visual style — empty runs without a style section"
             onChange={(e) => emit({ ...boxes, style: e.target.value })}
             onFocus={onFocus}
+            onBlur={onBlur}
           />
           {resizable && (
             <div
@@ -114,6 +140,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
         onKeyDown={onContentKeyDown}
         onFocus={onFocus}
         onBlur={onBlur}
+        deferExternalWhileFocused={deferExternalWhileFocused}
       />
       {includeBrand && (
         <>
@@ -136,6 +163,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
             placeholder="Palette & typography — empty regenerates from the brand set"
             onChange={(e) => emit({ ...boxes, brand: e.target.value })}
             onFocus={onFocus}
+            onBlur={onBlur}
           />
         </>
       )}

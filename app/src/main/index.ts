@@ -11,7 +11,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
@@ -1391,6 +1391,65 @@ function registerIpc() {
       if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath);
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
+  );
+
+  // Step 3 node graph: AI-edit one image for the edit-image node. The source
+  // image is the node's source pipe — the image node's selected generation,
+  // else a reference's artwork — falling back to the shot's current frame.
+  // The result is stored on the edit node; it becomes the shot's artwork only
+  // when the node is piped to the output.
+  handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string }) =>
+    runProductionStep(id, 3, "editing an image (node graph)", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const text = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
+      if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
+      const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
+      const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      const gen = openart.imageGenFn(p, modelId, resolution);
+      if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be edited in-app.");
+      // Source: image-node pipe > reference pipe > the shot's current frame.
+      let dataUrl: string | undefined;
+      let sourceName = `Shot ${shot.number} frame`;
+      if (shot.graphEditImageSource) {
+        const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+        if (src) {
+          const buf = fs.readFileSync(assetPath(p, src));
+          const ext = (path.extname(src).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+          const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+          dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+          sourceName = "Piped frame";
+        }
+      }
+      if (!dataUrl && shot.graphEditSourceRefId) {
+        const pool = [
+          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
+          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+        ];
+        const ref = pool.find((r) => r.id === shot.graphEditSourceRefId);
+        if (ref?.artwork) {
+          dataUrl = ref.artwork;
+          sourceName = ref.name;
+        }
+      }
+      if (!dataUrl && shot.artwork) {
+        const buf = fs.readFileSync(assetPath(p, shot.artwork));
+        const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+        const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+        dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+      }
+      if (!dataUrl) throw new Error("No source image — pipe a frame or reference into the edit node, or generate a frame first.");
+      emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}…`);
+      const png = await gen(
+        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${text.slice(0, 1200)}`,
+        [{ name: sourceName, dataUrl }]
+      );
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordGraphEditGen(shot, jpegRel, text, modelId ?? "auto");
+      if (shot.graphOutputSource === "editgen") shot.artwork = jpegRel;
+      emit(`Shot ${shot.number}: node edit ready.`, "done");
+    }, { needsApiKey: false })
   );
 
   // Step 3 node graph: make a generation node's selected output the shot's

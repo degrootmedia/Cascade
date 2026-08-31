@@ -999,10 +999,10 @@ Blender behavior model now:
 - Typecheck + build pass clean.
 ---
 
-## Architecture review 2026-08-30 — OpenArt module extraction (candidate 1)
+## Architecture review 2026-08-30 ï¿½ OpenArt module extraction (candidate 1)
 
 - New pp/src/main/openart.ts: `OpenArtClient` owns the whole OpenArt vertical slice that
-  lived inside `index.ts`'s `registerIpc()` — model discovery/parsing, live form-schema
+  lived inside `index.ts`'s `registerIpc()` ï¿½ model discovery/parsing, live form-schema
   introspection, per-model option assignment (aspect/resolution/count/duration/refs), async
   image+video generation incl. the PENDING -> creation_wait polling loop, project resolution,
   the per-model video-options cache, and reference upload/token-swap. `McpManager` is injected
@@ -1018,18 +1018,18 @@ Blender behavior model now:
 
 ---
 
-## Architecture review 2026-08-30 — IPC contract (candidate 2)
+## Architecture review 2026-08-30 ï¿½ IPC contract (candidate 2)
 
 - `shared/ipc.ts` now carries a single channel contract (`ipcContract`): a map of
   channel -> { method, kind: invoke|send }. The `CascadeApi` interface stays the documented
   renderer surface; a type-level drift guard (`AssertEqual<ExposedMethod, ContractMethod>`)
-  forces the two to match exactly — a channel/method typo now fails typecheck.
+  forces the two to match exactly ï¿½ a channel/method typo now fails typecheck.
 - `preload/index.ts` collapsed from a 155-line 1:1 stub list to a ~40-line generic adapter
   that builds `window.cascade` by walking the contract; the 8 `on*` subscriptions stay
   hand-wired. Adding a channel is now ONE entry in `ipcContract` instead of three files.
 - Main side: `ipcMain.handle/on` calls go through `handle()`/`on()` wrappers that reject
   undeclared channels and, at the end of `registerIpc()`, throw if any declared channel has
-  no handler — contract drift fails loudly at startup.
+  no handler ï¿½ contract drift fails loudly at startup.
 - "Types stop lying": `SessionFile.history` is now `ChatMessage[]` and `.display` is
   `DisplayItem[]` (moved to shared/ipc.ts; renderer re-exports). Dropped the 5 `as
   ChatMessage[]` casts, the `as DisplayItem[]` cast, the untyped `cascadeSync` second
@@ -1040,9 +1040,9 @@ Blender behavior model now:
 
 ---
 
-## Architecture review 2026-08-30 — prompt grammar consolidation (candidate 3)
+## Architecture review 2026-08-30 ï¿½ prompt grammar consolidation (candidate 3)
 
-- New `app/src/shared/prompt-grammar.ts` — the one home for the prompt serialization
+- New `app/src/shared/prompt-grammar.ts` ï¿½ the one home for the prompt serialization
   protocol, imported by main, renderer, and OpenArtClient:
   - `@[name]` tags: `refTagMatches`/`refTagNames`/`hasRefTag`/`addRefTag`/`removeRefTag`
     (folded NodeGraphModal's escape+tag+style helpers; 6 parse sites -> one module).
@@ -1057,20 +1057,20 @@ Blender behavior model now:
   - Media: `dataUrlToBytes` (chunked atob, env-agnostic) replaces index.ts `dataUrlToBuffer`
     + ProductionWorkspace's base64ToBytes; `IMAGE_URL_RX`/`VIDEO_URL_RX`/uri-ext regexes
     fold mcp.ts + openart.ts.
-- core/ keeps its own `decodeDataUrlText` — it is a standalone package that must not import
+- core/ keeps its own `decodeDataUrlText` ï¿½ it is a standalone package that must not import
   app/shared (noted in CONTEXT.md).
 - New `test/prompt-grammar.test.ts` (18 tests) pins the moved behavior; suite is 30/30
   (12 openart + 18 grammar). Typecheck + production build pass.
 
 ---
 
-## Architecture review 2026-08-30 — pipeline testability seam (candidate 6)
+## Architecture review 2026-08-30 ï¿½ pipeline testability seam (candidate 6)
 
 - `pipeline.ts` dropped its top-level `import { nativeImage } from "electron"` for the soft
   import pattern mcp.ts already used (`let nativeImage; void import("electron").then(...)`).
   The two JPEG-conversion call sites fall back to the original bytes when nativeImage is
   unavailable (they were already wrapped in try/catch). The module's pure prompt-derivation
-  core now loads in plain node — no electron mock required.
+  core now loads in plain node ï¿½ no electron mock required.
 - New `test/pipeline.test.ts` (21 tests) covering parseBreakdownJson, normalizeScenes,
   mergeCharacters/mergeProducts, resolveShotStyle, brandPrompt, boardPrompt (style/brand/
   character-key/action, per-shot override, brand-off, refExcluded), effectivePrompt (manual
@@ -1081,41 +1081,41 @@ Blender behavior model now:
 
 ---
 
-## Architecture review 2026-08-30 — document store deep module (candidate 4)
+## Architecture review 2026-08-30 ï¿½ document store deep module (candidate 4)
 
 - New `app/src/main/store.ts`: `createStore<T>({ dirName, idOf, sortKey, decode?, encode?, sideFiles? })`
-  owns the whole JSON-document lifecycle — atomic temp+rename writes (a crash can no longer
+  owns the whole JSON-document lifecycle ï¿½ atomic temp+rename writes (a crash can no longer
   truncate a session/production/agent file), newest-first `list()`, `load/save/remove/archive`,
   and `newId()`. Side-file hooks let agents move/delete its .md + avatar files alongside the meta.
 - `sessions.ts`, `productions.ts`, `agents.ts` now thin: each configures the store and keeps
   its bespoke logic (typed SessionFile factory; productions' normalize-as-decode + summary +
   asset-folder scaffold + in-place migration persist; agents' .md/avatar side files + hasPrompt +
-  import/export/duplicate + avatar helpers). `settings.ts` stays bespoke on purpose — it's a
+  import/export/duplicate + avatar helpers). `settings.ts` stays bespoke on purpose ï¿½ it's a
   singleton doc with safeStorage encryption + a deliberate memo cache, not a keyed collection.
 - New `test/store.test.ts` (7 tests): atomic round-trip (no .tmp leftovers), newest-first sort,
   corrupt-file tolerance, decode hook, archive/remove with side-file hooks, newId. Suite is now
   64/64 (12 openart + 19 grammar + 21 pipeline + 7 store + 5 video-fix). Typecheck + build pass.
 - Deferred (noted, not re-litigated): the `production:save` handler's field-whitelist merge is a
-  deliberate renderer-state merge, distinct from `normalize`'s back-fill — folding them is
+  deliberate renderer-state merge, distinct from `normalize`'s back-fill ï¿½ folding them is
   behavior-sensitive and left for a future pass. Follow-up: animatic timeline doesn't show a still
   when a video node is plugged into the frame output.
 
 ---
 
-## Architecture review 2026-08-30 — ProductionWorkspace split (candidate 5)
+## Architecture review 2026-08-30 ï¿½ ProductionWorkspace split (candidate 5)
 
 - `ProductionWorkspace.tsx` 4072 -> 1805 lines by extracting the ~14 module-scope components
   into `components/production/` (pure moves, zero behavior change):
-  - `hex.ts` — color/uid utils (pure, no React).
-  - `animatic.tsx` — the Step 4 playback engine + timeline (AnimaticThumb, MiniAudioPlayer,
+  - `hex.ts` ï¿½ color/uid utils (pure, no React).
+  - `animatic.tsx` ï¿½ the Step 4 playback engine + timeline (AnimaticThumb, MiniAudioPlayer,
     VolumeSlider, AnimaticTimeline, StepFooter, ProdLog, LogLine) + shared timeline helpers
     (flatShots/totalDuration/dataUrlToArrayBuffer/cascadeMedia/formatRuntime) + STEPS /
     VIDEO_POOL_MAX / ANIMATIC_MAX_ZOOM consts.
-  - `references.tsx` — Step 2/3 reference sections + PromptReference/promptRefsForShot/
+  - `references.tsx` ï¿½ Step 2/3 reference sections + PromptReference/promptRefsForShot/
     brandClause/shotStyleSelectValue/RefMediaGlyph.
-  - `prompt-panel.tsx` — ReferencePromptEditor + PromptSidePanel.
-  - `boards.tsx` — BoardCard + VideoGenModal + EditBoardModal.
-  - `brand.tsx` — BrandSwatchRow + BrandColorPicker.
+  - `prompt-panel.tsx` ï¿½ ReferencePromptEditor + PromptSidePanel.
+  - `boards.tsx` ï¿½ BoardCard + VideoGenModal + EditBoardModal.
+  - `brand.tsx` ï¿½ BrandSwatchRow + BrandColorPicker.
 - Each file owns its imports (shared/ipc types, prompt-grammar, TriplePrompt, cross-file deps:
   boards->references/prompt-panel, references->animatic for cascadeMedia). The orchestrator now
   imports the six modules and keeps the 5-step state handlers + JSX.
@@ -1123,9 +1123,9 @@ Blender behavior model now:
 
 ---
 
-## Architecture review 2026-08-30 — repo hygiene (candidate 7)
+## Architecture review 2026-08-30 ï¿½ repo hygiene (candidate 7)
 
-- Deleted tracked junk: `app/decrypt-key.js` (decrypts the installed app's API key — the
+- Deleted tracked junk: `app/decrypt-key.js` (decrypts the installed app's API key ï¿½ the
   security liability), `extract-asar.cjs` + the 1,926-line `installed-main.txt` dump,
   `mcp-init.mjs`, `scan-ico.{mjs,ps1}`, `sess-summary.cjs`/`sess-view.cjs`,
   `find-test.cjs`, the repo-root `` file, `core/src/.fuse_hidden*`, and the tracked
@@ -1146,15 +1146,120 @@ Blender behavior model now:
 
 - **Animatic still frame**: `pipeline.applyVideoOutput(shot, rel, sourceFallback?)` sets the
   shot's `videoPath` AND, when the shot has no primary artwork, adopts the video's source
-  frame (the image node's current output, else the piped source) as the still — so the animatic
+  frame (the image node's current output, else the piped source) as the still ï¿½ so the animatic
   timeline always has a frame. Used by `production:generateVideoNode` and
   `production:applyGraphOutput` (kind=video). 4 new tests in pipeline.test.ts.
 - **production:save merge folded**: the inline whitelist merge moved out of index.ts into
-  `productions.applyRendererState(fresh, incoming)` — the write-side counterpart to
+  `productions.applyRendererState(fresh, incoming)` ï¿½ the write-side counterpart to
   `normalize`'s read-side back-fill, so the production document's shape rules live in one
   module (and are unit-testable). Handler is now a thin call. 8 new tests in
   test/productions.test.ts. Suite is now 76/76.
-- **New skill**: `.opencode/skills/cascade-architecture/SKILL.md` — future agents read it
+- **New skill**: `.opencode/skills/cascade-architecture/SKILL.md` ï¿½ future agents read it
   (with CONTEXT.md) before touching the codebase; it encodes the deep-module rules (seams to
   inject, where code lives, the deletion test, interface-as-test-surface, no-scratch-files) and
   the verification gate (typecheck/test/build).
+
+---
+
+# Node graph: Edit Image node
+
+A node version of the classic AI-edit popup (`EditBoardModal`), set up like the video
+generation node: a **source input**, a **prompt input**, and an **output** pipe.
+
+## Schema (`shared/ipc.ts`)
+- `ProductionShot` gains `graphEditGens`/`graphEditGenIndex` (stored edits, newest first),
+  `graphEditPrompt` (edit-prompt node text), `graphEditImageSource` (imagegen feeds the
+  source input), `graphEditSourceRefId` (a reference feeds the source input â€” single
+  source, connecting one displaces the other), and `graphOutputSource` gains `"editgen"`.
+- New channel `production:generateEditNode` â€” one `ipcContract` entry; preload + the drift
+  guard follow mechanically.
+
+## Main (`main/index.ts` + `pipeline.ts`)
+- `generateEditNode` handler mirrors the classic `editBoard` (`imageGenFn` + the same
+  "Edit this reference image" prompt). Source resolution: image-node pipe
+  (`graphImageGens[index]`) > reference pipe (`refArtworkDataUrl`) > shot's frame; writes
+  via `writeBoardFrame` + new `recordGraphEditGen` (cap 20). Applies to the shot only when
+  `graphOutputSource === "editgen"`.
+- `hookImageGenToOutput`/`hookVideoGenToOutput` now also refuse to displace a deliberate
+  `editgen` output pipe.
+
+## Renderer (`NodeGraphModal.tsx` + `ProductionWorkspace.tsx` + CSS)
+- New `editgen` node (model select over image-input models, Source hint line, thumbnail
+  history strip + â€¹n/mâ€º cycle, Generate; labeled Prompt + Source input sockets and the
+  output socket, gutter `padding-left: 84px`) and `editprompt` node (persisting textarea).
+  Default column between imagegen and videogen; ids in `STRUCTURAL_IDS` so positions persist.
+- Wiring: `editpromptâ†’editgen.in-prompt` structural; `imagegenâ†’editgen.in-image` binds
+  `graphEditImageSource`, `refâ†’editgen.in-image` binds `graphEditSourceRefId` (image refs
+  only; both `isValidConnection`-gated); `editgenâ†’output` binds `graphOutputSource:
+  "editgen"` and applies the selected edit as `artwork`. Drag-off the source socket clears
+  both source fields; dragging off the editgen output or a feeding imagegen/ref source
+  unbinds the pipe. `selectGraphGen`/`cycleGraphGen` gained the `"edit"` kind.
+
+## Verify
+- [x] `npm run typecheck`, `npm test` (80/80), `npm run build`, `git diff --check`
+- [ ] Manual: edit prompt â†’ Generate lands on the node; pipe editgenâ†’output updates the
+      storyboard; source hint switches between piped frame / reference name / shot frame;
+      connecting imagegen + ref to source displaces the other; drag-off unbinds.
+- Requires a dev restart (main process changed: new IPC).
+
+## Follow-up round (cursor fix + resolution dropdown)
+
+- **Cursor jump fixed** â€” typing any prompt box in the node view sent the caret to the
+  end after one character. Root cause: the node graph's `nodes` state lags `prompt` by one
+  render (the derived nodes reconcile in a post-commit effect), so `TriplePrompt` received
+  a STALE echo of the previous value on every keystroke; its echo-suppression ref only
+  remembered the single latest emitted value, so the stale echo re-decomposed the boxes and
+  React reset the textarea caret to the end. `TriplePrompt` now tracks a set of every value
+  it has emitted and ignores any echo (current or stale) on re-decompose; a genuine external
+  value (style dropdown, brand toggle, generation refresh) clears the set and re-parses. The
+  side panel passes the value directly (no lag), which is why only the node view jumped.
+- **Resolution dropdown on the edit-image node** â€” the edit node now has a 1k/2k/4k
+  resolution `<select>` (matching the image node, defaulting to the production's OpenArt
+  config). `generateEditNode` accepts `opts.resolution` and passes it to
+  `imageGenFn(p, model, resolution)`; `EditGenNodeView`/`onRunEditGen`/`runEditGenNode`
+  thread the choice through.
+- Verified: typecheck clean, 80/80 tests, production build passes, `git diff --check` clean.
+  No new main-process surface for the resolution thread (the existing `generateEditNode`
+  channel signature grew one optional field â€” still needs a dev restart).
+
+## Follow-up round 3 (mid-text caret root-caused + inline prompts)
+
+The user's report was decisive: typing at the END works (caret is already there), but
+INSERTING mid-text jumps to the end â€” so a per-keystroke caret reset happens on EVERY
+edit, hidden only when the caret was already at the end.
+
+Root cause (verified by reading React DOM internals + a faithful jsdom harness):
+- React's controlled-input restore (`restoreStateIfNeeded` in `finishEventHandler`) writes
+  the committed prop value back to a focused textarea whenever the DOM value differs from
+  the prop at restore time. In a normal controlled editor `flushSync` commits the new value
+  first, so no revert. But the node graph's value LAG (derived node data reconciled in an
+  effect) plus any re-decompose of the boxes makes the prop stale at commit, so React
+  re-writes and drops the caret to the end.
+- My first tests were FALSE PASSES: setting `textarea.value` goes through React's tracked
+  value setter, which updates the change-detection tracker â€” so `onChange` never fired and
+  React never touched the element. The harness now sets the value through the
+  `HTMLTextAreaElement.prototype.value` descriptor (bypassing the override) to simulate the
+  browser's internal write; the tests now exercise the real `onChange â†’ re-render â†’ caret`
+  path.
+
+Three-part fix:
+1. **`TriplePrompt` focus-deferral** (`deferExternalWhileFocused`, used by the composer):
+   while a box is focused, external value changes are ignored â€” the user's local edits stay
+   authoritative until blur, so no re-decompose can reset the boxes mid-keystroke. The side
+   panel keeps re-decomposing while focused (its `@`-autocomplete needs it).
+2. **`PromptContentEditor` echo suppression**: the rebuild (which used to drop the caret to
+   `text.length` = END) is now skipped when the incoming text is the raw value this editor
+   last emitted â€” the DOM already holds it, even if Chromium restructured the contenteditable
+   around the `@[Name]` chips. Genuine external changes still rebuild, and a rebuild while
+   focused now preserves the user's actual caret (clamped) instead of jumping to the end.
+3. Kept the `TriplePrompt` emitted-set (multi-render lag safety).
+
+New test infra: `test/setup-dom.ts` (jsdom globals before react-dom loads) + jsdom/@types
+devDeps; 7 regression tests in `test/tripleprompt-caret.test.ts` + `test/nodegraph-caret.test.ts`
+(real `ReactFlow` composer render via the exported `graphNodeTypes`). Suite now 87/87.
+
+**Video/edit prompts are now INLINE.** Removed the `videoprompt` and `editprompt` nodes â€”
+the video and edit nodes carry their own prompt textarea (persisting
+`shot.graphVideoPrompt` / `shot.graphEditPrompt`), like the image node's self-contained
+layout. Dropped the `e-vp-vid`/`e-ep-edit` edges and the `in-prompt` sockets on both nodes;
+`STRUCTURAL_IDS`, `defaultPosition`, and `nodeTypes` updated. Typecheck + build clean.

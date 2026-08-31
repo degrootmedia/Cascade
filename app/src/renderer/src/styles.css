@@ -2869,10 +2869,13 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-socket-label.ref { color: var(--graph-socket-ref); }
 .prod-graph-socket-label.style { color: var(--graph-socket-style); }
 .prod-graph-socket-label.brand { color: var(--graph-socket-brand); }
-/* Reserve a left gutter in the prompt node so the labels don't cover text. */
+/* Reserve a left gutter in the prompt nodes so the labels don't cover text. */
 .prod-graph-composer { padding-left: 84px; }
+.prod-graph-videoprompt, .prod-graph-editprompt { padding-left: 84px; }
 /* The video gen node has the same socket labels on its left edge. */
 .prod-graph-videogen { padding-left: 84px; }
+/* The edit-image node labels its two inputs the same way. */
+.prod-graph-editgen { padding-left: 84px; }
 
 .prod-graph-ref { display: flex; align-items: center; gap: 9px; }
 .prod-graph-ref img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 64px; height: 48px; flex-shrink: 0; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
@@ -2915,6 +2918,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-ref.missing .prod-graph-ref-name { color: var(--text-dim); font-style: italic; }
 
 .prod-graph-composer { width: 360px; }
+.prod-graph-videoprompt, .prod-graph-editprompt { width: 360px; }
 .prod-graph-composer-text {
   width: 100%;
   background: var(--bg-raised);
@@ -2948,7 +2952,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-gen-cycle { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); font-size: 0.72rem; }
 .prod-graph-gen-hint { font-size: 0.68rem; color: var(--text-dim); }
 .prod-graph-gen-go { padding: 7px 10px; font-size: 0.78rem; }
-.prod-graph-videoprompt { width: 280px; }
 /* Generation history strip: every stored generation, click to select. */
 .prod-graph-gen-strip { display: flex; flex-wrap: wrap; gap: 4px; max-height: 84px; overflow-y: auto; }
 .prod-graph-gen-strip button {

@@ -3,7 +3,7 @@ import { composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../../s
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 
-export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, onKeyDown, onFocus }: {
+export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, onKeyDown, onFocus, onBlur }: {
   value: string;
   includeBrand: boolean;
   onChange: (value: string) => void;
@@ -15,6 +15,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   placeholder: string;
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   const contentRef = useRef<PromptContentHandle>(null);
   const [query, setQuery] = useState<string | null>(null);
@@ -77,17 +78,20 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         onContentChange={updateQuery}
         onContentKeyDown={keyDown}
         onFocus={onFocus}
-        onBlur={() => window.setTimeout(() => {
-          if (contentRef.current?.isActive() || query === null) return;
-          const caret = contentRef.current?.selectionStart ?? content.length;
-          const before = content.slice(0, caret);
-          const open = before.lastIndexOf("@");
-          const tail = open >= 0 ? before.slice(open + 1) : "";
-          if (open >= 0 && !/[\s\[\]]/.test(tail)) {
-            onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: content.slice(0, open) + content.slice(caret) }));
-          }
-          setQuery(null);
-        }, 120)}
+        onBlur={() => {
+          onBlur?.();
+          window.setTimeout(() => {
+            if (contentRef.current?.isActive() || query === null) return;
+            const caret = contentRef.current?.selectionStart ?? content.length;
+            const before = content.slice(0, caret);
+            const open = before.lastIndexOf("@");
+            const tail = open >= 0 ? before.slice(open + 1) : "";
+            if (open >= 0 && !/[\s\[\]]/.test(tail)) {
+              onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: content.slice(0, open) + content.slice(caret) }));
+            }
+            setQuery(null);
+          }, 120);
+        }}
       />
       {query !== null && matches.length > 0 && (
         <div className="prod-ref-autocomplete" style={{ left: menuPos.left, top: menuPos.top }}>

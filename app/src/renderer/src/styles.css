@@ -682,7 +682,85 @@ body {
 .prod-brand-toggle input:checked { background: var(--accent); border-color: var(--accent); }
 .prod-brand-toggle input:checked::before { transform: translateX(14px); background: white; }
 @media (max-width: 900px) { .prod-storyboard-layout { grid-template-columns: 1fr; } .prod-prompt-sidepanel { position: static; min-height: 320px; } }
-.prod-board { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.prod-board { position: relative; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.prod-board.dragging { opacity: 0.38; filter: saturate(0.6); }
+.prod-board.drop-target { outline: none; }
+.prod-board.drop-target .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 6px 20px color-mix(in srgb, var(--accent) 25%, transparent); }
+.prod-board-number { font-family: ui-monospace, Consolas, monospace; font-size: 0.68rem; color: var(--text-dim); text-align: center; letter-spacing: 0.02em; }
+/* Insertion indicator — obvious gap marker shown between cards */
+.prod-board-insert-indicator {
+  position: absolute;
+  left: -10px;
+  top: 0;
+  bottom: 28px;
+  width: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 45%, transparent);
+  z-index: 4;
+  animation: prod-insert-pulse 0.9s ease-in-out infinite alternate;
+}
+.prod-board-insert-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(0deg);
+  writing-mode: horizontal-tb;
+  background: var(--accent);
+  color: white;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+  pointer-events: none;
+}
+@keyframes prod-insert-pulse { from { opacity: 0.85; } to { opacity: 1; } }
+/* End-of-grid drop placeholder */
+.prod-board-end-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+  min-height: 0;
+}
+.prod-board-end-zone.drop-target { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+.prod-board-end-label { pointer-events: none; }
+.prod-board-drag-handle {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  width: 30px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(0,0,0,0.55);
+  color: var(--text);
+  font-size: 0.62rem;
+  letter-spacing: -1px;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.prod-board-drag-handle:active { cursor: grabbing; }
+.prod-board:hover .prod-board-drag-handle { opacity: 1; }
 .prod-board.selected .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 12px 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .prod-board-frame {
   position: relative;
@@ -1722,12 +1800,43 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-rows { padding: 4px 8px 10px; display: flex; flex-direction: column; gap: 4px; }
 .shot-row {
   display: grid;
-  grid-template-columns: 52px minmax(180px, 1fr) minmax(240px, 1.4fr) 58px;
+  grid-template-columns: 22px 52px minmax(180px, 1fr) minmax(240px, 1.4fr) 58px;
   gap: 8px;
   align-items: start;
   border-radius: 8px;
   padding: 2px 4px;
 }
+.shot-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 28px;
+  margin-top: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  cursor: grab;
+  font-size: 0.72rem;
+  letter-spacing: -1px;
+  line-height: 1;
+  opacity: 0.55;
+  user-select: none;
+}
+.shot-drag-handle:active { cursor: grabbing; }
+.shot-row:hover .shot-drag-handle { opacity: 1; color: var(--accent); border-color: var(--border); background: var(--bg-raised); }
+.shot-row.dragging { opacity: 0.4; }
+.shot-row.empty-drop { display: flex; align-items: center; justify-content: center; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); font-size: 0.78rem; }
+/* Explicit between-row dropzones — collapsed when idle, expanded when dragging */
+.shot-drop-zone.idle { height: 2px; margin: 0; border: none; }
+.shot-drop-zone { height: 10px; margin: 0; border-radius: 6px; border: 1px dashed transparent; display: flex; align-items: center; justify-content: center; transition: height 0.12s, background 0.12s, border-color 0.12s; overflow: hidden; }
+.shot-drop-zone:not(.idle) { border-color: color-mix(in srgb, var(--border) 70%, transparent); background: color-mix(in srgb, var(--bg-raised) 50%, transparent); }
+.shot-drop-zone.active { height: 34px; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
+.shot-drop-line { display: inline-flex; align-items: center; gap: 8px; opacity: 0; transition: opacity 0.12s; color: var(--accent); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.shot-drop-zone.active .shot-drop-line { opacity: 1; }
+.shot-drop-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.shot-drop-label { white-space: nowrap; }
 .shot-row:hover { background: var(--bg); }
 .shot-row.dirty { background: var(--bg); outline: 1px dashed var(--accent); }
 .shot-row.head {
@@ -1736,6 +1845,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   text-transform: uppercase;
   letter-spacing: 0.06em;
   padding: 6px 4px 2px;
+  grid-template-columns: 22px 52px minmax(180px, 1fr) minmax(240px, 1.4fr) 58px;
 }
 .shot-row.head:hover { background: none; }
 .shot-number {

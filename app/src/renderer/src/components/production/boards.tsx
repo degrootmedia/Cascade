@@ -4,7 +4,7 @@ import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { useExternalImageMenu } from "../external-menu.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory }: {
+export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -23,6 +23,13 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
   onDropFrame: (source: { prodId: string; shotId: string; number: number }) => void;
   /** Promote the browsed history frame (by artworkHistory index) to primary. */
   onPromoteHistory: (index: number) => void;
+  draggable?: boolean;
+  onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
+  onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
+  onReorderDragOver?: (shotId: string) => void;
+  onReorderDragEnd?: () => void;
+  isReorderTarget?: boolean;
+  isDragging?: boolean;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -107,7 +114,45 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
   }, [prod.meta.id, shot.id, shot.prompt, shot.style, designSig]);
 
   return (
-    <figure className={"prod-board" + (selected ? " selected" : "")}>
+    <figure
+      className={"prod-board" + (selected ? " selected" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          if (onReorderDragOver) onReorderDragOver(shot.id);
+        }
+      }}
+      onDragLeave={(e) => {
+        const rt = e.relatedTarget as HTMLElement | null;
+        if (rt && e.currentTarget.contains(rt)) return;
+        // clearing is handled by parent's global handler; no-op here
+      }}
+      onDrop={(e) => {
+        if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
+          e.preventDefault();
+          if (onReorderDrop) onReorderDrop(shot.id, e);
+        }
+      }}
+      onDragEnd={() => { if (onReorderDragEnd) onReorderDragEnd(); }}
+    >
+      {isReorderTarget && (
+        <div className="prod-board-insert-indicator" aria-hidden>
+          <span className="prod-board-insert-label">Insert before {shot.number}</span>
+        </div>
+      )}
+      {draggable && onReorderDragStart && (
+        <button
+          className="prod-board-drag-handle"
+          draggable
+          title="Drag to reorder — drop before another card"
+          aria-label="Drag to reorder shot"
+          onDragStart={(e) => { e.stopPropagation(); onReorderDragStart(shot.id, e); }}
+          onDragEnd={(e) => { e.stopPropagation(); e.currentTarget.blur(); if (onReorderDragEnd) onReorderDragEnd(); }}
+        >
+          ⋮⋮
+        </button>
+      )}
       <div
         className="prod-board-frame"
         onClick={() => onPromptFocus(shot.id, prompt)}
@@ -271,6 +316,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
           ))}
         </select>
       </div>
+      <div className="prod-board-number" title={`Shot ${shot.number}`}>{shot.number}</div>
       {expanded && (expandedImg || expandedVideo) && (
         <div className="prod-ref-lightbox" onClick={() => setExpanded(false)}>
           <figure className="prod-ref-lightbox-card">

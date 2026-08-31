@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
@@ -1156,6 +1156,13 @@ function registerIpc() {
         }
       }
       throw new Error("Shot not found.");
+    })
+  );
+
+  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null) =>
+    mutateShots(id, (p) => {
+      const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId);
+      relocateBoardsForRenumber(p, oldNumbers);
     })
   );
 

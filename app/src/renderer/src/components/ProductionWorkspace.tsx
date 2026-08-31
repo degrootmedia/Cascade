@@ -53,6 +53,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const regenRunningRef = useRef(false);
   const regenPendingRef = useRef<string[]>([]);
   const [boardBust, setBoardBust] = useState(0); // cache-buster after (re)generation
+  const [boardDragId, setBoardDragId] = useState<string | null>(null);
+  const [boardDropTarget, setBoardDropTarget] = useState<string | null>(null);
+  const boardDragRef = useRef<string | null>(null);
   const [magicBusy, setMagicBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [openArtOk, setOpenArtOk] = useState<boolean | null>(null);
@@ -1449,6 +1452,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     });
   }
 
+  function reorderShot(shotId: string, beforeShotId: string | null) {
+    if (!prod || shotId === beforeShotId) return;
+    apply(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId));
+    // Bust board thumbnails after reorder (numbers and folders changed)
+    setBoardBust((b) => b + 1);
+    setBoardDragId(null);
+    setBoardDropTarget(null);
+    boardDragRef.current = null;
+  }
+
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
    *  preview (speaker button on its timeline block). Affects only the shot's
    *  video track — the production-wide VO and music keep their sliders. */
@@ -1842,7 +1855,30 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             {err && <p className="error-text">{err}</p>}
             {shotCount > 0 && (
               <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
-              <div className="prod-boards-grid">
+              <div
+                className="prod-boards-grid"
+                onDragOver={(e) => {
+                  if (boardDragRef.current && e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                  }
+                }}
+                onDrop={(e) => {
+                  if (!boardDragRef.current) return;
+                  if (!e.dataTransfer.types.includes("application/x-cascade-shot-order")) return;
+                  // Dropped on grid background = move to end
+                  const src = boardDragRef.current;
+                  const flat = prod.scenes.flatMap((sc) => sc.shots);
+                  const last = flat[flat.length - 1];
+                  if (src && last && src !== last.id) {
+                    e.preventDefault();
+                    reorderShot(src, null);
+                  }
+                  setBoardDropTarget(null);
+                  setBoardDragId(null);
+                  boardDragRef.current = null;
+                }}
+              >
                 {prod.scenes.flatMap((sc) => sc.shots).map((shot) => (
                   <BoardCard
                     key={shot.id}
@@ -1860,8 +1896,69 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     selected={promptShotId === shot.id}
                     onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
                     onPromoteHistory={(index) => void promoteHistory(shot.id, index)}
+                    draggable
+                    isDragging={boardDragId === shot.id}
+                    isReorderTarget={boardDropTarget === shot.id}
+                    onReorderDragStart={(id, e) => {
+                      boardDragRef.current = id;
+                      setBoardDragId(id);
+                      e.dataTransfer.setData("application/x-cascade-shot-order", id);
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    onReorderDragOver={(id) => {
+                      if (boardDropTarget !== id) setBoardDropTarget(id);
+                    }}
+                    onReorderDragEnd={() => {
+                      setBoardDropTarget(null);
+                      setTimeout(() => {
+                        if (boardDragRef.current) {
+                          setBoardDragId(null);
+                          boardDragRef.current = null;
+                        }
+                      }, 0);
+                    }}
+                    onReorderDrop={(targetId) => {
+                      const src = boardDragRef.current;
+                      setBoardDropTarget(null);
+                      setBoardDragId(null);
+                      boardDragRef.current = null;
+                      if (!src || src === targetId) return;
+                      reorderShot(src, targetId);
+                    }}
                   />
                 ))}
+                {boardDragId && (
+                  <div
+                    className={"prod-board prod-board-end-zone" + (boardDropTarget === "__end__" ? " drop-target" : "")}
+                    onDragOver={(e) => {
+                      if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (boardDropTarget !== "__end__") setBoardDropTarget("__end__");
+                      }
+                    }}
+                    onDragLeave={(e) => {
+                      const rt = e.relatedTarget as HTMLElement | null;
+                      if (rt && e.currentTarget.contains(rt)) return;
+                      if (boardDropTarget === "__end__") setBoardDropTarget(null);
+                    }}
+                    onDrop={(e) => {
+                      if (!e.dataTransfer.types.includes("application/x-cascade-shot-order")) return;
+                      e.preventDefault();
+                      const src = boardDragRef.current;
+                      setBoardDropTarget(null);
+                      setBoardDragId(null);
+                      boardDragRef.current = null;
+                      if (!src) return;
+                      const flat = prod.scenes.flatMap((sc) => sc.shots);
+                      const last = flat[flat.length - 1];
+                      if (src === last?.id) return;
+                      reorderShot(src, null);
+                    }}
+                  >
+                    <span className="prod-board-end-label">Drop at end</span>
+                  </div>
+                )}
               </div>
               <PromptSidePanel
                 shotNumber={prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === promptShotId)?.number}

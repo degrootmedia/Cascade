@@ -999,6 +999,109 @@ export function recordBoardArtwork(shot: ProductionShot, rel: string): void {
   shot.artwork = rel;
 }
 
+/**
+ * Relocate storyboard board folders/files when shots are renumbered (e.g.
+ * drag-reorder). For every shot whose number changed (old→new), rename the
+ * per-shot directory boards/<old> → boards/<new> (via temp to avoid
+ * collisions), rename inner filenames shot-<old>- → shot-<new>-, and patch
+ * every board-related path stored on the shot. promptOverrides (keyed by
+ * number) follows the shot as well.
+ */
+export function relocateBoardsForRenumber(
+  p: Production,
+  oldNumbers: Map<string, string>
+): void {
+  const boardsDir = p.assets.boardsDir;
+  // Build list of shots that actually changed number and whose old folder exists
+  const moves: Array<{ shot: ProductionShot; oldNum: string; newNum: string }> = [];
+  for (const sc of p.scenes) {
+    for (const shot of sc.shots) {
+      const old = oldNumbers.get(shot.id);
+      if (old && old !== shot.number) moves.push({ shot, oldNum: old, newNum: shot.number });
+    }
+  }
+  if (!moves.length) return;
+
+  // Phase 1: move each old dir → temp dir (avoid collisions where new dirs already exist)
+  const tempMap = new Map<string, string>(); // oldNum → tempRel
+  for (const { oldNum } of moves) {
+    const oldRel = `${boardsDir}/${oldNum}`;
+    let oldAbs: string;
+    try { oldAbs = assetPath(p, oldRel); } catch { continue; }
+    if (!fs.existsSync(oldAbs)) continue;
+    const tmpRel = `${boardsDir}/.tmp-reorder-${oldNum}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`;
+    try {
+      fs.renameSync(oldAbs, assetPath(p, tmpRel));
+      tempMap.set(oldNum, tmpRel);
+    } catch { /* best-effort */ }
+  }
+
+  // Phase 2: temp → final new dir, renaming inner filenames to use new number
+  for (const { oldNum, newNum } of moves) {
+    const tmpRel = tempMap.get(oldNum);
+    if (!tmpRel) continue;
+    const newRel = `${boardsDir}/${newNum}`;
+    try {
+      fs.mkdirSync(path.dirname(assetPath(p, newRel)), { recursive: true });
+      // Remove existing new dir if it already exists (should be empty after temp dance, but handle)
+      const newAbs = assetPath(p, newRel);
+      if (fs.existsSync(newAbs)) {
+        try { fs.rmSync(newAbs, { recursive: true, force: true }); } catch {}
+      }
+      fs.renameSync(assetPath(p, tmpRel), newAbs);
+      // Rename filenames inside new dir that contain old number
+      const renameInDir = (dirRel: string) => {
+        let dirAbs: string;
+        try { dirAbs = assetPath(p, dirRel); } catch { return; }
+        if (!fs.existsSync(dirAbs)) return;
+        for (const entry of fs.readdirSync(dirAbs)) {
+          const full = path.join(dirAbs, entry);
+          try {
+            const st = fs.statSync(full);
+            if (st.isDirectory()) {
+              renameInDir(`${dirRel}/${entry}`);
+            } else if (entry.includes(`shot-${oldNum}-`)) {
+              const newEntry = entry.replace(`shot-${oldNum}-`, `shot-${newNum}-`);
+              fs.renameSync(full, path.join(dirAbs, newEntry));
+            }
+          } catch {}
+        }
+      };
+      renameInDir(newRel);
+    } catch { /* best-effort */ }
+  }
+
+  // Patch stored paths: replace boards/<old>/ → boards/<new>/ and shot-<old>- → shot-<new>-
+  const patchOne = (rel: string | undefined, oldNum: string, newNum: string): string | undefined => {
+    if (!rel) return rel;
+    return rel
+      .replace(`${boardsDir}/${oldNum}/`, `${boardsDir}/${newNum}/`)
+      .replace(`shot-${oldNum}-`, `shot-${newNum}-`);
+  };
+  for (const { shot, oldNum, newNum } of moves) {
+    if (shot.artwork) shot.artwork = patchOne(shot.artwork, oldNum, newNum)!;
+    if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => patchOne(r, oldNum, newNum)!);
+    if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+    if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+    if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+  }
+
+  // promptOverrides is keyed by displayed number — move entries with the shot
+  if (p.promptOverrides && typeof p.promptOverrides === "object") {
+    const nextOverrides: Record<string, string> = {};
+    const overrides = p.promptOverrides as Record<string, string>;
+    // Build old→new lookup for quick mapping
+    const oldToNew = new Map<string, string>();
+    for (const { oldNum, newNum } of moves) oldToNew.set(oldNum, newNum);
+    for (const [oldKey, val] of Object.entries(overrides)) {
+      const newKey = oldToNew.get(oldKey) ?? oldKey;
+      // If two old keys map to same new key (shouldn't happen with sequential), last wins — acceptable
+      if (typeof val === "string" && val.trim()) nextOverrides[newKey] = val;
+    }
+    p.promptOverrides = nextOverrides;
+  }
+}
+
 /** How many generations each node-graph generation node keeps. */
 export const GRAPH_HISTORY_CAP = 20;
 

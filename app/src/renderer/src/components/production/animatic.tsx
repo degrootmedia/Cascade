@@ -489,6 +489,33 @@ export function AnimaticTimeline({
 
   useEffect(() => () => stop(), [stop]);
 
+  // Spacebar toggles playback (ignored while typing in inputs/textareas/selects).
+  const playRef = useRef(play);
+  useEffect(() => { playRef.current = play; }, [play]);
+  const shotsLenRef = useRef(shots.length);
+  useEffect(() => { shotsLenRef.current = shots.length; }, [shots.length]);
+  useEffect(() => {
+    const isEditable = (el: Element | null) => {
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if ((el as HTMLElement).isContentEditable) return true;
+      return false;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " " && e.key !== "Spacebar") return;
+      if (e.repeat) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as Element | null;
+      if (isEditable(target)) return;
+      if (!shotsLenRef.current) return;
+      e.preventDefault();
+      void playRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // ---- Zoomable strip + per-shot video pool (behavior) -------------------
 
   /** Pixels per second at the current zoom (fit scale × zoom). */

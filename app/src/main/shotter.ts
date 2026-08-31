@@ -116,6 +116,58 @@ export function validate(scenes: ProductionScene[]): string[] {
   return problems;
 }
 
+/** Move one shot to a new position (before `beforeShotId`, or at the end when null).
+ *  Works across scenes — the shot is spliced out of its source scene and into
+ *  the target scene at the insertion point, then every number on the global
+ *  100-grid is re-derived. Returns the moved shot plus a map of id→oldNumber
+ *  so callers can relocate board folders. */
+export function reorderShot(
+  scenes: ProductionScene[],
+  shotId: string,
+  beforeShotId: string | null
+): { shot: ProductionShot; oldNumbers: Map<string, string> } {
+  if (beforeShotId === shotId) throw new Error("Cannot move a shot before itself.");
+  const oldNumbers = new Map<string, string>();
+  for (const sc of scenes) for (const s of sc.shots) oldNumbers.set(s.id, s.number);
+
+  // Locate source
+  let source: ProductionShot | null = null;
+  let sourceScene: ProductionScene | null = null;
+  let sourceIdx = -1;
+  for (const sc of scenes) {
+    const i = sc.shots.findIndex((s) => s.id === shotId);
+    if (i !== -1) { source = sc.shots[i]; sourceScene = sc; sourceIdx = i; break; }
+  }
+  if (!source || !sourceScene) throw new Error("Shot not found.");
+
+  // Remove from source
+  sourceScene.shots.splice(sourceIdx, 1);
+
+  // Locate target insertion point after removal (so same-scene moves are stable)
+  if (beforeShotId === null) {
+    // Append at end of last scene (or source scene if now empty and was last)
+    const last = scenes[scenes.length - 1];
+    if (!last) throw new Error("No scenes to insert into.");
+    last.shots.push(source);
+  } else {
+    let targetScene: ProductionScene | null = null;
+    let targetIdx = -1;
+    for (const sc of scenes) {
+      const i = sc.shots.findIndex((s) => s.id === beforeShotId);
+      if (i !== -1) { targetScene = sc; targetIdx = i; break; }
+    }
+    if (!targetScene) {
+      // Target gone — put it back and fail (keeps state consistent)
+      sourceScene.shots.splice(sourceIdx, 0, source);
+      throw new Error("Target shot not found.");
+    }
+    targetScene.shots.splice(targetIdx, 0, source);
+  }
+
+  renumber(scenes);
+  return { shot: source, oldNumbers };
+}
+
 /** New shot factory (id + placeholder text, number filled by the caller). */
 export function newShot(number: string, audio = "", visual = ""): ProductionShot {
   return { id: crypto.randomUUID(), number, audio, visual };

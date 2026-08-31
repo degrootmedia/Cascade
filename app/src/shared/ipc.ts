@@ -586,6 +586,8 @@ export interface CascadeApi {
   deleteShot(productionId: string, shotId: string): Promise<Production>;
   /** Edit a shot's audio/visual text. */
   updateShot(productionId: string, shotId: string, patch: { audio?: string; visual?: string }): Promise<Production>;
+  /** Move a shot before another shot (or to the end when beforeShotId is null). Re-numbers and relocates board files. */
+  reorderShot(productionId: string, shotId: string, beforeShotId: string | null): Promise<Production>;
   /**
    * Step 3: generate storyboard frames via the OpenArt MCP server. Generates
    * for shots without artwork (or all shots when `regenerateAll`), capped at
@@ -822,6 +824,7 @@ export const ipcContract = {
   "production:insertShot": { method: "insertShot", kind: "invoke" },
   "production:deleteShot": { method: "deleteShot", kind: "invoke" },
   "production:updateShot": { method: "updateShot", kind: "invoke" },
+  "production:reorderShot": { method: "reorderShot", kind: "invoke" },
   "production:generateBoards": { method: "generateBoards", kind: "invoke" },
   "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
   "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },

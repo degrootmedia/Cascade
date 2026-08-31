@@ -29,6 +29,7 @@ import "@xyflow/react/dist/style.css";
 import type { GraphGenItem, GraphLayout, OpenArtModelChoice, Production, ProductionShot, ProductionStyle, VideoModelOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, hasBrandParagraph, refTagNames, removeRefTag, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
+import { useExternalImageMenu } from "./external-menu.js";
 
 /** Default motion prompt for the video-prompt node (matches the video panel). */
 export const VIDEO_PROMPT_DEFAULT = "Animate this reference image with smooth, cinematic motion.";
@@ -171,11 +172,14 @@ type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode 
 /* ------------------------------------------------------------------ */
 
 const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) {
+  const extMenu = useExternalImageMenu(() => {
+    if (data.artwork) void window.cascade.openInExternalEditor({ dataUrl: data.artwork }).catch(() => {});
+  });
   return (
     <div className={"prod-graph-node prod-graph-ref" + (data.tagged ? "" : " avail") + (data.missing ? " missing" : "")}>
       <Handle type="source" position={Position.Right} className="socket-ref" />
       {data.artwork
-        ? <img src={data.artwork} alt={data.name} draggable={false} />
+        ? <><img src={data.artwork} alt={data.name} draggable={false} onContextMenu={extMenu.onContextMenu} />{extMenu.menu}</>
         : data.media === "video" && data.mediaUrl
           ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
           : data.media
@@ -363,6 +367,8 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
           <option value="auto">Auto</option>
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
+      </div>
+      <div className="prod-graph-gen-controls">
         <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
           <option value="1k">1k</option>
           <option value="2k">2k</option>
@@ -515,6 +521,8 @@ const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGe
           <option value="auto">Auto</option>
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
+      </div>
+      <div className="prod-graph-gen-controls">
         <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
           <option value="1k">1k</option>
           <option value="2k">2k</option>

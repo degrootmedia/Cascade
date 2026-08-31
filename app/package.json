@@ -57,6 +57,14 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "skills/magic-prompt.md",
+        "to": "skills/magic-prompt.md"
+      },
+      {
+        "from": "src/main/magic-prompt.md",
+        "to": "magic-prompt.md"
       }
     ]
   }

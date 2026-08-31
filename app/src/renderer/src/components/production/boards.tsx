@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
+import { useExternalImageMenu } from "../external-menu.js";
 
 export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory }: {
   prod: Production;
@@ -65,6 +66,14 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
   }, [histIdx, prod.meta.id, shot.id]);
 
   const shownImg = histIdx === null ? img : histCache[String(histIdx)] ?? null;
+
+  // Right-click → edit the underlying file (full-res) in the external editor, not the thumbnail data URL.
+  const relForExternal = histIdx === null ? shot.artwork : shot.artworkHistory?.[histIdx ?? 0];
+  const canEditExternal = !!relForExternal;
+  const externalMenu = useExternalImageMenu(() => {
+    if (!relForExternal) return;
+    void window.cascade.openInExternalEditor({ productionId: prod.meta.id, relPath: relForExternal }).catch(() => {});
+  });
 
   // Load the effective prompt into the editor when this shot OR the design
   // it derives from changes (styles, brand, references, shot text) — so
@@ -185,21 +194,25 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
             title="Hover to preview this shot's video — click to edit its prompt, or drag onto another frame as a reference"
           />
         ) : shownImg ? (
-          <img
-            src={shownImg}
-            alt={`Shot ${shot.number}`}
-            className="prod-board-frame-img"
-            onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, prompt); }}
-            onDragStart={(e) => {
-              // Carry this frame's identity so another frame can accept it as a reference.
-              e.dataTransfer.setData(
-                "application/x-cascade-frame",
-                JSON.stringify({ prodId: prod.meta.id, shotId: shot.id, number: shot.number }),
-              );
-              e.dataTransfer.effectAllowed = "copy";
-            }}
-            title="Click to edit this shot's prompt — or drag onto another frame to use it as a reference"
-          />
+          <>
+            <img
+              src={shownImg}
+              alt={`Shot ${shot.number}`}
+              className="prod-board-frame-img"
+              onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, prompt); }}
+              onContextMenu={canEditExternal ? externalMenu.onContextMenu : undefined}
+              onDragStart={(e) => {
+                // Carry this frame's identity so another frame can accept it as a reference.
+                e.dataTransfer.setData(
+                  "application/x-cascade-frame",
+                  JSON.stringify({ prodId: prod.meta.id, shotId: shot.id, number: shot.number }),
+                );
+                e.dataTransfer.effectAllowed = "copy";
+              }}
+              title={canEditExternal ? "Click to edit this shot's prompt — right-click to edit externally — or drag onto another frame" : "Click to edit this shot's prompt — or drag onto another frame to use it as a reference"}
+            />
+            {canEditExternal && externalMenu.menu}
+          </>
         ) : (
           <span className="prod-board-empty">{shot.artwork ? "…" : "no frame"}</span>
         )}

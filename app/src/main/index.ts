@@ -4,20 +4,22 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage, protocol } from "electron";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { Agent, GabClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, type ChatMessage, type AgentTool } from "@core";
 import * as settings from "./settings.js";
 import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
-import { dataUrlToBytes, stripReferenceClause } from "../shared/prompt-grammar.js";
+import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, AudioModelInfo, VoiceoverConfig, VideoGenOptions, VideoModelOptions } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
@@ -98,12 +100,157 @@ function registerMediaProtocol(): void {
           }
         }
       }
-      const buf = fs.readFileSync(abs);
-      return new Response(new Uint8Array(buf), { headers });
-    } catch {
-      return new Response("Not found", { status: 404 });
-    }
+  const buf = fs.readFileSync(abs);
+    return new Response(new Uint8Array(buf), { headers });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
   });
+}
+
+/** Whether a path is inside the ACL-locked WindowsApps container. */
+function isWindowsAppsPath(p: string): boolean {
+  return p.toLowerCase().includes("\\windowsapps\\") || p.toLowerCase().includes("/windowsapps/");
+}
+
+/** Spawn a process elevated via UAC (Windows only). Resolves when the elevation request was sent. */
+function spawnElevated(target: string, arg: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== "win32") {
+      reject(new Error("Elevation only supported on Windows"));
+      return;
+    }
+    const esc = (s: string) => s.replace(/'/g, "''");
+    const cmd = `Start-Process -FilePath '${esc(target)}' -ArgumentList '${esc(arg)}' -Verb RunAs`;
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], { windowsHide: true });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Elevated launch failed (code ${code})`));
+    });
+  });
+}
+
+/** Try to launch a Windows Store execution alias (e.g. Affinity.exe in WindowsApps) without touching the ACL-locked folder. */
+async function tryWindowsAppsAlias(absPath: string, editor: string): Promise<boolean> {
+  const alias = path.basename(editor) || "Affinity.exe";
+  const candidates: Array<{ cmd: string; args: string[]; opts?: Record<string, unknown> }> = [
+    // Execution aliases are on the user's effective PATH even though the folder can't be browsed.
+    { cmd: alias, args: [absPath], opts: { detached: true, stdio: "ignore" as const, shell: true } },
+    { cmd: "powershell.exe", args: ["-NoProfile", "-Command", `Start-Process -FilePath '${alias.replace(/'/g, "''")}' -ArgumentList '${absPath.replace(/'/g, "''")}'`], opts: { windowsHide: true } },
+    { cmd: "cmd.exe", args: ["/c", "start", "", `"${alias}"`, `"${absPath}"`], opts: { windowsHide: true } },
+  ];
+  for (const c of candidates) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(c.cmd, c.args, c.opts as never);
+        child.on("error", reject);
+        // Give the alias 400ms to fail; if no error, assume it launched.
+        setTimeout(() => { try { child.unref(); } catch {} resolve(); }, 400);
+        child.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(String(code)));
+        });
+      });
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/** Open `absPath` in the chosen external editor (or the OS default). */
+async function openWithExternalEditor(absPath: string): Promise<void> {
+  const editor = settings.getExternalEditor()?.trim();
+  if (editor) {
+    // Store apps (WindowsApps) are 0-byte reparse-point aliases: probing the
+    // folder via dialog/fs fails, and they must NOT be launched elevated
+    // (AppContainer blocks RunAs). Launch via the alias name on PATH instead.
+    if (isWindowsAppsPath(editor)) {
+      if (await tryWindowsAppsAlias(absPath, editor)) return;
+      // Fallback: try the absolute path elevated (covers non-Store exes that happen to live there).
+      try { await spawnElevated(editor, absPath); return; } catch {}
+      try {
+        const child = spawn(editor, [absPath], { detached: true, stdio: "ignore" });
+        child.on("error", () => {});
+        child.unref();
+        return;
+      } catch {}
+    } else {
+      // Normal desktop exe (Photoshop, Affinity non-Store, etc.): try direct, then elevated.
+      try {
+        const child = spawn(editor, [absPath], { detached: true, stdio: "ignore" });
+        let ok = true;
+        child.on("error", async () => {
+          try { await spawnElevated(editor, absPath); } catch { void shell.openPath(absPath); }
+        });
+        child.unref();
+        if (ok) return;
+      } catch {
+        try { await spawnElevated(editor, absPath); return; } catch {}
+      }
+    }
+  }
+  // No editor or all launch attempts failed → OS default (this is what you saw).
+  const err = await shell.openPath(absPath);
+  if (err) throw new Error(err);
+}
+
+/**
+ * External-edit watch: the original (high-quality) file that was handed to
+ * the editor, and the JPEG preview that must be re-encoded when the original
+ * is edited externally. `mtimeMs/size` are captured at open time; on window
+ * focus we compare and regenerate the JPEG when the file has changed.
+ */
+interface ExternalEditWatch {
+  productionId: string;
+  jpegRel: string;
+  originalRel: string;
+  jpegAbs: string;
+  originalAbs: string;
+  mtimeMs: number;
+  size: number;
+}
+const externalEditWatches = new Map<string, ExternalEditWatch>();
+
+function trackExternalEdit(p: Production, jpegRel: string, originalRel: string): void {
+  try {
+    const originalAbs = assetPath(p, originalRel);
+    const jpegAbs = assetPath(p, jpegRel);
+    const st = fs.statSync(originalAbs);
+    externalEditWatches.set(originalAbs, {
+      productionId: p.meta.id,
+      jpegRel,
+      originalRel,
+      jpegAbs,
+      originalAbs,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+    });
+  } catch {}
+}
+
+async function checkExternalEdits(): Promise<void> {
+  for (const [key, w] of externalEditWatches) {
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(w.originalAbs);
+    } catch {
+      continue;
+    }
+    if (st.mtimeMs > w.mtimeMs + 50 || st.size !== w.size) {
+      const p = productions.loadProduction(w.productionId);
+      if (!p) continue;
+      const ok = regenerateBoardJpeg(p, w.originalRel, w.jpegRel);
+      if (ok) {
+        w.mtimeMs = st.mtimeMs;
+        w.size = st.size;
+        win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
+        win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
+      }
+    }
+  }
 }
 
 /**
@@ -515,6 +662,7 @@ function registerIpc() {
     model: settings.getModel(),
     workspace: settings.getWorkspace(),
     accent: settings.getAccent(),
+    externalEditor: settings.getExternalEditor(),
   }));
 
   handle("settings:setApiKey", (_e, key: string) => {
@@ -529,6 +677,66 @@ function registerIpc() {
 
   handle("settings:setAccent", (_e, color: string) => {
     if (typeof color === "string") settings.setAccent(color);
+  });
+
+  handle("settings:pickExternalEditor", async () => {
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Choose external image editor",
+      properties: ["openFile"],
+      filters: [
+        { name: "Executables", extensions: ["exe", "app", "*"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    settings.setExternalEditor(res.filePaths[0]);
+    return res.filePaths[0];
+  });
+
+  handle("settings:setExternalEditor", (_e, p: string | null) => {
+    settings.setExternalEditor(p);
+  });
+
+  handle("external:open", async (_e, opts: { productionId?: string; relPath?: string; dataUrl?: string }) => {
+    if (opts?.relPath && opts?.productionId) {
+      const p = productions.loadProduction(String(opts.productionId));
+      if (!p) throw new Error("Production not found.");
+      const jpegRel = String(opts.relPath);
+      // Board frames: hand the original (high-quality) file to the editor,
+      // and watch it so the JPEG preview is re-encoded when the user returns.
+      const originalRel = originalForJpegRel(p, jpegRel);
+      if (originalRel) {
+        const originalAbs = assetPath(p, originalRel);
+        if (fs.existsSync(originalAbs)) {
+          trackExternalEdit(p, jpegRel, originalRel);
+          await openWithExternalEditor(originalAbs);
+          return;
+        }
+      }
+      const abs = assetPath(p, jpegRel);
+      if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${jpegRel}`);
+      await openWithExternalEditor(abs);
+      return;
+    }
+    if (opts?.dataUrl && typeof opts.dataUrl === "string" && opts.dataUrl.startsWith("data:")) {
+      const bytes = dataUrlToBytes(opts.dataUrl);
+      if (!bytes || !bytes.length) throw new Error("Couldn't decode that image.");
+      const comma = opts.dataUrl.indexOf(",");
+      const mime = comma !== -1 ? opts.dataUrl.slice(5, comma).split(";")[0] : "image/png";
+      const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+      const tmp = path.join(os.tmpdir(), `cascade-external-${Date.now()}.${ext}`);
+      fs.writeFileSync(tmp, Buffer.from(bytes));
+      await openWithExternalEditor(tmp);
+      return;
+    }
+    if (opts?.relPath && !opts?.productionId) {
+      // Absolute path fallback (e.g. from native context menu's file:// or cascade-media decoded elsewhere)
+      const abs = path.resolve(String(opts.relPath));
+      if (!fs.existsSync(abs)) throw new Error(`File not found: ${opts.relPath}`);
+      await openWithExternalEditor(abs);
+      return;
+    }
+    throw new Error("No image to open — provide a production file or a data URL.");
   });
 
   handle("models:list", async () => {
@@ -972,8 +1180,8 @@ function registerIpc() {
   function rebaseProduction(before: Production, after: Production): Production {
     const fresh = productions.loadProduction(after.meta.id);
     if (!fresh) return after;
-    // Top-level fields the pipeline owns (step status markers).
-    for (const k of ["status", "currentStep"] as const) {
+    // Top-level fields the pipeline owns (step status markers + magic prompt state).
+    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
@@ -1125,15 +1333,30 @@ function registerIpc() {
   });
 
   // Step 3: persist a shot's editable board-prompt override (empty clears it).
+  // When Magic Prompt is enabled, edits target the magicPrompts map (content-only)
+  // instead of the normal shot.prompt field; the original prompts stay untouched.
   handle("production:updateBoardPrompt", (_e, id: string, shotId: string, prompt: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
     const text = typeof prompt === "string" ? prompt.trim() : "";
-    // The reference-alias clause is appended at display/submission time; strip
-    // any copy the user's editor included so it never accumulates in storage.
     const clean = text ? stripReferenceClause(text) : "";
+    if (p.magicEnabled) {
+      p.magicPrompts ??= {};
+      if (clean) {
+        // Persist only the content box — Style/Brand stay derived from the style system
+        const content = parsePromptBoxes(clean).content.trim() || stripMagicLeakage(clean);
+        if (content) p.magicPrompts[shotId] = content.slice(0, 2000);
+        else delete p.magicPrompts[shotId];
+      } else if (text && !clean) {
+        delete p.magicPrompts[shotId];
+      } else {
+        delete p.magicPrompts[shotId];
+      }
+      productions.saveProduction(p);
+      return p;
+    }
     if (clean) {
       shot.prompt = clean;
       shot.promptManual = true; // manual: survives re-ingestion & design changes
@@ -1151,17 +1374,69 @@ function registerIpc() {
 
   // Step 3: refresh — discard a shot's manual prompt and re-derive it from the
   // current design (style, brand, references) + script text.
+  // When Magic Prompt is enabled, clears the magic content for that shot so
+  // it falls back to the normal derived prompt until Magic is regenerated.
   handle("production:refreshBoardPrompt", (_e, id: string, shotId: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
+    if (p.magicEnabled && p.magicPrompts?.[shotId]) {
+      delete p.magicPrompts[shotId];
+      productions.saveProduction(p);
+      productionEmit(id, `Shot ${shot.number}: magic prompt cleared — showing original prompt.`);
+      return p;
+    }
     delete shot.prompt;
     shot.promptManual = false;
     if (p.promptOverrides) delete p.promptOverrides[shot.number];
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: prompt refreshed from the current design.`);
     return p;
+  });
+
+  // Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic toggle).
+  handle("production:generateMagicPrompts", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    productionEmit(id, "Magic Prompt: generating content prompts for all shots…");
+    try {
+      await enqueueProduction(id, async () => {
+        const pq = productions.loadProduction(id);
+        if (!pq) throw new Error("Production not found.");
+        const before = structuredClone(pq);
+        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l));
+        productions.saveProduction(rebaseProduction(before, pq));
+      });
+    } catch (e) {
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    return productions.loadProduction(id) ?? p;
+  });
+
+  handle("production:setMagicEnabled", (_e, id: string, enabled: boolean) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const next = !!enabled;
+    p.magicEnabled = next;
+    // If enabling but nothing generated yet, keep it off and warn via log
+    if (next && (!p.magicPrompts || !Object.keys(p.magicPrompts).length)) {
+      p.magicEnabled = false;
+      productions.saveProduction(p);
+      productionEmit(id, "No Magic Prompts yet — generate them first.", "error");
+      throw new Error("No Magic Prompts yet — generate them first.");
+    }
+    productions.saveProduction(p);
+    productionEmit(id, next ? "Magic Prompt enabled — showing AI-generated content prompts." : "Magic Prompt disabled — restored original prompts.", "done");
+    return p;
+  });
+
+  handle("production:checkExternalEdits", async () => {
+    await checkExternalEdits();
   });
 
   // Step 3: OpenArt image-capable models for the model dropdown.
@@ -2028,8 +2303,14 @@ function createWindow() {
   // Pinch / Ctrl+wheel zoom also changes the zoom level; notify for those too.
   win.webContents.on("zoom-changed", () => win?.webContents.send("zoom:changed"));
 
-  // Bringing the window forward cancels any attention flash.
-  win.on("focus", () => win?.flashFrame(false));
+  // Bringing the window forward cancels any attention flash and checks
+  // whether an externally edited original was saved while the app was
+  // backgrounded — if so the JPEG preview is re-encoded before the user
+  // sees stale pixels.
+  win.on("focus", () => {
+    win?.flashFrame(false);
+    void checkExternalEdits();
+  });
 
   // External links open in the default browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -2038,10 +2319,20 @@ function createWindow() {
   });
 
   // Right-click context menu: native edit menu for inputs/textareas (Cut/Copy/
-  // Paste/Select All), and a save/copy menu for images.
+  // Paste/Select All), and a save/copy/edit-externally menu for images.
   win.webContents.on("context-menu", (_e, params) => {
     if (params.mediaType === "image" && params.srcURL) {
-      Menu.buildFromTemplate([
+      const src = params.srcURL;
+      const isCascadeMedia = src.startsWith("cascade-media://");
+      const isDataUrl = src.startsWith("data:image/");
+      const canEditExternally = isCascadeMedia || isDataUrl || /^https?:\/\//.test(src);
+      const editorLabel = (() => {
+        const ed = settings.getExternalEditor();
+        if (!ed) return "Edit externally";
+        const base = path.basename(ed).replace(/\.[^.]+$/, "");
+        return `Edit in ${base}`;
+      })();
+      const template: Electron.MenuItemConstructorOptions[] = [
         {
           label: "Save image as…",
           click: () => win?.webContents.downloadURL(params.srcURL), // triggers the native save dialog
@@ -2050,7 +2341,59 @@ function createWindow() {
           label: "Copy image",
           click: () => win?.webContents.copyImageAt(params.x, params.y),
         },
-      ]).popup();
+      ];
+      if (canEditExternally) {
+        template.push({
+          label: editorLabel,
+          click: () => {
+            void (async () => {
+              try {
+                if (isCascadeMedia) {
+                  const url = new URL(src);
+                  const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+                  const prodId = url.hostname;
+                  const p = productions.loadProduction(prodId);
+                  if (!p) throw new Error("Production not found for this image.");
+                  const originalRel = originalForJpegRel(p, rel);
+                  if (originalRel) {
+                    const originalAbs = assetPath(p, originalRel);
+                    if (fs.existsSync(originalAbs)) {
+                      trackExternalEdit(p, rel, originalRel);
+                      await openWithExternalEditor(originalAbs);
+                    } else {
+                      const abs = assetPath(p, rel);
+                      if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
+                      await openWithExternalEditor(abs);
+                    }
+                  } else {
+                    const abs = assetPath(p, rel);
+                    if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
+                    await openWithExternalEditor(abs);
+                  }
+                } else if (isDataUrl) {
+                  const bytes = dataUrlToBytes(src);
+                  if (!bytes || !bytes.length) throw new Error("Couldn't decode image.");
+                  const comma = src.indexOf(",");
+                  const mime = comma !== -1 ? src.slice(5, comma).split(";")[0] : "image/png";
+                  const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+                  const tmp = path.join(os.tmpdir(), `cascade-external-${Date.now()}.${ext}`);
+                  fs.writeFileSync(tmp, Buffer.from(bytes));
+                  await openWithExternalEditor(tmp);
+                } else {
+                  void shell.openExternal(src);
+                }
+              } catch (err) {
+                void dialog.showMessageBox(win!, {
+                  type: "error",
+                  title: "Couldn't open in external editor",
+                  message: String(err).replace(/^Error:\s*/, ""),
+                });
+              }
+            })();
+          },
+        });
+      }
+      Menu.buildFromTemplate(template).popup();
       return;
     }
     if (params.isEditable) {

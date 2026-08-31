@@ -33,6 +33,8 @@ export interface SettingsView {
   workspace: string | null;
   /** UI accent color (hex). */
   accent: string;
+  /** Absolute path to the external image editor, or null when not set. */
+  externalEditor: string | null;
 }
 
 export interface ModelInfo {
@@ -414,6 +416,12 @@ export interface Production {
    * optional font. Set in Design (Step 2); appended to every board prompt.
    */
   brand?: { colors: string[]; font?: string };
+  /** Magic Prompt: alternate content-only prompts generated for the full storyboard.
+   *  When `magicEnabled` is true the storyboard prompt editors show `magicPrompts`
+   *  content instead of the normal/manual prompts; style and brand paragraphs
+   *  remain separate. The original prompts stay in `shot.prompt` untouched. */
+  magicPrompts?: Record<string, string>;
+  magicEnabled?: boolean;
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
@@ -472,6 +480,10 @@ export interface CascadeApi {
   setApiKey(key: string): Promise<void>;
   setModel(model: string): Promise<void>;
   setAccent(color: string): Promise<void>;
+  pickExternalEditor(): Promise<string | null>;
+  setExternalEditor(path: string | null): Promise<void>;
+  /** Open an image in the external editor (or the OS default when none is set). */
+  openInExternalEditor(opts: { productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
   onOpenSettings(cb: () => void): () => void;
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
@@ -707,6 +719,14 @@ export interface CascadeApi {
   /** Step 4: the resolution / length options a video model accepts (from its
    *  live form schema). Null when the model form can't be read. */
   videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
+  /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
+  generateMagicPrompts(productionId: string): Promise<Production>;
+  /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
+  setMagicEnabled(productionId: string, enabled: boolean): Promise<Production>;
+  /** Board external edit — re-encode any externally modified originals to their JPEG previews. */
+  checkExternalEdits(): Promise<void>;
+  /** Fired after an externally edited board's JPEG preview has been regenerated. */
+  onBoardExternalUpdate(cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void): () => void;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }
 
@@ -745,6 +765,9 @@ export const ipcContract = {
   "settings:setApiKey": { method: "setApiKey", kind: "invoke" },
   "settings:setModel": { method: "setModel", kind: "invoke" },
   "settings:setAccent": { method: "setAccent", kind: "invoke" },
+  "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
+  "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
+  "external:open": { method: "openInExternalEditor", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
 
@@ -837,6 +860,9 @@ export const ipcContract = {
   "production:videoUrl": { method: "videoUrl", kind: "invoke" },
   "production:removeVideo": { method: "removeVideo", kind: "invoke" },
   "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
+  "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
+  "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
+  "production:checkExternalEdits": { method: "checkExternalEdits", kind: "invoke" },
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */
@@ -848,6 +874,7 @@ type SubscriptionMethod =
   | "onZoomChanged"
   | "onSessionRenamed"
   | "onAgentSwitched"
+  | "onBoardExternalUpdate"
   | "onProductionEvent";
 
 /** Every non-subscription method on CascadeApi must be wired in ipcContract,

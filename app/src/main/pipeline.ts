@@ -20,9 +20,11 @@ import {
   insertBrandParagraph,
   parseJsonLooseArray,
   parseJsonLooseObject,
+  parsePromptBoxes,
   refTagMatches,
   stripBrandParagraph,
   stripReferenceClause,
+  stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
@@ -372,6 +374,158 @@ export async function stylePromptFromImage(
 }
 
 /**
+ * Magic Prompt — content-only generation for the full storyboard.
+ * The style system stays separate (Style:/Brand paragraphs are not included).
+ * Generation parameters (prompt template, rules) live in the magic-prompt
+ * skill md file so cascade devs can update them without code changes.
+ */
+let cachedMagicSkill: string | null | undefined;
+export function loadMagicSkillText(): string | null {
+  if (cachedMagicSkill !== undefined) return cachedMagicSkill;
+  const candidates: string[] = [];
+  try {
+    // When bundled, __dirname is app/out/main
+    const base = typeof __dirname !== "undefined" ? __dirname : process.cwd();
+    candidates.push(path.join(base, "magic-prompt.md"));
+    candidates.push(path.join(base, "..", "skills", "magic-prompt.md"));
+    candidates.push(path.join(base, "..", "..", "skills", "magic-prompt.md"));
+    candidates.push(path.join(base, "..", "..", "app", "skills", "magic-prompt.md"));
+    candidates.push(path.join(process.cwd(), "skills", "magic-prompt.md"));
+    candidates.push(path.join(process.cwd(), "app", "skills", "magic-prompt.md"));
+    candidates.push(path.join(process.cwd(), "app", "src", "main", "magic-prompt.md"));
+  } catch {}
+  for (const cand of candidates) {
+    try {
+      if (fs.existsSync(cand)) {
+        const t = fs.readFileSync(cand, "utf8");
+        if (t.trim()) { cachedMagicSkill = t; return t; }
+      }
+    } catch {}
+  }
+  cachedMagicSkill = null;
+  return null;
+}
+export function clearMagicSkillCache(): void { cachedMagicSkill = undefined; }
+
+export function stripMagicLeakage(text: string): string {
+  let t = text.trim();
+  // Model sometimes leaks Style:/Brand paragraphs despite instructions — strip them
+  t = stripStyleParagraph(t);
+  t = stripBrandParagraph(t);
+  // Also strip stray prefixes like "Content:" or quoted wrappers
+  t = t.replace(/^\s*Content:\s*/i, "");
+  t = t.replace(/^["']|["']$/g, "");
+  return t.trim();
+}
+
+/**
+ * One bounded LLM call that generates CONTENT-ONLY prompts for every shot.
+ * Uses the magic-prompt skill file as the prompt source when available,
+ * otherwise falls back to the embedded template.
+ * Returns a map of shotId → content prompt and mutates the production to
+ * store it with magicEnabled=true.
+ */
+export async function generateMagicPrompts(
+  p: Production,
+  apiKey: string,
+  model: string,
+  emit: EmitFn
+): Promise<Production> {
+  const shots = p.scenes.flatMap((s) => s.shots);
+  if (!shots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
+  const skillText = loadMagicSkillText();
+  // Build shot list for the model: number | audio | visual | currentContent (stripped)
+  const shotLines = shots.map((s) => {
+    const boxes = parsePromptBoxes(effectivePrompt(p, s));
+    // Current content without style/brand — what magic replaces
+    const curContent = boxes.content.trim() || s.visual.trim() || "(no visual direction)";
+    const audio = s.audio.trim() ? s.audio.trim().slice(0, 220) : "(no dialogue)";
+    const visual = s.visual.trim() ? s.visual.trim().slice(0, 400) : "(no visual direction)";
+    return `${s.number} | audio: ${audio} | visual: ${visual} | current prompt content: ${curContent.slice(0, 500)}`;
+  }).join("\n");
+
+  const refNames = [
+    ...p.characters.map((c) => c.name).filter(Boolean),
+    ...p.products.map((pr) => pr.name).filter(Boolean),
+    ...(p.references ?? []).map((r) => r.name).filter(Boolean),
+  ];
+  const refList = refNames.length ? refNames.map((n) => `@[${n}]`).join(", ") : "(none)";
+
+  // Use skill file as instruction source when available (fallback embedded)
+  const skillPrefix = skillText ? skillText.slice(0, 2000) : "";
+  const systemContent = skillPrefix
+    ? "You are a cinematic storyboard prompt engineer. Reply with JSON only — no prose, no markdown fences. Follow the MAGIC PROMPT skill instructions verbatim. Content prompts only — never style language.\n\nSKILL:\n" + skillPrefix
+    : "You are a cinematic storyboard prompt engineer for an animation pipeline. Reply with JSON only — no prose, no markdown fences. You write CONTENT prompts only — never style language.";
+
+  const userContent =
+    "You are a storyboard image-prompt generator. Analyze the full script and visual direction and produce a CONTENT-ONLY prompt for each shot.\n\n" +
+    "Rules:\n" +
+    "- CONTENT ONLY: Describe subject, framing, action, camera (wide/medium/closeup), composition, key props and characters, setting, time of day, mood conveyed by content.\n" +
+    "- NEVER include style words: no medium, palette, lighting style, line treatment, rendering, brush, painterly, photorealistic, 3D, anime, etc. The style system will handle that.\n" +
+    "- Keep each prompt to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
+    "- Understand flow: track continuity across shots — maintain character presence, location progression, action continuity, and shot-to-shot rhythm. Adjacent shots should read as a visual sequence, not isolated images.\n" +
+    "- Include ALL elements needed in each frame: foreground/background elements, character count and placement, key objects from references when tagged, and any text-implied visuals (e.g. SFX sources).\n" +
+    "- Respect @[Name] reference tags if present — keep them verbatim when that reference should appear in the frame; omit when not needed for this shot's content.\n" +
+    "- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.\n\n" +
+    "Shots (in order):\n" + shotLines + "\n\n" +
+    "References available (name — will be inserted as @[Name] where needed):\n" + refList + "\n\n" +
+    'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.';
+
+  emit(`Generating Magic Prompts for ${shots.length} shot(s) (model: ${model})…`);
+  const gab = new GabClient(apiKey);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      { role: "system", content: systemContent },
+      { role: "user", content: userContent },
+    ],
+    8000
+  );
+
+  const parsed = parseJsonLooseObject(text);
+  const rawPrompts = (parsed?.prompts ?? parsed?.shots ?? parsed?.data) as unknown;
+  let arr: unknown[] | null = null;
+  if (Array.isArray(rawPrompts)) arr = rawPrompts;
+  else if (Array.isArray(parsed)) arr = parsed as unknown[];
+  else {
+    // Try loose array extraction
+    const loose = parseJsonLooseArray(text);
+    if (loose) arr = loose;
+  }
+  if (!arr || !arr.length) throw new Error("Magic Prompt generation returned no JSON prompts — try again.");
+
+  const byNumber = new Map(shots.map((s) => [s.number, s]));
+  const byNumberLoose = new Map(shots.map((s) => [s.number.padStart(4, "0"), s]));
+  const generated: Record<string, string> = {};
+  let matched = 0;
+  for (const item of arr) {
+    const o = (item ?? {}) as Record<string, unknown>;
+    const rawNum = String(o.number ?? o.shot ?? o.id ?? "").trim();
+    const num = rawNum.padStart(4, "0");
+    const shot = byNumber.get(num) ?? byNumberLoose.get(num) ?? byNumber.get(rawNum);
+    if (!shot) continue;
+    let prompt = String(o.prompt ?? o.content ?? o.text ?? "").trim();
+    if (!prompt) continue;
+    prompt = stripMagicLeakage(prompt).slice(0, 600);
+    if (!prompt) continue;
+    generated[shot.id] = prompt;
+    matched++;
+  }
+  if (!matched) throw new Error("Magic Prompt generation produced no matching shot numbers — try again.");
+  // Fill gaps with fallback (keep existing visual or previous content)
+  for (const s of shots) {
+    if (!generated[s.id]) {
+      const fallback = stripMagicLeakage(parsePromptBoxes(effectivePrompt(p, s)).content) || s.visual.trim() || "Establishing frame for this moment.";
+      generated[s.id] = fallback.slice(0, 600);
+    }
+  }
+  p.magicPrompts = generated;
+  p.magicEnabled = true;
+  emit(`Magic Prompt generated ${Object.keys(generated).length} prompt(s) — enabled.`, "done");
+  return p;
+}
+
+/**
  * Step 3 helper — build the image-generation prompt for one shot's board:
  * master style first, then consistency keys for any character named in the
  * shot, then user-added per-shot references, then the shot's own visual.
@@ -478,8 +632,34 @@ export function brandPrompt(p: Production): string {
 /**
  * The prompt actually used to generate/export a shot's board: a user override
  * set in Step 3 wins; otherwise the auto-derived boardPrompt applies.
+ * When Magic Prompt is enabled, its alternate content store takes precedence
+ * (still wrapped with Style/Brand paragraphs so style system remains separate).
  */
 export function effectivePrompt(p: Production, shot: ProductionShot): string {
+  if (p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()) {
+    const content = stripMagicLeakage(p.magicPrompts[shot.id].trim());
+    const paras: string[] = [];
+    const style = resolveShotStyle(p, shot);
+    if (style) paras.push(`Style: ${style}`);
+    else {
+      const master = (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
+      if (master) paras.push(`Style: ${master}`);
+    }
+    const consistency: string[] = [];
+    const brand = shot.includeBrandIdentity !== false ? brandPrompt(p) : "";
+    if (brand) consistency.push(`Brand identity: ${brand}`);
+    const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
+    const excludedIds = new Set(shot.refExcluded ?? []);
+    for (const c of p.characters) {
+      if (c.key && c.name && !excludedIds.has(c.id) && haystack.includes(c.name.toLowerCase())) consistency.push(`${c.name}: ${c.key}.`);
+    }
+    if (consistency.length) paras.push(consistency.join("\n"));
+    paras.push(content || "Establishing frame for this moment.");
+    const base = paras.join("\n\n").slice(0, 2000);
+    // Respect includeBrandIdentity flag (magic content is brand-aware)
+    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
+    return base;
+  }
   if (shot.prompt?.trim()) {
     const base = shot.prompt.trim();
     const brand = brandPrompt(p);
@@ -488,6 +668,13 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     return base;
   }
   return boardPrompt(p, shot);
+}
+
+/** Return the raw content-only text that effectivePrompt will use for this shot (without Style/Brand wrappers). */
+export function effectivePromptContent(p: Production, shot: ProductionShot): string {
+  if (p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()) return stripMagicLeakage(p.magicPrompts[shot.id].trim());
+  if (shot.prompt?.trim()) return parsePromptBoxes(shot.prompt).content.trim() || shot.prompt.trim();
+  return shot.visual.trim() || "Establishing frame for this moment.";
 }
 
 /**
@@ -548,7 +735,10 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
     ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
     ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
   ];
-  for (const { name } of refTagMatches(shot.prompt ?? "")) {
+  const promptForTags = p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()
+    ? p.magicPrompts[shot.id]
+    : shot.prompt ?? "";
+  for (const { name } of refTagMatches(promptForTags)) {
     const ref = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
     if (ref) push(ref);
   }
@@ -578,7 +768,10 @@ export function boardJpegRelPath(p: Production, shot: ProductionShot): string {
 
 /** Write both the archived original and the served JPEG for a frame. Returns
  *  the JPEG rel (what `shot.artwork` should point to). The original's
- *  extension is preserved (PNG for model output, original ext for imports). */
+ *  extension is preserved (PNG for model output, original ext for imports).
+ *  Both files share the same tag so the original ↔ JPEG mapping is
+ *  deterministic — the external editor opens the original and the JPEG is
+ *  regenerated from it when the file is edited externally. */
 export function writeBoardFrame(
   p: Production,
   shot: ProductionShot,
@@ -587,8 +780,10 @@ export function writeBoardFrame(
 ): { jpegRel: string; originalRel: string } {
   fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}`), { recursive: true });
   fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${shot.number}/originals`), { recursive: true });
-  const originalRel = boardOriginalRelPath(p, shot, originalExt);
-  const jpegRel = boardJpegRelPath(p, shot);
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  const safeExt = (originalExt || "png").replace(/^\./, "").toLowerCase() || "png";
+  const originalRel = `${p.assets.boardsDir}/${shot.number}/originals/shot-${shot.number}-${tag}.${safeExt}`;
+  const jpegRel = `${p.assets.boardsDir}/${shot.number}/shot-${shot.number}-${tag}.jpg`;
   fs.writeFileSync(assetPath(p, originalRel), originalBytes);
   let jpegBytes: Buffer;
   try {
@@ -599,6 +794,80 @@ export function writeBoardFrame(
   }
   fs.writeFileSync(assetPath(p, jpegRel), jpegBytes);
   return { jpegRel, originalRel };
+}
+
+/** Derive the expected JPEG path for an original, or null when it isn't a
+ *  board original (`boards/<shot>/originals/shot-<shot>-<tag>.<ext>`). */
+export function jpegForOriginalRel(p: Production, originalRel: string): string | null {
+  const esc = p.assets.boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`^${esc}/(\\d{4})/originals/shot-\\d{4}-([^/]+)\\.[^/]+$`).exec(originalRel);
+  if (!m) return null;
+  const shotNumber = m[1];
+  const tag = m[2];
+  return `${p.assets.boardsDir}/${shotNumber}/shot-${shotNumber}-${tag}.jpg`;
+}
+
+/** Find the archived original file for a board JPEG (`boards/<shot>/shot-<shot>-<tag>.jpg`).
+ *  With the post-fix layout both files share the tag, so a direct lookup works.
+ *  For legacy frames that used independent tags, the scan falls back to the
+ *  newest file in that shot's `originals/` directory. Returns the
+ *  workspace-relative original rel or null when none exists. */
+export function originalForJpegRel(p: Production, jpegRel: string): string | null {
+  const esc = p.assets.boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`^${esc}/(\\d{4})/shot-\\d{4}-([^/]+)\\.jpg$`, "i").exec(jpegRel);
+  if (!m) return null;
+  const shotNumber = m[1];
+  const tag = m[2];
+  const originalsDir = `${p.assets.boardsDir}/${shotNumber}/originals`;
+  let absDir: string;
+  try {
+    absDir = assetPath(p, originalsDir);
+  } catch {
+    return null;
+  }
+  // Direct tag match first — the high-quality file the external editor edits.
+  try {
+    const files = fs.readdirSync(absDir);
+    const direct = files.find((f) => f === `shot-${shotNumber}-${tag}.png` || f === `shot-${shotNumber}-${tag}.jpg` || f === `shot-${shotNumber}-${tag}.jpeg` || f === `shot-${shotNumber}-${tag}.webp` || f.startsWith(`shot-${shotNumber}-${tag}.`));
+    if (direct) return `${originalsDir}/${direct}`;
+    // Legacy: tags diverged — pick the newest original for that shot.
+    let newest: { rel: string; mtime: number } | null = null;
+    for (const f of files) {
+      if (!/^shot-\d{4}-.+\.\w+$/.test(f)) continue;
+      try {
+        const st = fs.statSync(path.join(absDir, f));
+        if (!newest || st.mtimeMs > newest.mtime) newest = { rel: `${originalsDir}/${f}`, mtime: st.mtimeMs };
+      } catch {}
+    }
+    return newest?.rel ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Re-encode `originalRel` into `jpegRel` (90-quality JPEG). Returns true
+ *  when the JPEG was overwritten, false when the original couldn't be read. */
+export function regenerateBoardJpeg(p: Production, originalRel: string, jpegRel: string): boolean {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(assetPath(p, originalRel));
+  } catch {
+    return false;
+  }
+  let jpegBytes: Buffer;
+  try {
+    const img = nativeImage?.createFromBuffer(bytes);
+    jpegBytes = img && !img.isEmpty() ? img.toJPEG(90) : bytes;
+  } catch {
+    jpegBytes = bytes;
+  }
+  try {
+    fs.mkdirSync(path.dirname(assetPath(p, jpegRel)), { recursive: true });
+    fs.writeFileSync(assetPath(p, jpegRel), jpegBytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** One-time migration: if `shot.artwork` is a legacy PNG (extension .png) that

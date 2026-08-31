@@ -17,6 +17,7 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   const [workspace, setWorkspace] = useState(settings.workspace);
   const [model, setModel] = useState(settings.model);
   const [accent, setAccent] = useState(settings.accent);
+  const [externalEditor, setExternalEditor] = useState(settings.externalEditor);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [hasKey, setHasKey] = useState(settings.hasApiKey);
   const [saving, setSaving] = useState(false);
@@ -56,6 +57,36 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
     setAccent(color);
     applyAccent(color);
     void window.cascade.setAccent(color);
+  }
+
+  async function pickExternalEditor() {
+    try {
+      const picked = await window.cascade.pickExternalEditor();
+      if (picked) setExternalEditor(picked);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function clearExternalEditor() {
+    try {
+      await window.cascade.setExternalEditor(null);
+      setExternalEditor(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function saveExternalEditor(path: string | null) {
+    const trimmed = path?.trim() ? path.trim() : null;
+    // Allow WindowsApps even though it may not pass exists check — we bake elevation for it.
+    try {
+      await window.cascade.setExternalEditor(trimmed);
+      setExternalEditor(trimmed);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   const ready = hasKey;
@@ -134,6 +165,25 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
           />
         </div>
         <p className="hint">Highlights, links, and selection outlines. Applied immediately.</p>
+
+        <label>External image editor</label>
+        <div className="row">
+          <input
+            value={externalEditor ?? ""}
+            placeholder="System default — paste path e.g. ...\WindowsApps\Affinity.exe"
+            onChange={(e) => setExternalEditor(e.target.value || null)}
+            onBlur={(e) => void saveExternalEditor(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setExternalEditor(settings.externalEditor); }}
+            style={{ flex: 1, minWidth: 220 }}
+            title={externalEditor ?? "System default"}
+          />
+          <button onClick={() => void pickExternalEditor()}>Choose…</button>
+          {externalEditor && <button onClick={() => void clearExternalEditor()}>Clear</button>}
+        </div>
+        <p className="hint">
+          Photoshop, Affinity, etc. Right-click any reference or generated frame and choose “Edit externally” to open it here.
+          Windows Store apps (e.g. <code>...\WindowsApps\Affinity.exe</code>) are ACL-locked — the file picker can't enter that folder, so paste the full path above. It will be launched elevated (UAC) automatically.
+        </p>
 
         <label>Agents</label>
         <p className="hint">

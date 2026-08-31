@@ -9,7 +9,7 @@ import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, in
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
-import { AnimaticTimeline, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
+import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js";
@@ -53,6 +53,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const regenRunningRef = useRef(false);
   const regenPendingRef = useRef<string[]>([]);
   const [boardBust, setBoardBust] = useState(0); // cache-buster after (re)generation
+  const [magicBusy, setMagicBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [openArtOk, setOpenArtOk] = useState<boolean | null>(null);
   const [openArtModels, setOpenArtModels] = useState<OpenArtModelChoice[]>([]);
@@ -96,6 +97,29 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     });
     return off;
   }, [refreshList]);
+
+  // External edit: when the high-quality original is edited in Photoshop etc.,
+  // main re-encodes the JPEG preview on window focus and notifies here — bump
+  // the board cache-buster and reload the production so the updated frame shows.
+  useEffect(() => {
+    const off = window.cascade.onBoardExternalUpdate(async (e) => {
+      if (prod?.meta.id && e.productionId !== prod.meta.id) return;
+      setBoardBust((b) => b + 1);
+      try {
+        const next = await window.cascade.loadProduction(e.productionId);
+        if (next) setProd(next);
+      } catch {}
+      void refreshList();
+    });
+    const onWindowFocus = () => {
+      void window.cascade.checkExternalEdits().catch(() => {});
+    };
+    window.addEventListener("focus", onWindowFocus);
+    return () => {
+      off();
+      window.removeEventListener("focus", onWindowFocus);
+    };
+  }, [prod?.meta.id, refreshList]);
 
   // Keep the rename draft in sync when switching productions.
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
@@ -425,40 +449,142 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     await styleFromImageDataUrl(dataUrl);
   }
 
-  /** Step 2: paste an image from the clipboard (Ctrl+V) to generate a style. */
-  async function styleFromPastedImage(file: File) {
-    if (!prod || styleImgBusy) return;
-    if (file.size > 15 * 1024 * 1024) {
-      setErr("That image is larger than 15 MB — use a smaller one.");
-      return;
+  /** Next auto-generated reference name (Ref-001, Ref-002, …). */
+  function nextRefName(): string {
+    let max = 0;
+    for (const r of prod?.references ?? []) {
+      const m = /^Ref-(\d+)$/.exec(r.name);
+      if (m) max = Math.max(max, Number(m[1]));
     }
-    const dataUrl = await new Promise<string>((resolve, reject) => {
+    return `Ref-${String(max + 1).padStart(3, "0")}`;
+  }
+
+  /** Shared: read a File as a data URL. */
+  function fileToDataUrl(file: File): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
       const r = new FileReader();
       r.onload = () => resolve(r.result as string);
       r.onerror = reject;
       r.readAsDataURL(file);
     });
+  }
+
+  /** Resolve a reference's image to a data URL (legacy inline or on-disk file). */
+  async function referenceToDataUrl(refId: string): Promise<string | null> {
+    if (!prod) return null;
+    const all: Array<{ id: string; artwork?: string; imagePath?: string }> = [
+      ...prod.characters,
+      ...prod.products,
+      ...(prod.references ?? []),
+    ];
+    const ref = all.find((r) => r.id === refId);
+    if (!ref) return null;
+    if (ref.artwork) return ref.artwork;
+    if (ref.imagePath) {
+      try {
+        const url = cascadeMedia(prod.meta.id, ref.imagePath);
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return await new Promise<string>((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result as string);
+          fr.onerror = reject;
+          fr.readAsDataURL(blob);
+        });
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /** Step 2: drag a reference image onto the "From image" button to generate a style from it. */
+  async function styleFromReferenceId(refId: string) {
+    const dataUrl = await referenceToDataUrl(refId);
+    if (!dataUrl) { setErr("Couldn't load that reference image."); return; }
     await styleFromImageDataUrl(dataUrl);
   }
 
-  // Step 2: while the Design panel is open, Ctrl+V with an image in the
-  // clipboard generates a style from it. Text pastes are untouched.
+  /** Create a pasted image as a new reference with an auto-generated name (Ref-001…). */
+  async function createReferenceFromFile(file: File, forcedName?: string) {
+    if (!prod) return;
+    if (file.size > 15 * 1024 * 1024) {
+      setErr("That image is larger than 15 MB — use a smaller one.");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setErr(`${file.name}: not an image file.`);
+      return;
+    }
+    const name = forcedName ?? nextRefName();
+    let dataUrl: string;
+    try {
+      dataUrl = await fileToDataUrl(file);
+    } catch {
+      setErr("Couldn't read the pasted image.");
+      return;
+    }
+    const imagePath = await persistRefImage(dataUrl, name);
+    if (!imagePath) { setErr("Couldn't save the pasted image."); return; }
+    saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name, imagePath, shotIds: [] }] });
+  }
+
+  function batchRefNames(count: number): string[] {
+    let max = 0;
+    for (const r of prod?.references ?? []) {
+      const m = /^Ref-(\d+)$/.exec(r.name);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return Array.from({ length: count }, (_, i) => `Ref-${String(max + 1 + i).padStart(3, "0")}`);
+  }
+
+  // Step 2: while the Design panel is open, Ctrl+V with an image creates a reference (Ref-001…).
+  // Text pastes are untouched. When the node graph is open, it owns paste (see NodeGraphModal).
   useEffect(() => {
     if (prod?.currentStep !== 2) return;
     const onPaste = (e: ClipboardEvent) => {
+      // If the node graph modal is open, let it handle paste (creates a ref via its own handler).
+      if (document.querySelector(".prod-graph-overlay")) return;
       const items = e.clipboardData?.items;
       if (!items) return;
-      let file: File | null = null;
+      const files: File[] = [];
       for (const item of Array.from(items)) {
-        if (item.kind === "file" && item.type.startsWith("image/")) { file = item.getAsFile(); break; }
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
       }
-      if (!file) return;
+      if (!files.length) return;
       e.preventDefault();
-      void styleFromPastedImage(file);
+      const names = batchRefNames(files.length);
+      files.forEach((f, i) => void createReferenceFromFile(f, names[i]));
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [prod, styleImgBusy]);
+  }, [prod?.currentStep, prod?.references, prod?.meta.id]);
+
+  // Node graph: Ctrl+V with an image creates a reference (Ref-001…), same as the Design page.
+  useEffect(() => {
+    if (!graphShotId) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (!files.length) return;
+      e.preventDefault();
+      const names = batchRefNames(files.length);
+      files.forEach((f, i) => void createReferenceFromFile(f, names[i]));
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [graphShotId, prod?.references, prod?.meta.id]);
 
   /** Step 2: remove a style and renumber the rest. */
   function removeStyle(idx: number) {
@@ -1516,12 +1642,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 className="prod-btn"
                 disabled={styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES}
                 onClick={() => void pickStyleImage()}
-                title="Generate a style prompt from an image that captures the look you're after"
+                onDragOver={(e) => { if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }}
+                onDragLeave={(e) => e.currentTarget.classList.remove("dragover")}
+                onDrop={async (e) => {
+                  e.preventDefault(); e.currentTarget.classList.remove("dragover");
+                  if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return;
+                  const refId = e.dataTransfer.getData("application/x-cascade-reference");
+                  if (refId) { void styleFromReferenceId(refId); return; }
+                  const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+                  if (files.length) {
+                    const file = files[0];
+                    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
+                    try {
+                      const dataUrl = await fileToDataUrl(file);
+                      await styleFromImageDataUrl(dataUrl);
+                    } catch { setErr("Couldn't read the dropped image."); }
+                  }
+                }}
+                title="Generate a style prompt from an image — or drag a reference image here"
               >
                 {styleImgBusy ? "Reading image…" : "🖼 From image…"}
               </button>
             </div>
-            <p className="hint">You can also paste an image (Ctrl+V) straight into this page while it's open.</p>
 
             <div className="prod-brand">
               <label className="prod-label">Brand identity — global</label>
@@ -1590,7 +1732,57 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
         {prod.currentStep === 3 && (
           <section className="prod-panel prod-storyboard-panel">
-            <h3>3 · Storyboard</h3>
+            <div className="prod-storyboard-head">
+              <h3>3 · Storyboard</h3>
+              <div className="prod-magic-controls">
+                <button
+                  className={"prod-btn prod-magic-btn" + (prod.magicEnabled ? " active" : "")}
+                  disabled={magicBusy || !shotCount}
+                  onClick={() => {
+                    if (!prod) return;
+                    if (prod.magicEnabled) {
+                      setMagicBusy(true); setErr(null);
+                      void window.cascade.setMagicEnabled(prod.meta.id, false).then((next) => {
+                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
+                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+                    } else if (prod.magicPrompts && Object.keys(prod.magicPrompts).length) {
+                      setMagicBusy(true); setErr(null);
+                      void window.cascade.setMagicEnabled(prod.meta.id, true).then((next) => {
+                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
+                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+                    } else {
+                      setMagicBusy(true); setErr(null);
+                      void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
+                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
+                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+                    }
+                  }}
+                  title={prod.magicEnabled ? "Disable Magic Prompt — restore original prompts" : "Enable Magic Prompt — AI generates content-only prompts for all shots"}
+                >
+                  {magicBusy ? "…" : prod.magicEnabled ? "✨ Magic On" : "✨ Magic Prompt"}
+                </button>
+                {prod.magicEnabled && (
+                  <button
+                    className="prod-btn prod-magic-refresh"
+                    disabled={magicBusy}
+                    onClick={() => {
+                      if (!prod) return;
+                      setMagicBusy(true); setErr(null);
+                      void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
+                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
+                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+                    }}
+                    title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
+                  >
+                    ↻
+                  </button>
+                )}
+              </div>
+            </div>
             <p className="hint">
               One frame per shot — the master style and character keys from Step 2 are baked into every prompt.
               Frames are saved to <code>{prod.assets.boardsDir}/</code> in the production folder.
@@ -1683,6 +1875,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
                 submitting={!!promptShotId && regenIds.has(promptShotId)}
                 onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
+                magicActive={!!prod.magicEnabled}
               />
               </div>
             )}

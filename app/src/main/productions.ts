@@ -37,6 +37,16 @@ function normalize(p: ProductionFile): ProductionFile {
   p.assets.musicDir ??= "music";
   p.assets.videosDir ??= "videos";
   p.assets.referencesDir ??= "references";
+  p.magicPrompts ??= {};
+  if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
+  // Clean stale magic entries for deleted shots and non-string values
+  if (p.magicPrompts && typeof p.magicPrompts === "object") {
+    const ids = new Set(p.scenes.flatMap((sc) => sc.shots.map((s) => s.id)));
+    for (const k of Object.keys(p.magicPrompts)) {
+      if (!ids.has(k) || typeof p.magicPrompts[k] !== "string") delete p.magicPrompts[k];
+      else p.magicPrompts[k] = p.magicPrompts[k].trim().slice(0, 2000);
+    }
+  }
   if (typeof (p as unknown as { voiceoverVolume?: unknown }).voiceoverVolume !== "number") {
     // Default voiceover volume when a VO exists, otherwise leave undefined for fresh projects.
     if (p.voiceoverPath) (p as ProductionFile).voiceoverVolume = 1;
@@ -141,6 +151,12 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.status = p.status ?? {};
   if (typeof p.scriptSource === "string") fresh.scriptSource = p.scriptSource;
   if (typeof p.meta.name === "string" && p.meta.name.trim()) fresh.meta.name = p.meta.name.trim();
+  if (p.magicPrompts && typeof p.magicPrompts === "object") {
+    fresh.magicPrompts = Object.fromEntries(Object.entries(p.magicPrompts).filter(([, v]) => typeof v === "string" && v.trim()).map(([k, v]) => [k, String(v).trim().slice(0, 2000)]));
+  } else if (p.magicPrompts === undefined) {
+    fresh.magicPrompts = fresh.magicPrompts ?? {};
+  }
+  if (typeof p.magicEnabled === "boolean") fresh.magicEnabled = p.magicEnabled;
   return fresh;
 }
 

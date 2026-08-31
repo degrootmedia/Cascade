@@ -57,6 +57,11 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("production:event", listener);
     return () => ipcRenderer.removeListener("production:event", listener);
   };
+  api.onBoardExternalUpdate = (cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void) => {
+    const listener = (_e: unknown, ev: { productionId: string; jpegRel: string; originalRel: string }) => cb(ev);
+    ipcRenderer.on("board:externalUpdate", listener);
+    return () => ipcRenderer.removeListener("board:externalUpdate", listener);
+  };
 
   // The contract↔CascadeApi drift guard in shared/ipc.ts guarantees every
   // method this object carries is a real CascadeApi member, so the cast is

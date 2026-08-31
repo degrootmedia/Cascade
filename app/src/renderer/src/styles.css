@@ -2838,7 +2838,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 .prod-graph-node-title { font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 7px; }
-.prod-graph-node .react-flow__handle { width: 9px; height: 9px; background: var(--accent); border: 2px solid var(--bg-raised); }
+.prod-graph-node .react-flow__handle { width: 12px; height: 12px; background: var(--accent); border: 2px solid var(--bg-raised); }
 .prod-graph-canvas .react-flow__node.selected .prod-graph-node {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
@@ -3032,3 +3032,50 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-prompt-divider::before { content: ""; width: 40px; height: 2px; border-radius: 2px; background: var(--border); }
 .prod-prompt-divider:hover::before, .prod-prompt-divider:active::before { background: var(--accent); }
+
+/* ---------- Magic Prompt (Step 3 alternate content) ---------- */
+.prod-storyboard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.prod-storyboard-head h3 { margin: 0; }
+.prod-magic-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.prod-magic-btn {
+  background: linear-gradient(135deg, #7c3aed, #4f46e5);
+  border-color: #7c3aed;
+  color: white;
+}
+.prod-magic-btn:hover:not(:disabled) {
+  border-color: #a78bfa;
+  filter: brightness(1.08);
+}
+.prod-magic-btn.active {
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  border-color: #a78bfa;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #a78bfa 35%, transparent);
+}
+.prod-magic-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.prod-prompt-sidepanel.magic-active .prompt-content-editor {
+  position: relative;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  background: linear-gradient(var(--bg), var(--bg)) padding-box,
+              linear-gradient(90deg, #ff6b6b, #f59e0b, #84cc16, #06b6d4, #8b5cf6, #ec4899, #ff6b6b) border-box;
+  background-size: auto, 300% 100%;
+  animation: magic-border-cycle 3s linear infinite;
+}
+@keyframes magic-border-cycle {
+  0% { background-position: 0 0, 0 0; }
+  100% { background-position: 0 0, 300% 0; }
+}
+.prod-prompt-sidepanel.magic-active .prompt-content-editor:focus {
+  border-color: transparent;
+}

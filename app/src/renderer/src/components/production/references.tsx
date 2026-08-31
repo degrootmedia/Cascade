@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { CustomRef, Production, ProductionShot, ReferenceCategory } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
+import { useExternalImageMenu } from "../external-menu.js";
 
 interface RefItem {
   id: string;
@@ -150,7 +151,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   return (
     <div className="prod-refs">
       <label className="prod-label">Reference images</label>
-      <p className="hint">Create categories for your references, then drag images between them.</p>
+      <p className="hint">Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto <em>From image</em> to generate a style.</p>
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}>＋ Add category</button>
@@ -172,22 +173,9 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
             }}>
               <div className="prod-category-head"><input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} /><span className="hint">{groupItems.length}</span></div>
               <div className="prod-ref-grid">
-                {groupItems.map((r) => {
-                  const imgUrl = r.imagePath ? cascadeMedia(prodId, r.imagePath) : r.artwork;
-                  const isVideo = r.media === "video" && !!r.mediaPath;
-                  return (
-                    <figure key={r.id} className="prod-ref">
-                      {imgUrl
-                        ? <img src={imgUrl} alt={r.name} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "move"; }} />
-                        : isVideo
-                          ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "move"; }} />
-                          : <div className="prod-ref-blank">＋</div>}
-                      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
-                      {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Attach a reference image" onClick={() => void onAttach(r.id)}>＋</button>}
-                      <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
-                    </figure>
-                  );
-                })}
+                {groupItems.map((r) => (
+                  <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} />
+                ))}
                 {!groupItems.length && <span className="hint">Drop references here.</span>}
               </div>
             </section>
@@ -203,6 +191,36 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   );
 }
 
+
+function RefFigure({ prodId, refItem, onAttach, onRemove, onRename }: {
+  prodId: string;
+  refItem: CustomRef;
+  onAttach: (id: string) => void;
+  onRemove: (id: string) => void;
+  onRename: (id: string, name: string) => void;
+}) {
+  const r = refItem;
+  const imgUrl = r.imagePath ? cascadeMedia(prodId, r.imagePath) : r.artwork;
+  const isVideo = r.media === "video" && !!r.mediaPath;
+  const hasImage = !!imgUrl && !isVideo;
+  const menu = useExternalImageMenu(() => {
+    if (r.imagePath) void window.cascade.openInExternalEditor({ productionId: prodId, relPath: r.imagePath }).catch(() => {});
+    else if (r.artwork) void window.cascade.openInExternalEditor({ dataUrl: r.artwork }).catch(() => {});
+  });
+  return (
+    <figure className="prod-ref">
+      {imgUrl
+        ? <img src={imgUrl} alt={r.name} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }} onContextMenu={hasImage ? menu.onContextMenu : undefined} />
+        : isVideo
+          ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }} />
+          : <div className="prod-ref-blank">＋</div>}
+      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
+      {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Attach a reference image" onClick={() => void onAttach(r.id)}>＋</button>}
+      <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
+      {hasImage && menu.menu}
+    </figure>
+  );
+}
 
 export interface PromptReference {
   id: string;

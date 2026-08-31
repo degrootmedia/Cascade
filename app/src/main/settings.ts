@@ -23,6 +23,8 @@ interface SettingsFile {
   mcpOnDemand: string[];
   /** UI accent color (hex), applied to the --accent CSS variable. */
   accent: string;
+  /** Absolute path to the external image editor executable (e.g. Photoshop). */
+  externalEditor: string | null;
 }
 
 const DEFAULTS: SettingsFile = {
@@ -32,6 +34,7 @@ const DEFAULTS: SettingsFile = {
   recentProductions: [],
   mcpOnDemand: ["openart"],
   accent: "#4f8ef7",
+  externalEditor: null,
 };
 const MAX_RECENT_WORKSPACES = 10;
 const MAX_RECENT_PRODUCTIONS = 10;
@@ -138,5 +141,15 @@ export function getAccent(): string {
 export function setAccent(color: string): void {
   if (!/^#[0-9a-fA-F]{6}$/.test(color)) return; // hex only — it's injected into CSS
   load().accent = color;
+  save();
+}
+
+export function getExternalEditor(): string | null {
+  return load().externalEditor ?? null;
+}
+
+export function setExternalEditor(p: string | null): void {
+  const next = typeof p === "string" && p.trim() ? p.trim() : null;
+  load().externalEditor = next;
   save();
 }

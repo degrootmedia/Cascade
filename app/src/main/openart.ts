@@ -654,14 +654,24 @@ export class OpenArtClient {
 
 /** Parse the OpenArt project-list/create reply into project objects. */
   private parseOpenArtProjects(text: string): RawProject[] {
+    const scan = (arr: unknown[]): RawProject[] => arr.filter((x) => x && typeof x === "object") as RawProject[];
     const arr = parseJsonLooseArray(text);
-    if (arr) return arr.filter((x) => x && typeof x === "object") as RawProject[];
+    if (arr) return scan(arr);
     const o = parseJsonLooseObject(text);
     if (o) {
       if (o.id !== undefined) return [o as unknown as RawProject]; // single created/found project
-      for (const key of ["items", "projects", "data", "list"]) {
+      for (const key of ["items", "projects", "data", "list", "results"]) {
         const v = o[key];
-        if (Array.isArray(v)) return v.filter((x) => x && typeof x === "object") as RawProject[];
+        if (Array.isArray(v)) return scan(v);
+        // Nested envelopes: { data: { projects: [...] } } or { data: { id, … } }.
+        if (v && typeof v === "object") {
+          const rec = v as RawProject;
+          if (rec.id !== undefined) return [rec];
+          for (const k2 of ["items", "projects", "data", "list", "results"]) {
+            const v2 = (v as Record<string, unknown>)[k2];
+            if (Array.isArray(v2)) return scan(v2);
+          }
+        }
       }
     }
     return [];
@@ -673,27 +683,45 @@ export class OpenArtClient {
    * with that name (only ones Cascade can generate into), or creates it.
    * Returns the project id, or null when OpenArt's project tools aren't
    * available / an error occurs — generation then falls back to the account
-   * default project rather than blocking.
+   * default project rather than blocking. `onNotice` (when given) reports the
+   * exact reason for a fallback so a silent wrong-project generation can't
+   * happen again.
    */
-  async resolveProject(p: Production): Promise<string | null> {
+  async resolveProject(p: Production, onNotice?: (msg: string) => void): Promise<string | null> {
     const listRaw = this.findTool(/^openart_project_list$/);
     const createRaw = this.findTool(/^openart_project_create$/);
-    if (!listRaw) return null;
     const folderName = (path.basename(p.meta.folder) || p.meta.name).trim();
     if (!folderName) return null;
+    if (!listRaw) {
+      onNotice?.(`No OpenArt project tool is connected — frames will land in the account's default project instead of "${folderName}".`);
+      return null;
+    }
+    const target = folderName.toLowerCase();
     try {
       const listText = await this.mcp.callRaw(SERVER, listRaw, {});
       const existing = this.parseOpenArtProjects(listText);
-      const match = existing.find(
-        (pr) => pr.canGenerate && typeof pr.id === "string" && typeof pr.name === "string" &&
-          pr.name.trim().toLowerCase() === folderName.toLowerCase()
+      const byName = existing.filter(
+        (pr) => typeof pr.id === "string" && typeof pr.name === "string" &&
+          pr.name.trim().toLowerCase() === target
       );
+      // Prefer a project Cascade can generate into; a same-named project that
+      // merely lacks the canGenerate flag is still better than a duplicate —
+      // a failed generate surfaces a readable error instead.
+      const match = byName.find((pr) => pr.canGenerate) ?? byName[0];
       if (match && typeof match.id === "string") return match.id;
-      if (!createRaw) return null;
+      if (!createRaw) {
+        onNotice?.(`No OpenArt project named "${folderName}" exists yet and the create tool isn't connected — generating into the account's default project.`);
+        return null;
+      }
       const createdText = await this.mcp.callRaw(SERVER, createRaw, { name: folderName });
       const created = this.parseOpenArtProjects(createdText)[0];
-      return created && typeof created.id === "string" ? created.id : null;
-    } catch {
+      const id = created && typeof created.id === "string" ? created.id : null;
+      if (!id) {
+        onNotice?.(`Couldn't read the id of the OpenArt project created for "${folderName}" — generating into the account's default project instead.`);
+      }
+      return id;
+    } catch (e) {
+      onNotice?.(`Couldn't resolve the OpenArt project "${folderName}" (${e instanceof Error ? e.message : String(e)}) — generating into the account's default project.`);
       return null;
     }
   }
@@ -733,8 +761,11 @@ for (const { tag, name } of refTagMatches(prompt)) {
    * image-generation tool, in which case the caller falls back to exporting
    * prompts for manual generation + import. `modelOverride` forces a specific
    * OpenArt model id (per-frame edit runs); "auto"/undefined uses the config.
+   * `onNotice` reports a project-resolution fallback (frames landing in the
+   * account default project instead of the folder-named one) to the caller's
+   * log so it's never silent.
    */
-  imageGenFn(p: Production, modelOverride?: string, resolutionOverride?: string): ImageGenFn | null {
+  imageGenFn(p: Production, modelOverride?: string, resolutionOverride?: string, onNotice?: (msg: string) => void): ImageGenFn | null {
     const toolName = this.findTool(/^openart_.*generate.*image$/i);
     if (!toolName) return null;
 
@@ -796,7 +827,7 @@ for (const { tag, name } of refTagMatches(prompt)) {
       }
 
       if (projectId === undefined) {
-        try { projectId = await this.resolveProject(p); } catch { projectId = null; }
+        projectId = await this.resolveProject(p, onNotice).catch(() => null);
       }
       const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps);
       const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
@@ -904,7 +935,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
         }
       }
     }
-    const projectId = await this.resolveProject(p).catch(() => null);
+    const projectId = await this.resolveProject(p, (m) => emit(m)).catch(() => null);
 
     const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps);
     emit(`Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}…`);

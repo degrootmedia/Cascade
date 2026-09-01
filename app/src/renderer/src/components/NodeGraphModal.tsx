@@ -27,9 +27,19 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { GraphGenItem, GraphLayout, OpenArtModelChoice, Production, ProductionShot, ProductionStyle, VideoModelOptions } from "../../../shared/ipc.js";
-import { addRefTag, addStyleParagraph, hasBrandParagraph, refTagNames, removeRefTag, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
+import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, parsePromptBoxes, refTagNames, removeRefTag, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
 import { useExternalImageMenu } from "./external-menu.js";
+
+function isTagReorder(a: string, b: string): boolean {
+  const ra = refTagNames(a);
+  const rb = refTagNames(b);
+  if (ra.length !== rb.length || ra.length === 0) return false;
+  const sa = [...ra].sort().join("|");
+  const sb = [...rb].sort().join("|");
+  if (sa !== sb) return false;
+  return ra.join("|") !== rb.join("|");
+}
 
 /** Default motion prompt for the video-prompt node (matches the video panel). */
 export const VIDEO_PROMPT_DEFAULT = "Animate this reference image with smooth, cinematic motion.";
@@ -71,6 +81,18 @@ interface RefData extends Record<string, unknown> {
 }
 type RefFlowNode = Node<RefData, "ref">;
 
+/** A prompt node's live-draft handle. Graph-side prompt mutations (connect /
+ *  disconnect / toggle a reference, style/brand paragraph ops) are applied to
+ *  the node's LOCAL draft when it holds one, so a focused composer can never
+ *  overwrite them on blur — and the emitted prompt (what gets saved and what
+ *  generation resolves references from) always carries the change. */
+export interface PromptDraftApplier {
+  /** The node's current draft (== the synced value when not drafting). */
+  get: () => string;
+  /** Apply a text transform to the draft and emit the result upstream. */
+  apply: (fn: (t: string) => string) => void;
+}
+
 interface ComposerData extends Record<string, unknown> {
   value: string;
   /** One dedicated input-socket id per connected reference, in prompt order. */
@@ -80,6 +102,7 @@ interface ComposerData extends Record<string, unknown> {
   /** Whether the brand section currently exists (drives the Brand box). */
   includeBrand: boolean;
   onChange: (value: string) => void;
+  registerApplier: (applier: PromptDraftApplier | undefined) => void;
 }
 type ComposerFlowNode = Node<ComposerData, "composer">;
 
@@ -152,6 +175,7 @@ interface VideoPromptData extends Record<string, unknown> {
   openHandleId: string;
   includeBrand: boolean;
   onChange: (text: string) => void;
+  registerApplier: (applier: PromptDraftApplier | undefined) => void;
 }
 type VideoPromptFlowNode = Node<VideoPromptData, "videoprompt">;
 
@@ -162,6 +186,7 @@ interface EditPromptData extends Record<string, unknown> {
   openHandleId: string;
   includeBrand: boolean;
   onChange: (text: string) => void;
+  registerApplier: (applier: PromptDraftApplier | undefined) => void;
 }
 type EditPromptFlowNode = Node<EditPromptData, "editprompt">;
 
@@ -249,8 +274,52 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     }, 0);
   };
   useEffect(() => {
-    if (rootRef.current?.contains(document.activeElement)) return;
     if (emitted.current.has(data.value)) return;
+    const active = document.activeElement as HTMLElement | null;
+    const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
+    if (isFocused) {
+      // While the composer is focused, keep the focused box authoritative
+      // but still allow the other boxes (style/brand) to follow external
+      // changes. This implements the “separate logical sections” rule:
+      // style, content, brand are independent and only combined at
+      // persistence / MCP submission.
+      const incoming = parsePromptBoxes(data.value);
+      const current = parsePromptBoxes(localValue);
+      const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
+      const isContentFocused = !!contentEl && !!active && (contentEl === active || contentEl.contains(active));
+      const activeIsStyle = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Visual style");
+      const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
+      let next: string | null = null;
+      if (isContentFocused) {
+        // Preserve local content (including tag positions), take incoming style/brand
+        if (incoming.style !== current.style || incoming.brand !== current.brand) {
+          const merged = { ...current, style: incoming.style, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsStyle) {
+        if (incoming.content !== current.content || incoming.brand !== current.brand) {
+          const merged = { ...current, content: incoming.content, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsBrand) {
+        if (incoming.content !== current.content || incoming.style !== current.style) {
+          const merged = { ...current, style: incoming.style, content: incoming.content };
+          next = composePromptBoxes(merged);
+        }
+      } else {
+        // Focus is inside the node but not in a specific box (e.g. header);
+        // treat as not focused for prompt purposes and allow full sync.
+        // Fall through to full sync below.
+      }
+      if (next !== null) {
+        emitted.current.add(next);
+        if (emitted.current.size > 100) emitted.current.clear();
+        setLocalValue(next);
+        draftRef.current = next;
+        return;
+      }
+      return;
+    }
     emitted.current.clear();
     emitted.current.add(data.value);
     setLocalValue(data.value);
@@ -258,6 +327,29 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
   }, [data.value]);
   // Flush any pending draft when the modal closes / node unmounts.
   useEffect(() => () => { syncToParent(); }, []);
+  // Register the live-draft handle so graph-side prompt mutations (connect /
+  // disconnect / toggle a reference, style/brand ops) land IN the draft —
+  // a focused composer can never overwrite them on blur, and the emitted
+  // prompt (saved + used to resolve references for generation) always
+  // carries the change.
+  useEffect(() => {
+    const register = dataRef.current.registerApplier as ((a: PromptDraftApplier | undefined) => void) | undefined;
+    if (!register) return;
+    register({
+      get: () => draftRef.current,
+      apply: (fn) => {
+        const next = fn(draftRef.current);
+        if (next === draftRef.current) return;
+        draftRef.current = next;
+        setLocalValue(next);
+        const s = emitted.current;
+        if (s.size > 100) s.clear();
+        s.add(next);
+        dataRef.current.onChange(next);
+      },
+    });
+    return () => register?.(undefined);
+  }, []);
   const n = data.refHandles.length + 1;
   const total = n + 2;
   const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
@@ -292,11 +384,23 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
         placeholder="Describe the frame — connect references, type @, or edit the boxes"
         onBlur={handleBlur}
         onChange={(v) => {
+          const prev = localValue;
           setLocalValue(v);
           draftRef.current = v;
           const s = emitted.current;
           if (s.size > 100) s.clear();
           s.add(v);
+          // Tag reorders are discrete moves that must be visible in the
+          // side panel and survive a concurrent style change. Sync them
+          // immediately to the parent instead of waiting for blur. Regular
+          // typing stays local until blur to keep the caret stable.
+          try {
+            const pc = parsePromptBoxes(prev).content;
+            const nc = parsePromptBoxes(v).content;
+            if (isTagReorder(pc, nc)) {
+              dataRef.current.onChange(v);
+            }
+          } catch {}
         }}
       />
       <Handle type="source" position={Position.Right} />
@@ -588,14 +692,70 @@ const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: Node
     setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
   };
   useEffect(() => {
-    if (rootRef.current?.contains(document.activeElement)) return;
     if (emitted.current.has(data.value)) return;
+    const active = document.activeElement as HTMLElement | null;
+    const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
+    if (isFocused) {
+      const incoming = parsePromptBoxes(data.value);
+      const current = parsePromptBoxes(localValue);
+      const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
+      const isContentFocused = !!contentEl && !!active && (contentEl === active || contentEl.contains(active));
+      const activeIsStyle = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Visual style");
+      const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
+      let next: string | null = null;
+      if (isContentFocused) {
+        if (incoming.style !== current.style || incoming.brand !== current.brand) {
+          const merged = { ...current, style: incoming.style, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsStyle) {
+        if (incoming.content !== current.content || incoming.brand !== current.brand) {
+          const merged = { ...current, content: incoming.content, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsBrand) {
+        if (incoming.content !== current.content || incoming.style !== current.style) {
+          const merged = { ...current, style: incoming.style, content: incoming.content };
+          next = composePromptBoxes(merged);
+        }
+      } else if (!isContentFocused && !activeIsStyle && !activeIsBrand) {
+        // Generic focus inside node (e.g. header) — preserve local draft
+        return;
+      }
+      if (next !== null) {
+        emitted.current.add(next);
+        if (emitted.current.size > 100) emitted.current.clear();
+        setLocalValue(next);
+        draftRef.current = next;
+        return;
+      }
+      return;
+    }
     emitted.current.clear();
     emitted.current.add(data.value);
     setLocalValue(data.value);
     draftRef.current = data.value;
   }, [data.value]);
   useEffect(() => () => { syncToParent(); }, []);
+  // Live-draft handle for the video-prompt node (see ComposerNodeView).
+  useEffect(() => {
+    const register = dataRef.current.registerApplier as ((a: PromptDraftApplier | undefined) => void) | undefined;
+    if (!register) return;
+    register({
+      get: () => draftRef.current,
+      apply: (fn) => {
+        const next = fn(draftRef.current);
+        if (next === draftRef.current) return;
+        draftRef.current = next;
+        setLocalValue(next);
+        const s = emitted.current;
+        if (s.size > 100) s.clear();
+        s.add(next);
+        dataRef.current.onChange(next);
+      },
+    });
+    return () => register?.(undefined);
+  }, []);
   const n = data.refHandles.length + 1;
   const total = n + 2;
   const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
@@ -622,7 +782,19 @@ const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: Node
         includeBrand={data.includeBrand}
         placeholder="Motion prompt — connect references, type @, or edit the boxes"
         onBlur={handleBlur}
-        onChange={(v) => { setLocalValue(v); draftRef.current = v; const s = emitted.current; if (s.size > 100) s.clear(); s.add(v); }}
+        onChange={(v) => {
+          const prev = localValue;
+          setLocalValue(v);
+          draftRef.current = v;
+          const s = emitted.current;
+          if (s.size > 100) s.clear();
+          s.add(v);
+          try {
+            const pc = parsePromptBoxes(prev).content;
+            const nc = parsePromptBoxes(v).content;
+            if (isTagReorder(pc, nc)) dataRef.current.onChange(v);
+          } catch {}
+        }}
       />
       <Handle type="source" position={Position.Right} />
     </div>
@@ -652,14 +824,69 @@ const EditPromptNodeView = memo(function EditPromptNodeView({ id, data }: NodePr
     setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
   };
   useEffect(() => {
-    if (rootRef.current?.contains(document.activeElement)) return;
     if (emitted.current.has(data.value)) return;
+    const active = document.activeElement as HTMLElement | null;
+    const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
+    if (isFocused) {
+      const incoming = parsePromptBoxes(data.value);
+      const current = parsePromptBoxes(localValue);
+      const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
+      const isContentFocused = !!contentEl && !!active && (contentEl === active || contentEl.contains(active));
+      const activeIsStyle = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Visual style");
+      const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
+      let next: string | null = null;
+      if (isContentFocused) {
+        if (incoming.style !== current.style || incoming.brand !== current.brand) {
+          const merged = { ...current, style: incoming.style, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsStyle) {
+        if (incoming.content !== current.content || incoming.brand !== current.brand) {
+          const merged = { ...current, content: incoming.content, brand: incoming.brand };
+          next = composePromptBoxes(merged);
+        }
+      } else if (activeIsBrand) {
+        if (incoming.content !== current.content || incoming.style !== current.style) {
+          const merged = { ...current, style: incoming.style, content: incoming.content };
+          next = composePromptBoxes(merged);
+        }
+      } else {
+        return;
+      }
+      if (next !== null) {
+        emitted.current.add(next);
+        if (emitted.current.size > 100) emitted.current.clear();
+        setLocalValue(next);
+        draftRef.current = next;
+        return;
+      }
+      return;
+    }
     emitted.current.clear();
     emitted.current.add(data.value);
     setLocalValue(data.value);
     draftRef.current = data.value;
   }, [data.value]);
   useEffect(() => () => { syncToParent(); }, []);
+  // Live-draft handle for the edit-prompt node (see ComposerNodeView).
+  useEffect(() => {
+    const register = dataRef.current.registerApplier as ((a: PromptDraftApplier | undefined) => void) | undefined;
+    if (!register) return;
+    register({
+      get: () => draftRef.current,
+      apply: (fn) => {
+        const next = fn(draftRef.current);
+        if (next === draftRef.current) return;
+        draftRef.current = next;
+        setLocalValue(next);
+        const s = emitted.current;
+        if (s.size > 100) s.clear();
+        s.add(next);
+        dataRef.current.onChange(next);
+      },
+    });
+    return () => register?.(undefined);
+  }, []);
   const n = data.refHandles.length + 1;
   const total = n + 2;
   const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
@@ -686,7 +913,19 @@ const EditPromptNodeView = memo(function EditPromptNodeView({ id, data }: NodePr
         includeBrand={data.includeBrand}
         placeholder="Edit instructions — connect references, type @, or edit the boxes"
         onBlur={handleBlur}
-        onChange={(v) => { setLocalValue(v); draftRef.current = v; const s = emitted.current; if (s.size > 100) s.clear(); s.add(v); }}
+        onChange={(v) => {
+          const prev = localValue;
+          setLocalValue(v);
+          draftRef.current = v;
+          const s = emitted.current;
+          if (s.size > 100) s.clear();
+          s.add(v);
+          try {
+            const pc = parsePromptBoxes(prev).content;
+            const nc = parsePromptBoxes(v).content;
+            if (isTagReorder(pc, nc)) dataRef.current.onChange(v);
+          } catch {}
+        }}
       />
       <Handle type="source" position={Position.Right} />
     </div>
@@ -925,11 +1164,34 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // which keeps React Flow's selection bookkeeping from fighting re-renders.
   const cb = useRef({ onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValue, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeEditGen, onUnpipeOutput, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditStyleConnected: shot.graphEditStyleConnected, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphEditSourceRefId: shot.graphEditSourceRefId });
   cb.current = { onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValue, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeEditGen, onUnpipeOutput, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditStyleConnected: shot.graphEditStyleConnected, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphEditSourceRefId: shot.graphEditSourceRefId };
+  // Live-draft handles registered by the three prompt nodes (see
+  // PromptDraftApplier). Prompt mutations below prefer them over cb.current's
+  // prop values, which lag the node's local draft while it is focused.
+  const appliers = useRef<Partial<Record<"composer" | "video" | "edit", PromptDraftApplier>>>({});
+  /** Apply a prompt transform to the live draft when one exists; returns true
+   *  when handled (the applier emitted upstream itself). */
+  const applyDraftEdit = (kind: "composer" | "video" | "edit", fn: (t: string) => string): boolean => {
+    const a = appliers.current[kind];
+    if (!a) return false;
+    a.apply(fn);
+    return true;
+  };
   const stable = useRef({
     onPromptChange: (value: string) => cb.current.onPromptChange(value),
     onStyleChange: (style: string) => cb.current.onStyleChange(style),
     onToggleBrand: (include: boolean) => cb.current.onToggleBrand(include),
+    registerApplier: (kind: "composer" | "video" | "edit", applier: PromptDraftApplier | undefined) => {
+      if (applier) appliers.current[kind] = applier;
+      else delete appliers.current[kind];
+    },
     onToggle: (name: string, currentlyTagged: boolean) => {
+      // Prefer the live draft: a focused composer holds edits the prop
+      // hasn't seen, and its blur-sync would otherwise overwrite the tag
+      // change made here (dropping the reference from the saved prompt).
+      if (applyDraftEdit("composer", (t) => {
+        const tagged = refTagNames(t).some((n) => n.toLowerCase() === name.toLowerCase());
+        return tagged ? removeRefTag(t, name) : addRefTag(t, name);
+      })) return;
       const p = cb.current.prompt;
       cb.current.onPromptChange(currentlyTagged ? removeRefTag(p, name) : addRefTag(p, name));
     },
@@ -1013,7 +1275,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "composer",
         type: "composer" as const,
         position: ORIGIN,
-        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(prompt), onChange: stable.onPromptChange },
+        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(prompt), onChange: stable.onPromptChange, registerApplier: (a) => stable.registerApplier("composer", a) },
         deletable: false,
       }),
       build({
@@ -1101,14 +1363,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "videoprompt",
         type: "videoprompt" as const,
         position: ORIGIN,
-        data: { value: videoPromptValue, refHandles: taggedVideo.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(videoPromptValue), onChange: stable.onVideoPromptChange },
+        data: { value: videoPromptValue, refHandles: taggedVideo.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(videoPromptValue), onChange: stable.onVideoPromptChange, registerApplier: (a) => stable.registerApplier("video", a) },
         deletable: false,
       }),
       build({
         id: "editprompt",
         type: "editprompt" as const,
         position: ORIGIN,
-        data: { value: editPromptValue, refHandles: taggedEdit.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(editPromptValue), onChange: stable.onEditPromptChange },
+        data: { value: editPromptValue, refHandles: taggedEdit.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(editPromptValue), onChange: stable.onEditPromptChange, registerApplier: (a) => stable.registerApplier("edit", a) },
         deletable: false,
       }),
     ];
@@ -1263,7 +1525,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           const list = targetKind === "composer" ? tagged : targetKind === "videoprompt" ? taggedVideo : taggedEdit;
           const entry = list[idx];
           if (entry) {
-            if (targetKind === "composer") onPromptChange(removeRefTag(prompt, entry.name));
+            if (targetKind === "composer") { if (!applyDraftEdit("composer", (t) => removeRefTag(t, entry.name))) onPromptChange(removeRefTag(prompt, entry.name)); }
             else if (targetKind === "videoprompt") cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, entry.name) });
             else cb.current.onGraphField({ graphEditPrompt: removeRefTag(cb.current.editPromptValue, entry.name) });
           }
@@ -1274,7 +1536,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const m2 = /^e-ref:(.+)$/.exec(c.id);
         if (m2) {
           const idx = tagged.findIndex((t, i) => (t.ref?.id ?? "missing-" + i) === m2[1]);
-          if (idx >= 0) onPromptChange(removeRefTag(prompt, tagged[idx].name));
+          if (idx >= 0) { if (!applyDraftEdit("composer", (t) => removeRefTag(t, tagged[idx].name))) onPromptChange(removeRefTag(prompt, tagged[idx].name)); }
           setSelectedEdges(new Set());
           continue;
         }
@@ -1315,7 +1577,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const text = cb.current.styles.find((s) => s.id === cb.current.styleValue)?.prompt.trim() ?? "";
         if (isComposer) {
           cb.current.onGraphField({ graphStyleConnected: true });
-          cb.current.onPromptChange(addStyleParagraph(cb.current.prompt, text));
+          if (!applyDraftEdit("composer", (t) => addStyleParagraph(t, text))) cb.current.onPromptChange(addStyleParagraph(cb.current.prompt, text));
         } else if (isVideo) {
           cb.current.onGraphField({ graphVideoStyleConnected: true, graphVideoPrompt: addStyleParagraph(cb.current.videoPromptValue, text) });
         } else {
@@ -1326,7 +1588,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (conn.source === "brand") {
         const getBrandNext = (cur: string) => cur.trimEnd() ? `${cur.trimEnd()}\n\nBrand identity: auto` : `Brand identity: auto`;
         if (isComposer) {
-          if (!hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(getBrandNext(cb.current.prompt));
+          if (!applyDraftEdit("composer", (t) => hasBrandParagraph(t) ? t : getBrandNext(t)) && !hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(getBrandNext(cb.current.prompt));
           return;
         }
         const cur = isVideo ? cb.current.videoPromptValue : cb.current.editPromptValue;
@@ -1341,7 +1603,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (!m) return;
       const ref = references.find((r) => r.id === m[1]);
       if (!ref) return;
-      if (isComposer) onPromptChange(addRefTag(prompt, ref.name));
+      if (isComposer) {
+        if (!applyDraftEdit("composer", (t) => addRefTag(t, ref.name))) onPromptChange(addRefTag(prompt, ref.name));
+      }
       else if (isVideo) cb.current.onGraphField({ graphVideoPrompt: addRefTag(cb.current.videoPromptValue, ref.name) });
       else cb.current.onGraphField({ graphEditPrompt: addRefTag(cb.current.editPromptValue, ref.name) });
       return;
@@ -1390,10 +1654,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (!from) return;
     const detachPrompt = (nodeId: string, handleId: string): boolean => {
       if (nodeId === "composer") {
-        if (handleId === "in-style") { cb.current.onGraphField({ graphStyleConnected: false }); cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt)); return true; }
-        if (handleId === "in-brand") { cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt)); return true; }
+        if (handleId === "in-style") {
+          cb.current.onGraphField({ graphStyleConnected: false });
+          if (!applyDraftEdit("composer", (t) => removeStyleParagraph(t))) cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
+          return true;
+        }
+        if (handleId === "in-brand") { if (!applyDraftEdit("composer", (t) => stripBrandParagraph(t))) cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt)); return true; }
         const m = /^in-ref-(\d+)$/.exec(handleId);
-        if (m) { const t = tagged[Number(m[1])]; if (t) cb.current.onPromptChange(removeRefTag(cb.current.prompt, t.name)); return true; }
+        if (m) { const t = tagged[Number(m[1])]; if (t && !applyDraftEdit("composer", (cur) => removeRefTag(cur, t.name))) cb.current.onPromptChange(removeRefTag(cb.current.prompt, t.name)); return true; }
       } else if (nodeId === "videoprompt") {
         if (handleId === "in-style") { cb.current.onGraphField({ graphVideoStyleConnected: false, graphVideoPrompt: removeStyleParagraph(cb.current.videoPromptValue) }); return true; }
         if (handleId === "in-brand") { cb.current.onGraphField({ graphVideoPrompt: stripBrandParagraph(cb.current.videoPromptValue) }); return true; }
@@ -1440,11 +1708,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (/^Style:/m.test(cb.current.videoPromptValue)) patch.graphVideoPrompt = removeStyleParagraph(cb.current.videoPromptValue);
         if (/^Style:/m.test(cb.current.editPromptValue)) patch.graphEditPrompt = removeStyleParagraph(cb.current.editPromptValue);
         cb.current.onGraphField(patch);
-        if (/^Style:/m.test(cb.current.prompt)) cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
+        if (!applyDraftEdit("composer", (t) => removeStyleParagraph(t)) && /^Style:/m.test(cb.current.prompt)) cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
         return;
       }
       if (from.nodeId === "brand") {
-        if (hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt));
+        if (!applyDraftEdit("composer", (t) => stripBrandParagraph(t)) && hasBrandParagraph(cb.current.prompt)) cb.current.onPromptChange(stripBrandParagraph(cb.current.prompt));
         if (hasBrandParagraph(cb.current.videoPromptValue)) cb.current.onGraphField({ graphVideoPrompt: stripBrandParagraph(cb.current.videoPromptValue) });
         if (hasBrandParagraph(cb.current.editPromptValue)) cb.current.onGraphField({ graphEditPrompt: stripBrandParagraph(cb.current.editPromptValue) });
         return;
@@ -1457,14 +1725,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const entry = list.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId);
         if (entry) setter(removeRefTag(value, entry.name));
       };
-      stripIfTagged(tagged, cb.current.prompt, (v) => cb.current.onPromptChange(v));
+      stripIfTagged(tagged, cb.current.prompt, (v) => { if (!applyDraftEdit("composer", () => v)) cb.current.onPromptChange(v); });
       stripIfTagged(taggedVideo, cb.current.videoPromptValue, (v) => cb.current.onGraphField({ graphVideoPrompt: v }));
       stripIfTagged(taggedEdit, cb.current.editPromptValue, (v) => cb.current.onGraphField({ graphEditPrompt: v }));
       // Also check union dangling tag by name
       const unionEntry = unionTagged.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId);
       if (unionEntry) {
         // Ensure removal even if not in per-prompt list due to timing
-        if (refTagNames(cb.current.prompt).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onPromptChange(removeRefTag(cb.current.prompt, unionEntry.name));
+        if (refTagNames(cb.current.prompt).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) { if (!applyDraftEdit("composer", (t) => removeRefTag(t, unionEntry.name))) cb.current.onPromptChange(removeRefTag(cb.current.prompt, unionEntry.name)); }
         if (refTagNames(cb.current.videoPromptValue).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, unionEntry.name) });
         if (refTagNames(cb.current.editPromptValue).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) cb.current.onGraphField({ graphEditPrompt: removeRefTag(cb.current.editPromptValue, unionEntry.name) });
       }

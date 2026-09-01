@@ -1285,7 +1285,7 @@ function registerIpc() {
     emit: (m: string, l?: ProductionEvent["level"]) => void,
     genOpts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[] }
   ): Promise<void> => {
-    const gen = openart.imageGenFn(p);
+    const gen = openart.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
     if (!gen) {
       emit("OpenArt MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.", "error");
       exportBoardPrompts(p, emit);
@@ -1624,7 +1624,7 @@ function registerIpc() {
       if (!shot) throw new Error("Shot not found.");
       const prompt = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
       if (!prompt) throw new Error("The prompt is empty — write something in the prompt node first.");
-      const gen = openart.imageGenFn(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined);
+      const gen = openart.imageGenFn(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined, (m) => emit(m, "info"));
       if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be generated in-app.");
       // References: the @[name] tags the composer prompt actually cites.
       const { resolved, extras } = openart.resolvePromptRefs(p, prompt, 0);
@@ -1688,7 +1688,7 @@ function registerIpc() {
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
-      const gen = openart.imageGenFn(p, modelId, resolution);
+      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
       if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be edited in-app.");
       // Source: image-node pipe > reference pipe > the shot's current frame.
       let dataUrl: string | undefined;
@@ -1825,7 +1825,7 @@ function registerIpc() {
       const text = typeof prompt === "string" ? prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof model === "string" && model.trim() && model !== "auto" ? model.trim() : undefined;
-      const gen = openart.imageGenFn(p, modelId);
+      const gen = openart.imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
       if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.");
       const buf = fs.readFileSync(assetPath(p, shot.artwork));
       const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");

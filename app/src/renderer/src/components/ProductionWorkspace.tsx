@@ -939,6 +939,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
     const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
+    // Use the latest prompt string (including unsaved tag drags) as the
+    // base, not the stale on-disk `target.prompt`. The prompt cache holds
+    // the most recent composed prompt for the focused shot (side panel or
+    // graph), and focusedPrompt is the live value for that shot.
+    const basePrompt = promptCacheRef.current[shotId] ?? target.prompt;
     const isPlugged = (flag: boolean | undefined, cur: string | undefined) => flag ?? /^Style:/m.test(cur ?? "");
     const rewritePlugged = (cur: string | undefined, plugged: boolean | undefined): string | undefined => {
       if (cur == null) return cur;
@@ -947,15 +952,18 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       return addStyleParagraph(cur, styleText);
     };
     // For the image prompt we preserve the classic manual/auto distinction
-    let nextPrompt: string | undefined = target.prompt;
+    let nextPrompt: string | undefined = basePrompt;
     let nextManual = target.promptManual;
-    if (target.promptManual && target.prompt?.trim() && isPlugged(target.graphStyleConnected, target.prompt)) {
-      nextPrompt = styleText ? addStyleParagraph(target.prompt, styleText) : removeStyleParagraph(target.prompt);
+    // If the base came from the cache (which is always a full prompt string
+    // with Style/Content/Brand), treat it as manual for the purpose of
+    // rewriting — otherwise a cached auto-derived prompt would be mistaken
+    // for non-manual and we'd create a prompt with only Style and no content.
+    const baseIsManual = target.promptManual || !!promptCacheRef.current[shotId];
+    if (baseIsManual && basePrompt?.trim() && isPlugged(target.graphStyleConnected, basePrompt)) {
+      nextPrompt = styleText ? addStyleParagraph(basePrompt, styleText) : removeStyleParagraph(basePrompt);
       nextManual = true;
     } else if (!target.promptManual && target.graphStyleConnected && styleText) {
-      // Auto-derived prompt that is plugged but has no Style yet — adding a style should still inject it
-      // (the derived prompt path will handle the non-manual case, but for plugged we ensure paragraph appears)
-      if (!/^Style:/m.test(target.prompt ?? "")) nextPrompt = addStyleParagraph(target.prompt ?? "", styleText);
+      if (!/^Style:/m.test(basePrompt ?? "")) nextPrompt = addStyleParagraph(basePrompt ?? "", styleText);
     }
     const nextVideo = rewritePlugged(target.graphVideoPrompt, target.graphVideoStyleConnected);
     const nextEdit = rewritePlugged(target.graphEditPrompt, target.graphEditStyleConnected);
@@ -969,8 +977,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s),
       })),
     });
-    if (nextPrompt !== target.prompt && promptShotId === shotId) {
-      setFocusedPrompt(nextPrompt ?? "");
+    if (nextPrompt !== basePrompt) {
+      // Keep both side-panel and graph prompt caches in sync — the graph's
+      // prompt is also `focusedPrompt` (shared), so either shot being
+      // focused should update the live prompt.
+      if (promptShotId === shotId || graphShotId === shotId) {
+        setFocusedPrompt(nextPrompt ?? "");
+      }
       if (nextPrompt != null) promptCacheRef.current[shotId] = nextPrompt;
     }
   }
@@ -1350,7 +1363,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
-    let prompt = target.prompt?.trim() ?? "";
+    const basePrompt = promptCacheRef.current[shotId] ?? target.prompt;
+    let prompt = basePrompt?.trim() ?? "";
     // Manual prompts carry their own Brand paragraph: physically add/remove
     // it so the toggle is real — OFF strips it, ON inserts the freshly
     // generated clause (picking up current wording). Auto-derived prompts

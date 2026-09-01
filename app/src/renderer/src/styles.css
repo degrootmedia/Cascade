@@ -3127,6 +3127,23 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prompt-tag-chip:active { cursor: grabbing; }
 .prompt-tag-chip.dragging { opacity: 0.55; box-shadow: 0 0 0 2px color-mix(in srgb, #a78bfa 35%, transparent); }
+/* Visible drop caret while dragging a tag — fixed 2px line that tracks the pointer. */
+.prompt-drop-caret {
+  position: fixed;
+  width: 2px;
+  background: #a78bfa;
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 9999;
+  box-shadow: 0 0 6px color-mix(in srgb, #a78bfa 55%, transparent);
+  animation: prompt-caret-pulse 1s ease-in-out infinite;
+}
+@keyframes prompt-caret-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.prompt-content-editor.drag-active { cursor: grabbing; }
+.prompt-content-editor.drag-active .prompt-tag-chip { cursor: grabbing; }
 .prod-prompt-sidepanel .prod-prompt-triple { flex: 1; min-height: 0; }
 .prod-prompt-sidepanel .prod-prompt-box.content { min-height: 96px; }
 /* Drag divider between stacked prompt boxes: visible grab bar + cursor. */

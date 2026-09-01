@@ -39,6 +39,10 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
 }) {
   const [boxes, setBoxes] = useState<PromptBoxes>(() => parsePromptBoxes(value));
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const styleRef = useRef<HTMLTextAreaElement | null>(null);
+  const brandRef = useRef<HTMLTextAreaElement | null>(null);
+  const boxesRef = useRef(boxes);
+  useEffect(() => { boxesRef.current = boxes; }, [boxes]);
   // Every composed value this component has emitted. The parent echoes the
   // value back (sometimes one render late — the node graph reconciles node
   // state in an effect), so a re-decompose must ignore OUR OWN echoes or the
@@ -50,30 +54,65 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   const [brandH, setBrandH] = useState<number | null>(null);
   const drag = useRef<{ which: "style" | "brand"; startY: number; startH: number } | null>(null);
 
-  // External prompt changes (generation refresh, style dropdown, brand
-  // toggle, graph edits) re-decompose — unless they're our own echo (current
-  // or stale) or the user is actively editing a box (deferExternalWhileFocused
-  // keeps local edits authoritative until blur). Focus is read straight from
-  // the DOM at sync time — synthetic focus/blur events inside React Flow's
-  // transformed viewport are unreliable (style/brand boxes don't even wire
-  // onBlur, and bubble ordering races), while document.activeElement is
-  // authoritative. This runs once on mount too.
+  // External prompt changes re-decompose. The three boxes are separate
+  // logical sections — style, content, brand — and only combined
+  // (composed) for persistence / MCP submission. When one box is focused
+  // we keep that box authoritative (its caret/selection must not jump)
+  // but still allow the other two boxes to follow external changes
+  // (e.g. changing the style dropdown while the content editor is
+  // focused must update the Style textarea without resetting the tag
+  // positions in Content, and vice-versa).
   useEffect(() => {
-    if (deferExternalWhileFocused && containerRef.current?.contains(document.activeElement)) return;
     if (emitted.current.has(value)) return;
+    const incoming = parsePromptBoxes(value);
+    if (deferExternalWhileFocused) {
+      const active = document.activeElement as HTMLElement | null;
+      const contentEl = containerRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
+      const isContentFocused = !!contentEl && (!!active && (contentEl === active || contentEl.contains(active)));
+      const isStyleFocused = !!styleRef.current && styleRef.current === active;
+      const isBrandFocused = !!brandRef.current && brandRef.current === active;
+      const anyFocused = isContentFocused || isStyleFocused || isBrandFocused;
+      if (anyFocused) {
+        // Merge only the unfocused boxes; keep the focused one(s) as-is.
+        let changed = false;
+        const next: PromptBoxes = { ...boxesRef.current };
+        if (!isStyleFocused && incoming.style !== boxesRef.current.style) { next.style = incoming.style; changed = true; }
+        if (!isContentFocused && incoming.content !== boxesRef.current.content) { next.content = incoming.content; changed = true; }
+        if (!isBrandFocused && incoming.brand !== boxesRef.current.brand) { next.brand = incoming.brand; changed = true; }
+        // Also handle includeBrand structural change: the Brand box may
+        // appear/disappear based on incoming, even while content focused.
+        // That is derived from `value` outside, but we still need to keep
+        // brand text in sync when not focused.
+        if (changed) {
+          setBoxes(next);
+          emitted.current.clear();
+          emitted.current.add(value);
+        }
+        return;
+      }
+    }
     emitted.current.clear();
     emitted.current.add(value);
-    setBoxes(parsePromptBoxes(value));
+    setBoxes(incoming);
   }, [value, deferExternalWhileFocused]);
 
-const emit = (next: PromptBoxes) => {
+  const emitPartial = (partial: Partial<PromptBoxes>) => {
+    // Use the latest boxes via ref so a drag that started before a
+    // concurrent style edit doesn't clobber the style. The three boxes
+    // are separate logical sections; they are only combined (composed)
+    // here for persistence / MCP submission.
+    const next: PromptBoxes = { ...boxesRef.current, ...partial };
     setBoxes(next);
     const composed = composePromptBoxes(next);
     const s = emitted.current;
     if (s.size > 100) s.clear();
     s.add(composed);
     onChange(composed);
+    return next;
   };
+  // Legacy helper kept for any external callers that still pass a full
+  // boxes object.
+  const emit = (next: PromptBoxes) => { emitPartial(next); };
 
   function startDrag(which: "style" | "brand") {
     return (e: React.PointerEvent<HTMLDivElement>) => {
@@ -109,12 +148,13 @@ const emit = (next: PromptBoxes) => {
         <>
           <span className="prod-prompt-box-label style">Style</span>
           <textarea
+            ref={styleRef}
             className={`prod-prompt-box side${cls}`}
             rows={sideRows}
             style={sideStyle(styleH)}
             value={boxes.style}
             placeholder="Visual style — empty runs without a style section"
-            onChange={(e) => emit({ ...boxes, style: e.target.value })}
+            onChange={(e) => emitPartial({ style: e.target.value })}
             onFocus={onFocus}
             onBlur={onBlur}
           />
@@ -136,7 +176,7 @@ const emit = (next: PromptBoxes) => {
         className={`prod-prompt-box content${cls}`}
         text={boxes.content}
         placeholder={placeholder}
-        onChange={(text) => { emit({ ...boxes, content: text }); onContentChange?.(text); }}
+        onChange={(text) => { emitPartial({ content: text }); onContentChange?.(text); }}
         onKeyDown={onContentKeyDown}
         onFocus={onFocus}
         onBlur={onBlur}
@@ -156,12 +196,13 @@ const emit = (next: PromptBoxes) => {
           )}
           <span className="prod-prompt-box-label brand">Brand identity</span>
           <textarea
+            ref={brandRef}
             className={`prod-prompt-box side${cls}`}
             rows={sideRows}
             style={sideStyle(brandH)}
             value={boxes.brand}
             placeholder="Palette & typography — empty regenerates from the brand set"
-            onChange={(e) => emit({ ...boxes, brand: e.target.value })}
+            onChange={(e) => emitPartial({ brand: e.target.value })}
             onFocus={onFocus}
             onBlur={onBlur}
           />

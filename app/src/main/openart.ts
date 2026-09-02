@@ -29,6 +29,7 @@ import {
 import type {
   OpenArtBoardConfig,
   OpenArtModelChoice,
+  PendingImageGen,
   Production,
   ProductionEvent,
   ProductionShot,
@@ -51,6 +52,28 @@ const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *  timeout (120 s) — a slow render must never look like a "connection
  *  timed out" error, and the finished clip must still be downloaded. */
 const VIDEO_WAIT_DEADLINE_MS = 20 * 60_000;
+
+/** The image wait cap per frame (~2.5 min). The OpenArt job keeps rendering
+ *  server-side past this cap, so the historyId is recorded as pending and can
+ *  be reclaimed by a recheck instead of paying for a second generation. */
+const IMAGE_WAIT_DEADLINE_MS = 150_000;
+
+/** How long one recheck probes a pending image job before reporting it as
+ *  still rendering. A quick probe, not a fresh generation — if the frame
+ *  isn't ready yet the user can recheck again later. */
+const IMAGE_RECHECK_DEADLINE_MS = 60_000;
+
+/** Thrown when an async OpenArt image job outlives the wait cap. The job is
+ *  NOT dead — it keeps rendering server-side — so callers can record the
+ *  historyId as pending and reclaim the finished image later. FAILED/CANCELLED
+ *  completions throw a plain Error instead (the job is dead; nothing to
+ *  reclaim). */
+export class OpenArtImagePendingError extends Error {
+  constructor(readonly historyId: string) {
+    super(`OpenArt image generation timed out (${historyId.slice(0, 8)}…).`);
+    this.name = "OpenArtImagePendingError";
+  }
+}
 
 /** Minimal shape of an OpenArt project (from list or create). */
 interface RawProject { id?: unknown; name?: unknown; canGenerate?: unknown }
@@ -545,18 +568,22 @@ export class OpenArtClient {
     }
   }
 
-  /**
-   * Wait for an async OpenArt image generation to finish, then return the
-   * pixels. Uses the server's blocking `openart_creation_wait` where present
-   * (looping on STILL_RUNNING); falls back to polling `openart_creation_get`.
-   * Returns null if completion surfaces no fetchable image (caller then errors).
+/**
+   * One poll pass over an async OpenArt image job. Returns the finished bytes
+   * (`buf`), or `{ failed }` when the server reports FAILED/CANCELLED. When
+   * both are empty the job is still rendering — or the deadline passed.
+   * Transient per-call errors surface as a normal rejection (the caller's
+   * wait/recheck decides whether that is fatal).
    */
-  private async waitOpenArtImage(historyId: string): Promise<Buffer | null> {
+  private async pollOpenArtImage(
+    historyId: string,
+    deadlineMs: number
+  ): Promise<{ buf: Buffer | null; failed?: string }> {
     const waitRaw = this.findTool(/^openart_creation_wait$/);
     const getRaw = this.findTool(/^openart_creation_get$/);
-    if (!waitRaw && !getRaw) return null;
+    if (!waitRaw && !getRaw) return { buf: null };
 
-    const deadline = Date.now() + 150_000; // ~2.5 min cap per frame
+    const deadline = Date.now() + deadlineMs;
     const finalize = async (res: { text: string; images: Buffer[]; uris: string[] }): Promise<Buffer | null> => {
       if (res.images.length) return res.images[0];
       const imgUrl =
@@ -573,15 +600,62 @@ export class OpenArtClient {
     while (Date.now() < deadline) {
       const res = await pollWith();
       const got = await finalize(res);
-      if (got) return got;
+      if (got) return { buf: got };
       const obj = parseJsonLooseObject(res.text);
       const status = typeof obj?.status === "string" ? obj.status : "";
       if (status === "FAILED" || status === "CANCELLED") {
-        throw new Error(`OpenArt generation ${status.toLowerCase()} (${historyId.slice(0, 8)}…).`);
+        return { buf: null, failed: status };
       }
       await sleepMs(Math.max(1, Number(obj?.pollAfterSeconds ?? 4)) * 1000);
     }
-    throw new Error(`OpenArt image generation timed out (${historyId.slice(0, 8)}…).`);
+    return { buf: null };
+  }
+
+  /**
+   * Wait for an async OpenArt image generation to finish, then return the
+   * pixels. Uses the server's blocking `openart_creation_wait` where present
+   * (looping on STILL_RUNNING); falls back to polling `openart_creation_get`.
+   * Returns null if no wait/get tool exists or completion surfaces no
+   * fetchable image (caller then errors); throws OpenArtImagePendingError
+   * when the wait cap passes with the job still running; throws a plain Error
+   * on FAILED/CANCELLED.
+   */
+  private async waitOpenArtImage(historyId: string, deadlineMs = IMAGE_WAIT_DEADLINE_MS): Promise<Buffer | null> {
+    if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
+    const { buf, failed } = await this.pollOpenArtImage(historyId, deadlineMs);
+    if (buf) return buf;
+    if (failed) throw new Error(`OpenArt generation ${failed.toLowerCase()} (${historyId.slice(0, 8)}…).`);
+    throw new OpenArtImagePendingError(historyId);
+  }
+
+  /** Record an OpenArt image job that outlived the generating call on the shot,
+   *  so the finished frame can be reclaimed later instead of re-paid. A fresh
+   *  submission or a successful recheck clears it. */
+  private recordPendingImage(
+    shot: ProductionShot | undefined,
+    rec: { historyId?: string; url?: string; prompt: string; model: string }
+  ): void {
+    if (!shot) return;
+    shot.pendingImageGen = { ...rec, at: new Date().toISOString() };
+  }
+
+  /**
+   * Recheck a pending image job and return the finished bytes, or null when
+   * it's still rendering (or the result URL still can't be fetched). With a
+   * `historyId` this re-polls `openart_creation_get`/`wait` and downloads the
+   * image like the original wait; with just a `url` it re-fetches that. Throws
+   * when the server reports the job FAILED/CANCELLED (nothing left to reclaim).
+   */
+  async recheckPendingImage(rec: PendingImageGen): Promise<Buffer | null> {
+    if (rec.historyId) {
+      if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
+      const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS);
+      if (buf) return buf;
+      if (failed) throw new Error(`OpenArt generation ${failed.toLowerCase()} (${rec.historyId.slice(0, 8)}…).`);
+      return null;
+    }
+    if (rec.url) return this.fetchImageBuffer(rec.url);
+    return null;
   }
 
   /**
@@ -769,11 +843,15 @@ for (const { tag, name } of refTagMatches(prompt)) {
     const toolName = this.findTool(/^openart_.*generate.*image$/i);
     if (!toolName) return null;
 
-    // Resolved lazily on the first shot (cache the folder-named project id for
+// Resolved lazily on the first shot (cache the folder-named project id for
     // the rest of the run); null when the lookup/create fails.
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: GenerationRef[]): Promise<Buffer> => {
+    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot): Promise<Buffer> => {
+      // A fresh submission supersedes any earlier pending job — the new
+      // historyId is the one a future recheck must poll.
+      if (shot?.pendingImageGen) delete shot.pendingImageGen;
+
       // Resolve the dropdown choice (incl. "auto") fresh per run, so edits to
       // the model dropdown are honored without an app restart.
       let models: OpenArtModelChoice[] = [];
@@ -833,13 +911,23 @@ for (const { tag, name } of refTagMatches(prompt)) {
       const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
       if (images.length) return images[0];
 
-      // OpenArt's generate tool is async — a PENDING submission carries the
+// OpenArt's generate tool is async — a PENDING submission carries the
       // historyId but no pixels. Wait for the finished image before giving up.
       const historyId = this.openArtHistoryId(text);
       if (historyId) {
-        const done = await this.waitOpenArtImage(historyId);
-        if (done) return done;
-        // no image surfaced despite completion — fall through to URL scan
+        try {
+          const done = await this.waitOpenArtImage(historyId);
+          if (done) return done;
+          // no image surfaced despite completion — fall through to URL scan
+        } catch (e) {
+          if (e instanceof OpenArtImagePendingError) {
+            // The wait cap passed but the job keeps rendering server-side —
+            // don't lose it. Record the historyId as pending so the finished
+            // frame can be rechecked and downloaded without paying twice.
+            this.recordPendingImage(shot, { historyId, prompt, model: modelId ?? "auto" });
+          }
+          throw e;
+        }
       }
 
       // Many MCP image tools return text containing a URL to the result.
@@ -847,9 +935,16 @@ for (const { tag, name } of refTagMatches(prompt)) {
 text.match(IMAGE_URL_RX)?.[0] ??
         text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
       if (!url) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
-      return Buffer.from(await res.arrayBuffer());
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
+        return Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        // The image is ready but couldn't be fetched — record the URL so a
+        // recheck can retry the download without regenerating.
+        this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto" });
+        throw e;
+      }
     };
   }
 

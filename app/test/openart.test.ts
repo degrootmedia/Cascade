@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
 import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
-import type { Production } from "../src/shared/ipc.js";
+import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
 vi.mock("electron", () => ({
   nativeImage: {
@@ -86,7 +86,7 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
     products: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
     ...overrides,
   };
 }
@@ -346,5 +346,107 @@ describe("OpenArtClient.imageGenFn", () => {
     });
     const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
     await expect(gen("any", [])).rejects.toThrow(/failed/i);
+  });
+});
+
+describe("OpenArtClient pending-image contingency", () => {
+  const shot = (): ProductionShot => ({ id: "s1", number: "0100", audio: "", visual: "" });
+
+  it("records the shot as pending when the image wait times out, then a recheck reclaims the frame", async () => {
+    let completed = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-slow","pollAfterSeconds":0}',
+      openart_creation_wait: () =>
+        completed
+          ? { text: '{"status":"SUCCEEDED"}', images: [Buffer.from("late-jpeg")], uris: [] }
+          : { text: '{"status":"STILL_RUNNING","pollAfterSeconds":0}', images: [], uris: [] },
+    });
+    const client = new OpenArtClient(mcp);
+    const gen = client.imageGenFn(makeProduction())!;
+    const s = shot();
+
+    vi.useFakeTimers();
+    try {
+      // The original wait runs its ~2.5 min cap with the job never completing.
+      const first = gen("Draw a castle", [], s);
+      const assertion = expect(first).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(151_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The job wasn't lost — it's recorded on the shot for a later recheck.
+    expect(s.pendingImageGen).toMatchObject({ historyId: "h-slow", prompt: "Draw a castle", model: "m" });
+
+    // While it's still rendering, a recheck probes and reports pending.
+    vi.useFakeTimers();
+    try {
+      const pendingProbe = client.recheckPendingImage(s.pendingImageGen!);
+      const probeAssertion = expect(pendingProbe).resolves.toBeNull();
+      await vi.advanceTimersByTimeAsync(61_000);
+      await probeAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Once the job finishes server-side, a recheck downloads the frame.
+    completed = true;
+    await expect(client.recheckPendingImage(s.pendingImageGen!)).resolves.toEqual(Buffer.from("late-jpeg"));
+  });
+
+  it("records the result URL as pending when the finished image can't be downloaded, then a recheck retries it", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => "Done! Your image is at https://example.invalid/out.png",
+    });
+    const client = new OpenArtClient(mcp);
+    const gen = client.imageGenFn(makeProduction())!;
+    const s = shot();
+    const realFetch = globalThis.fetch;
+
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 }) as unknown as typeof fetch;
+    try {
+      await expect(gen("Draw a castle", [], s)).rejects.toThrow(/Couldn't download/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    expect(s.pendingImageGen).toMatchObject({ url: "https://example.invalid/out.png", prompt: "Draw a castle", model: "m" });
+
+    // A recheck retries the URL once the download works again.
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => bytes.buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await expect(client.recheckPendingImage(s.pendingImageGen!)).resolves.toEqual(Buffer.from(bytes));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("reports a FAILED recheck as an error and does not fake a pending record", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-fail2","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"FAILED"}', images: [], uris: [] }),
+    });
+    const client = new OpenArtClient(mcp);
+    const gen = client.imageGenFn(makeProduction())!;
+    const s = shot();
+
+    // FAILED/CANCELLED is a hard error — not a pending job to reclaim.
+    await expect(gen("any", [], s)).rejects.toThrow(/failed/i);
+    expect(s.pendingImageGen).toBeUndefined();
+
+    // Rechecking a dead job throws too.
+    await expect(client.recheckPendingImage({ historyId: "h-fail2", prompt: "any", model: "m", at: "" })).rejects.toThrow(/failed/i);
   });
 });

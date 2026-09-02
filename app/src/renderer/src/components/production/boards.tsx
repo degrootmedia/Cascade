@@ -4,13 +4,19 @@ import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { useExternalImageMenu } from "../external-menu.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegenerate, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
+export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
   regenerating: boolean;
   videoBusy: boolean;
+  /** An OpenArt frame job outlived its wait — show a pending badge + recheck. */
+  pending?: boolean;
+  /** A recheck is currently polling the pending job. */
+  rechecking?: boolean;
   onRegenerate: () => void;
+  /** Recheck the shot's pending OpenArt job and download the frame when ready. */
+  onRecheck?: () => void;
   onImport: () => void;
   /** Open the AI edit dialog for this frame. */
   onEdit: () => void;
@@ -111,7 +117,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
     }).catch(() => {});
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prod.meta.id, shot.id, shot.prompt, shot.style, designSig]);
+  }, [prod.meta.id, shot.id, shot.prompt, shot.style, shot.styleNone, designSig]);
 
   return (
     <figure
@@ -259,7 +265,15 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
             {canEditExternal && externalMenu.menu}
           </>
         ) : (
-          <span className="prod-board-empty">{shot.artwork ? "…" : "no frame"}</span>
+          <span className="prod-board-empty">{shot.artwork ? "…" : pending ? "pending…" : "no frame"}</span>
+        )}
+        {pending && (
+          <span
+            className="prod-board-pending"
+            title="This frame is still rendering on OpenArt — recheck to download it when ready"
+          >
+            pending
+          </span>
         )}
         <button
           className="prod-board-zoom"
@@ -294,7 +308,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
         >
           ✎
         </button>
-        <button
+<button
           className="prod-board-regen"
           title="Regenerate this frame"
           disabled={regenerating}
@@ -302,6 +316,16 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, onRegener
         >
           {regenerating ? "…" : "↻"}
         </button>
+        {pending && (
+          <button
+            className="prod-board-recheck"
+            title="Recheck the pending OpenArt job and download the frame when ready"
+            disabled={rechecking}
+            onClick={(e) => { e.stopPropagation(); onRecheck?.(); }}
+          >
+            {rechecking ? "…" : "◷"}
+          </button>
+        )}
       </div>
       <div className="prod-board-style-row">
         <select

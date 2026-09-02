@@ -16,6 +16,8 @@ import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
+import { assemble, renderAnimatic } from "./assembly.js";
+import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
@@ -1187,8 +1189,10 @@ function registerIpc() {
   function rebaseProduction(before: Production, after: Production): Production {
     const fresh = productions.loadProduction(after.meta.id);
     if (!fresh) return after;
-    // Top-level fields the pipeline owns (step status markers + magic prompt state).
-    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts"] as const) {
+    // Top-level fields the pipeline owns (step status markers + magic prompt
+    // state + Step 5 assembly bookkeeping). `assembly` is included so an
+    // assemble()/renderAnimatic() run persists its assembledAt/renderPath.
+    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
@@ -1216,7 +1220,7 @@ function registerIpc() {
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
   async function runProductionStep(
     id: string,
-    step: 3 | 4,
+    step: 3 | 4 | 5,
     label: string,
     fn: (p: Production, emit: (m: string, l?: ProductionEvent["level"]) => void) => Promise<void>,
     opts: { needsApiKey?: boolean } = {}
@@ -1316,6 +1320,42 @@ function registerIpc() {
     runProductionStep(id, 3, `regenerating ${(shotIds ?? []).length} boards`, async (p, emit) => {
       await boardsOrPrompts(p, emit, { shotIds: Array.isArray(shotIds) ? shotIds : [shotIds] });
     }, { needsApiKey: false })
+  );
+
+  // Step 3: reclaim a frame whose OpenArt job outlived the generating call —
+  // the wait timed out or the finished image couldn't be downloaded. The job
+  // keeps rendering server-side, so a recheck re-polls it and downloads the
+  // image when ready, recovering the frame without a second generation.
+  handle("production:recheckBoard", (_e, id: string, shotId: string) =>
+    runProductionJob(id, "rechecking a pending frame", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const pending = shot.pendingImageGen;
+      if (!pending) {
+        emit(`Shot ${shot.number}: nothing pending to recheck.`, "info");
+        return;
+      }
+      emit(`Shot ${shot.number}: rechecking the pending OpenArt job…`, "info");
+      let buf: Buffer;
+      try {
+        const got = await openart.recheckPendingImage(pending);
+        if (!got) {
+          emit(`Shot ${shot.number}: the frame is still rendering — check again in a minute.`, "info");
+          return;
+        }
+        buf = got;
+      } catch (e) {
+        // The job is dead (FAILED/CANCELLED) — drop the stale pending record so
+        // the shot stops showing as pending; the user regenerates instead.
+        delete shot.pendingImageGen;
+        throw e;
+      }
+      const { jpegRel } = writeBoardFrame(p, shot, buf, "png");
+      recordGraphImageGen(shot, jpegRel, pending.prompt, pending.model);
+      hookImageGenToOutput(shot);
+      delete shot.pendingImageGen;
+      emit(`Shot ${shot.number}: frame recovered from the pending OpenArt job.`, "done");
+    })
   );
 
   // Step 3 fallback: write boards/prompts.md for manual generation.
@@ -1629,7 +1669,7 @@ function registerIpc() {
       // References: the @[name] tags the composer prompt actually cites.
       const { resolved, extras } = openart.resolvePromptRefs(p, prompt, 0);
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
-      const png = await gen(resolved, extras);
+      const png = await gen(resolved, extras, shot);
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
       if (shot.graphOutputSource === "imagegen") shot.artwork = jpegRel;
@@ -1722,10 +1762,15 @@ function registerIpc() {
         dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
       }
       if (!dataUrl) throw new Error("No source image — pipe a frame or reference into the edit node, or generate a frame first.");
-      emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}…`);
+      // Resolve @[name] tags in the edit text against the production's artwork,
+      // so the references cited in the edit-prompt node are uploaded alongside
+      // the source. The source occupies @image1 (token 0), so tags start at 1.
+      const { resolved: editText, extras } = openart.resolvePromptRefs(p, text, 1);
+      emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}${extras.length ? ` (+${extras.length} reference${extras.length === 1 ? "" : "s"})` : ""}…`);
       const png = await gen(
-        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${text.slice(0, 1200)}`,
-        [{ name: sourceName, dataUrl }]
+        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
+        [{ name: sourceName, dataUrl }, ...extras],
+        shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphEditGen(shot, jpegRel, text, modelId ?? "auto");
@@ -1832,9 +1877,14 @@ function registerIpc() {
       const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
       const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
       emit(`Shot ${shot.number}: editing frame${modelId ? ` via ${modelId}` : ""}...`);
+      // Resolve @[name] tags in the edit text against the production's artwork
+      // so the cited references are uploaded alongside the frame. The frame
+      // occupies @image1 (token 0), so tags start at 1.
+      const { resolved: editText, extras } = openart.resolvePromptRefs(p, text, 1);
       const png = await gen(
-        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${text.slice(0, 1200)}`,
-        [{ name: "Current frame", dataUrl }]
+        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
+        [{ name: "Current frame", dataUrl }, ...extras],
+        shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphImageGen(shot, jpegRel, text, modelId ?? "auto");
@@ -2157,6 +2207,53 @@ function registerIpc() {
       productionEmit(id, "Removed music (kept in archive).");
     }
     return p;
+  });
+
+  // Step 5: gather all full-res frames + clips + audio into the export folder
+  // and write the EDL / After Effects script / manifest. Fast (no render);
+  // marks the Assembly step done.
+  handle("production:assemblyBuild", (_e, id: string, cfg?: { fps?: number; width?: number; height?: number }) => {
+    return runProductionStep(
+      id,
+      5,
+      "Build assembly package",
+      async (p, emit) => {
+        await assemble(p, cfg, emit, { ffmpegBin: await resolveFfmpeg(), probe: probeMedia });
+        p.status[5] = "done";
+      },
+      { needsApiKey: false }
+    );
+  });
+
+  // Step 5: render the assembled timeline to render.mp4 via the 3-pass ffmpeg
+  // pipeline. Requires an ffmpeg binary (bundled ffmpeg-static, else PATH).
+  handle("production:assemblyRender", (_e, id: string) => {
+    return runProductionJob(id, "Render animatic to MP4", async (p, emit) => {
+      const bin = await resolveFfmpeg();
+      if (!bin) {
+        throw new Error(
+          "No ffmpeg available. Install ffmpeg on your system (or bundle ffmpeg-static) to render the animatic to MP4."
+        );
+      }
+      p.status[5] = "running";
+      try {
+        const renderRel = await renderAnimatic(p, undefined, emit, { bin, runFfmpeg, probe: probeMedia });
+        p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
+        p.assembly.renderPath = renderRel;
+        p.assembly.renderedAt = new Date().toISOString();
+        p.status[5] = "done";
+      } catch (e) {
+        p.status[5] = "error";
+        throw e;
+      }
+    });
+  });
+
+  // Step 5: open the export folder in the OS file manager.
+  handle("production:assemblyOpenFolder", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    void shell.openPath(assetPath(p, p.assembly?.exportDir ?? `${p.assets.outDir}/${p.assets.assemblyDir}`));
   });
 
   handle("agents:getSessionAgent", (_e, sessionId: string) => {

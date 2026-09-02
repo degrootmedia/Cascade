@@ -48,6 +48,23 @@ No session-specific lessons yet.
      paths hide failures from the UI.
   3. Silent .catch(() => {}) in the renderer is fine for UX, but pairs badly with
      a lossy parser — verify the data survives the whole chain.
-- When consolidating duplicated helpers into a shared module, preserve every call site's guards � an "append if absent" check is load-bearing. effectivePrompt originally guarded its brand append with !hasBrand, and the shared insertBrandParagraph lost that guard, so a manual prompt that already carried Brand identity: (written by the brand toggle) got a duplicate paragraph, which parsePromptBoxes then leaked into the Content box. Always port the guard into the shared helper (make it idempotent) and add a regression test for the exact user-visible scenario.
+- When consolidating duplicated helpers into a shared module, preserve every call site's guards � an "append if absent" check is load-bearing. effectivePrompt originally guarded its brand append with !hasBrand, and the shared insertBrandParagraph lost that guard, so a manual prompt that already carried Brand identity: (written by the brand toggle) got a duplicate paragraph, which parsePromptBoxes then leaked into the Content box. Always port the guard into the shared helper (make it idempotent) and add a regression test for the exact user-visible scenario.
 - OpenArt's per-model form schemas must be mirrored field-for-field, not filtered by convention: building a startFrame object by mapping only url/id keys silently dropped the required type ("image") and label sub-fields, and Grok 1.5's schema rejected the submission ("startFrame.type: expected image"). When filling an object-shaped schema field, copy every declared sub-property from the reference (exact name, then url/id/type/label aliases), and fall back to the whole reference when nothing maps.
 - Video-option lookups must use the SAME mode selection as the actual submission: options were fetched from the first mode with options while generation submitted the first mode whose form parses, so a later mode's enum could leak resolutions (e.g. 1080p) the submitted mode never accepts. Align the two selections, and don't change mode-picking logic in one place without the other.
+
+## 2026-09-02 — edit-image node output shows in the graph but not the storyboard
+- Bug: the node graph's "Frame output" preview derives from the piped gen node's
+  selected output (`graphEditGens[graphEditGenIndex].path`), but the storyboard
+  reads `shot.artwork` — a separately-maintained mirror. When the pipe's apply
+  raced a renderer `production:save` (or a pipe was bound while the node was
+  empty and the later generation's `if (graphOutputSource === "editgen")`
+  check read a stale disk state), `shot.artwork` stayed empty/missing and the
+  storyboard showed nothing while the node view was correct. Real data confirmed
+  it: shot 1800 had `graphOutputSource: "editgen"`, a valid `graphEditGens[0]`
+  file on disk, and `artwork` empty.
+- Rule: when two surfaces read the same output, don't keep a second cached
+  field that must be re-applied everywhere — make the pipe authoritative and
+  RE-DERIVE the mirror at read/write time. `syncBoardOutputToPipe(shot)` runs on
+  every `loadProduction` (self-heals existing docs) and inside
+  `applyRendererState` (so a stale renderer save can never clobber the piped
+  frame back out). Test the exact user-visible desync, not just the happy path.

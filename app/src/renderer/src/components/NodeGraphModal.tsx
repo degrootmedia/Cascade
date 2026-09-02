@@ -1178,7 +1178,21 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   };
   const stable = useRef({
     onPromptChange: (value: string) => cb.current.onPromptChange(value),
-    onStyleChange: (style: string) => cb.current.onStyleChange(style),
+    onStyleChange: (style: string) => {
+      // Persist first (setGraphStyle rewrites the on-disk prompts and updates
+      // the prompt cache), then rewrite the composer's LIVE draft so a focused
+      // composer's blur-sync (a setTimeout) can never resurrect the Style
+      // paragraph this change removes/replaces. "None" strips the paragraph
+      // from any prompt that carries one, plugged or not.
+      cb.current.onStyleChange(style);
+      const text = cb.current.styles.find((s) => s.id === style)?.prompt.trim() ?? "";
+      const rewrite = (cur: string): string => (text ? addStyleParagraph(cur, text) : removeStyleParagraph(cur));
+      if (text) {
+        if (cb.current.graphStyleConnected ?? /^Style:/m.test(cb.current.prompt ?? "")) applyDraftEdit("composer", rewrite);
+      } else {
+        applyDraftEdit("composer", rewrite);
+      }
+    },
     onToggleBrand: (include: boolean) => cb.current.onToggleBrand(include),
     registerApplier: (kind: "composer" | "video" | "edit", applier: PromptDraftApplier | undefined) => {
       if (applier) appliers.current[kind] = applier;
@@ -1655,7 +1669,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const detachPrompt = (nodeId: string, handleId: string): boolean => {
       if (nodeId === "composer") {
         if (handleId === "in-style") {
-          cb.current.onGraphField({ graphStyleConnected: false });
+          cb.current.onGraphField({ graphStyleConnected: false, style: undefined, styleNone: true });
           if (!applyDraftEdit("composer", (t) => removeStyleParagraph(t))) cb.current.onPromptChange(removeStyleParagraph(cb.current.prompt));
           return true;
         }
@@ -1704,7 +1718,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     if (from.type === "source") {
       if (from.nodeId === "style") {
-        const patch: Partial<ProductionShot> = { graphStyleConnected: false, graphVideoStyleConnected: false, graphEditStyleConnected: false };
+        const patch: Partial<ProductionShot> = { graphStyleConnected: false, graphVideoStyleConnected: false, graphEditStyleConnected: false, style: undefined, styleNone: true };
         if (/^Style:/m.test(cb.current.videoPromptValue)) patch.graphVideoPrompt = removeStyleParagraph(cb.current.videoPromptValue);
         if (/^Style:/m.test(cb.current.editPromptValue)) patch.graphEditPrompt = removeStyleParagraph(cb.current.editPromptValue);
         cb.current.onGraphField(patch);

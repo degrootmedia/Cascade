@@ -3,7 +3,7 @@
  * then a 5-step pipeline view. Step 1 (script ingestion + shot table) is live;
  * later steps show their planned surface and keep persisted state (style).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
@@ -13,11 +13,31 @@ import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, V
 import { ReferenceCategorySection, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js";
+import { AssemblyPanel } from "./production/assembly.js";
 import { BrandSwatchRow } from "./production/brand.js";
 import { uid } from "./production/hex.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
+
+/** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
+ * identity / References) so each reads as its own block. */
+function DesignSection({ title, children, defaultOpen = true }: {
+  title: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="prod-design-section">
+      <button className="prod-design-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
+        <span className="prod-design-title">{title}</span>
+      </button>
+      {open && <div className="prod-design-body">{children}</div>}
+    </div>
+  );
+}
 
 
 export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () => void }) {
@@ -46,6 +66,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [boardsBusy, setBoardsBusy] = useState(false);
   /** Shot ids currently regenerating (a Set so several frames can run in parallel). */
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
+  /** Shot ids whose pending OpenArt job is being rechecked. */
+  const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
   // each load/save the whole production and clobber each other, so batches run
@@ -196,6 +218,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const voObjectUrl = voUrl;
   const musicObjectUrl = musicUrl;
 
+  // Re-fetch the focused shot's effective prompt whenever the data it derives
+  // from changes (manual override, style, references, characters/products,
+  // brand, magic prompts). Without this, a reference drop that mutates prod
+  // wouldn't refresh the side panel if the shot was already focused (the
+  // boardBust/promptShotId deps alone miss it).
+  const focusedShot = promptShotId ? prod?.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId) : undefined;
+  const focusedSig = promptShotId ? JSON.stringify([
+    promptShotId,
+    prod?.magicEnabled,
+    prod?.magicPrompts?.[promptShotId],
+    focusedShot?.prompt,
+    focusedShot?.style,
+    focusedShot?.styleNone,
+    focusedShot?.includeBrandIdentity,
+    focusedShot?.refIds,
+    focusedShot?.refExcluded,
+    prod?.styles ?? [],
+    prod?.brand ?? {},
+    (prod?.characters ?? []).map((c) => [c.id, c.name, c.key, !!(c.artwork || c.imagePath)]),
+    (prod?.products ?? []).map((p) => [p.id, p.name, !!(p.artwork || p.imagePath)]),
+    (prod?.references ?? []).map((r) => [r.name, !!(r.artwork || r.imagePath || r.media)]),
+  ]) : "";
   useEffect(() => {
     if (!promptShotId) return;
     let live = true;
@@ -203,14 +247,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       for (let attempt = 0; attempt < 3; attempt++) {
         const next = await window.cascade.getBoardPrompt(prod?.meta.id ?? "", promptShotId);
         if (next != null) {
-          if (live) { promptCacheRef.current[promptShotId] = next; setFocusedPrompt(next); }
+          if (live) {
+            // While the user is typing in this shot's editor, never clobber the
+            // live value: a just-fired save changes focusedSig, re-runs this
+            // effect, and a round-tripped (normalized) string would reset the
+            // textarea's DOM value and yank the caret to the end.
+            const el = document.activeElement;
+            if (el instanceof HTMLTextAreaElement
+              && (el.classList.contains("prod-board-prompt") || el.classList.contains("prod-prompt-drawer-text"))) return;
+            promptCacheRef.current[promptShotId] = next; setFocusedPrompt(next);
+          }
           return;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 80));
       }
     }).catch(() => {});
     return () => { live = false; };
-  }, [boardBust, promptShotId, prod?.meta.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardBust, promptShotId, prod?.meta.id, focusedSig]);
 
   async function pickFolder() {
     const dir = await window.cascade.pickProductionFolder();
@@ -692,6 +746,30 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
+  /** Step 3: reclaim a shot's frame from an OpenArt job that outlived the
+   *  generating call (the wait timed out or the download failed). The job keeps
+   *  rendering server-side, so rechecking polls it again and downloads the
+   *  finished frame when ready. */
+  async function recheckBoard(shotId: string) {
+    if (!prod || recheckIds.has(shotId)) return;
+    setErr(null);
+    setRecheckIds((prev) => new Set(prev).add(shotId));
+    try {
+      const next = await window.cascade.recheckBoard(prod.meta.id, shotId);
+      setProd(next);
+      setBoardBust((b) => b + 1);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setRecheckIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
+  }
+
   /** Step 3: export every shot's prompt to boards/prompts.md. */
   async function exportPrompts() {
     if (!prod) return;
@@ -897,9 +975,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const stripped = base.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").replace(/\n{3,}/g, "\n\n").trim();
       const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
         ...sc,
-        shots: sc.shots.map((s) => s.id === shotId ? { ...s, style: undefined, prompt: stripped, promptManual: true } : s),
+        shots: sc.shots.map((s) => s.id === shotId ? { ...s, style: undefined, styleNone: true, prompt: stripped, promptManual: true } : s),
       })) };
       setProd(next);
+      // Keep the prompt cache in sync so the focused side panel / node graph
+      // can't resurrect the removed Style section from a stale cache entry.
+      promptCacheRef.current[shotId] = stripped;
       if (promptShotId === shotId) setFocusedPrompt(stripped);
       void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
       return;
@@ -909,17 +990,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       ...sc,
       shots: sc.shots.map((s) => {
         if (s.id !== shotId) return s;
-        if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined };
+        if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined, styleNone: false };
         const para = styleText ? `Style: ${styleText}` : "";
         const rest = s.prompt.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").trim();
-        return { ...s, style: styleId || undefined, prompt: para ? (rest ? `${para}\n\n${rest}` : para) : s.prompt };
+        return { ...s, style: styleId || undefined, styleNone: false, prompt: para ? (rest ? `${para}\n\n${rest}` : para) : s.prompt };
       }),
     })) };
     setProd(next);
-    if (promptShotId === shotId) {
-      const changed = next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      setFocusedPrompt(changed?.prompt ?? "");
-    }
+    const changed = next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (changed?.prompt != null) promptCacheRef.current[shotId] = changed.prompt;
+    if (promptShotId === shotId) setFocusedPrompt(changed?.prompt ?? "");
     void window.cascade.saveProduction(next).then(async () => {
       await refreshList();
       if (promptShotId === shotId) {
@@ -945,10 +1025,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     // graph), and focusedPrompt is the live value for that shot.
     const basePrompt = promptCacheRef.current[shotId] ?? target.prompt;
     const isPlugged = (flag: boolean | undefined, cur: string | undefined) => flag ?? /^Style:/m.test(cur ?? "");
+    // Choosing a style rewrites the paragraph only when the edge is plugged;
+    // "None" strips it from any prompt that carries one, plugged or not — a
+    // leftover/detached edge must never keep the paragraph alive.
     const rewritePlugged = (cur: string | undefined, plugged: boolean | undefined): string | undefined => {
       if (cur == null) return cur;
+      if (!styleText) return /^Style:/m.test(cur) ? removeStyleParagraph(cur) : cur;
       if (!isPlugged(plugged, cur)) return cur;
-      if (!styleText) return removeStyleParagraph(cur);
       return addStyleParagraph(cur, styleText);
     };
     // For the image prompt we preserve the classic manual/auto distinction
@@ -959,7 +1042,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     // rewriting — otherwise a cached auto-derived prompt would be mistaken
     // for non-manual and we'd create a prompt with only Style and no content.
     const baseIsManual = target.promptManual || !!promptCacheRef.current[shotId];
-    if (baseIsManual && basePrompt?.trim() && isPlugged(target.graphStyleConnected, basePrompt)) {
+    if (baseIsManual && basePrompt?.trim() && (isPlugged(target.graphStyleConnected, basePrompt) || !styleText)) {
       nextPrompt = styleText ? addStyleParagraph(basePrompt, styleText) : removeStyleParagraph(basePrompt);
       nextManual = true;
     } else if (!target.promptManual && target.graphStyleConnected && styleText) {
@@ -967,7 +1050,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
     const nextVideo = rewritePlugged(target.graphVideoPrompt, target.graphVideoStyleConnected);
     const nextEdit = rewritePlugged(target.graphEditPrompt, target.graphEditStyleConnected);
-    const patch: Partial<ProductionShot> = { style: styleId || undefined };
+    const patch: Partial<ProductionShot> = { style: styleId || undefined, styleNone: !styleId };
     if (nextPrompt !== target.prompt) { patch.prompt = nextPrompt; patch.promptManual = nextManual; }
     if (nextVideo !== target.graphVideoPrompt) patch.graphVideoPrompt = nextVideo;
     if (nextEdit !== target.graphEditPrompt) patch.graphEditPrompt = nextEdit;
@@ -1018,9 +1101,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       if (!target) { setErr("Couldn't find the destination frame."); return; }
       const currentPrompt = target.prompt?.trim() || await window.cascade.getBoardPrompt(prod.meta.id, shotId) || "";
       const prompt = addRefTag(currentPrompt, name);
+      // Keep the prompt cache in sync so a later selection of this shot (via
+      // focusPrompt, which reads the cache) shows the tagged prompt — the
+      // board-refresh effect (boardBust) may not have fired yet.
+      promptCacheRef.current[shotId] = prompt;
       if (promptShotId === shotId) setFocusedPrompt(prompt);
+      const references = upsertReference(name, ref, shotId);
+      if (prod.magicEnabled) {
+        // Magic prompts keep content-only text in magicPrompts[shotId] — the
+        // effective prompt, reference resolution, and the node graph all read
+        // magicPrompts first, so a tag written to shot.prompt would be lost.
+        // Tag the content box itself and persist the magic store.
+        const content = (prod.magicPrompts?.[shotId] ?? parsePromptBoxes(currentPrompt).content ?? "").trim();
+        const next = addRefTag(content, name);
+        saveField({ references, magicPrompts: { ...(prod.magicPrompts ?? {}), [shotId]: next } });
+        return;
+      }
       saveField({
-        references: upsertReference(name, ref, shotId),
+        references,
         scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, prompt, promptManual: true } : s) })),
       });
     } catch (e) {
@@ -1620,80 +1718,81 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         {prod.currentStep === 2 && (
           <section className="prod-panel">
             <h3>2 · Design</h3>
-            <label className="prod-label">Visual styles — up to {MAX_STYLES}</label>
-            <p className="hint">
-              Add up to {MAX_STYLES} distinct <strong>named</strong> styles one at a time, then assign each shot a
-              style in <em> Storyboard</em>. Style <strong>1</strong> is the default look for every frame.
-            </p>
-            {(prod.styles ?? []).length > 0 && (
-              <div className="prod-styles">
-                {(prod.styles ?? []).map((s, i) => (
-                  <div key={s.id} className="prod-style-card">
-                    <span className="prod-style-index" title={`Style ${s.index} of up to ${MAX_STYLES}`}>{s.index}</span>
-                    <div className="prod-style-fields">
-                      <div className="prod-style-head">
-                        {i === 0 && <span className="prod-style-master-tag" title="Default style for shots that haven't picked one">default</span>}
-                        <input
-                          className="prod-style-name"
-                          value={s.name}
-                          placeholder="Style name (e.g. Heroic 3D)"
-                          onChange={(e) => setStyle(i, { name: e.target.value })}
-                          title={`Style ${s.index} — shown in the Storyboard dropdown`}
+
+            <DesignSection title="Visual styles">
+              <p className="hint">
+                Add up to {MAX_STYLES} distinct <strong>named</strong> styles one at a time, then assign each shot a
+                style in <em> Storyboard</em>. Style <strong>1</strong> is the default look for every frame.
+              </p>
+              {(prod.styles ?? []).length > 0 && (
+                <div className="prod-styles">
+                  {(prod.styles ?? []).map((s, i) => (
+                    <div key={s.id} className="prod-style-card">
+                      <span className="prod-style-index" title={`Style ${s.index} of up to ${MAX_STYLES}`}>{s.index}</span>
+                      <div className="prod-style-fields">
+                        <div className="prod-style-head">
+                          {i === 0 && <span className="prod-style-master-tag" title="Default style for shots that haven't picked one">default</span>}
+                          <input
+                            className="prod-style-name"
+                            value={s.name}
+                            placeholder="Style name (e.g. Heroic 3D)"
+                            onChange={(e) => setStyle(i, { name: e.target.value })}
+                            title={`Style ${s.index} — shown in the Storyboard dropdown`}
+                          />
+                        </div>
+                        <textarea
+                          className="prod-style-prompt"
+                          value={s.prompt}
+                          placeholder="Full generation prompt for this style"
+                          onChange={(e) => setStyle(i, { prompt: e.target.value })}
                         />
                       </div>
-                      <textarea
-                        className="prod-style-prompt"
-                        value={s.prompt}
-                        placeholder="Full generation prompt for this style"
-                        onChange={(e) => setStyle(i, { prompt: e.target.value })}
-                      />
+                      <button
+                        className="prod-style-wand"
+                        title="Refine this style's prompt via the model"
+                        disabled={refiningStyleId !== null || !s.prompt.trim()}
+                        onClick={() => void refineStyle(s.id)}
+                      >
+                        {refiningStyleId === s.id ? "…" : "✨"}
+                      </button>
+                      <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}>×</button>
                     </div>
-                    <button
-                      className="prod-style-wand"
-                      title="Refine this style's prompt via the model"
-                      disabled={refiningStyleId !== null || !s.prompt.trim()}
-                      onClick={() => void refineStyle(s.id)}
-                    >
-                      {refiningStyleId === s.id ? "…" : "✨"}
-                    </button>
-                    <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}>×</button>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              )}
+              <div className="prod-style-actions">
+                <button className="prod-btn" disabled={(prod.styles?.length ?? 0) >= MAX_STYLES} onClick={addStyle}>
+                  ＋ Add style
+                </button>
+                <button
+                  className="prod-btn"
+                  disabled={styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES}
+                  onClick={() => void pickStyleImage()}
+                  onDragOver={(e) => { if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }}
+                  onDragLeave={(e) => e.currentTarget.classList.remove("dragover")}
+                  onDrop={async (e) => {
+                    e.preventDefault(); e.currentTarget.classList.remove("dragover");
+                    if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return;
+                    const refId = e.dataTransfer.getData("application/x-cascade-reference");
+                    if (refId) { void styleFromReferenceId(refId); return; }
+                    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+                    if (files.length) {
+                      const file = files[0];
+                      if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
+                      try {
+                        const dataUrl = await fileToDataUrl(file);
+                        await styleFromImageDataUrl(dataUrl);
+                      } catch { setErr("Couldn't read the dropped image."); }
+                    }
+                  }}
+                  title="Generate a style prompt from an image — or drag a reference image here"
+                >
+                  {styleImgBusy ? "Reading image…" : "🖼 From image…"}
+                </button>
               </div>
-            )}
-            <div className="prod-style-actions">
-              <button className="prod-btn" disabled={(prod.styles?.length ?? 0) >= MAX_STYLES} onClick={addStyle}>
-                ＋ Add style
-              </button>
-              <button
-                className="prod-btn"
-                disabled={styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES}
-                onClick={() => void pickStyleImage()}
-                onDragOver={(e) => { if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }}
-                onDragLeave={(e) => e.currentTarget.classList.remove("dragover")}
-                onDrop={async (e) => {
-                  e.preventDefault(); e.currentTarget.classList.remove("dragover");
-                  if (styleImgBusy || (prod.styles?.length ?? 0) >= MAX_STYLES) return;
-                  const refId = e.dataTransfer.getData("application/x-cascade-reference");
-                  if (refId) { void styleFromReferenceId(refId); return; }
-                  const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
-                  if (files.length) {
-                    const file = files[0];
-                    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
-                    try {
-                      const dataUrl = await fileToDataUrl(file);
-                      await styleFromImageDataUrl(dataUrl);
-                    } catch { setErr("Couldn't read the dropped image."); }
-                  }
-                }}
-                title="Generate a style prompt from an image — or drag a reference image here"
-              >
-                {styleImgBusy ? "Reading image…" : "🖼 From image…"}
-              </button>
-            </div>
+            </DesignSection>
 
-            <div className="prod-brand">
-              <label className="prod-label">Brand identity — global</label>
+            <DesignSection title="Brand identity">
               <p className="hint">
                 A palette (up to 5 swatches) and optional font appended to <strong>every</strong> style's prompt,
                 so the brand look stays consistent across all frames.
@@ -1721,37 +1820,39 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onChange={(e) => setBrandFont(e.target.value)}
                 />
               </label>
-            </div>
+            </DesignSection>
 
-            {(prod.suggestedReferences ?? []).length > 0 && (
-              <section className="prod-suggestions">
-                <label className="prod-label">Suggested references</label>
-                <p className="hint">Characters and props found in the script. Add them manually and place them in any category.</p>
-                <div className="prod-suggestion-list">
-                  {(prod.suggestedReferences ?? []).map((s) => (
-                    <div key={s.id} className="prod-suggestion">
-                      <span><strong>{s.name}</strong><small>{s.kind === "character" ? "Character suggestion" : "Prop suggestion"}</small></span>
-                      <div className="prod-suggestion-actions">
-                        <button className="prod-btn" onClick={() => approveSuggestion(s)}>Add reference</button>
-                        <button className="prod-suggestion-remove" title="Dismiss this suggestion" onClick={() => dismissSuggestion(s)}>×</button>
+            <DesignSection title="References">
+              {(prod.suggestedReferences ?? []).length > 0 && (
+                <section className="prod-suggestions">
+                  <label className="prod-label">Suggested references</label>
+                  <p className="hint">Characters and props found in the script. Add them manually and place them in any category.</p>
+                  <div className="prod-suggestion-list">
+                    {(prod.suggestedReferences ?? []).map((s) => (
+                      <div key={s.id} className="prod-suggestion">
+                        <span><strong>{s.name}</strong><small>{s.kind === "character" ? "Character suggestion" : "Prop suggestion"}</small></span>
+                        <div className="prod-suggestion-actions">
+                          <button className="prod-btn" onClick={() => approveSuggestion(s)}>Add reference</button>
+                          <button className="prod-suggestion-remove" title="Dismiss this suggestion" onClick={() => dismissSuggestion(s)}>×</button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-            <ReferenceCategorySection
-              prodId={prod.meta.id}
-              categories={prod.referenceCategories ?? []}
-              items={prod.references ?? []}
-              onAddCategory={addCategory}
-              onRenameCategory={renameCategory}
-              onAddReference={addRef}
-              onAttach={(id) => void attachRefArtwork(id)}
-              onRemove={removeRef}
-              onRename={(id, name) => updateRef(id, { name })}
-              onMove={moveReference}
-            />
+                    ))}
+                  </div>
+                </section>
+              )}
+              <ReferenceCategorySection
+                prodId={prod.meta.id}
+                categories={prod.referenceCategories ?? []}
+                items={prod.references ?? []}
+                onAddCategory={addCategory}
+                onRenameCategory={renameCategory}
+                onAddReference={addRef}
+                onAttach={(id) => void attachRefArtwork(id)}
+                onRemove={removeRef}
+                onRename={(id, name) => updateRef(id, { name })}
+                onMove={moveReference}
+              />
+            </DesignSection>
 
             <StepFooter prod={prod} onNext={goNext} />
           </section>
@@ -1901,7 +2002,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     bust={boardBust}
                     regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id)}
                     videoBusy={videoBusyIds.includes(shot.id)}
+                    pending={!!shot.pendingImageGen}
+                    rechecking={recheckIds.has(shot.id)}
                     onRegenerate={() => void regenBoard(shot.id)}
+                    onRecheck={() => void recheckBoard(shot.id)}
                     onImport={() => void importFrames(shot.id)}
                     onEdit={() => setEditShotId(shot.id)}
                     onVideo={() => setVideoShotId(shot.id)}
@@ -2268,11 +2372,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         )}
 
         {prod.currentStep === 5 && (
-          <section className="prod-panel">
-            <h3>{prod.currentStep} · {STEPS[prod.currentStep - 1].title}</h3>
-            <p className="hint">{STEPS[prod.currentStep - 1].desc} — coming in the next milestone. Your shot list and style carry forward automatically.</p>
-            <StepFooter prod={prod} onNext={goNext} />
-          </section>
+          <AssemblyPanel prod={prod} onApply={apply} log={visibleLog} />
         )}
       </div>
 

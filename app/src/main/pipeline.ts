@@ -577,6 +577,16 @@ export function resolveShotStyle(p: Production, shot: ProductionShot): string {
   return s;
 }
 
+/** The Style text a shot's prompt should carry: its per-shot override, else the
+ *  master style — unless the user explicitly picked "None" (styleNone), which
+ *  suppresses the paragraph entirely (the master fallback must not sneak back). */
+export function effectiveShotStyle(p: Production, shot: ProductionShot): string {
+  if (shot.styleNone) return "";
+  const s = resolveShotStyle(p, shot);
+  if (s) return s;
+  return (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
+}
+
 export function boardPrompt(p: Production, shot: ProductionShot): string {
   // Paragraph 1 — STYLE. A per-shot style tag overrides the master style: it
   // lets a production mix render languages (e.g. some shots "3D Motion
@@ -584,15 +594,11 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // With no override, the Step 2 master style is used for every frame (with a
   // legacy free-text visualStyle fallback for older productions).
   const paras: string[] = [];
-  const style = resolveShotStyle(p, shot);
+  const style = effectiveShotStyle(p, shot);
   // No auto-appended period — style texts usually end with their own, and
   // adding another produced "render..". Used verbatim, matching the
   // renderer's style paragraph composer.
   if (style) paras.push(`Style: ${style}`);
-  else {
-    const master = (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
-    if (master) paras.push(`Style: ${master}`);
-  }
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
   // explicitly attached character/product refs). Artwork-bearing refs are
@@ -639,12 +645,8 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
   if (p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()) {
     const content = stripMagicLeakage(p.magicPrompts[shot.id].trim());
     const paras: string[] = [];
-    const style = resolveShotStyle(p, shot);
+    const style = effectiveShotStyle(p, shot);
     if (style) paras.push(`Style: ${style}`);
-    else {
-      const master = (p.styles?.[0]?.prompt ?? "").trim() || (p.visualStyle ?? "").trim();
-      if (master) paras.push(`Style: ${master}`);
-    }
     const consistency: string[] = [];
     const brand = shot.includeBrandIdentity !== false ? brandPrompt(p) : "";
     if (brand) consistency.push(`Brand identity: ${brand}`);
@@ -1159,6 +1161,49 @@ export function hookVideoGenToOutput(shot: ProductionShot): void {
   shot.graphOutputSource = "videogen";
 }
 
+/** The node-graph output pipe is the source of truth for the shot's primary
+ *  frame/clip. Re-derive `artwork`/`videoPath` from the piped generation node's
+ *  selected output so the storyboard (which reads `shot.artwork`) always
+ *  mirrors the graph's frame output node. A piped node whose selection changed,
+ *  or whose apply raced a renderer save, can't leave a stale or missing frame —
+ *  e.g. an edit-image node piped to the output whose selected edit never landed
+ *  on `shot.artwork`. Returns true when anything changed. */
+export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
+  const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+  const editSel = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
+  const vidSel = shot.graphVideoGens?.[shot.graphVideoGenIndex ?? 0];
+  switch (shot.graphOutputSource) {
+    case "imagegen":
+    case "editgen": {
+      const sel = shot.graphOutputSource === "imagegen" ? imgSel : editSel;
+      if (sel?.path) {
+        if (shot.artwork !== sel.path) { shot.artwork = sel.path; shot.videoPath = undefined; return true; }
+        return false;
+      }
+      // Node piped but empty — the storyboard frame goes blank until a
+      // generation is piped back in (matches the output node's preview).
+      if (shot.artwork !== undefined || shot.videoPath !== undefined) {
+        shot.artwork = undefined;
+        shot.videoPath = undefined;
+        return true;
+      }
+      return false;
+    }
+    case "videogen": {
+      if (vidSel?.path) {
+        let changed = false;
+        if (shot.videoPath !== vidSel.path) { shot.videoPath = vidSel.path; changed = true; }
+        if (!shot.artwork && imgSel?.path && shot.artwork !== imgSel.path) { shot.artwork = imgSel.path; changed = true; }
+        return changed;
+      }
+      if (shot.videoPath !== undefined) { shot.videoPath = undefined; return true; }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 /** One-time migration: MOVE the classic generations (current artwork +
  *  history, videoPath) into the node-graph generation nodes — the nodes own
  *  the generation history, and the storyboard frame comes from the output
@@ -1189,8 +1234,11 @@ export function migrateGraphGenerations(shot: ProductionShot): boolean {
 }
 
 /** Image generator injected by the caller (OpenArt MCP in production).
- *  `refs` carries the shot's reference artwork (if any) for image-input models. */
-export type ImageGenFn = (prompt: string, refs: GenerationRef[]) => Promise<Buffer>;
+ *  `refs` carries the shot's reference artwork (if any) for image-input models.
+ *  `shot` (when given) lets the generator record a pending async job on the
+ *  shot if the generation outlives its wait — the frame can then be reclaimed
+ *  later instead of being lost. */
+export type ImageGenFn = (prompt: string, refs: GenerationRef[], shot?: ProductionShot) => Promise<Buffer>;
 
 /**
  * Step 3 — generate storyboard frames. Runs the image submissions in parallel
@@ -1231,7 +1279,7 @@ export async function generateBoards(
           .filter((r) => r.artwork)
           .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
         const genPrompt = openArtPrompt(p, shot);
-        const png = await generate(genPrompt, refs);
+        const png = await generate(genPrompt, refs, shot);
         const { jpegRel } = writeBoardFrame(p, shot, png, "png");
         recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
         // Classic flow: the storyboard frame comes from the output pipe — if

@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork } from "./pipeline.js";
+import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe } from "./pipeline.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -32,11 +32,13 @@ function normalize(p: ProductionFile): ProductionFile {
   p.styles ??= [];
   p.brand ??= { colors: [], font: "" };
   p.currentStep ??= 1;
-  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" };
+  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" };
   p.assets.voiceoverDir ??= "voiceover";
   p.assets.musicDir ??= "music";
   p.assets.videosDir ??= "videos";
   p.assets.referencesDir ??= "references";
+  p.assets.assemblyDir ??= "assembly";
+  p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
   p.magicPrompts ??= {};
   if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
   // Clean stale magic entries for deleted shots and non-string values
@@ -118,6 +120,10 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     shots: sc.shots.map((sh) => {
       // Legacy fields no longer used (single-VO model, cuts-only timeline).
       const { voiceoverPath: _v, transition: _t, ...rest } = sh as typeof sh & { voiceoverPath?: unknown; transition?: unknown };
+      // The output pipe is authoritative: re-derive artwork/videoPath so a
+      // renderer save with a stale or missing frame can't diverge from the
+      // graph's frame output node (e.g. an edit-image node piped to output).
+      syncBoardOutputToPipe(rest);
       return rest;
     }),
   })) : [];
@@ -150,6 +156,23 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   }
   fresh.status = p.status ?? {};
   if (typeof p.scriptSource === "string") fresh.scriptSource = p.scriptSource;
+  if (p.assembly) {
+    const a = p.assembly;
+    const fps = Number.isFinite(a.fps) && a.fps >= 1 ? Math.round(a.fps) : 24;
+    const width = Number.isFinite(a.width) && a.width >= 1 ? Math.round(a.width) : 1920;
+    const height = Number.isFinite(a.height) && a.height >= 1 ? Math.round(a.height) : 1080;
+    fresh.assembly = {
+      fps,
+      width,
+      height,
+      exportDir: typeof a.exportDir === "string" && a.exportDir ? a.exportDir : `${fresh.assets.outDir}/${fresh.assets.assemblyDir}`,
+      assembledAt: a.assembledAt,
+      renderPath: typeof a.renderPath === "string" && a.renderPath ? a.renderPath : undefined,
+      renderedAt: a.renderedAt,
+      totalSec: Number.isFinite(a.totalSec) ? a.totalSec : undefined,
+      skippedShots: Array.isArray(a.skippedShots) ? a.skippedShots.filter((s) => typeof s === "string") : undefined,
+    };
+  }
   if (typeof p.meta.name === "string" && p.meta.name.trim()) fresh.meta.name = p.meta.name.trim();
   if (p.magicPrompts && typeof p.magicPrompts === "object") {
     fresh.magicPrompts = Object.fromEntries(Object.entries(p.magicPrompts).filter(([, v]) => typeof v === "string" && v.trim()).map(([k, v]) => [k, String(v).trim().slice(0, 2000)]));
@@ -170,6 +193,7 @@ function migrateBoardArtwork(p: Production): boolean {
       if (migrateGraphPipes(s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;
+      if (syncBoardOutputToPipe(s)) changed = true;
       if (s.artworkHistory) {
         const next = s.artworkHistory.map((rel) => rel);
         let hChanged = false;
@@ -226,10 +250,11 @@ export function newProduction(name: string, folder: string): ProductionFile {
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
+    assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
   };
   // Scaffold the asset folders inside the user's production folder.
-  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir]) {
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
     } catch {

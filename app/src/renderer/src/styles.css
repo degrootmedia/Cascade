@@ -572,6 +572,32 @@ body {
 }
 .prod-brand-font-input:focus { outline: none; border-color: var(--accent); }
 
+/* Step 2 sections each get their own collapsible panel so Visual styles /
+   Brand identity / References read as separate blocks. */
+.prod-design-section { margin-top: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); overflow: hidden; }
+.prod-design-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--bg-panel);
+  border: none;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 1rem;
+  text-align: left;
+  cursor: pointer;
+}
+.prod-design-head:hover { background: color-mix(in srgb, var(--bg) 25%, transparent); }
+.prod-caret { display: inline-block; transition: transform 0.12s; color: var(--text-dim); font-size: 0.7rem; }
+.prod-caret.open { transform: rotate(90deg); }
+.prod-design-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prod-design-body { padding: 14px 18px 16px; border-top: 1px solid var(--border); }
+.prod-design-section .prod-refs { margin-top: 0; }
+.prod-design-section .prod-suggestions { margin-top: 0; }
+.prod-design-section .prod-suggestions + .prod-refs { margin-top: 18px; }
+
 /* ---------- design references (Step 2) ---------- */
 .prod-refs { margin-top: 22px; }
 .prod-ref-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
@@ -637,6 +663,14 @@ body {
 .prod-btn:disabled { opacity: 0.45; cursor: default; }
 .prod-btn.ghost { background: none; border: 1px solid transparent; color: var(--text-dim); }
 .prod-btn.ghost:hover { border-color: var(--border); color: var(--text); }
+.prod-btn.inline { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; white-space: normal; }
+
+/* Step 5 Assembly (export package + render). */
+.prod-assembly-config { align-items: flex-end; }
+.prod-assembly-config .prod-label { margin-bottom: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.prod-assembly-config select { min-width: 92px; }
+.prod-assembly-status { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 8px; }
+.prod-assembly-render { width: 100%; max-width: 720px; max-height: 420px; background: #000; border-radius: 8px; margin: 8px 0; }
 
 /* Step 3 model / resolution selectors + cap input. */
 .prod-boards-cap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
@@ -2810,6 +2844,42 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-board-edit:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 /* Disabled (no frame yet) stays invisible until hover, matching the other icons. */
 .prod-board-frame:hover .prod-board-edit:disabled { opacity: 0.4; cursor: default; }
+
+/* "pending" badge — an OpenArt frame job outlived its wait; recheck to claim it. */
+.prod-board-pending {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--accent);
+  font-size: 0.7rem;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 2;
+}
+.prod-board-recheck {
+  position: absolute;
+  top: 6px;
+  right: 102px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  opacity: 1;
+  transition: opacity 0.12s;
+  z-index: 2;
+}
+.prod-board-recheck:hover:not(:disabled) { border-color: var(--accent); color: white; }
+.prod-board-recheck:disabled { opacity: 0.5; cursor: default; }
 
 /* ---------- EditBoardModal (AI frame edit) ---------- */
 .prod-edit-overlay {

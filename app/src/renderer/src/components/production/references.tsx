@@ -262,6 +262,7 @@ export function brandClause(prod: Production): string {
  *  no Style section), otherwise the shot's style or the master fallback. */
 
 export function shotStyleSelectValue(shot: ProductionShot, prod: Production): string {
+  if (shot.styleNone) return "";
   if (!shot.style && shot.promptManual && shot.prompt && !/^Style:/m.test(shot.prompt)) return "";
   return shot.style ?? prod.styles?.[0]?.id ?? "";
 }

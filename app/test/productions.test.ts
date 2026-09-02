@@ -36,7 +36,7 @@ function baseProduction(overrides: Partial<Production> = {}): Production {
     products: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
     ...overrides,
   };
 }
@@ -171,5 +171,36 @@ describe("applyRendererState", () => {
     const incoming = baseProduction({ meta: { ...baseProduction().meta, name: "Renamed" } });
     const merged = applyRendererState(baseProduction(), incoming);
     expect(merged.meta.name).toBe("Renamed");
+  });
+
+  it("re-derives the storyboard frame from the output pipe when the renderer's save is stale", () => {
+    // The renderer sends the shot with the edit-image node piped to the output
+    // but a stale/empty `artwork` (the apply raced its save). The pipe owns the
+    // frame, so the merged document must mirror the node graph's output node.
+    const incoming = baseProduction({
+      scenes: [
+        {
+          number: 1,
+          title: "S1",
+          shots: [
+            {
+              id: "shot1",
+              number: "0100",
+              audio: "",
+              visual: "Hero walks",
+              graphOutputSource: "editgen",
+              graphEditGens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" }],
+              graphEditGenIndex: 0,
+              artwork: undefined,
+              videoPath: "videos/stale.mp4",
+            },
+          ],
+        },
+      ],
+    });
+    const merged = applyRendererState(baseProduction(), incoming);
+    const shot = merged.scenes[0].shots[0];
+    expect(shot.artwork).toBe("boards/0100/shot-0100-edit.jpg");
+    expect(shot.videoPath).toBeUndefined();
   });
 });

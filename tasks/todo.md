@@ -1,3 +1,157 @@
+# Assembly Page (Step 5) — PLAN
+
+Build Step 5 "Assembly" (currently a placeholder at `ProductionWorkspace.tsx:2327–2333`)
+into the editor-handoff + render step: gather full-res media into an export folder, write an
+EDL, write an After Effects rebuild script, and render the animatic to MP4.
+
+**Status: IMPLEMENTED.**
+
+## Context / decisions (already settled)
+
+- **ffmpeg**: `ffmpeg-static` bundled, with system-`ffmpeg` fallback (`app/src/main/ffmpeg.ts`,
+  `resolveFfmpeg()`). No ffmpeg/ffprobe today — this is all new machinery.
+- **Export folder**: `out/assembly/` inside the production folder (reuses `assets.outDir` +
+  a new `assets.assemblyDir: "assembly"`). Media gathered under `out/assembly/media/`
+  (`shots/`, `clips/`, `audio/`). Render → `out/assembly/render.mp4`.
+- **Sources are all workspace-relative and already present**: board frames at
+  `shot.artwork` (full-res original resolvable via `originalForJpegRel`), clips at
+  `shot.videoPath`, timing at `shot.durationSec ?? 3`, `muted` per clip, audio at
+  `p.voiceoverPath`/`p.musicPath` + volumes. Ordered sequence = `scenes.flatMap(s => s.shots)`.
+- **Rule that mirrors the timeline**: a shot with a `videoPath` plays as a clip (still copied
+  alongside for the storyboard); a shot with only `artwork` is a still; a shot with neither is
+  **skipped** with a warning in the manifest (no black frames, no shifted timing — timeline is
+  recomputed over included events only).
+- **One deep module, all pure logic testable**: `app/src/main/assembly.ts`. String builders
+  (EDL / AEScript / manifest / ffmpeg argv) are pure; `assemble()` does the copy+write I/O;
+  `renderAnimatic()` takes an injected `runFfmpeg` so it's fakeable in tests.
+
+## Data model (`app/src/shared/ipc.ts` + `productions.ts`)
+
+- [x] `ProductionAssembly` interface: `{ fps, width, height, exportDir, assembledAt?,
+      renderPath?, renderedAt?, totalSec?, skippedShots? }` — defaults `24 / 1920 / 1080`.
+- [x] `Production.assembly?: ProductionAssembly` + `assets.assemblyDir` ("assembly");
+      back-filled in `productions.ts` `normalize` + `applyRendererState`; `out/assembly/`
+      scaffolded in `newProduction`.
+- [x] No per-shot schema changes — everything derives from existing fields.
+
+## New module `app/src/main/assembly.ts` (pure core, unit-tested)
+
+- [x] `assemblyPlan(p)` — ordered events with cumulative `startSec`/`endSec`; stills resolve
+      the full-res original (`originalForJpegRel`) falling back to `shot.artwork`; clips from
+      `videoPath`; dedupe by `srcRel`; no-media shots → `skipped[]`; audio with volumes.
+- [x] `buildEdl(plan, fps, title)` — CMX3600 NON-DROP FRAME: 8-char reels (`SHOT0100`,
+      `VOICE`, `MUSIC`), stills source in=out=`00:00:00:00`, clips source out =
+      `min(probed, dur)` frames, cumulative record timecodes, `* FROM CLIP NAME:` comments,
+      VO/music as A-track events. CRLF.
+- [x] `buildAeScript(plan, cfg, exportRoot)` — ExtendScript `.jsx`: new project, comp at
+      w×h×fps×totalSec; imports media relative to the script (`$.fileName`), layers per event
+      with `startTime`/`outPoint`, `muted` → `audioEnabled=false`, `20*log10(volume)` dB
+      levels for VO/music beds; saves `Assembly.aep` next to the script. Paths escaped.
+- [x] `buildManifest(plan, cfg, opts)` — markdown: per-shot mapping, skips, runtime/fps/res.
+- [x] `buildNormalizeArgs` / `buildConcatList` / `buildConcatArgs` / `buildMixArgs` — pure
+      argv builders for the 3-pass pipeline (below).
+- [x] `assemble(p, cfg, emit, deps)` — I/O: copies media into `media/{shots,clips,audio}`,
+      writes the 4 artifacts, probes clip/audio lengths when ffmpeg resolves, persists
+      `p.assembly` bookkeeping. E2E-tested over a temp production folder.
+- [x] `renderAnimatic(p, cfg, emit, deps)` — 3-pass pipeline via injected
+      `runFfmpeg`/`probe`; per-shot progress lines; temp segments always cleaned up;
+      returns the render rel path.
+
+## ffmpeg seam `app/src/main/ffmpeg.ts`
+
+- [x] `resolveFfmpeg()` — `ffmpeg-static` first (dev node_modules; packaged via the
+      `app.asar` → `app.asar.unpacked` swap + `asarUnpack`), then `resources/ffmpeg/`, then
+      `ffmpeg` on `PATH`. Guards the Electron-only `process.resourcesPath`.
+- [x] `runFfmpeg(bin, argv, emit?)` — spawn, stderr tail on non-zero exit.
+- [x] `probeMedia(bin, path)` — `ffmpeg -i` `Duration:` + audio-stream detection; null-safe.
+
+## Render pipeline (3-pass, robust to mixed stills+clips)
+
+- [x] Pass A — normalize each event to a uniform h264/yuv420p + aac segment of exactly
+      `durationSec` at the target size (stills `-loop 1`; short clips `tpad`-cloned to their
+      duration; muted/audio-less clips get an `anullsrc` silent track so every segment has
+      video+audio and Pass B can `-c copy`).
+- [x] Pass B — concat demuxer (`-safe 0` list file) with `-c copy` → premix.
+- [x] Pass C — `amix` VO + music (per-bed `volume=`) over the base track; no beds → copy
+      through; writes `out/assembly/render.mp4`.
+- [x] `_render/` temp segments removed after C (also on failure).
+
+## Wiring (`app/src/main/index.ts` + `shared/ipc.ts`)
+
+- [x] `runProductionStep` widened to `step: 3 | 4 | 5`.
+- [x] `production:assemblyBuild(id, cfg?)` — `runProductionStep(5, ...)`, no API key needed;
+      marks `status[5]="done"`.
+- [x] `production:assemblyRender(id)` — `runProductionJob`; hard error when no ffmpeg;
+      `status[5]` running → done / error; sets `renderPath`/`renderedAt`.
+- [x] `production:assemblyOpenFolder(id)` — `shell.openPath` on the export folder.
+- [x] CascadeApi + 3 `ipcContract` entries + 3 `handle()`s (drift guards enforce parity).
+
+## Renderer — `app/src/renderer/src/components/production/assembly.tsx`
+
+- [x] `AssemblyPanel({ prod, onApply, log })`: fps select (24/25/30) + resolution select
+      (1080/1440/2160p, default 1080p) → `cfg`; **Build package**; **Render MP4** (disabled
+      until built); live log (`ProdLog`); `cascade-media://…render.mp4` preview; **Open
+      export folder**; runtime/skip/rendered readouts.
+- [x] Replaced the Step 5 placeholder block in `ProductionWorkspace.tsx` with the panel
+      (StepFooter already hides at step 5).
+
+## Packaging
+
+- [x] `ffmpeg-static` added to `app/package.json` deps (externalized by
+      `externalizeDepsPlugin`); `electron-builder.json` gains `asarUnpack:
+      node_modules/ffmpeg-static/**` so the binary lives outside the asar.
+
+## Tests (`app/test/assembly.test.ts` + `assembly-ffmpeg.test.ts`)
+
+- [x] `assemblyPlan` (ordering, full-res original resolution, clip precedence, still gathered
+      alongside clips, default 3s, dedupe, skip+warn, audio config, clip-only shots).
+- [x] `buildEdl` (header/FCM, reels, still src 00:00:00:00, cumulative record tc, probe-clamped
+      clip srcOut, comment lines, VO/music A-track events).
+- [x] `buildAeScript` (comp args, relative media base, in/out points, muted flag, dB levels,
+      project save, path escaping).
+- [x] `buildManifest` / `buildNormalizeArgs` / `buildConcat*` / `buildMixArgs` (stills `-loop 1`,
+      muted→silence, `tpad`, `apad`, volumes, output path).
+- [x] `assemble` e2e over a temp production folder: tree created, media copied, 4 artifacts
+      written, config persisted, probe → probed EDL.
+- [x] `renderAnimatic` with a fake `runFfmpeg`: exact call sequence + argv, temp cleanup,
+      "nothing to render" guard.
+- [x] `assembly-ffmpeg.test.ts` — real-ffmpeg e2e smoke (skips unless `ASSEMBLY_E2E=1`):
+      stills + clip + VO + music render a playable 3.5s mp4 with audio.
+
+## Verify
+
+- [x] `npm run typecheck` + `npm test` (118 tests) + `npm run build` pass.
+- [x] Real-binary smoke: `ASSEMBLY_E2E=1 npx vitest run test/assembly-ffmpeg.test.ts` →
+      playable `render.mp4` (3.5s, has audio).
+- [ ] Manual: build package on a real production → export folder with all media + 4 artifacts;
+      open EDL in Resolve/Premiere; run JSX in After Effects → comp rebuilds; Render MP4 →
+      playable `render.mp4` with VO/music mixed and muted clips silent.
+
+## Review
+
+Implemented across `app/src/shared/ipc.ts`, `app/src/main/{productions,assembly,ffmpeg,index}.ts`,
+`app/src/renderer/src/components/production/{assembly.tsx,ProductionWorkspace.tsx}`, `styles.css`,
+`app/package.json`, `electron-builder.json`, `CONTEXT.md`. Typecheck + full test suite + build
+pass clean; the real-ffmpeg e2e smoke test renders a playable mp4.
+
+- **Deep module** — `assembly.ts` keeps every decision (plan mapping, EDL/AEScript/manifest
+  text, ffmpeg argv) in pure builders behind a small surface; `assemble`/`renderAnimatic` take
+  an injected `run`/`probe` seam, so the whole pipeline is unit-tested without ffmpeg and
+  smoke-tested with it.
+- **Robust render** — every segment is normalized to identical h264/aac streams (silence for
+  muted/audio-less clips, `tpad` clone for short clips), so Pass B `-c copy` never hits a
+  stream mismatch; clip audio is baked into the base track and VO/music `amix` on top.
+- **Muted semantics** — honored in the AEScript (`audioEnabled = false`) and the render
+  (silent segment); EDL clips also clamp source-out to probed length.
+- **Editor handoff** — media paths in the `.jsx` are relative to the script, so the export
+  folder is portable to another machine.
+- **Note (not re-litigated)**: `renderAnimatic` re-probes clip lengths at render time rather
+  than trusting the build-time probe, because `p` may change between build and render; the
+  probe is cheap.
+- **Restart required** — main process changed (new IPC channels + schema back-fill).
+
+---
+
 # Draggable reference-tag chips in the prompt text boxes
 
 The `@[Name]` reference tags in the prompt content box are now little **purple chips**
@@ -1263,3 +1417,38 @@ the video and edit nodes carry their own prompt textarea (persisting
 `shot.graphVideoPrompt` / `shot.graphEditPrompt`), like the image node's self-contained
 layout. Dropped the `e-vp-vid`/`e-ep-edit` edges and the `in-prompt` sockets on both nodes;
 `STRUCTURAL_IDS`, `defaultPosition`, and `nodeTypes` updated. Typecheck + build clean.
+
+---
+
+## Fix: edit-image node output shows in the graph but not the storyboard
+
+User report: the edit-image node's output piped into the frame output node renders in the
+node view but never reaches the storyboard card.
+
+### Root cause
+The graph's frame output node derives its preview from the **piped gen node's selected
+output** (`graphEditGens[graphEditGenIndex].path`), but the storyboard reads
+`shot.artwork` — a separately-maintained mirror field. The mirror is only correct if every
+apply/generation lands on `shot.artwork` and nothing races it. Real production data had the
+exact desync: shot 1800 was `graphOutputSource: "editgen"` with a valid edit file in
+`graphEditGens[0]` on disk but `artwork` empty → node view correct, storyboard "no frame".
+(Also present: `graphImageGens` items seeded from legacy flat/`shot-undefined` paths.)
+
+### Fix
+The output pipe is now the source of truth; the mirror is re-derived at read and write time:
+- New pure `syncBoardOutputToPipe(shot)` in `pipeline.ts` — for `imagegen`/`editgen` sets
+  `artwork` to the selected gen's path (and clears a stale `videoPath`); empty piped node →
+  blank frame; `videogen` syncs `videoPath` (+ image-pipe still fallback).
+- Runs on every `loadProduction` (`migrateBoardArtwork`) → **self-heals existing documents**
+  (the next load fixes the user's shot 1800).
+- Runs inside `applyRendererState` → a stale renderer `production:save` can no longer
+  clobber the piped frame back out (the race that originally produced the desync).
+- `ref`/unpiped/classic shots are untouched (refs are already applied to `artwork`/
+  `videoPath` by `applyGraphRefOutput`).
+
+### Verify
+- [x] `npm run typecheck`
+- [x] `npm test` (142 tests incl. new `syncBoardOutputToPipe` + `applyRendererState` cases)
+- [x] `npm run build`
+- [x] Healed the real production docs (verified shot 1800: artwork mirrors the piped edit)
+- Requires a dev restart (main-process change).

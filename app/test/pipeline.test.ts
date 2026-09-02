@@ -30,12 +30,14 @@ import {
   mergeProducts,
   normalizeScenes,
   parseBreakdownJson,
+  openArtPrompt,
   recordGraphEditGen,
   refTokens,
   resolveReferenceTags,
   resolveShotStyle,
   scriptMarkdown,
   shotReferences,
+  syncBoardOutputToPipe,
 } from "../src/main/pipeline.js";
 
 // ---- fixture ---------------------------------------------------------------
@@ -65,7 +67,7 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
     products: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
     ...overrides,
   };
 }
@@ -227,6 +229,28 @@ describe("effectivePrompt", () => {
     const prompt = effectivePrompt(p, makeShot());
     expect(prompt).toContain("Style: Heroic 3D render style");
   });
+
+  it("frame-drop tag on shot.prompt is invisible while Magic Prompt is ON", () => {
+    // attachReferenceToPrompt (the frame-over-frame drop) writes the @[name] tag
+    // to shot.prompt — but in magic mode effectivePrompt reads magicPrompts
+    // first and never sees it, so the reference block never appears.
+    const shot = makeShot({ prompt: "The villain looms over the ridge.\n\n@[Frame 0001]", promptManual: true });
+    const p = makeProduction({ magicEnabled: true, magicPrompts: { [shot.id]: "The villain looms over the ridge." } });
+    expect(effectivePrompt(p, shot)).not.toContain("@[Frame 0001]");
+    expect(effectivePrompt(p, shot)).toContain("The villain looms over the ridge.");
+  });
+
+  it("frame-drop tag written to magicPrompts DOES surface (the fix)", () => {
+    const shot = makeShot();
+    const p = makeProduction({
+      magicEnabled: true,
+      magicPrompts: { [shot.id]: "The villain looms over the ridge.\n\n@[Frame 0001]" },
+      references: [{ id: "r-frame", name: "Frame 0001", artwork: "data:image/png;base64,QUFBQQ==", shotIds: [shot.id] }],
+    });
+    expect(effectivePrompt(p, shot)).toContain("@[Frame 0001]");
+    expect(shotReferences(p, shot).some((r) => r.name === "Frame 0001")).toBe(true);
+    expect(openArtPrompt(p, shot)).toContain("@image1");
+  });
 });
 
 describe("shotReferences / refTokens / resolveReferenceTags", () => {
@@ -254,6 +278,19 @@ describe("shotReferences / refTokens / resolveReferenceTags", () => {
   it("resolves human tags to tokens", () => {
     const shot = makeShot({ prompt: "Show @[Gandalf] with @[Aragorn]" });
     expect(resolveReferenceTags(p, shot, "Show @[Gandalf] with @[Aragorn]")).toBe("Show @image1 with @image2");
+  });
+
+  it("frame-drop reference is never resolved while Magic Prompt is ON", () => {
+    // The frame drop tags shot.prompt, but shotReferences/openArtPrompt read
+    // magicPrompts in magic mode — the dropped frame reference is dropped.
+    const shot = makeShot({ prompt: "The villain looms over the ridge.\n\n@[Frame 0001]", promptManual: true });
+    const mp = makeProduction({
+      magicEnabled: true,
+      magicPrompts: { [shot.id]: "The villain looms over the ridge." },
+      references: [{ id: "r-frame", name: "Frame 0001", imagePath: "references/Frame 0001.png", shotIds: [shot.id] }],
+    });
+    expect(shotReferences(mp, shot).some((r) => r.name === "Frame 0001")).toBe(false);
+    expect(openArtPrompt(mp, shot)).not.toContain("@[Frame 0001]");
   });
 });
 
@@ -350,5 +387,62 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
     hookImageGenToOutput(shot);
     expect(shot.graphOutputSource).toBe("imagegen");
     expect(shot.artwork).toBe("boards/0100/shot-0100-gen.jpg");
+  });
+});
+
+describe("syncBoardOutputToPipe", () => {
+  const edit = { path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" };
+  const frame = { path: "boards/0100/shot-0100-frame.jpg", prompt: "p", model: "auto", at: "" };
+  const clip = { path: "videos/shot-0100-clip.mp4", prompt: "p", model: "auto", at: "" };
+
+  it("applies a piped edit-image node's selected edit as the storyboard frame", () => {
+    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0 });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.artwork).toBe(edit.path);
+  });
+
+  it("re-derives the frame when a stale/missing artwork raced a renderer save", () => {
+    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0, artwork: "boards/0100/shot-0100-stale.jpg", videoPath: "videos/stale.mp4" });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.artwork).toBe(edit.path);
+    expect(shot.videoPath).toBeUndefined();
+  });
+
+  it("is a no-op when artwork already mirrors the piped edit", () => {
+    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0, artwork: edit.path });
+    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    expect(shot.artwork).toBe(edit.path);
+  });
+
+  it("clears the frame when the piped node has no generation yet", () => {
+    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [], artwork: "boards/0100/old.jpg", videoPath: "videos/old.mp4" });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.artwork).toBeUndefined();
+    expect(shot.videoPath).toBeUndefined();
+  });
+
+  it("mirrors the image generation node's selected frame", () => {
+    const shot = makeShot({ graphOutputSource: "imagegen", graphImageGens: [frame], graphImageGenIndex: 0 });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.artwork).toBe(frame.path);
+  });
+
+  it("mirrors the video generation node's selected clip and its still", () => {
+    const shot = makeShot({ graphOutputSource: "videogen", graphVideoGens: [clip], graphVideoGenIndex: 0 });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.videoPath).toBe(clip.path);
+  });
+
+  it("uses the image pipe as the videogen still when the shot has no frame", () => {
+    const shot = makeShot({ graphOutputSource: "videogen", graphVideoGens: [clip], graphVideoGenIndex: 0, graphImageGens: [frame], graphImageGenIndex: 0 });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.videoPath).toBe(clip.path);
+    expect(shot.artwork).toBe(frame.path);
+  });
+
+  it("leaves unpiped/classic shots untouched", () => {
+    const shot = makeShot({ artwork: "boards/0100/shot-0100-classic.jpg" });
+    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    expect(shot.artwork).toBe("boards/0100/shot-0100-classic.jpg");
   });
 });

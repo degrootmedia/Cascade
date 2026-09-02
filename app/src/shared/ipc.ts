@@ -151,6 +151,9 @@ export interface ProductionShot {
    *  resolved by name/prompt at generation time). When absent, the master
    *  style (styles[0]) applies. */
   style?: string;
+  /** True when the user picked "None" for this shot's render style: the Style
+   *  paragraph is suppressed entirely, even though a master style exists. */
+  styleNone?: boolean;
   /** Character/product reference ids explicitly attached to this frame in
    *  Step 3 — beyond those auto-matched by name from the shot's text. */
   refIds?: string[];
@@ -217,6 +220,11 @@ graphImageGenIndex?: number;
   graphOutputRefId?: string;
   /** One-time marker: classic generations were moved into the gen nodes. */
   graphMigrated?: boolean;
+  /** An OpenArt frame job that outlived the generating call (timed out or the
+   *  finished image couldn't be downloaded). The job keeps rendering
+   *  server-side, so the frame can be reclaimed later instead of re-paid.
+   *  Cleared when a fresh generation supersedes it or the recheck recovers it. */
+  pendingImageGen?: PendingImageGen;
 }
 
 /** One stored output of a node-graph generation node. */
@@ -228,6 +236,24 @@ export interface GraphGenItem {
   /** The model id used ("auto" when Cascade picked). */
   model: string;
   /** ISO timestamp. */
+  at: string;
+}
+
+/** An OpenArt async image job that outlived the generating call — the wait
+ *  timed out or the finished image couldn't be downloaded, but the job keeps
+ *  rendering server-side. Kept on the shot so the finished frame can be
+ *  reclaimed (recheck + download) instead of paying for a second generation. */
+export interface PendingImageGen {
+  /** The async job id to re-poll (`openart_creation_get`/`wait`). */
+  historyId?: string;
+  /** Direct result URL to re-download when the submission returned one
+   *  (no historyId) and the first download failed. */
+  url?: string;
+  /** The prompt this job was submitted with. */
+  prompt: string;
+  /** The model id used ("auto" when Cascade picked). */
+  model: string;
+  /** ISO timestamp of when the job was orphaned. */
   at: string;
 }
 
@@ -374,6 +400,27 @@ export interface VoiceoverConfig {
   voice: string;
 }
 
+/** Step 5 assembly configuration + last-run bookkeeping.
+ *  `fps`/`width`/`height` describe the exported timeline and the MP4 render;
+ *  `exportDir` is workspace-relative (defaults to `<outDir>/assembly`). */
+export interface ProductionAssembly {
+  fps: number;
+  width: number;
+  height: number;
+  /** Workspace-relative export folder (media + EDL + AEScript + manifest + render). */
+  exportDir: string;
+  /** ISO timestamp of the last package build (gather + EDL + AEScript + manifest). */
+  assembledAt?: string;
+  /** Workspace-relative path of the last rendered MP4. */
+  renderPath?: string;
+  /** ISO timestamp of the last successful render. */
+  renderedAt?: string;
+  /** Total runtime of the assembled timeline in seconds. */
+  totalSec?: number;
+  /** Shot numbers rendered as black slots at the last build (no frame, no clip). */
+  skippedShots?: string[];
+}
+
 export interface Production {
   meta: ProductionMeta;
   /** Pipeline step the user is focused on (1..5). */
@@ -425,7 +472,9 @@ export interface Production {
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
-  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string };
+  /** Step 5 assembly configuration + last-run bookkeeping. */
+  assembly?: ProductionAssembly;
+  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string };
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -599,6 +648,12 @@ export interface CascadeApi {
   regenerateBoard(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: regenerate several frames in parallel (single shared production). */
   regenerateBoards(productionId: string, shotIds: string[]): Promise<Production>;
+  /**
+   * Step 3: reclaim a shot's frame from an OpenArt job that outlived the
+   * generating call (the wait timed out or the finished image couldn't be
+   * downloaded). Rechecks the pending job and downloads the image when ready.
+   */
+  recheckBoard(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: write every shot's generation prompt to <folder>/boards/prompts.md. */
   exportBoardPrompts(productionId: string): Promise<Production>;
   /** Step 3: return one shot's full generation prompt (used by the per-frame copy button). */
@@ -729,6 +784,22 @@ export interface CascadeApi {
   checkExternalEdits(): Promise<void>;
   /** Fired after an externally edited board's JPEG preview has been regenerated. */
   onBoardExternalUpdate(cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void): () => void;
+  /**
+   * Step 5: gather all full-res frames + video clips + audio into the export
+   * folder and write the EDL, After Effects rebuild script, and manifest.
+   * `cfg` overrides the persisted fps / target resolution. Returns the
+   * updated production.
+   */
+  assemblyBuild(productionId: string, cfg?: Partial<Pick<ProductionAssembly, "fps" | "width" | "height">>): Promise<Production>;
+  /**
+   * Step 5: render the assembled timeline to MP4 via ffmpeg (3-pass: normalize
+   * per-shot segments → concat → mix VO + music). Requires an ffmpeg binary
+   * (bundled ffmpeg-static, else a system `ffmpeg`). Returns the updated
+   * production.
+   */
+  assemblyRender(productionId: string): Promise<Production>;
+  /** Step 5: open the export folder in the OS file manager. */
+  assemblyOpenFolder(productionId: string): Promise<void>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }
 
@@ -828,6 +899,7 @@ export const ipcContract = {
   "production:generateBoards": { method: "generateBoards", kind: "invoke" },
   "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
   "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },
+  "production:recheckBoard": { method: "recheckBoard", kind: "invoke" },
   "production:boardPrompts": { method: "exportBoardPrompts", kind: "invoke" },
   "production:boardPrompt": { method: "getBoardPrompt", kind: "invoke" },
   "production:updateBoardPrompt": { method: "updateBoardPrompt", kind: "invoke" },
@@ -866,6 +938,9 @@ export const ipcContract = {
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
   "production:checkExternalEdits": { method: "checkExternalEdits", kind: "invoke" },
+  "production:assemblyBuild": { method: "assemblyBuild", kind: "invoke" },
+  "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
+  "production:assemblyOpenFolder": { method: "assemblyOpenFolder", kind: "invoke" },
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */

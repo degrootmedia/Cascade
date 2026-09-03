@@ -648,6 +648,23 @@ body {
 .prod-category-toggle:hover { background: var(--bg-raised); color: var(--accent); }
 .prod-category-name { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text); padding: 4px 6px; font-size: .9rem; font-weight: 600; }
 .prod-category-name:not(:disabled):hover, .prod-category-name:not(:disabled):focus { border-color: var(--border); outline: none; background: var(--bg-raised); }
+/* AI-generate button in a category header — creates a reference in that category. */
+.prod-ref-gen-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.8rem;
+}
+.prod-ref-gen-btn:hover { border-color: var(--accent); background: var(--bg-raised); }
 
 /* ---------- step 3: storyboard contact sheet ---------- */
 /* Standard button language for the Step 3/4 toolbar (aligns with the rest of the app). */
@@ -1116,7 +1133,12 @@ body {
   padding: 10px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
-.prod-ref-lightbox-card img {
+/* Scoped under .prod-ref-lightbox and explicit width/height:auto so the card's
+   thumbnail rules (.prod-ref img { width:100%; height:110px }) can never leak
+   in and shrink the enlarged image back to thumbnail size. */
+.prod-ref-lightbox .prod-ref-lightbox-card img {
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 70vh;
   object-fit: contain;
@@ -1234,6 +1256,26 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
   line-height: 1;
 }
 .prod-ref-addimg:hover { background: var(--accent); }
+/* AI-edit button on a reference figure that has an image (mirrors the
+   addimg slot, so the two never overlap). */
+.prod-ref-edit-ai {
+  position: absolute;
+  top: 4px;
+  right: 30px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.prod-ref:hover .prod-ref-edit-ai, .prod-ref-edit-ai:focus { opacity: 1; }
+.prod-ref-edit-ai:hover { background: var(--accent); }
 .prod-ref-del {
   position: absolute;
   top: 4px;
@@ -1252,6 +1294,26 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
 }
 .prod-ref:hover .prod-ref-del, .prod-ref-del:focus { opacity: 1; }
 .prod-ref-del:hover { background: var(--danger); }
+/* Magnify a reference/character-sheet image (top-left slot, mirrors the
+   del/edit buttons that sit on the right). */
+.prod-ref-zoom {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.prod-ref:hover .prod-ref-zoom, .prod-ref-zoom:focus { opacity: 1; }
+.prod-ref-zoom:hover { background: var(--accent); }
 .prod-ref-new { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .prod-ref-new.form { margin-top: 8px; }
 .prod-ref-add { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
@@ -2953,6 +3015,111 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-edit-prompt:focus { outline: none; border-color: var(--accent); }
 .prod-edit-go { margin-top: 12px; align-self: flex-end; padding: 9px 20px; }
+
+/* ---------- ReferenceImageGenModal (Step 2 generate/edit) ---------- */
+.prod-refgen-panel { width: min(540px, 92vw); gap: 8px; }
+.prod-refgen-tabs { display: flex; gap: 8px; margin: 2px 0 10px; }
+.prod-refgen-tab {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.prod-refgen-tab.active { border-color: var(--accent); color: var(--accent); background: var(--bg-raised); }
+.prod-refgen-tab:disabled { opacity: 0.45; cursor: default; }
+.prod-refgen-panel .prod-video-row { margin-top: 2px; }
+.prod-refgen-name {
+  width: 100%;
+  margin-top: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+.prod-refgen-name:focus { outline: none; border-color: var(--accent); }
+.prod-refgen-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 6px;
+}
+.prod-refgen-source img {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.prod-refgen-source span { font-size: 0.78rem; color: var(--text-dim); line-height: 1.45; }
+/* The @-tag prompt editor inside the reference modal — a bigger surface than
+   the frame edit boxes, so generation prompts have room to breathe. */
+.prod-refgen-prompt {
+  width: 100%;
+  min-height: 150px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.prod-refgen-prompt:focus { outline: none; border-color: var(--accent); }
+
+/* ---------- Character builder (Step 2) ---------- */
+.prod-char-form { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.prod-char-desc-row { display: flex; gap: 8px; align-items: stretch; }
+.prod-char-desc-row .prod-char-desc { flex: 1; }
+.prod-char-refine { align-self: stretch; white-space: nowrap; }
+.prod-char-desc { min-height: 90px; resize: vertical; }
+.prod-char-view { display: flex; flex-direction: column; gap: 4px; }
+.prod-char-view-options { display: flex; gap: 8px; }
+.prod-char-view-opt {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.prod-char-view-opt.active { border-color: var(--accent); color: var(--accent); background: var(--bg-raised); }
+.prod-char-sheets { margin-top: 18px; }
+/* Gray "+" thumbnail — starts a new character prompt (always first in the grid). */
+.prod-char-new {
+  width: 140px;
+  height: 110px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-dim);
+  font-size: 1.7rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.prod-char-new:hover { border-color: var(--accent); color: var(--accent); background: var(--bg-raised); }
+/* Selectable character-sheet thumbnail — click loads the character's last
+   description + settings; the selected one is highlighted. */
+.prod-char-sel { cursor: pointer; }
+.prod-char-sel.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 
 /* Step 2: "active model can't see images" popup. */
 .prod-vision-panel { width: min(440px, 92vw); gap: 8px; }

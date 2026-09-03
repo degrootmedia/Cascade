@@ -29,7 +29,7 @@ import {
 import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
-import type { CharacterSheet, ProductRef, SuggestedReference } from "../shared/ipc.js";
+import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -266,6 +266,50 @@ export async function refineStylePrompt(
   );
   const refined = text.trim().replace(/^["']|["']$/g, "");
   if (!refined) throw new Error("The style refinement came back empty.");
+  return refined;
+}
+
+/**
+ * Step 2 character builder — one bounded LLM call that polishes the user's
+ * rough character description into a concrete visual description (appearance,
+ * build, outfit, distinguishing features) suitable as the subject of a
+ * character-sheet generation. Only the description is refined — the always-on
+ * sheet framing (full body + face inset, neutral on gray) is added later by
+ * characterSheetPrompt(), so this must not emit any of that structure.
+ */
+export async function refineCharacterDescription(
+  description: string,
+  scriptExcerpt: string,
+  apiKey: string,
+  model: string
+): Promise<string> {
+  const gab = new GabClient(apiKey);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      {
+        role: "system",
+        content:
+          "You polish character descriptions for an image/animation generation pipeline. " +
+          "Reply with the refined description only — no quotes, no explanation, no markdown.",
+      },
+      {
+        role: "user",
+        content:
+          "Refine this rough character description into a clear, concrete visual description " +
+          "for a character reference sheet. Keep the user's intent; add useful specifics " +
+          "(build, age, skin/hair/eye details, outfit, distinguishing features, materials) " +
+          "only where the user was vague. Do NOT mention a full body shot, face closeup, pose, " +
+          "expression, lighting, background, or image layout — the pipeline adds that framing " +
+          "itself. AT MOST 2 SENTENCES.\n\n" +
+          "CHARACTER DESCRIPTION:\n" + description +
+          (scriptExcerpt ? "\n\nSCRIPT EXCERPT (for tone only — do not describe scenes):\n" + scriptExcerpt : ""),
+      },
+    ],
+    600
+  );
+  const refined = text.trim().replace(/^["']|["']$/g, "");
+  if (!refined) throw new Error("The character description refinement came back empty.");
   return refined;
 }
 
@@ -633,6 +677,51 @@ export function brandPrompt(p: Production): string {
   if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
   if (font) parts.push(`Font: ${font}.`);
   return parts.join(" ");
+}
+
+/** The always-on framing for the Step 2 character builder. The user's
+ *  description is the subject; this language guarantees the sheet structure —
+ *  a full body shot (front, or front + back) with an inset closeup of the
+ *  character's face — always rendered in a neutral pose and expression under
+ *  neutral lighting on a plain gray background, with no text overlays. */
+export function characterSheetPrompt(description: string, view: CharacterSheetView = "front"): string {
+  const desc = description.trim();
+  const body = view === "front-back" ? "front and back views" : "front view";
+  return (
+    `Character reference sheet: ${desc}. ` +
+    `Full body shot, ${body}, with an inset closeup of the character's face. ` +
+    `Neutral pose, neutral expression, neutral lighting, plain gray background. ` +
+    `No text, no labels, no watermarks.`
+  );
+}
+
+/** Mirror a generated character sheet into the references panel: ensure a
+ *  "Characters" category exists and upsert a CustomRef named after the
+ *  character into it, pointing at the same on-disk file as the CharacterSheet
+ *  (so the sheet is manageable in the reference grid and citable as @[name]).
+ *  Pure production mutation — file IO is the caller's job. Returns the
+ *  category id used. */
+export function upsertCharacterSheetRef(p: Production, name: string, rel: string, categoryName = "Characters"): string {
+  let categoryId = (p.referenceCategories ?? []).find((c) => c.name.trim().toLowerCase() === categoryName.toLowerCase())?.id;
+  if (!categoryId) {
+    categoryId = `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    p.referenceCategories = [...(p.referenceCategories ?? []), { id: categoryId, name: categoryName }];
+  }
+  const ref = (p.references ?? []).find((r) => r.name.toLowerCase() === name.toLowerCase());
+  if (ref) {
+    ref.imagePath = rel;
+    ref.artwork = undefined;
+    ref.categoryId = categoryId;
+  } else {
+    p.references = [...(p.references ?? []), {
+      id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      imagePath: rel,
+      categoryId,
+      shotIds: [],
+    }];
+  }
+  return categoryId;
 }
 
 /**

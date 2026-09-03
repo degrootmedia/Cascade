@@ -332,6 +332,37 @@ describe("OpenArtClient.imageGenFn", () => {
     }
   });
 
+  it("honors a requested aspect ratio (4:3 / 1:1) instead of the 16:9 default", async () => {
+    const generated: Record<string, unknown>[] = [];
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "grok-imagine-1-5", displayName: "Grok Imagine", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              aspectRatio: { type: "string", enum: ["1:1", "4:3", "16:9"] },
+              resolution: { type: "string", enum: ["1k", "2k", "4k"] },
+            },
+          },
+        }),
+      openart_generate_image: (args) => {
+        generated.push(args);
+        return '{"status":"PENDING","historyId":"h-ratio","pollAfterSeconds":0}';
+      },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("ratio-jpeg")] }),
+    });
+    const client = new OpenArtClient(mcp);
+
+    for (const ratio of ["1:1", "4:3", "16:9"] as const) {
+      generated.length = 0;
+      const gen = client.imageGenFn(makeProduction(), undefined, undefined, undefined, ratio)!;
+      const out = await gen("A reference image", []);
+      expect(out.toString()).toBe("ratio-jpeg");
+      const params = (generated[0] as Record<string, unknown>).params as Record<string, unknown>;
+      expect(params.aspectRatio).toBe(ratio);
+    }
+  });
+
   it("returns null when no image-generation tool is connected", () => {
     const client = new OpenArtClient(fakeMcp({ openart_model_list: () => "[]" }));
     expect(client.imageGenFn(makeProduction())).toBeNull();

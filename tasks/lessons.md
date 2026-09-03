@@ -68,3 +68,26 @@ No session-specific lessons yet.
   every `loadProduction` (self-heals existing docs) and inside
   `applyRendererState` (so a stale renderer save can never clobber the piped
   frame back out). Test the exact user-visible desync, not just the happy path.
+
+## 2026-09-03 — character builder output vanished on save (rebaseProduction whitelist)
+- Bug: the Step 2 character builder generated a sheet (file written to disk) but
+  the character never appeared in the Load-character dropdown and the mirrored
+  reference never landed in the references panel. Same for the older
+  reference-image generator. Root cause: both run under `runProductionJob`,
+  whose `rebaseProduction` reloads the freshest on-disk production and copies
+  ONLY a hardcoded top-level field list (`status`, `currentStep`, `magicEnabled`,
+  `magicPrompts`, `assembly`) plus per-shot fields — `characters`,
+  `references`, and `referenceCategories` mutations were silently dropped on
+  save, leaving disk files orphaned (no production entry points at them).
+- Rules:
+  1. `rebaseProduction` is a denylist-by-default, not a merge: ANY top-level
+     collection a `runProductionJob`/`runProductionStep` handler mutates must be
+     added to its copy list, or the change disappears while `emit("…done")` and
+     the on-disk file say otherwise. Grep the runner's call sites for what they
+     mutate, and keep the list in sync.
+  2. Files written to disk during a job are NOT proof of persistence — a
+     `refsDir`/`boardsDir` artifact can exist while no production field points
+     at it. Verify the production JSON after a job, not just the file.
+  3. When a job mutates renderer-owned collections (characters/references),
+     wholesale-copy from the job's copy on change; the concurrent-edit window is
+     the job duration and matches how `status`/`assembly` are already handled.

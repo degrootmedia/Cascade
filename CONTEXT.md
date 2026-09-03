@@ -37,6 +37,14 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 - **Scene** — ordinal grouping of shots (display only).
 - **Reference** — a character / product / custom-referenced image. Artwork lives
   on disk (`imagePath` under `referencesDir`); legacy inline data URLs still read.
+- **Character sheet** — the generated reference image for a character (built by
+  the Step 2 character builder): a full body shot (front, or front + back) with a
+  face-closeup inset, always neutral pose/expression/lighting on a plain gray
+  background with no text overlays. Its prompt framing lives in `characterSheetPrompt`
+  (`pipeline.ts`); sheets are always generated 16:9. The builder's last
+  description + generation settings persist per character (`CharacterSheet.builder`),
+  and every generated sheet is mirrored into the references panel's **Characters**
+  category (`upsertCharacterSheetRef`) so it's citable as `@[name]`.
 - **Style** — a named generation prompt (up to 5); `styles[0]` is the master.
 - **Brand** — palette swatches + optional font appended to every board prompt.
 - **Board** — a shot's generated frame (`artwork` on the shot, in `boardsDir`).

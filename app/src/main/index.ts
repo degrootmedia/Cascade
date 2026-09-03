@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { assemble, renderAnimatic } from "./assembly.js";
@@ -22,7 +22,7 @@ import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, AudioModelInfo, VoiceoverConfig, VideoGenOptions, VideoModelOptions } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, AudioModelInfo, VoiceoverConfig, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1064,6 +1064,28 @@ function registerIpc() {
     }
   });
 
+  // Step 2 character builder: refine the character description via one LLM
+  // call. Returns the refined text; the renderer keeps it in the description
+  // box until the user generates (same flow as typing it by hand).
+  handle("production:refineCharacterDescription", async (_e, id: string, description: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (typeof description !== "string" || !description.trim()) throw new Error("Describe the character first, then refine it.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    productionEmit(id, "Refining the character description…");
+    try {
+      const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
+      const refined = await refineCharacterDescription(description.trim(), excerpt, apiKey, settings.getModel());
+      productionEmit(id, "Character description refined.", "done");
+      return refined;
+    } catch (e) {
+      const msg = friendlyApiError(e);
+      productionEmit(id, msg, "error");
+      throw new Error(msg);
+    }
+  });
+
   // Step 2: fan rough style notes out into up to 5 distinct named styles.
   // Returns the list; the renderer numbers, ids, and persists them as the
   // production's `styles` set (which drives the Step 3 style dropdown).
@@ -1192,7 +1214,11 @@ function registerIpc() {
     // Top-level fields the pipeline owns (step status markers + magic prompt
     // state + Step 5 assembly bookkeeping). `assembly` is included so an
     // assemble()/renderAnimatic() run persists its assembledAt/renderPath.
-    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly"] as const) {
+    // `characters`/`references`/`referenceCategories` are included so the
+    // runProductionJob-based generators (reference-image gen, character
+    // builder) persist their new/updated entries — without them those changes
+    // were silently dropped on save.
+    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly", "characters", "references", "referenceCategories"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
@@ -2165,6 +2191,159 @@ function registerIpc() {
     productionEmit(id, `Added image reference → ${rel}.`);
     return { path: rel };
   });
+
+  // Step 2: generate (or AI-edit) a reference image via OpenArt. Generation
+  // adds a brand-new reference (named by opts.name) into the given category;
+  // editing (opts.sourceRefId) replaces that reference's image in place. The
+  // finished image is written into referencesDir and the reference points at
+  // the on-disk file — references never ride the JSON as data URLs.
+  handle("production:generateReferenceImage", (_e, id: string, opts: ReferenceImageGenOptions) =>
+    runProductionJob(id, "generating a reference image", async (p, emit) => {
+      const text = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
+      if (!text) throw new Error('Describe what to generate or edit first (e.g. "a red gondola interior, moody light").');
+      const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
+      const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      const aspectRatio: ReferenceImageGenOptions["aspectRatio"] = opts?.aspectRatio === "1:1" || opts?.aspectRatio === "4:3" ? opts.aspectRatio : "16:9";
+      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), aspectRatio);
+      if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so references can't be generated in-app.");
+
+      // Editing: the source reference's current image is uploaded as the
+      // visual reference (occupies @image1); @[name] tags in the edit text add
+      // more, so tags start at token 1. Generation has no fixed source.
+      let sourceRef: CustomRef | undefined;
+      if (typeof opts?.sourceRefId === "string" && opts.sourceRefId) {
+        sourceRef = (p.references ?? []).find((r) => r.id === opts.sourceRefId);
+        if (!sourceRef) throw new Error("The reference to edit wasn't found.");
+      }
+      const sourceDataUrl = sourceRef ? refArtworkDataUrl(p, sourceRef) : undefined;
+      if (sourceRef && !sourceDataUrl) throw new Error("This reference has no image to edit — attach or generate one first.");
+
+      let promptText: string;
+      let refs: { name: string; dataUrl: string }[];
+      if (sourceRef) {
+        const { resolved, extras } = openart.resolvePromptRefs(p, text, 1);
+        promptText = `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${resolved.slice(0, 1200)}`;
+        refs = [{ name: sourceRef.name, dataUrl: sourceDataUrl! }, ...extras];
+      } else {
+        const { resolved, extras } = openart.resolvePromptRefs(p, text, 0);
+        promptText = resolved;
+        refs = extras;
+      }
+
+      emit(`${sourceRef ? `Editing reference "${sourceRef.name}"` : "Generating a reference image"}${modelId ? ` via ${modelId}` : ""} (${aspectRatio})…`);
+      const buf = await gen(promptText, refs);
+
+      const base = (sourceRef?.name ?? (typeof opts?.name === "string" && opts.name.trim() ? opts.name.trim() : "Generated reference"))
+        .replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "reference";
+      const dir = p.assets.referencesDir;
+      fs.mkdirSync(assetPath(p, dir), { recursive: true });
+      const ext = buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP" ? "webp"
+        : buf[0] === 0xff && buf[1] === 0xd8 ? "jpg"
+        : "png";
+      let rel = `${dir}/${base}.${ext}`;
+      let i = 2;
+      while (fs.existsSync(assetPath(p, rel))) {
+        rel = `${dir}/${base} (${i}).${ext}`;
+        i++;
+      }
+      fs.writeFileSync(assetPath(p, rel), buf);
+
+      if (sourceRef) {
+        if (sourceRef.imagePath && sourceRef.imagePath !== rel) {
+          try { fs.unlinkSync(assetPath(p, sourceRef.imagePath)); } catch { /* old file already gone */ }
+        }
+        sourceRef.imagePath = rel;
+        sourceRef.artwork = undefined;
+        emit(`Reference "${sourceRef.name}" edited → ${rel}.`, "done");
+      } else {
+        p.references = [...(p.references ?? []), {
+          id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+          name: base,
+          imagePath: rel,
+          categoryId: typeof opts?.categoryId === "string" && opts.categoryId ? opts.categoryId : undefined,
+          shotIds: [],
+        }];
+        emit(`Added reference "${base}" → ${rel}.`, "done");
+      }
+    })
+  );
+
+  // Step 2 character builder: generate a character-sheet reference image via
+  // OpenArt and attach it to a character reference — creating the character
+  // when one with that name doesn't exist yet. The prompt is the user's
+  // description wrapped in the always-on character-sheet framing (full body
+  // shot + face-closeup inset, front or front + back view, neutral pose /
+  // expression / lighting on a plain gray background) built by
+  // characterSheetPrompt() in pipeline.ts. The finished sheet is written into
+  // referencesDir and the character points at the on-disk file.
+  handle("production:generateCharacterSheet", (_e, id: string, opts: CharacterSheetGenOptions) =>
+    runProductionJob(id, "generating a character reference", async (p, emit) => {
+      const name = typeof opts?.name === "string" ? opts.name.trim() : "";
+      const description = typeof opts?.description === "string" ? opts.description.trim() : "";
+      if (!name) throw new Error('Give the character a name first (e.g. "Captain Mara").');
+      if (!description) throw new Error('Describe the character first (e.g. "a scarred space smuggler in a worn leather jacket").');
+      const view: CharacterSheetView = opts?.view === "front-back" ? "front-back" : "front";
+      const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
+      const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      // Character sheets are always 16:9, whatever the view layout.
+      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
+      if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.");
+
+      const promptText = characterSheetPrompt(description, view);
+      emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}…`);
+      const buf = await gen(promptText, []);
+
+      const base = name.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "character";
+      const dir = p.assets.referencesDir;
+      fs.mkdirSync(assetPath(p, dir), { recursive: true });
+      const ext = buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP" ? "webp"
+        : buf[0] === 0xff && buf[1] === 0xd8 ? "jpg"
+        : "png";
+      let rel = `${dir}/${base}.${ext}`;
+      let i = 2;
+      while (fs.existsSync(assetPath(p, rel))) {
+        rel = `${dir}/${base} (${i}).${ext}`;
+        i++;
+      }
+      fs.writeFileSync(assetPath(p, rel), buf);
+
+      const existing = p.characters.find((c) => c.name.toLowerCase() === name.toLowerCase());
+      const builder: CharacterSheetBuilder = {
+        description,
+        view,
+        model: typeof opts?.model === "string" && opts.model ? opts.model : "auto",
+        resolution: typeof opts?.resolution === "string" && opts.resolution ? opts.resolution : "1k",
+      };
+      // Old files replaced by this generation (the character and its mirrored
+      // reference usually share one file) — deleted after both point at rel.
+      const stale: string[] = [];
+      if (existing?.imagePath && existing.imagePath !== rel) stale.push(existing.imagePath);
+      const oldRef = (p.references ?? []).find((r) => r.name.toLowerCase() === name.toLowerCase());
+      if (oldRef?.imagePath && oldRef.imagePath !== rel) stale.push(oldRef.imagePath);
+      if (existing) {
+        existing.imagePath = rel;
+        existing.artwork = undefined;
+        existing.builder = builder;
+        emit(`Character "${name}" reference sheet ready → ${rel}.`, "done");
+      } else {
+        p.characters = [...p.characters, {
+          id: `char-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+          name,
+          key: "",
+          imagePath: rel,
+          builder,
+        }];
+        emit(`Added character "${name}" → ${rel}.`, "done");
+      }
+      // Mirror the sheet into the references panel's "Characters" category so
+      // it's manageable there and citable as @[name]. The character and its
+      // reference point at the same on-disk file.
+      upsertCharacterSheetRef(p, name, rel);
+      for (const oldRel of new Set(stale)) {
+        try { fs.unlinkSync(assetPath(p, oldRel)); } catch { /* old file already gone */ }
+      }
+    })
+  );
 
   // Delete a reference's on-disk file (image or media) when the reference is
   // removed, so referencesDir doesn't accumulate orphans.

@@ -275,6 +275,22 @@ export interface CharacterSheet {
   /** Workspace-relative path of the reference image on disk (the modern
    *  storage — images live in referencesDir, not as inline data URLs). */
   imagePath?: string;
+  /** Step 2 character builder: the last description + generation settings used
+   *  for this character's sheet, so the builder panel can recall them. Re-running
+   *  the builder overwrites — no history is kept. */
+  builder?: CharacterSheetBuilder;
+}
+
+/** The character builder's last-used form state for one character. */
+export interface CharacterSheetBuilder {
+  /** The character description (as typed/refined) that produced the sheet. */
+  description: string;
+  /** View layout of the last sheet (front, or front + back). */
+  view: CharacterSheetView;
+  /** OpenArt model id used ("auto" when Cascade picked). */
+  model: string;
+  /** Output resolution bucket used. */
+  resolution: string;
 }
 
 /** A product whose look must stay consistent (label, packaging, hero item). */
@@ -377,6 +393,50 @@ export interface VideoModelOptions {
   resolutions: string[];
   /** Clip lengths in seconds the model accepts. */
   durations: number[];
+}
+
+/** Aspect ratios offered when generating reference images (Design, Step 2). */
+export type ImageGenAspectRatio = "1:1" | "4:3" | "16:9";
+
+/** Choices made in the reference-image generation/edit modal (Step 2). */
+export interface ReferenceImageGenOptions {
+  /** OpenArt model id, or "auto" for Cascade to pick. */
+  model: string;
+  /** Output resolution bucket fed to the generate tool's sizing param. */
+  resolution: string;
+  /** The desired aspect ratio for the generated image. */
+  aspectRatio: ImageGenAspectRatio;
+  /** Generation/edit prompt (may contain @[name] reference tags). */
+  prompt: string;
+  /** Name for a freshly generated reference (ignored when editing). */
+  name?: string;
+  /** Category the generated reference lands in (ignored when editing). */
+  categoryId?: string;
+  /** When set, the reference's current image is edited in place. */
+  sourceRefId?: string;
+}
+
+/** The view layout a character-sheet generation produces: front view only, or
+ *  front + back views (both with a face-closeup inset). */
+export type CharacterSheetView = "front" | "front-back";
+
+/** Choices made in the Step 2 character-builder panel. The generated image is
+ *  attached to a character reference (`prod.characters`), creating the
+ *  character when one with that name doesn't exist yet. Sheets are always
+ *  generated 16:9. */
+export interface CharacterSheetGenOptions {
+  /** OpenArt model id, or "auto" for Cascade to pick. */
+  model: string;
+  /** Output resolution bucket fed to the generate tool's sizing param. */
+  resolution: string;
+  /** Character name — the sheet is attached to this character. */
+  name: string;
+  /** The user's description of the character. The generation prompt always
+   *  wraps it in the character-sheet framing: full body shot + face-closeup
+   *  inset, neutral pose/expression/lighting on a plain gray background. */
+  description: string;
+  /** Front only, or front + back (both with the face inset). */
+  view: CharacterSheetView;
 }
 
 /** A TTS-capable audio model surfaced in the Step 4 voiceover picker. */
@@ -592,7 +652,7 @@ export interface CascadeApi {
   removeProduction(id: string, mode: "delete" | "archive"): Promise<boolean>;
   /** Native file dialog for a script (pdf/docx/txt/md/fountain). */
   pickScriptFile(): Promise<string | null>;
-  /** Native file dialog for a reference image. Returns a data URL or null. */
+  /** Step 2: open a native file dialog for a reference image. Returns a data URL or null. */
   pickReferenceImage(): Promise<string | null>;
   /**
    * Step 3 node graph: save a dropped video/audio file into the production's
@@ -607,6 +667,23 @@ export interface CascadeApi {
    * references stop riding the JSON as data URLs.
    */
   addReferenceImage(productionId: string, fileName: string, dataUrl: string): Promise<{ path: string } | null>;
+  /**
+   * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
+   * into the production's referencesDir. With `sourceRefId` the reference's
+   * current image is edited in place; otherwise a brand-new reference is added
+   * (named by `name`) to the given `categoryId`. Returns the updated
+   * production.
+   */
+  generateReferenceImage(productionId: string, opts: ReferenceImageGenOptions): Promise<Production>;
+  /**
+   * Step 2 character builder: generate a character-sheet reference image via
+   * OpenArt — the user's description plus the always-on framing (full body shot
+   * with a face-closeup inset, front or front + back view, neutral pose /
+   * expression / lighting on a plain gray background). Attached to a character
+   * reference, creating the character when that name isn't on the production
+   * yet. Returns the updated production.
+   */
+  generateCharacterSheet(productionId: string, opts: CharacterSheetGenOptions): Promise<Production>;
   /** Delete a reference's on-disk file (image or media) when the reference is
    *  removed, so the references folder doesn't accumulate orphans. */
   removeReferenceFile(productionId: string, rel: string): Promise<void>;
@@ -617,6 +694,12 @@ export interface CascadeApi {
   ingestScript(productionId: string, source: string): Promise<Production>;
   /** Step 2 magic wand: refine the style notes via one LLM call. Returns the refined text. */
   refineStylePrompt(productionId: string, style: string): Promise<string>;
+  /**
+   * Step 2 character builder: refine the character description via one LLM call
+   * (polishes the user's rough text into a concrete visual description — the
+   * always-on sheet framing is NOT part of it). Returns the refined text.
+   */
+  refineCharacterDescription(productionId: string, description: string): Promise<string>;
   /**
    * Step 2: generate up to 5 distinct named styles (name + generation prompt)
    * from the user's rough style notes. The renderer assigns numbers/ids and
@@ -887,9 +970,12 @@ export const ipcContract = {
   "production:pickReferenceImage": { method: "pickReferenceImage", kind: "invoke" },
   "production:addReferenceMedia": { method: "addReferenceMedia", kind: "invoke" },
   "production:addReferenceImage": { method: "addReferenceImage", kind: "invoke" },
+  "production:generateReferenceImage": { method: "generateReferenceImage", kind: "invoke" },
+  "production:generateCharacterSheet": { method: "generateCharacterSheet", kind: "invoke" },
   "production:removeReferenceFile": { method: "removeReferenceFile", kind: "invoke" },
   "production:ingest": { method: "ingestScript", kind: "invoke" },
   "production:refineStyle": { method: "refineStylePrompt", kind: "invoke" },
+  "production:refineCharacterDescription": { method: "refineCharacterDescription", kind: "invoke" },
   "production:generateStyles": { method: "generateStyles", kind: "invoke" },
   "production:styleFromImage": { method: "styleFromImage", kind: "invoke" },
   "production:insertShot": { method: "insertShot", kind: "invoke" },

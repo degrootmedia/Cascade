@@ -27,6 +27,7 @@ import {
   VIDEO_URL_RX,
 } from "../shared/prompt-grammar.js";
 import type {
+  ImageGenAspectRatio,
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
@@ -340,25 +341,31 @@ export class OpenArtClient {
     }
   }
 
-  // ---- option assignment ----------------------------------------------------
+// ---- option assignment ----------------------------------------------------
 
-  /** Force a 16:9 widescreen aspect ratio on whatever sizing param the model's
+  /** Map a requested aspect ratio onto whatever sizing param the model's
    *  schema declares. Only sets a value when the schema accepts it: either an
-   *  enum carrying a "16:9" string, or a boolean cinematic/landscape toggle.
-   *  Returns null when the model has no supported 16:9 option (its default —
-   *  usually square — then applies rather than us guessing a malformed value). */
-  private aspectRatioAssign(props: Record<string, unknown>): Record<string, unknown> | null {
+   *  enum carrying a matching "16:9"/"4:3"/"1:1" string, or a boolean
+   *  cinematic/landscape toggle (16:9 → on, 1:1 → off; 4:3 has no boolean
+   *  representation so it falls back to the model default). Returns null when
+   *  the model has no supported option — its default then applies rather than
+   *  us guessing a malformed value. Defaults to 16:9 so storyboards stay
+   *  widescreen unless a caller (reference generation) picks another ratio. */
+  private aspectRatioAssign(props: Record<string, unknown>, aspectRatio: ImageGenAspectRatio = "16:9"): Record<string, unknown> | null {
+    const ratioRx = aspectRatio === "16:9" ? /^16[:xX]9$/ : aspectRatio === "4:3" ? /^4[:xX]3$/ : /^1[:xX]1$/;
     for (const key of Object.keys(props)) {
       if (!/aspect|orient|format/i.test(key)) continue;
       const p = props[key] as { type?: string; enum?: unknown[] } | undefined;
       if (!p) continue;
       if (Array.isArray(p.enum)) {
-        const wide = p.enum.find((v) => /^16[:xX]9$/.test(String(v)));
-        if (wide !== undefined) return { [key]: wide };
-        continue; // has an aspect option but no 16:9 literal — don't guess
+        const want = p.enum.find((v) => ratioRx.test(String(v)));
+        if (want !== undefined) return { [key]: want };
+        continue; // has an aspect option but no matching literal — don't guess
       }
       if (p.type === "boolean" && /cinema|widescreen|wide|landscape/i.test(key)) {
-        return { [key]: true };
+        if (aspectRatio === "16:9") return { [key]: true };
+        if (aspectRatio === "1:1") return { [key]: false };
+        continue;
       }
     }
     return null;
@@ -457,7 +464,7 @@ export class OpenArtClient {
    *  inputImage, …) are preferred over array-style fields (visualReferences).
    *  Returns null when no reference field is found — the caller then falls back
    *  to `params.visualReferences`. */
-  private videoRefsAssign = videoRefsAssign;
+private videoRefsAssign = videoRefsAssign;
 
   /** Build the OpenArt generate-tool arguments for one board.
    *
@@ -467,7 +474,8 @@ export class OpenArtClient {
    *  tool schema doesn't carry per-model field names, so we never rely on it for
    *  more than confirming the nested `params` wrapper. We fill the known keys:
    *   - prompt          (the shot prompt)
-   *   - aspectRatio     → "16:9" (storyboards are widescreen)
+   *   - aspectRatio     → the requested ratio (16:9 by default — storyboards
+   *                       are widescreen; reference generation picks 1:1/4:3/16:9)
    *   - resolution / resolutionTier per the 1k/2k/4k dropdown
    *   - imageCount      → 1 (exactly one frame per shot)
    *   - visualReferences → uploaded reference art (image2image mode only)
@@ -479,15 +487,15 @@ export class OpenArtClient {
     models: OpenArtModelChoice[],
     projectId: string | null,
     mode: string,
-    formProps: Record<string, unknown> | null
+    formProps: Record<string, unknown> | null,
+    aspectRatio: ImageGenAspectRatio = "16:9"
   ): Record<string, unknown> {
     const props = formProps ?? {};
     const params: Record<string, unknown> = { prompt };
 
-    // Every board is storyboarded in widescreen — lock 16:9 whenever the model
-    // offers it; otherwise the model's default (usually square) applies rather
-    // than us guessing a malformed value.
-    const asp = this.aspectRatioAssign(props);
+    // Storyboards stay widescreen by default; reference generation passes the
+    // ratio the user picked in the modal.
+    const asp = this.aspectRatioAssign(props, aspectRatio);
     if (asp) Object.assign(params, asp);
     // Resolution bucket → the model's resolution/resolutionTier label.
     const res = this.resolutionAssign(cfg.resolution, props);
@@ -837,9 +845,10 @@ for (const { tag, name } of refTagMatches(prompt)) {
    * OpenArt model id (per-frame edit runs); "auto"/undefined uses the config.
    * `onNotice` reports a project-resolution fallback (frames landing in the
    * account default project instead of the folder-named one) to the caller's
-   * log so it's never silent.
+   * log so it's never silent. `aspectRatio` selects the generated image's
+   * shape (16:9 by default; reference generation passes the modal's choice).
    */
-  imageGenFn(p: Production, modelOverride?: string, resolutionOverride?: string, onNotice?: (msg: string) => void): ImageGenFn | null {
+  imageGenFn(p: Production, modelOverride?: string, resolutionOverride?: string, onNotice?: (msg: string) => void, aspectRatio: ImageGenAspectRatio = "16:9"): ImageGenFn | null {
     const toolName = this.findTool(/^openart_.*generate.*image$/i);
     if (!toolName) return null;
 
@@ -907,7 +916,7 @@ for (const { tag, name } of refTagMatches(prompt)) {
       if (projectId === undefined) {
         projectId = await this.resolveProject(p, onNotice).catch(() => null);
       }
-      const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps);
+      const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps, aspectRatio);
       const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
       if (images.length) return images[0];
 

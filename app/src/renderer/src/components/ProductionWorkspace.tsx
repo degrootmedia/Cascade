@@ -4,13 +4,13 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout } from "../../../shared/ipc.js";
+import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout, ReferenceImageGenOptions, CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
-import { ReferenceCategorySection, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
+import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js";
 import { AssemblyPanel } from "./production/assembly.js";
@@ -106,6 +106,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // the background (videoBusyIds tracks in-flight shots for button spinners).
   const [videoShotId, setVideoShotId] = useState<string | null>(null);
   const [videoBusyIds, setVideoBusyIds] = useState<string[]>([]);
+  // Step 2 reference-image generation/edit modal. `refId` preselects edit mode
+  // (that reference becomes the AI source); `categoryId` defaults the generate
+  // mode's target category.
+  const [refGen, setRefGen] = useState<{ categoryId?: string; refId?: string } | null>(null);
   const [promptShotId, setPromptShotId] = useState<string | null>(null);
   const [focusedPrompt, setFocusedPrompt] = useState("");
   // Step 3 node graph: opens for the focused shot; overlays the storyboard.
@@ -158,13 +162,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // Keep the rename draft in sync when switching productions.
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
 
-  // Step 3: is the OpenArt MCP server connected (in-app generation possible)?
+  // Step 2 (reference-image generation) + Step 3 (in-app board generation):
+  // is the OpenArt MCP server connected, and which models does it expose?
   useEffect(() => {
-    if (prod?.currentStep !== 3) return;
+    if (prod?.currentStep !== 2 && prod?.currentStep !== 3) return;
     let live = true;
-    window.cascade.getMcpStatus()
-      .then((st) => { if (live) setOpenArtOk(st.some((s) => s.name === "openart" && s.status === "connected")); })
-      .catch(() => { if (live) setOpenArtOk(null); });
+    if (prod.currentStep === 3) {
+      window.cascade.getMcpStatus()
+        .then((st) => { if (live) setOpenArtOk(st.some((s) => s.name === "openart" && s.status === "connected")); })
+        .catch(() => { if (live) setOpenArtOk(null); });
+    }
     window.cascade.listOpenArtModels()
       .then((m) => { if (live) setOpenArtModels(m); })
       .catch(() => { if (live) setOpenArtModels([]); });
@@ -401,6 +408,25 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const ref = (prod.references ?? []).find((r) => r.id === id);
     if (ref?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, ref.imagePath).catch(() => {});
     saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
+  }
+
+  /** Step 2: generate or AI-edit a reference image via OpenArt. The modal
+   *  stays open (and shows errors) until the call succeeds. */
+  async function runRefGen(opts: ReferenceImageGenOptions) {
+    if (!prod) return;
+    setErr(null);
+    const next = await window.cascade.generateReferenceImage(prod.meta.id, opts);
+    setProd(next);
+    void refreshList();
+  }
+  /** Step 2: generate a character-sheet reference via OpenArt (the character
+   *  is created/updated with the finished sheet). */
+  async function runCharacterGen(opts: CharacterSheetGenOptions) {
+    if (!prod) return;
+    setErr(null);
+    const next = await window.cascade.generateCharacterSheet(prod.meta.id, opts);
+    setProd(next);
+    void refreshList();
   }
   /** Add a person/product the script-detection missed. */
   function addPerson(name: string, key: string) {
@@ -1833,6 +1859,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </label>
             </DesignSection>
 
+            <DesignSection title="Character builder" prodId={prod.meta.id}>
+              <CharacterBuilderSection
+                prodId={prod.meta.id}
+                characters={prod.characters}
+                models={openArtModels}
+                onGenerate={runCharacterGen}
+              />
+            </DesignSection>
+
             <DesignSection title="References" prodId={prod.meta.id}>
               {(prod.suggestedReferences ?? []).length > 0 && (
                 <section className="prod-suggestions">
@@ -1862,8 +1897,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onRemove={removeRef}
                 onRename={(id, name) => updateRef(id, { name })}
                 onMove={moveReference}
+                onGenerate={(categoryId) => setRefGen({ categoryId })}
+                onEditRef={(ref) => setRefGen({ refId: ref.id })}
               />
             </DesignSection>
+
+            {refGen && (
+              <RefGenModal
+                prodId={prod.meta.id}
+                models={openArtModels}
+                categories={prod.referenceCategories ?? []}
+                references={prod.references ?? []}
+                promptRefs={allPromptRefs(prod)}
+                defaultCategoryId={refGen.categoryId}
+                initialRefId={refGen.refId}
+                onClose={() => setRefGen(null)}
+                onSubmit={runRefGen}
+              />
+            )}
 
             <StepFooter prod={prod} onNext={goNext} />
           </section>

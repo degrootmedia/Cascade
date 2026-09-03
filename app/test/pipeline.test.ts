@@ -22,6 +22,7 @@ import {
   applyVideoOutput,
   boardPrompt,
   brandPrompt,
+  characterSheetPrompt,
   effectivePrompt,
   formatRuntime,
   hookImageGenToOutput,
@@ -38,6 +39,7 @@ import {
   scriptMarkdown,
   shotReferences,
   syncBoardOutputToPipe,
+  upsertCharacterSheetRef,
 } from "../src/main/pipeline.js";
 
 // ---- fixture ---------------------------------------------------------------
@@ -152,6 +154,66 @@ describe("brandPrompt", () => {
   it("normalizes colors and appends the font", () => {
     const p = makeProduction({ brand: { colors: ["#AABBCC", "not-a-color", "#00ff00"], font: "Baskerville" } });
     expect(brandPrompt(p)).toBe("Color palette: #aabbcc, #00ff00. Font: Baskerville.");
+  });
+});
+
+describe("characterSheetPrompt", () => {
+  it("wraps the description in the always-on sheet framing (front view)", () => {
+    const prompt = characterSheetPrompt("a scarred space smuggler in a worn leather jacket", "front");
+    expect(prompt).toContain("Character reference sheet: a scarred space smuggler in a worn leather jacket.");
+    expect(prompt).toContain("Full body shot, front view, with an inset closeup of the character's face.");
+    expect(prompt).toContain("Neutral pose, neutral expression, neutral lighting, plain gray background.");
+  });
+
+  it("switches to front + back views for the front-back option", () => {
+    const prompt = characterSheetPrompt("a short gnome baker with flour-dusted apron", "front-back");
+    expect(prompt).toContain("Full body shot, front and back views, with an inset closeup of the character's face.");
+  });
+
+  it("defaults to the front view when none is given", () => {
+    const prompt = characterSheetPrompt("a robot butler");
+    expect(prompt).toContain("Full body shot, front view, with an inset closeup of the character's face.");
+  });
+
+  it("keeps the neutral-presentation language regardless of view", () => {
+    for (const view of ["front", "front-back"] as const) {
+      const prompt = characterSheetPrompt("anyone", view);
+      expect(prompt).toContain("Neutral pose, neutral expression, neutral lighting, plain gray background.");
+    }
+  });
+
+  it("always forbids text overlays", () => {
+    for (const view of ["front", "front-back"] as const) {
+      const prompt = characterSheetPrompt("anyone", view);
+      expect(prompt).toContain("No text, no labels, no watermarks.");
+    }
+  });
+});
+
+describe("upsertCharacterSheetRef", () => {
+  it("creates a Characters category and adds the sheet as a reference", () => {
+    const p = makeProduction();
+    const categoryId = upsertCharacterSheetRef(p, "Mara", "references/Mara.png");
+    expect(p.referenceCategories).toHaveLength(1);
+    expect(p.referenceCategories?.[0].name).toBe("Characters");
+    const ref = p.references?.find((r) => r.name === "Mara");
+    expect(ref?.imagePath).toBe("references/Mara.png");
+    expect(ref?.categoryId).toBe(categoryId);
+  });
+
+  it("reuses an existing Characters category (case-insensitive)", () => {
+    const p = makeProduction({ referenceCategories: [{ id: "cat-1", name: "characters" }] });
+    const categoryId = upsertCharacterSheetRef(p, "Mara", "references/Mara.png");
+    expect(categoryId).toBe("cat-1");
+    expect(p.referenceCategories).toHaveLength(1);
+  });
+
+  it("upserts an existing same-named reference in place", () => {
+    const p = makeProduction({ references: [{ id: "ref-1", name: "Mara", imagePath: "references/Mara.png", shotIds: [] }] });
+    const categoryId = upsertCharacterSheetRef(p, "Mara", "references/Mara (2).png");
+    expect(p.references).toHaveLength(1);
+    expect(p.references?.[0].imagePath).toBe("references/Mara (2).png");
+    expect(p.references?.[0].categoryId).toBe(categoryId);
   });
 });
 

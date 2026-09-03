@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { CustomRef, Production, ProductionShot, ReferenceCategory } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
 import { useExternalImageMenu } from "../external-menu.js";
+import { usePersistedCollapsed } from "./persisted-state.js";
 
 interface RefItem {
   id: string;
@@ -156,31 +157,10 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}>＋ Add category</button>
       </div>
-      <div className="prod-category-list">
-        {groups.map((category) => {
-          const groupItems = items.filter((r) => (r.categoryId ?? "") === category.id);
-          return (
-            <section key={category.id || "uncategorized"} className="prod-category" onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); }} onDragLeave={(e) => e.currentTarget.classList.remove("dragover")} onDrop={(e) => {
-              e.preventDefault(); e.currentTarget.classList.remove("dragover");
-              const id = e.dataTransfer.getData("application/x-cascade-reference");
-              if (id) { onMove(id, category.id || undefined); return; }
-              for (const file of Array.from(e.dataTransfer.files)) {
-                if (!file.type.startsWith("image/")) continue;
-                const reader = new FileReader();
-                reader.onload = () => { if (typeof reader.result === "string") onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, reader.result); };
-                reader.readAsDataURL(file);
-              }
-            }}>
-              <div className="prod-category-head"><input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} /><span className="hint">{groupItems.length}</span></div>
-              <div className="prod-ref-grid">
-                {groupItems.map((r) => (
-                  <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} />
-                ))}
-                {!groupItems.length && <span className="hint">Drop references here.</span>}
-              </div>
-            </section>
-          );
-        })}
+<div className="prod-category-list">
+        {groups.map((category) => (
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={items.filter((r) => (r.categoryId ?? "") === category.id)} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} />
+        ))}
       </div>
       <div className="prod-ref-new form">
         <input className="prod-ref-new-name" placeholder="Reference name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -191,6 +171,52 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   );
 }
 
+
+/** One collapsible category panel in the reference grid. Drop targets accept
+ *  existing references (move) or pasted/dropped image files (create). */
+function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove }: {
+  prodId: string;
+  category: ReferenceCategory;
+  items: CustomRef[];
+  onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
+  onAttach: (id: string) => void;
+  onRemove: (id: string) => void;
+  onRename: (id: string, name: string) => void;
+  onRenameCategory: (id: string, name: string) => void;
+  onMove: (id: string, categoryId?: string) => void;
+}) {
+  const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
+  const open = !collapsed;
+  return (
+    <section className="prod-category" onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); }} onDragLeave={(e) => e.currentTarget.classList.remove("dragover")} onDrop={(e) => {
+      e.preventDefault(); e.currentTarget.classList.remove("dragover");
+      const id = e.dataTransfer.getData("application/x-cascade-reference");
+      if (id) { onMove(id, category.id || undefined); return; }
+      for (const file of Array.from(e.dataTransfer.files)) {
+        if (!file.type.startsWith("image/")) continue;
+        const reader = new FileReader();
+        reader.onload = () => { if (typeof reader.result === "string") onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, reader.result); };
+        reader.readAsDataURL(file);
+      }
+    }}>
+      <div className="prod-category-head">
+        <button className="prod-category-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={open} title={open ? "Collapse category" : "Expand category"}>
+          <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
+        </button>
+        <input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} />
+        <span className="hint">{items.length}</span>
+      </div>
+      {open && (
+        <div className="prod-ref-grid">
+          {items.map((r) => (
+            <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} />
+          ))}
+          {!items.length && <span className="hint">Drop references here.</span>}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function RefFigure({ prodId, refItem, onAttach, onRemove, onRename }: {
   prodId: string;

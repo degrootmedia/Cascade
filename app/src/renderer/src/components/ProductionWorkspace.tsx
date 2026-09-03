@@ -16,21 +16,24 @@ import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js
 import { AssemblyPanel } from "./production/assembly.js";
 import { BrandSwatchRow } from "./production/brand.js";
 import { uid } from "./production/hex.js";
+import { usePersistedCollapsed } from "./production/persisted-state.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
 
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
- * identity / References) so each reads as its own block. */
-function DesignSection({ title, children, defaultOpen = true }: {
+ * identity / References) so each reads as its own block. Collapse state is
+ * persisted per production so it survives step switches and app restarts. */
+function DesignSection({ title, prodId, children }: {
   title: string;
+  prodId: string;
   children: ReactNode;
-  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.design.${title}`);
+  const open = !collapsed;
   return (
     <div className="prod-design-section">
-      <button className="prod-design-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+      <button className="prod-design-head" onClick={() => setCollapsed(!collapsed)} aria-expanded={open}>
         <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
         <span className="prod-design-title">{title}</span>
       </button>
@@ -110,6 +113,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const promptSaveQueue = useRef(Promise.resolve());
   const latestPromptRef = useRef<Record<string, string>>({});
   const promptCacheRef = useRef<Record<string, string>>({});
+  // Latest production kept in a ref (updated every render) so effect-registered
+  // listeners — the Ctrl+V paste handlers — never write stale field state back
+  // over newer saves (e.g. dismissing a suggestion, then pasting an image used
+  // to resurrect the dismissed suggestion from the stale closure).
+  const prodRef = useRef<Production | null>(prod);
+  prodRef.current = prod;
 
   const refreshList = useCallback(async () => {
     try { setList(await window.cascade.listProductions()); } catch {}
@@ -326,8 +335,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   function saveField(patch: Partial<Production>) {
-    if (!prod) return;
-    const next = { ...prod, ...patch };
+    const current = prodRef.current;
+    if (!current) return;
+    const next = { ...current, ...patch };
+    prodRef.current = next;
     setProd(next);
     void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
   }
@@ -509,7 +520,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Next auto-generated reference name (Ref-001, Ref-002, …). */
   function nextRefName(): string {
     let max = 0;
-    for (const r of prod?.references ?? []) {
+    for (const r of prodRef.current?.references ?? []) {
       const m = /^Ref-(\d+)$/.exec(r.name);
       if (m) max = Math.max(max, Number(m[1]));
     }
@@ -565,7 +576,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Create a pasted image as a new reference with an auto-generated name (Ref-001…). */
   async function createReferenceFromFile(file: File, forcedName?: string) {
-    if (!prod) return;
+    if (!prodRef.current) return;
     if (file.size > 15 * 1024 * 1024) {
       setErr("That image is larger than 15 MB — use a smaller one.");
       return;
@@ -584,12 +595,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
     const imagePath = await persistRefImage(dataUrl, name);
     if (!imagePath) { setErr("Couldn't save the pasted image."); return; }
-    saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name, imagePath, shotIds: [] }] });
+    saveField({ references: [...(prodRef.current?.references ?? []), { id: uid("ref"), name, imagePath, shotIds: [] }] });
   }
 
   function batchRefNames(count: number): string[] {
     let max = 0;
-    for (const r of prod?.references ?? []) {
+    for (const r of prodRef.current?.references ?? []) {
       const m = /^Ref-(\d+)$/.exec(r.name);
       if (m) max = Math.max(max, Number(m[1]));
     }
@@ -1719,7 +1730,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           <section className="prod-panel">
             <h3>2 · Design</h3>
 
-            <DesignSection title="Visual styles">
+            <DesignSection title="Visual styles" prodId={prod.meta.id}>
               <p className="hint">
                 Add up to {MAX_STYLES} distinct <strong>named</strong> styles one at a time, then assign each shot a
                 style in <em> Storyboard</em>. Style <strong>1</strong> is the default look for every frame.
@@ -1792,7 +1803,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </div>
             </DesignSection>
 
-            <DesignSection title="Brand identity">
+            <DesignSection title="Brand identity" prodId={prod.meta.id}>
               <p className="hint">
                 A palette (up to 5 swatches) and optional font appended to <strong>every</strong> style's prompt,
                 so the brand look stays consistent across all frames.
@@ -1822,7 +1833,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </label>
             </DesignSection>
 
-            <DesignSection title="References">
+            <DesignSection title="References" prodId={prod.meta.id}>
               {(prod.suggestedReferences ?? []).length > 0 && (
                 <section className="prod-suggestions">
                   <label className="prod-label">Suggested references</label>

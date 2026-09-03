@@ -9,6 +9,7 @@
 import { useRef, useState } from "react";
 import type { Production, ProductionScene } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
+import { usePersistedCollapsed } from "./production/persisted-state.js";
 
 interface Props {
   prod: Production;
@@ -65,12 +66,13 @@ function zoneKey(beforeId: string | null): string {
 }
 
 function SceneBlock({ scene, prod, onMutation, dragId, dragIdRef, activeZone, onDragStart, onDragEnd, onActiveZone, onReorder }: SceneProps) {
-  const [open, setOpen] = useState(true);
+  const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prod.meta.id}.scene.${scene.number}`);
+  const open = !collapsed;
   const isDragging = dragId !== null;
   return (
     <section className="shot-scene">
       <header className="shot-scene-head">
-        <button className="shot-scene-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <button className="shot-scene-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={open}>
           <span className={"shot-caret" + (open ? " open" : "")}>▸</span>
           Scene {scene.number} — {scene.title}
           <span className="shot-scene-count">{scene.shots.length} shot{scene.shots.length === 1 ? "" : "s"}</span>

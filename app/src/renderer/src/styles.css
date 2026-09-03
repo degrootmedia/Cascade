@@ -252,7 +252,7 @@ body {
 .prod-step-num { font-variant-numeric: tabular-nums; opacity: 0.7; }
 
 .prod-body { flex: 1; min-height: 0; overflow-y: auto; }
-.prod-panel { padding: 20px 24px 40px; max-width: 1100px; }
+.prod-panel { padding: 20px 24px 40px; max-width: 1100px; margin: 0 auto; }
 .prod-storyboard-panel { max-width: none; }
 .prod-panel h3 { margin: 0 0 14px; }
 .prod-ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -630,6 +630,22 @@ body {
 .prod-category { padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); transition: border-color .12s, background .12s; }
 .prod-category.dragover { border-color: var(--accent); background: var(--bg-raised); }
 .prod-category-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.prod-category-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.7rem;
+}
+.prod-category-toggle:hover { background: var(--bg-raised); color: var(--accent); }
 .prod-category-name { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text); padding: 4px 6px; font-size: .9rem; font-weight: 600; }
 .prod-category-name:not(:disabled):hover, .prod-category-name:not(:disabled):focus { border-color: var(--border); outline: none; background: var(--bg-raised); }
 
@@ -666,11 +682,22 @@ body {
 .prod-btn.inline { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; white-space: normal; }
 
 /* Step 5 Assembly (export package + render). */
-.prod-assembly-config { align-items: flex-end; }
-.prod-assembly-config .prod-label { margin-bottom: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
-.prod-assembly-config select { min-width: 92px; }
-.prod-assembly-status { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 8px; }
-.prod-assembly-render { width: 100%; max-width: 720px; max-height: 420px; background: #000; border-radius: 8px; margin: 8px 0; }
+.prod-assembly-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 18px;
+}
+@media (max-width: 900px) {
+  .prod-assembly-layout { grid-template-columns: 1fr; }
+}
+.prod-assembly-card { padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); }
+.prod-assembly-config { display: flex; flex-direction: column; gap: 10px; }
+.prod-assembly-config-fields { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.prod-assembly-config-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.prod-assembly-status { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 0; }
+.prod-assembly-render { display: block; width: 100%; max-width: none; max-height: 420px; background: #000; border-radius: 8px; }
 
 /* Step 3 model / resolution selectors + cap input. */
 .prod-boards-cap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }

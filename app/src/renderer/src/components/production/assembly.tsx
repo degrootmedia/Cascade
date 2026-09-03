@@ -57,56 +57,70 @@ export function AssemblyPanel({
 
   return (
     <section className="prod-panel prod-assembly">
-      <header className="prod-boards-controls prod-assembly-config">
-        <label className="prod-label">FPS
-          <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
-            {[24, 25, 30].map((f) => <option key={f} value={f}>{f}</option>)}
-          </select>
-        </label>
-        <label className="prod-label">Resolution
-          <select value={resIndex} onChange={(e) => setResIndex(Number(e.target.value))}>
-            {RESOLUTIONS.map((r, i) => <option key={r.label} value={i}>{r.label}</option>)}
-          </select>
-        </label>
-        <button className="prod-btn primary" onClick={build} disabled={busy !== null}>
-          {busy === "build" ? "Building…" : "Build package"}
-        </button>
-        <button
-          className="prod-btn primary"
-          onClick={render}
-          disabled={busy !== null || !asm?.assembledAt}
-          title={asm?.assembledAt ? undefined : "Build the package first"}
-        >
-          {busy === "render" ? "Rendering…" : "Render MP4"}
-        </button>
-        <button className="prod-btn" onClick={() => void window.cascade.assemblyOpenFolder(prod.meta.id)}>
-          Open export folder
-        </button>
-      </header>
+      <h3>5 · Assembly</h3>
+      <p className="hint">
+        Build the export package — media, CMX3600 EDL, After Effects rebuild script, and manifest — then
+        render the final MP4 from the timed animatic.
+      </p>
 
-      <div className="prod-assembly-status">
-        {asm?.assembledAt && (
-          <p className="hint">
-            Package built {new Date(asm.assembledAt).toLocaleString()} · runtime ≈{" "}
-            {formatRuntime(asm.totalSec ?? 0)} · {exportDir}
-          </p>
+      <div className="prod-assembly-layout">
+        {renderPath && (
+          <video className="prod-assembly-render" src={cascadeMedia(prod.meta.id, renderPath)} controls />
         )}
-        {asm?.skippedShots && asm.skippedShots.length > 0 && (
-          <p className="hint">Blank slot (no frame/clip): {asm.skippedShots.join(", ")}</p>
-        )}
-        {asm?.renderedAt && (
-          <p className="hint">
-            Rendered {new Date(asm.renderedAt).toLocaleString()} —{" "}
-            <button className="prod-btn inline" onClick={() => void window.cascade.assemblyOpenFolder(prod.meta.id)}>
-              {renderPath ?? "render.mp4"}
-            </button>
-          </p>
-        )}
+
+        <section className="prod-assembly-card">
+          <div className="prod-assembly-config">
+            <div className="prod-assembly-config-fields">
+              <label className="prod-openart-label">FPS
+                <select className="prod-openart-select" value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+                  {[24, 25, 30].map((f) => <option key={f} value={f}>{f}</option>)}
+                </select>
+              </label>
+              <label className="prod-openart-label">Resolution
+                <select className="prod-openart-select" value={resIndex} onChange={(e) => setResIndex(Number(e.target.value))}>
+                  {RESOLUTIONS.map((r, i) => <option key={r.label} value={i}>{r.label}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="prod-assembly-config-actions">
+              <button className="prod-btn primary" onClick={build} disabled={busy !== null}>
+                {busy === "build" ? "Building…" : "Build package"}
+              </button>
+              <button
+                className="prod-btn primary"
+                onClick={render}
+                disabled={busy !== null || !asm?.assembledAt}
+                title={asm?.assembledAt ? undefined : "Build the package first"}
+              >
+                {busy === "render" ? "Rendering…" : "Render MP4"}
+              </button>
+              <button className="prod-btn" onClick={() => void window.cascade.assemblyOpenFolder(prod.meta.id)}>
+                Open export folder
+              </button>
+            </div>
+          </div>
+
+          <div className="prod-assembly-status">
+            {asm?.assembledAt && (
+              <p className="hint">
+                Package built {new Date(asm.assembledAt).toLocaleString()} · runtime ≈{" "}
+                {formatRuntime(asm.totalSec ?? 0)} · {exportDir}
+              </p>
+            )}
+            {asm?.skippedShots && asm.skippedShots.length > 0 && (
+              <p className="hint">Blank slot (no frame/clip): {asm.skippedShots.join(", ")}</p>
+            )}
+            {asm?.renderedAt && (
+              <p className="hint">
+                Rendered {new Date(asm.renderedAt).toLocaleString()} —{" "}
+                <button className="prod-btn inline" onClick={() => void window.cascade.assemblyOpenFolder(prod.meta.id)}>
+                  {renderPath ?? "render.mp4"}
+                </button>
+              </p>
+            )}
+          </div>
+        </section>
       </div>
-
-      {renderPath && (
-        <video className="prod-assembly-render" src={cascadeMedia(prod.meta.id, renderPath)} controls />
-      )}
 
       {log.length > 0 && <ProdLog lines={log} />}
     </section>

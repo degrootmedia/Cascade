@@ -161,18 +161,18 @@ describe("characterSheetPrompt", () => {
   it("wraps the description in the always-on sheet framing (front view)", () => {
     const prompt = characterSheetPrompt("a scarred space smuggler in a worn leather jacket", "front");
     expect(prompt).toContain("Character reference sheet: a scarred space smuggler in a worn leather jacket.");
-    expect(prompt).toContain("Full body shot, front view, with an inset closeup of the character's face.");
+    expect(prompt).toContain("Full body front view, with an inset closeup of the character's face.");
     expect(prompt).toContain("Neutral pose, neutral expression, neutral lighting, plain gray background.");
   });
 
-  it("switches to front + back views for the front-back option", () => {
+  it("marks BOTH the front and back views as full body for the front-back option", () => {
     const prompt = characterSheetPrompt("a short gnome baker with flour-dusted apron", "front-back");
-    expect(prompt).toContain("Full body shot, front and back views, with an inset closeup of the character's face.");
+    expect(prompt).toContain("Full body front view and full body back view, with an inset closeup of the character's face.");
   });
 
   it("defaults to the front view when none is given", () => {
     const prompt = characterSheetPrompt("a robot butler");
-    expect(prompt).toContain("Full body shot, front view, with an inset closeup of the character's face.");
+    expect(prompt).toContain("Full body front view, with an inset closeup of the character's face.");
   });
 
   it("keeps the neutral-presentation language regardless of view", () => {

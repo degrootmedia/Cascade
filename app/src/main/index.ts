@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, generateVoiceover, generateMusic, voicesForModel, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { assemble, renderAnimatic } from "./assembly.js";
@@ -22,7 +22,7 @@ import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, AudioModelInfo, VoiceoverConfig, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1926,95 +1926,6 @@ function registerIpc() {
   handle("production:planAnimatic", (_e, id: string) =>
     runProductionStep(id, 4, "animatic timing", async (p, emit) => {
       await planAnimatic(p, settings.getApiKey()!, settings.getModel(), emit);
-    })
-  );
-
-  // Step 4: TTS-capable audio models for the voiceover + music pickers.
-  /** Classify an audio model by its generation family so the VO picker shows
-   *  only tts models and the music picker only music models. */
-  const audioModelKind = (id: string): AudioModelInfo["kind"] => {
-    const i = id.toLowerCase();
-    if (i.includes("music")) return "music";
-    if (i.includes("sound") || i.includes("sfx") || i.includes("effect")) return "sfx";
-    return "tts";
-  };
-  /** "gpt-4o-mini-tts" -> "GPT-4o Mini TTS". Cosmetic only. */
-  function prettifyModelId(id: string): string {
-    return id
-      .split(/[-_]/)
-      .map((p) => (p ? p[0].toUpperCase() + p.slice(1) : p))
-      .join(" ");
-  }
-  handle("production:listAudioModels", async (): Promise<AudioModelInfo[]> => {
-    const apiKey = settings.getApiKey();
-    if (!apiKey) return [];
-    try {
-      const res = await fetch("https://gab.ai/v1/models", {
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-      const json = (await res.json()) as {
-        data?: Array<{
-          id: string;
-          capabilities?: Record<string, boolean>;
-          credit_cost?: { base_cost?: number } | null;
-        }>;
-      };
-      const out: AudioModelInfo[] = (json.data ?? [])
-        .filter((m) => m.capabilities?.audio === true)
-        .map((m) => ({
-          id: m.id,
-          displayName: prettifyModelId(m.id),
-          voices: [...voicesForModel(m.id)],
-          cost: m.credit_cost?.base_cost ?? null,
-          kind: audioModelKind(m.id),
-        }));
-      return out.length ? out : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Step 4: synthesize one voiceover clip for the whole production. Joins
-  // every non-empty shot dialogue into one TTS call and stores the resulting
-  // audio on the production itself (no per-shot field).
-  handle("production:generateVoiceover", (_e, id: string, opts?: { model?: string; voice?: string }) =>
-    runProductionStep(id, 4, "voiceover", async (p, emit) => {
-      const apiKey = settings.getApiKey();
-      if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
-      const cfg: VoiceoverConfig = p.voiceover ?? { model: "auto", voice: voicesForModel("gpt-4o-mini-tts")[0] };
-      let model = (typeof opts?.model === "string" && opts.model && opts.model !== "auto" ? opts.model : cfg.model);
-      let voice = (typeof opts?.voice === "string" && opts.voice ? opts.voice : cfg.voice);
-      if (!model || model === "auto") {
-        const list = await (await fetch("https://gab.ai/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } })).json() as {
-          data?: Array<{ id: string; capabilities?: Record<string, boolean> }>;
-        };
-        const first = (list.data ?? []).find((m) => m.capabilities?.audio === true);
-        if (!first) throw new Error("No TTS-capable models available — add one in your Gab.ai account.");
-        model = first.id;
-      }
-      const allowed = voicesForModel(model);
-      if (!allowed.includes(voice)) voice = allowed[0];
-      await generateVoiceover(p, apiKey, { model, voice }, emit);
-    })
-  );
-
-  // Step 4: synthesize a background music clip from a text prompt using a
-  // music-capable model (music-2-0 / music-2-6).
-  handle("production:generateMusic", (_e, id: string, opts?: { model?: string; prompt?: string }) =>
-    runProductionStep(id, 4, "music", async (p, emit) => {
-      const apiKey = settings.getApiKey();
-      if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
-      let model = typeof opts?.model === "string" && opts.model && opts.model !== "auto" ? opts.model : "";
-      const prompt = typeof opts?.prompt === "string" ? opts.prompt : "";
-      if (!model) {
-        const list = await (await fetch("https://gab.ai/v1/models", { headers: { Authorization: `Bearer ${apiKey}` } })).json() as {
-          data?: Array<{ id: string; capabilities?: Record<string, boolean> }>;
-        };
-        const first = (list.data ?? []).find((m) => m.capabilities?.audio === true && /music/i.test(m.id));
-        if (!first) throw new Error("No music-capable models available on your account.");
-        model = first.id;
-      }
-      await generateMusic(p, apiKey, { model, prompt }, emit);
     })
   );
 

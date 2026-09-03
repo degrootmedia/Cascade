@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, AudioModelInfo, VideoGenOptions, VideoModelOptions, GraphLayout, ReferenceImageGenOptions, CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, VideoGenOptions, VideoModelOptions, GraphLayout, ReferenceImageGenOptions, CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
@@ -85,14 +85,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [importBusy, setImportBusy] = useState(false);
   const [openArtOk, setOpenArtOk] = useState<boolean | null>(null);
   const [openArtModels, setOpenArtModels] = useState<OpenArtModelChoice[]>([]);
-  const [audioModels, setAudioModels] = useState<AudioModelInfo[]>([]);
-  const [voBusy, setVoBusy] = useState(false);
   const [voUrl, setVoUrl] = useState<string | null>(null);
   const [voDuration, setVoDuration] = useState<number | null>(null);
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
-  const [musicBusy, setMusicBusy] = useState(false);
-  const [musicPrompt, setMusicPrompt] = useState("");
-  const [musicModel, setMusicModel] = useState("auto");
   const [audioBust, setAudioBust] = useState(0);
   // Live volume targets for the inline preview players (so the sliders can
   // adjust playback volume during the drag, not just after release).
@@ -175,16 +170,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     window.cascade.listOpenArtModels()
       .then((m) => { if (live) setOpenArtModels(m); })
       .catch(() => { if (live) setOpenArtModels([]); });
-    return () => { live = false; };
-  }, [prod?.meta.id, prod?.currentStep]);
-
-  // Step 4: fetch TTS-capable audio models for the voiceover picker.
-  useEffect(() => {
-    if (prod?.currentStep !== 4) return;
-    let live = true;
-    window.cascade.listAudioModels()
-      .then((m) => { if (live) setAudioModels(m); })
-      .catch(() => { if (live) setAudioModels([]); });
     return () => { live = false; };
   }, [prod?.meta.id, prod?.currentStep]);
 
@@ -354,7 +339,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   function goNext() {
     if (!prod) return;
     const n = prod.currentStep;
-    const next: Production = { ...prod, status: { ...prod.status, [n]: "done" } };
+    const next: Production = { ...prod };
     if (n < 5) next.currentStep = (n + 1) as Production["currentStep"];
     setProd(next);
     void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
@@ -856,22 +841,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 4: synthesize one voiceover clip for the whole production. */
-  async function generateVo() {
-    if (!prod || voBusy) return;
-    setVoBusy(true); setErr(null);
-    try {
-      const next = await window.cascade.generateVoiceover(prod.meta.id);
-      setProd(next);
-      setAudioBust((n) => n + 1);
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    } finally {
-      setVoBusy(false);
-    }
-  }
-
   /** Step 4: pick a local audio file to use as the voiceover. */
   async function importVo() {
     if (!prod) return;
@@ -899,23 +868,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 4: change the VO model; if the current voice isn't in the new
-   *  model's set, fall back to the first available voice. */
-  function setVoiceoverModel(model: string) {
-    if (!prod) return;
-    const m = audioModels.find((am) => am.id === model);
-    const allowed = m?.voices ?? [];
-    const cur = prod.voiceover;
-    const voice = cur && allowed.includes(cur.voice) ? cur.voice : (allowed[0] ?? "alloy");
-    saveField({ voiceover: { model, voice } });
-  }
-
-  function setVoiceoverConfig(patch: Partial<NonNullable<Production["voiceover"]>>) {
-    if (!prod) return;
-    const cur = prod.voiceover ?? { model: "auto", voice: audioModels[0]?.voices[0] ?? "alloy" };
-    saveField({ voiceover: { ...cur, ...patch } });
-  }
-
   /** Step 4: open the native picker to import a music track. */
   async function importMusic() {
     if (!prod) return;
@@ -926,23 +878,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
-    }
-  }
-
-  /** Step 4: synthesize a background music clip from a text prompt. */
-  async function generateMusic() {
-    if (!prod || musicBusy) return;
-    setMusicBusy(true); setErr(null);
-    try {
-      const next = await window.cascade.generateMusic(prod.meta.id, { model: musicModel, prompt: musicPrompt });
-      setProd(next);
-      setMusicUrl(null);
-      setAudioBust((n) => n + 1);
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    } finally {
-      setMusicBusy(false);
     }
   }
 
@@ -1671,12 +1606,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const imageModels = openArtModels.filter((m) => m.imageInput);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
-  // Split the audio model registry by family: VO picker shows TTS models,
-  // the music picker shows music models.
-  // Voiceover picker shows TTS + sound-effects (Gab's ElevenLabs offering is
-  // elevenlabs-sound-effects-v2); the music picker shows music + sound-effects.
-  const ttsModels = audioModels.filter((m) => m.kind === "tts" || m.kind === "sfx");
-  const musicModels = audioModels.filter((m) => m.kind === "music" || m.kind === "sfx");
   // Brand swatches actually shown: trailing empty slots (saved by an older
   // version's pad-to-5 bug) are hidden but stay addressable for edits.
   const brandColors = (() => {
@@ -1703,21 +1632,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       </header>
 
       <nav className="prod-steps">
-        {STEPS.map(({ n, title, desc }) => {
-          const st = prod.status[n] ?? "todo";
-          return (
-            <button
-              key={n}
-              className={"prod-step" + (prod.currentStep === n ? " active" : "") + (st === "done" ? " done" : "")}
-              onClick={() => setStep(n)}
-              title={desc}
-            >
-              <span className={"prod-step-dot " + st} />
-              <span className="prod-step-num">{n}</span>
-              <span className="prod-step-title">{title}</span>
-            </button>
-          );
-        })}
+        {STEPS.map(({ n, title, desc }) => (
+          <button
+            key={n}
+            className={"prod-step" + (prod.currentStep === n ? " active" : "")}
+            onClick={() => setStep(n)}
+            title={desc}
+          >
+            <span className="prod-step-title">{title}</span>
+          </button>
+        ))}
       </nav>
 
       <div className="prod-body">
@@ -2244,7 +2168,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           <section className="prod-panel prod-storyboard-panel">
             <h3>4 · Animatic</h3>
             <p className="hint">
-              Generate or import one voiceover clip for the whole production, optionally add a music track, then
+              Import one voiceover clip for the whole production, optionally add a music track, then
               drag the cut points on the timeline to set the length of each clip. The plan is written to <code>{prod.assets.outDir}/animatic.md</code>.
             </p>
 
@@ -2258,51 +2182,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     <header className="prod-audio-head">
                       <label className="prod-label">Voiceover</label>
                       <div className="prod-audio-controls">
-                        <label className="prod-openart-label">Model
-                          <select
-                            className="prod-openart-select"
-                            value={prod.voiceover?.model ?? "auto"}
-                            onChange={(e) => setVoiceoverModel(e.target.value)}
-                            title="Audio model for the voiceover"
-                          >
-                            <option value="auto">Auto</option>
-                            {ttsModels.map((m) => (
-                              <option key={m.id} value={m.id} title={m.cost != null ? `Base cost: ${m.cost} credits` : undefined}>
-                                {m.displayName}{m.cost != null ? ` ◎${m.cost}` : ""}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="prod-openart-label">Voice
-                          <select
-                            className="prod-openart-select"
-                            value={(() => {
-                              const m = ttsModels.find((am) => am.id === prod.voiceover?.model);
-                              const allowed = m?.voices ?? [];
-                              return prod.voiceover && allowed.includes(prod.voiceover.voice)
-                                ? prod.voiceover.voice
-                                : (allowed[0] ?? "");
-                            })()}
-                            onChange={(e) => setVoiceoverConfig({ voice: e.target.value })}
-                            title="Voice id passed to the audio model"
-                          >
-                            {(() => {
-                              const m = ttsModels.find((am) => am.id === prod.voiceover?.model);
-                              const allowed = m?.voices ?? [];
-                              return allowed.map((v) => <option key={v} value={v}>{v}</option>);
-                            })()}
-                          </select>
-                        </label>
-                        <div className="prod-audio-buttons">
-                          <button
-                            className="primary"
-                            disabled={voBusy || !prod.scenes.some((sc) => sc.shots.some((s) => s.audio.trim()))}
-                            onClick={() => void generateVo()}
-                            title="Synthesize one voiceover clip for the whole production"
-                          >
-                            {voBusy ? "Generating…" : "Generate"}
-                          </button>
-                        </div>
                         {prod.voiceoverPath && (voObjectUrl || voUrl) ? (
                           <div className="prod-audio-file">
                             <MiniAudioPlayer src={voObjectUrl ?? voUrl} onDurationKnown={setVoDuration} audioRef={voPreviewRef} />
@@ -2345,38 +2224,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     <header className="prod-audio-head">
                       <label className="prod-label">Music</label>
                       <div className="prod-audio-controls">
-                        <label className="prod-openart-label">Model
-                          <select
-                            className="prod-openart-select"
-                            value={musicModels.some((m) => m.id === musicModel) ? musicModel : "auto"}
-                            onChange={(e) => setMusicModel(e.target.value)}
-                            title="Audio model for music generation"
-                          >
-                            <option value="auto">Auto</option>
-                            {musicModels.map((m) => (
-                              <option key={m.id} value={m.id} title={m.cost != null ? `Base cost: ${m.cost} credits` : undefined}>
-                                {m.displayName}{m.cost != null ? ` ◎${m.cost}` : ""}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <input
-                          className="prod-music-prompt"
-                          value={musicPrompt}
-                          onChange={(e) => setMusicPrompt(e.target.value)}
-                          placeholder="Describe the music… e.g. warm lofi loop, gentle piano, ~30s"
-                          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void generateMusic(); } }}
-                        />
-                        <div className="prod-audio-buttons">
-                          <button
-                            className="primary"
-                            disabled={musicBusy || !musicPrompt.trim()}
-                            onClick={() => void generateMusic()}
-                            title="Synthesize a background music clip from the description"
-                          >
-                            {musicBusy ? "Generating…" : "Generate"}
-                          </button>
-                        </div>
                         {prod.musicPath && (musicObjectUrl || musicUrl) ? (
                           <div className="prod-audio-file">
                             <MiniAudioPlayer src={musicObjectUrl ?? musicUrl} audioRef={musicPreviewRef} />

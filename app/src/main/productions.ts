@@ -139,9 +139,6 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
     fresh.openArt = { model: p.openArt.model, resolution: p.openArt.resolution };
   }
-  if (p.voiceover && typeof p.voiceover.model === "string" && typeof p.voiceover.voice === "string") {
-    fresh.voiceover = { model: p.voiceover.model, voice: p.voiceover.voice };
-  }
   if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
     fresh.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;
   }

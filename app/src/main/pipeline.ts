@@ -686,10 +686,12 @@ export function brandPrompt(p: Production): string {
  *  neutral lighting on a plain gray background, with no text overlays. */
 export function characterSheetPrompt(description: string, view: CharacterSheetView = "front"): string {
   const desc = description.trim();
-  const body = view === "front-back" ? "front and back views" : "front view";
+  const body = view === "front-back"
+    ? "Full body front view and full body back view"
+    : "Full body front view";
   return (
     `Character reference sheet: ${desc}. ` +
-    `Full body shot, ${body}, with an inset closeup of the character's face. ` +
+    `${body}, with an inset closeup of the character's face. ` +
     `Neutral pose, neutral expression, neutral lighting, plain gray background. ` +
     `No text, no labels, no watermarks.`
   );
@@ -1066,12 +1068,6 @@ export function migrateReferenceArtwork(p: Production): boolean {
   for (const pr of p.products) if (write(pr)) changed = true;
   for (const r of p.references ?? []) if (write(r)) changed = true;
   return changed;
-}
-
-/** Relative path of the production's single voiceover clip. Stable name so
- *  a replacement overwrites the previous version in the project folder. */
-export function voiceoverRelPath(p: Production, ext = "mp3"): string {
-  return `${p.assets.voiceoverDir}/voiceover.${ext}`;
 }
 
 /** How many previous frames each shot keeps (the active one excluded). */
@@ -1643,168 +1639,6 @@ export function animaticMarkdown(p: Production): string {
   }
   lines.push(`**Total runtime: ${formatRuntime(total)}**`, "");
   return lines.join("\n");
-}
-
-/** OpenAI-compatible TTS endpoint exposed by gab.ai. Override here if the
- *  gateway shape changes. The request body is the standard `{model, input,
- *  voice}` shape. Depending on the provider, the response is either raw audio
- *  bytes OR a JSON envelope `{ url, content_type }` pointing at a CDN file —
- *  `resolveAudioResponse` handles both. */
-export const VOICEOVER_ENDPOINT = "https://gab.ai/v1/audio/speech";
-
-/**
- * Music generation reuses the same audio/speech endpoint — a music model
- * (e.g. `music-2-0`) treats `input` as a music prompt and ignores `voice`.
- * Kept as its own constant so it's a one-line swap if gab.ai ever exposes a
- * dedicated music route.
- */
-export const MUSIC_ENDPOINT = VOICEOVER_ENDPOINT;
-
-/** Resolve an audio-generation HTTP response into the actual audio bytes.
- *  gab.ai returns raw bytes for some providers and a JSON envelope
- *  `{ url, content_type }` for others — normalize either into bytes. */
-async function resolveAudioResponse(res: Response): Promise<{ bytes: Buffer; ext: string }> {
-  const ct = (res.headers.get("content-type") ?? "").toLowerCase();
-  if (ct.includes("json")) {
-    const json = (await res.json()) as Record<string, unknown>;
-    const url = typeof json.url === "string" && json.url ? json.url : null;
-    if (!url) {
-      throw new Error(`Audio endpoint returned JSON without a url: ${JSON.stringify(json).slice(0, 240)}`);
-    }
-    const dl = await fetch(url);
-    if (!dl.ok) throw new Error(`Couldn't download generated audio (HTTP ${dl.status})`);
-    const bytes = Buffer.from(await dl.arrayBuffer());
-    const contentType = String(json.content_type ?? dl.headers.get("content-type") ?? "").toLowerCase();
-    const ext = contentType.includes("wav") ? "wav"
-      : contentType.includes("mp4") || contentType.includes("m4a") || contentType.includes("aac") ? "m4a"
-      : "mp3";
-    return { bytes, ext };
-  }
-  const bytes = Buffer.from(await res.arrayBuffer());
-  if (!bytes.length) throw new Error("Audio endpoint returned an empty response.");
-  return { bytes, ext: "mp3" };
-}
-
-/** OpenAI-style voice ids accepted by gab.ai's TTS gateway. */
-export const VOICEOVER_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
-/** ElevenLabs-style voice ids (sample of their stock library). */
-export const ELEVENLABS_VOICES = ["rachel", "domi", "bella", "antoni", "elli", "josh", "arnold", "adam", "sam"] as const;
-export type VoiceoverVoice = string;
-
-/** Look up the voice ids a given TTS model accepts. The registry doesn't
- *  expose per-model voice lists yet, so this is a family-based heuristic;
- *  update the matchers here as new model families are onboarded. */
-export function voicesForModel(modelId: string): readonly string[] {
-  const id = modelId.toLowerCase();
-  if (id.includes("elevenlabs") || id.includes("eleven_")) return ELEVENLABS_VOICES;
-  if (id.includes("qwen") || id.includes("multitalk")) return ["default", "male", "female"] as const;
-  // Default: OpenAI-style TTS (gpt-4o-mini-tts and similar).
-  return VOICEOVER_VOICES;
-}
-
-/** Workspace-relative path of the production's music file. Stored once. */
-export function musicRelPath(p: Production, ext = "mp3"): string {
-  return `${p.assets.musicDir}/music.${ext}`;
-}
-
-/**
- * Step 4 — generate one voiceover clip for the whole production. The text is
- * every non-empty shot dialogue joined with newlines so the model reads it
- * as a single take. Writes the mp3 into voiceoverDir and records the
- * relative path on the production. Returns the production (mutated).
- */
-export async function generateVoiceover(
-  p: Production,
-  apiKey: string,
-  opts: { model: string; voice: string },
-  emit: EmitFn
-): Promise<Production> {
-  const lines = p.scenes
-    .flatMap((s) => s.shots)
-    .map((s) => s.audio.trim())
-    .filter(Boolean);
-  if (!lines.length) throw new Error("No dialogue in the script — add some in Step 1 first.");
-  const text = lines.join("\n");
-  emit(`Synthesizing voiceover (${lines.length} line${lines.length === 1 ? "" : "s"}, ${text.length} chars) with ${opts.model} (voice: ${opts.voice})…`);
-  const res = await fetch(VOICEOVER_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: opts.model, input: text, voice: opts.voice }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`TTS request failed (${res.status} ${res.statusText}): ${body.slice(0, 240)}`);
-  }
-  const { bytes, ext } = await resolveAudioResponse(res);
-  fs.mkdirSync(assetPath(p, p.assets.voiceoverDir), { recursive: true });
-  const rel = voiceoverRelPath(p, ext);
-  // Replace behavior: archive the previous clip instead of destroying it.
-  // This also covers regenerating the same stable name (voiceover.<ext>),
-  // where the old file would otherwise be overwritten in place.
-  if (p.voiceoverPath) {
-    archiveAsset(p, p.voiceoverPath);
-  }
-  // Also archive any stale voiceover.* files with different extensions.
-  try {
-    const dir = assetPath(p, p.assets.voiceoverDir);
-    for (const f of fs.readdirSync(dir)) {
-      if (f.startsWith("voiceover.") && `${p.assets.voiceoverDir}/${f}` !== rel) {
-        archiveAsset(p, `${p.assets.voiceoverDir}/${f}`);
-      }
-    }
-  } catch { /* ignore */ }
-  fs.writeFileSync(assetPath(p, rel), bytes);
-  p.voiceoverPath = rel;
-  if (typeof p.voiceoverVolume !== "number") p.voiceoverVolume = 1;
-  emit(`Voiceover written to ${rel} (${(bytes.length / 1024).toFixed(1)} KB).`, "done");
-  return p;
-}
-
-/**
- * Step 4 — generate one background music clip from a text prompt. Uses the
- * same audio/speech endpoint with a music model (music-2-0 / music-2-6), where
- * `input` is the music prompt and `voice` is ignored. Writes the audio into
- * musicDir as a generated track and records the relative path. Returns the
- * production (mutated). Generated clips keep a stable name (imports keep
- * their original filenames — see production:importMusic).
- */
-export async function generateMusic(
-  p: Production,
-  apiKey: string,
-  opts: { model: string; prompt: string },
-  emit: EmitFn
-): Promise<Production> {
-  const prompt = opts.prompt.trim();
-  if (!prompt) throw new Error("Describe the music first (style, mood, length).");
-  emit(`Synthesizing music (${prompt.length} chars) with ${opts.model}…`);
-  const res = await fetch(MUSIC_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: opts.model, input: prompt, voice: "" }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Music request failed (${res.status} ${res.statusText}): ${body.slice(0, 240)}`);
-  }
-  const { bytes, ext } = await resolveAudioResponse(res);
-  fs.mkdirSync(assetPath(p, p.assets.musicDir), { recursive: true });
-  const rel = `${p.assets.musicDir}/music-generated.${ext}`;
-  // Replace behavior: archive the previous track instead of destroying it
-  // (also covers regenerating the same stable name).
-  if (p.musicPath) {
-    archiveAsset(p, p.musicPath);
-  }
-  fs.writeFileSync(assetPath(p, rel), bytes);
-  p.musicPath = rel;
-  if (typeof p.musicVolume !== "number") p.musicVolume = 0.5;
-  emit(`Music written to ${rel} (${(bytes.length / 1024).toFixed(1)} KB).`, "done");
-  return p;
 }
 
 /**

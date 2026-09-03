@@ -48,7 +48,6 @@ describe("applyRendererState", () => {
       currentStep: 3,
       styles: [{ id: "s1", index: 1, name: "Heroic", prompt: "Heroic 3D" }],
       openArt: { model: "kling", resolution: "2k" },
-      voiceover: { model: "tts", voice: "alloy" },
       status: { 3: "done" },
       scriptSource: "C:/script.md",
     });
@@ -56,7 +55,6 @@ describe("applyRendererState", () => {
     expect(merged.currentStep).toBe(3);
     expect(merged.styles).toEqual(incoming.styles);
     expect(merged.openArt).toEqual({ model: "kling", resolution: "2k" });
-    expect(merged.voiceover).toEqual({ model: "tts", voice: "alloy" });
     expect(merged.status).toEqual({ 3: "done" });
     expect(merged.scriptSource).toBe("C:/script.md");
   });

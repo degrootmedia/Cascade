@@ -439,27 +439,6 @@ export interface CharacterSheetGenOptions {
   view: CharacterSheetView;
 }
 
-/** A TTS-capable audio model surfaced in the Step 4 voiceover picker. */
-export interface AudioModelInfo {
-  id: string;
-  displayName: string;
-  /** Voice ids the model accepts (OpenAI-style: alloy/echo/fable/onyx/nova/shimmer). */
-  voices: string[];
-  /** Base credit cost for one VO job (null when the registry didn't report one). */
-  cost: number | null;
-  /** What this audio model generates — the VO picker shows tts, the music
-   *  picker shows music. */
-  kind: "tts" | "music" | "sfx";
-}
-
-/** Voiceover generation choices made on the Step 4 VO panel. */
-export interface VoiceoverConfig {
-  /** Audio model id, or "auto" for Cascade to pick. */
-  model: string;
-  /** Voice id fed to the model (when the model supports voices). */
-  voice: string;
-}
-
 /** Step 5 assembly configuration + last-run bookkeeping.
  *  `fps`/`width`/`height` describe the exported timeline and the MP4 render;
  *  `exportDir` is workspace-relative (defaults to `<outDir>/assembly`). */
@@ -508,8 +487,6 @@ export interface Production {
   referenceCategories?: ReferenceCategory[];
   /** Step 3 OpenArt generation preferences. */
   openArt?: OpenArtBoardConfig;
-  /** Step 4 voiceover generation preferences. */
-  voiceover?: VoiceoverConfig;
   /** Step 4: workspace-relative path to the single voiceover clip for the whole production. */
   voiceoverPath?: string;
   /** Step 4: voiceover playback volume (0..1). Defaults to 1 when voiceoverPath is set. */
@@ -782,14 +759,6 @@ export interface CascadeApi {
   promoteBoardHistory(productionId: string, shotId: string, index: number): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
-  /** Step 4: list TTS-capable audio models for the voiceover picker. */
-  listAudioModels(): Promise<AudioModelInfo[]>;
-  /**
-   * Step 4: synthesize one voiceover clip for the whole production (every
-   * shot's dialogue joined). Writes the audio into voiceoverDir and stores
-   * the relative path on the production. Resolves to the updated production.
-   */
-  generateVoiceover(productionId: string, opts?: { model?: string; voice?: string }): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
   importVoiceover(productionId: string): Promise<Production | null>;
   /** Step 4: read the production's voiceover clip as a data URL. */
@@ -801,12 +770,6 @@ export interface CascadeApi {
   removeVoiceover(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen music file into the production's musicDir, and set musicPath. */
   importMusic(productionId: string): Promise<Production | null>;
-  /**
-   * Step 4: synthesize a background music clip from a text prompt using a
-   * music-capable model. Writes the audio into musicDir and stores the
-   * relative path on the production.
-   */
-  generateMusic(productionId: string, opts?: { model?: string; prompt?: string }): Promise<Production>;
   /** Step 4: read the imported music file as a data URL (for the inline player / animatic mixing). */
   musicFile(productionId: string): Promise<string | null>;
   /** Step 4: streamable `cascade-media://` URL for the music track. */
@@ -1001,14 +964,11 @@ export const ipcContract = {
   "production:editBoard": { method: "editBoard", kind: "invoke" },
   "production:promoteBoardHistory": { method: "promoteBoardHistory", kind: "invoke" },
   "production:planAnimatic": { method: "planAnimatic", kind: "invoke" },
-  "production:listAudioModels": { method: "listAudioModels", kind: "invoke" },
-  "production:generateVoiceover": { method: "generateVoiceover", kind: "invoke" },
   "production:importVoiceover": { method: "importVoiceover", kind: "invoke" },
   "production:voiceoverFile": { method: "voiceoverFile", kind: "invoke" },
   "production:voiceoverUrl": { method: "voiceoverUrl", kind: "invoke" },
   "production:removeVoiceover": { method: "removeVoiceover", kind: "invoke" },
   "production:importMusic": { method: "importMusic", kind: "invoke" },
-  "production:generateMusic": { method: "generateMusic", kind: "invoke" },
   "production:musicFile": { method: "musicFile", kind: "invoke" },
   "production:musicUrl": { method: "musicUrl", kind: "invoke" },
   "production:removeMusic": { method: "removeMusic", kind: "invoke" },

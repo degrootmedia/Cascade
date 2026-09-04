@@ -245,6 +245,8 @@ body {
 }
 .prod-step:hover { color: var(--text); border-color: transparent; box-shadow: 0 0 0 1px var(--accent); }
 .prod-step.active { color: var(--text); border-color: var(--accent); background: var(--bg-raised); box-shadow: 0 0 0 2px var(--accent); }
+/* Far-right Expenses tab on the step-tabs row. */
+.prod-step-expenses { margin-left: auto; }
 
 .prod-body { flex: 1; min-height: 0; overflow-y: auto; }
 .prod-panel { padding: 20px 24px 40px; max-width: 1100px; margin: 0 auto; }
@@ -274,6 +276,42 @@ body {
   resize: vertical;
 }
 .prod-style:focus { outline: none; border-color: var(--accent); }
+
+/* ---------- expenses page (far-right tab) ---------- */
+.prod-expenses-toolbar { display: flex; gap: 8px; align-items: center; margin: 4px 0 12px; }
+.prod-expenses-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.prod-expenses-table th, .prod-expenses-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.prod-expenses-table th { font-weight: 600; color: var(--text-dim); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.prod-expenses-table tr:last-child td { border-bottom: none; }
+.prod-expenses-table tr.manual td { color: var(--text-dim); }
+.prod-expenses-table .num { text-align: right; white-space: nowrap; }
+.prod-expenses-table .nowrap { white-space: nowrap; }
+.prod-expenses-table tfoot td { font-weight: 600; border-top: 2px solid var(--border); }
+.prod-expenses-table tfoot .total { color: var(--accent); font-size: 1rem; }
+.prod-expenses-add { display: flex; gap: 8px; align-items: center; margin-top: 16px; max-width: 720px; }
+.prod-expenses-add input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+}
+.prod-expenses-add input:focus { outline: none; border-color: var(--accent); }
+.prod-expenses-add input[type="number"] { flex: 0 0 140px; }
 
 /* ---------- step navigation / next button ---------- */
 .prod-next { margin-top: 26px; display: flex; justify-content: flex-end; }
@@ -2516,6 +2554,34 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .hint { color: var(--text-dim); font-size: 0.82rem; margin: 6px 0 0; }
 .error-text { color: var(--danger); font-size: 0.85rem; }
 .link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 0.9rem; }
+
+/* ---------- expense pricing rules (Settings) ---------- */
+.expense-pricing { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.expense-rule {
+  display: grid;
+  grid-template-columns: 90px 1.4fr 1fr 110px 110px 24px;
+  gap: 6px;
+  align-items: center;
+}
+.expense-rule-head span { font-size: 0.74rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.expense-rule select, .expense-rule input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 8px;
+  width: 100%;
+}
+.expense-pricing-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.expense-pricing-actions button {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+.expense-pricing-actions button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
 
 /* ---------- MCP section ---------- */
 .mcp-config {

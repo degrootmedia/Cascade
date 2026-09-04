@@ -153,7 +153,7 @@ export function App() {
       window.cascade.getWorkspaceInstructions().then(setInstructions),
     ]);
     if (sid) void refreshActiveAgent(sid);
-    if (s.hasApiKey) void window.cascade.listModels().then(setModels).catch(() => {});
+    if (s.hasApiKey) void window.cascade.listModels().then((r) => { if (r.ok) setModels(r.models); }).catch(() => {});
   }, [refreshActiveAgent]);
 
   useEffect(() => {
@@ -236,7 +236,7 @@ export function App() {
     } catch (err) {
       const msg = String(err);
       const friendly = msg.includes("NO_API_KEY")
-        ? "Add your Gab.ai API key in Settings first."
+        ? "Add your API key in Settings first."
         : msg;
       updateTranscript(id, (prev) => [...prev, { kind: "notice", text: friendly }]);
       setBusyIds((p) => ({ ...p, [id]: false }));

@@ -33,11 +33,12 @@ function VisionIcon() {
   );
 }
 
-function CostBadge({ baseCost }: { baseCost: number }) {
+function CostBadge({ info }: { info: ModelInfo }) {
+  const isUsd = info.costLabel.startsWith("$");
   return (
-    <span className="cost-badge" title={`${baseCost} credits per message`}>
-      <TokenIcon />
-      {baseCost}
+    <span className="cost-badge" title={info.costTitle}>
+      {!isUsd && <TokenIcon />}
+      {info.costLabel}
     </span>
   );
 }
@@ -72,7 +73,7 @@ export function ModelPicker({
     <div className="model-picker" ref={ref}>
       <button className="model-button" disabled={disabled} onClick={() => setOpen(!open)} title="Choose model">
         <span className="model-current">{current}</span>
-        {currentInfo && <CostBadge baseCost={currentInfo.baseCost} />}
+        {currentInfo && <CostBadge info={currentInfo} />}
         <span className="model-caret">▴</span>
       </button>
       {open && (
@@ -92,7 +93,7 @@ export function ModelPicker({
                   <VisionIcon />
                 </span>
               )}
-              <CostBadge baseCost={m.baseCost} />
+              <CostBadge info={m} />
             </button>
           ))}
           {sorted.length === 0 && <div className="model-empty">Add your API key to load models</div>}

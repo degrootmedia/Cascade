@@ -16,13 +16,15 @@ import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
+import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic } from "./assembly.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder } from "../shared/ipc.js";
+import { extractModelList, normalizeModelList } from "../shared/providers.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -57,6 +59,14 @@ function mediaMimeForPath(rel: string): string {
     case "mov": return "video/quicktime";
     case "mkv": return "video/x-matroska";
     case "avi": return "video/x-msvideo";
+    case "png": return "image/png";
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "webp": return "image/webp";
+    case "gif": return "image/gif";
+    case "bmp": return "image/bmp";
+    case "avif": return "image/avif";
+    case "svg": return "image/svg+xml";
     default: return "audio/mpeg";
   }
 }
@@ -255,6 +265,121 @@ async function checkExternalEdits(): Promise<void> {
   }
 }
 
+/** Open a data-URL image in the external editor via a temp file. */
+async function openDataUrlExternally(win: BrowserWindow, dataUrl: string): Promise<void> {
+  const bytes = dataUrlToBytes(dataUrl);
+  if (!bytes || !bytes.length) throw new Error("Couldn't decode that image.");
+  const comma = dataUrl.indexOf(",");
+  const mime = comma !== -1 ? dataUrl.slice(5, comma).split(";")[0] : "image/png";
+  const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+  const tmp = path.join(os.tmpdir(), `cascade-external-${Date.now()}.${ext}`);
+  fs.writeFileSync(tmp, Buffer.from(bytes));
+  await openWithExternalEditor(tmp);
+}
+
+/** Open an image in the external editor. Accepts an explicit production file
+ *  (`productionId`+`relPath`), an inline data URL, or a raw src URL (cascade-
+ *  media / data: / http). Shared by every image context menu so "Edit
+ *  externally" behaves identically no matter where the image lives. */
+async function openImageExternally(win: BrowserWindow, target: { productionId?: string; relPath?: string; dataUrl?: string; src?: string }): Promise<void> {
+  try {
+    if (target.productionId && target.relPath) {
+      const p = productions.loadProduction(target.productionId);
+      if (!p) throw new Error("Production not found.");
+      // Board frames: hand the original (high-quality) file to the editor, and
+      // watch it so the JPEG preview is re-encoded when the user returns.
+      const originalRel = originalForJpegRel(p, target.relPath);
+      if (originalRel) {
+        const originalAbs = assetPath(p, originalRel);
+        if (fs.existsSync(originalAbs)) {
+          trackExternalEdit(p, target.relPath, originalRel);
+          await openWithExternalEditor(originalAbs);
+          return;
+        }
+      }
+      const abs = assetPath(p, target.relPath);
+      if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${target.relPath}`);
+      await openWithExternalEditor(abs);
+      return;
+    }
+    if (target.dataUrl) {
+      await openDataUrlExternally(win, target.dataUrl);
+      return;
+    }
+    const src = target.src ?? "";
+    if (src.startsWith("cascade-media://")) {
+      const url = new URL(src);
+      const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+      const prodId = url.hostname;
+      const p = productions.loadProduction(prodId);
+      if (!p) throw new Error("Production not found for this image.");
+      const originalRel = originalForJpegRel(p, rel);
+      if (originalRel) {
+        const originalAbs = assetPath(p, originalRel);
+        if (fs.existsSync(originalAbs)) {
+          trackExternalEdit(p, rel, originalRel);
+          await openWithExternalEditor(originalAbs);
+          return;
+        }
+      }
+      const abs = assetPath(p, rel);
+      if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
+      await openWithExternalEditor(abs);
+      return;
+    }
+    if (src.startsWith("data:image/")) {
+      await openDataUrlExternally(win, src);
+      return;
+    }
+    if (/^https?:\/\//.test(src)) {
+      void shell.openExternal(src);
+      return;
+    }
+    throw new Error("No image to open — provide a production file or a data URL.");
+  } catch (err) {
+    void dialog.showMessageBox(win, {
+      type: "error",
+      title: "Couldn't open in external editor",
+      message: String(err).replace(/^Error:\s*/, ""),
+    });
+  }
+}
+
+/** Pop the right-click menu for an image: Save image as… / Copy image / Edit
+ *  externally. This is the single menu builder — the native `context-menu`
+ *  event and the renderer-triggered `image:showMenu` IPC both funnel through
+ *  it, so every image in the app gets the same three options with the same
+ *  wording. `edit` pins the full-res target when the renderer knows it. */
+function popImageContextMenu(win: BrowserWindow, opts: { src: string; x: number; y: number; edit?: { productionId: string; relPath: string } | { dataUrl: string } }): void {
+  const src = opts.src;
+  const canEditExternally = !!opts.edit || src.startsWith("cascade-media://") || src.startsWith("data:image/") || /^https?:\/\//.test(src);
+  const editorLabel = (() => {
+    const ed = settings.getExternalEditor();
+    if (!ed) return "Edit externally";
+    const base = path.basename(ed).replace(/\.[^.]+$/, "");
+    return `Edit in ${base}`;
+  })();
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: "Save image as…",
+      click: () => win.webContents.downloadURL(src), // triggers the native save dialog
+    },
+    {
+      label: "Copy image",
+      click: () => win.webContents.copyImageAt(opts.x, opts.y),
+    },
+  ];
+  if (canEditExternally) {
+    template.push({
+      label: editorLabel,
+      click: () => {
+        void openImageExternally(win, opts.edit ?? { src });
+      },
+    });
+  }
+  Menu.buildFromTemplate(template).popup();
+}
+
 /**
  * One live chat = one in-memory session + a lazy Agent. Keeping every open/
  * background chat here (instead of a single global agent) is what lets chats
@@ -354,6 +479,7 @@ function ensureAgent(entry: LiveChat): Agent {
       const pureAgent = new Agent({
         apiKey,
         model: settings.getModel(),
+        baseUrl: settings.getBaseUrl(),
         pureChat: true,
         requestApproval: (req) => requestApprovalFromUser(req),
         onEvent: (e) => {
@@ -426,6 +552,7 @@ function ensureAgent(entry: LiveChat): Agent {
     const thisAgent = new Agent({
       apiKey,
       model: agentModel ?? settings.getModel(),
+      baseUrl: settings.getBaseUrl(),
       workspaceRoot: workspace,
       agentPrompt: agentPrompt || undefined,
       skills: skillsList,
@@ -484,7 +611,7 @@ function rejectPendingApprovals() {
 async function applyChatTitle(history: ChatMessage[], targetId: string, force: boolean): Promise<string | null> {
   const apiKey = settings.getApiKey();
   if (!apiKey) return null;
-  const title = await suggestChatTitle(history, apiKey);
+  const title = await suggestChatTitle(history, apiKey, new GabClient(apiKey, settings.getBaseUrl()));
   if (title === "New chat") return null;
   const entry = chats.get(targetId) ?? null;
   const loaded = entry ? entry.session : sessions.loadSession(targetId);
@@ -504,7 +631,9 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 
 // ---- IPC ------------------------------------------------------------------
 function registerIpc() {
-  const openart = new OpenArtClient(mcp);
+  // Every successful OpenArt generation feeds the expenses ledger, which
+  // prices it against the user's rules and keeps the CSV tally in sync.
+  const openart = new OpenArtClient(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) });
 
   // IPC channels are declared in the shared contract (shared/ipc.ts), which the
   // preload adapter also consumes — so adding a channel means editing one map,
@@ -660,7 +789,8 @@ function registerIpc() {
   handle("workspace:current", () => effectiveWorkspace());
 
   handle("settings:get", () => ({
-    hasApiKey: settings.getApiKey() !== null,
+    provider: settings.getProviderId(),
+    hasApiKey: settings.hasApiKey(),
     model: settings.getModel(),
     workspace: settings.getWorkspace(),
     accent: settings.getAccent(),
@@ -674,6 +804,11 @@ function registerIpc() {
 
   handle("settings:setModel", (_e, model: string) => {
     settings.setModel(model);
+    resetAllAgents();
+  });
+
+  handle("settings:setProvider", (_e, id: string) => {
+    settings.setProvider(id);
     resetAllAgents();
   });
 
@@ -699,76 +834,50 @@ function registerIpc() {
     settings.setExternalEditor(p);
   });
 
-  handle("external:open", async (_e, opts: { productionId?: string; relPath?: string; dataUrl?: string }) => {
-    if (opts?.relPath && opts?.productionId) {
-      const p = productions.loadProduction(String(opts.productionId));
-      if (!p) throw new Error("Production not found.");
-      const jpegRel = String(opts.relPath);
-      // Board frames: hand the original (high-quality) file to the editor,
-      // and watch it so the JPEG preview is re-encoded when the user returns.
-      const originalRel = originalForJpegRel(p, jpegRel);
-      if (originalRel) {
-        const originalAbs = assetPath(p, originalRel);
-        if (fs.existsSync(originalAbs)) {
-          trackExternalEdit(p, jpegRel, originalRel);
-          await openWithExternalEditor(originalAbs);
-          return;
-        }
-      }
-      const abs = assetPath(p, jpegRel);
-      if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${jpegRel}`);
-      await openWithExternalEditor(abs);
-      return;
-    }
-    if (opts?.dataUrl && typeof opts.dataUrl === "string" && opts.dataUrl.startsWith("data:")) {
-      const bytes = dataUrlToBytes(opts.dataUrl);
-      if (!bytes || !bytes.length) throw new Error("Couldn't decode that image.");
-      const comma = opts.dataUrl.indexOf(",");
-      const mime = comma !== -1 ? opts.dataUrl.slice(5, comma).split(";")[0] : "image/png";
-      const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
-      const tmp = path.join(os.tmpdir(), `cascade-external-${Date.now()}.${ext}`);
-      fs.writeFileSync(tmp, Buffer.from(bytes));
-      await openWithExternalEditor(tmp);
-      return;
-    }
-    if (opts?.relPath && !opts?.productionId) {
-      // Absolute path fallback (e.g. from native context menu's file:// or cascade-media decoded elsewhere)
-      const abs = path.resolve(String(opts.relPath));
-      if (!fs.existsSync(abs)) throw new Error(`File not found: ${opts.relPath}`);
-      await openWithExternalEditor(abs);
-      return;
-    }
-    throw new Error("No image to open — provide a production file or a data URL.");
+  handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; productionId?: string; relPath?: string; dataUrl?: string }) => {
+    if (!win || typeof opts?.src !== "string" || !opts.src) return;
+    const edit = opts.productionId && opts.relPath
+      ? { productionId: String(opts.productionId), relPath: String(opts.relPath) }
+      : opts.dataUrl
+        ? { dataUrl: String(opts.dataUrl) }
+        : undefined;
+    popImageContextMenu(win, { src: opts.src, x: Number(opts.x) || 0, y: Number(opts.y) || 0, edit });
   });
 
-  handle("models:list", async () => {
+  handle("models:list", async (): Promise<import("../shared/ipc.js").ModelListResult> => {
     const apiKey = settings.getApiKey();
-    if (!apiKey) return [];
-    const res = await fetch("https://gab.ai/v1/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    const json = (await res.json()) as {
-      data?: Array<{
-        id: string;
-        capabilities?: Record<string, boolean>;
-        credit_cost?: { base_cost?: number } | null;
-      }>;
-    };
-    return (json.data ?? [])
-      .filter((m) => m.capabilities?.text && m.capabilities?.function_calling && m.capabilities?.streaming)
-      .map((m) => ({
-        id: m.id,
-        thinking: !!m.capabilities?.thinking,
-        vision: !!m.capabilities?.image_input,
-        baseCost: m.credit_cost?.base_cost ?? 1, // null/absent = cheapest tier (arya)
-      }));
+    if (!apiKey) return { ok: false, error: "No API key saved for this provider." };
+    try {
+      const res = await fetch(`${settings.getBaseUrl()}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        return { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+      }
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        return { ok: false, error: `Non-JSON response from ${settings.getBaseUrl()}/models: ${text.slice(0, 200)}` };
+      }
+      const models = normalizeModelList(extractModelList(json));
+      if (models.length === 0) {
+        // An unrecognized /models shape silently hiding models is worse than
+        // showing the raw reply so the schema can be fixed.
+        return { ok: false, error: `No usable models in response: ${JSON.stringify(json).slice(0, 200)}` };
+      }
+      return { ok: true, models };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
   });
 
   handle("credits:get", async () => {
     const apiKey = settings.getApiKey();
     if (!apiKey) return null;
     try {
-      const c = (await new GabClient(apiKey).credits()) as { total_available?: number };
+      const c = (await new GabClient(apiKey, settings.getBaseUrl()).credits()) as { total_available?: number };
       return c.total_available ?? null;
     } catch {
       return null;
@@ -1029,7 +1138,7 @@ function registerIpc() {
     productions.saveProduction(p);
     productionEmit(id, `Step 1 started: ${source}`);
     try {
-      await ingestScript(p, source, apiKey, settings.getModel(), (m, level) => productionEmit(id, m, level));
+      await ingestScript(p, source, apiKey, settings.getModel(), (m, level) => productionEmit(id, m, level), settings.getBaseUrl());
       p.status[1] = "done";
     } catch (e) {
       p.status[1] = "error";
@@ -1054,7 +1163,7 @@ function registerIpc() {
     try {
       // A short excerpt of the first scene's visuals gives tone context.
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
-      const refined = await refineStylePrompt(style.trim(), excerpt, apiKey, settings.getModel());
+      const refined = await refineStylePrompt(style.trim(), excerpt, apiKey, settings.getModel(), settings.getBaseUrl());
       productionEmit(id, "Style prompt refined.", "done");
       return refined;
     } catch (e) {
@@ -1076,7 +1185,7 @@ function registerIpc() {
     productionEmit(id, "Refining the character description…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
-      const refined = await refineCharacterDescription(description.trim(), excerpt, apiKey, settings.getModel());
+      const refined = await refineCharacterDescription(description.trim(), excerpt, apiKey, settings.getModel(), settings.getBaseUrl());
       productionEmit(id, "Character description refined.", "done");
       return refined;
     } catch (e) {
@@ -1098,7 +1207,7 @@ function registerIpc() {
     productionEmit(id, "Generating up to 5 named visual styles…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
-      const styles = await generateStyleSet(notes.trim(), excerpt, apiKey, settings.getModel());
+      const styles = await generateStyleSet(notes.trim(), excerpt, apiKey, settings.getModel(), undefined, settings.getBaseUrl());
       productionEmit(id, `Generated ${styles.length} style${styles.length === 1 ? "" : "s"}.`, "done");
       return styles;
     } catch (e) {
@@ -1121,7 +1230,7 @@ function registerIpc() {
     productionEmit(id, "Generating a style prompt from the image…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
-      const style = await stylePromptFromImage(imageDataUrl, excerpt, apiKey, settings.getModel());
+      const style = await stylePromptFromImage(imageDataUrl, excerpt, apiKey, settings.getModel(), settings.getBaseUrl());
       productionEmit(id, `Style "${style.name}" generated from the image.`, "done");
       return style;
     } catch (e) {
@@ -1481,7 +1590,7 @@ function registerIpc() {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
-        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l));
+        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl());
         productions.saveProduction(rebaseProduction(before, pq));
       });
     } catch (e) {
@@ -1925,7 +2034,7 @@ function registerIpc() {
   // Step 4: animatic timing (one bounded LLM call).
   handle("production:planAnimatic", (_e, id: string) =>
     runProductionStep(id, 4, "animatic timing", async (p, emit) => {
-      await planAnimatic(p, settings.getApiKey()!, settings.getModel(), emit);
+      await planAnimatic(p, settings.getApiKey()!, settings.getModel(), emit, settings.getBaseUrl());
     })
   );
 
@@ -2346,6 +2455,23 @@ function registerIpc() {
     void shell.openPath(assetPath(p, p.assembly?.exportDir ?? `${p.assets.outDir}/${p.assets.assemblyDir}`));
   });
 
+  // Expenses: the ledger of every AI generation (and manual purchased-asset
+  // rows), plus the pricing rules edited from Settings.
+  handle("ledger:get", async (): Promise<LedgerView> => ledger.view());
+  handle("ledger:getPriceRules", async (): Promise<ExpensePriceRule[]> => ledger.getPriceRules());
+  handle("ledger:setPriceRules", async (_e, rules: ExpensePriceRule[]): Promise<void> => {
+    ledger.setPriceRules(rules);
+  });
+  handle("ledger:addManual", async (_e, label: string, amount: number): Promise<LedgerView> => {
+    return ledger.addManualEntry(label, amount);
+  });
+  handle("ledger:removeEntry", async (_e, id: string): Promise<LedgerView> => {
+    return ledger.removeEntry(id);
+  });
+  handle("ledger:openFile", async (): Promise<void> => {
+    await ledger.openLedgerFile();
+  });
+
   handle("agents:getSessionAgent", (_e, sessionId: string) => {
 
     const entry = chats.get(sessionId) ?? (sessions.loadSession(sessionId) ? live(sessionId) : null);
@@ -2516,78 +2642,7 @@ function createWindow() {
   // Paste/Select All), and a save/copy/edit-externally menu for images.
   win.webContents.on("context-menu", (_e, params) => {
     if (params.mediaType === "image" && params.srcURL) {
-      const src = params.srcURL;
-      const isCascadeMedia = src.startsWith("cascade-media://");
-      const isDataUrl = src.startsWith("data:image/");
-      const canEditExternally = isCascadeMedia || isDataUrl || /^https?:\/\//.test(src);
-      const editorLabel = (() => {
-        const ed = settings.getExternalEditor();
-        if (!ed) return "Edit externally";
-        const base = path.basename(ed).replace(/\.[^.]+$/, "");
-        return `Edit in ${base}`;
-      })();
-      const template: Electron.MenuItemConstructorOptions[] = [
-        {
-          label: "Save image as…",
-          click: () => win?.webContents.downloadURL(params.srcURL), // triggers the native save dialog
-        },
-        {
-          label: "Copy image",
-          click: () => win?.webContents.copyImageAt(params.x, params.y),
-        },
-      ];
-      if (canEditExternally) {
-        template.push({
-          label: editorLabel,
-          click: () => {
-            void (async () => {
-              try {
-                if (isCascadeMedia) {
-                  const url = new URL(src);
-                  const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-                  const prodId = url.hostname;
-                  const p = productions.loadProduction(prodId);
-                  if (!p) throw new Error("Production not found for this image.");
-                  const originalRel = originalForJpegRel(p, rel);
-                  if (originalRel) {
-                    const originalAbs = assetPath(p, originalRel);
-                    if (fs.existsSync(originalAbs)) {
-                      trackExternalEdit(p, rel, originalRel);
-                      await openWithExternalEditor(originalAbs);
-                    } else {
-                      const abs = assetPath(p, rel);
-                      if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
-                      await openWithExternalEditor(abs);
-                    }
-                  } else {
-                    const abs = assetPath(p, rel);
-                    if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
-                    await openWithExternalEditor(abs);
-                  }
-                } else if (isDataUrl) {
-                  const bytes = dataUrlToBytes(src);
-                  if (!bytes || !bytes.length) throw new Error("Couldn't decode image.");
-                  const comma = src.indexOf(",");
-                  const mime = comma !== -1 ? src.slice(5, comma).split(";")[0] : "image/png";
-                  const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
-                  const tmp = path.join(os.tmpdir(), `cascade-external-${Date.now()}.${ext}`);
-                  fs.writeFileSync(tmp, Buffer.from(bytes));
-                  await openWithExternalEditor(tmp);
-                } else {
-                  void shell.openExternal(src);
-                }
-              } catch (err) {
-                void dialog.showMessageBox(win!, {
-                  type: "error",
-                  title: "Couldn't open in external editor",
-                  message: String(err).replace(/^Error:\s*/, ""),
-                });
-              }
-            })();
-          },
-        });
-      }
-      Menu.buildFromTemplate(template).popup();
+      popImageContextMenu(win!, { src: params.srcURL, x: params.x, y: params.y });
       return;
     }
     if (params.isEditable) {

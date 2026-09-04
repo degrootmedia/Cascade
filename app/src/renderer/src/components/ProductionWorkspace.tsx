@@ -14,6 +14,7 @@ import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allProm
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js";
 import { AssemblyPanel } from "./production/assembly.js";
+import { ExpensesPanel } from "./production/expenses.js";
 import { BrandSwatchRow } from "./production/brand.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
@@ -49,6 +50,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [log, setLog] = useState<LogLine[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // expenses page (far-right tab) replaces the step content while open
+  const [showExpenses, setShowExpenses] = useState(false);
   // creation form
   const [newName, setNewName] = useState("");
   const [newFolder, setNewFolder] = useState<string | null>(null);
@@ -320,6 +323,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }, [refreshList]);
 
   function setStep(n: 1 | 2 | 3 | 4 | 5) {
+    if (showExpenses) setShowExpenses(false);
     if (!prod || prod.currentStep === n) return;
     const next = { ...prod, currentStep: n };
     setProd(next);
@@ -500,7 +504,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     // Vision check against the live model list; if it can't be verified we let
     // the request run and surface whatever the API reports.
     try {
-      const [s, models] = await Promise.all([window.cascade.getSettings(), window.cascade.listModels()]);
+      const [s, res] = await Promise.all([window.cascade.getSettings(), window.cascade.listModels()]);
+      const models = res.ok ? res.models : [];
       const info = models.find((m) => m.id === s.model);
       if (info && !info.vision) {
         setVisionWarnModel(info.id);
@@ -1635,16 +1640,27 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         {STEPS.map(({ n, title, desc }) => (
           <button
             key={n}
-            className={"prod-step" + (prod.currentStep === n ? " active" : "")}
+            className={"prod-step" + (prod.currentStep === n && !showExpenses ? " active" : "")}
             onClick={() => setStep(n)}
             title={desc}
           >
             <span className="prod-step-title">{title}</span>
           </button>
         ))}
+        <button
+          className={"prod-step prod-step-expenses" + (showExpenses ? " active" : "")}
+          onClick={() => setShowExpenses(true)}
+          title="Running tally of every AI generation and purchased asset"
+        >
+          <span className="prod-step-title">Expenses</span>
+        </button>
       </nav>
 
       <div className="prod-body">
+        {showExpenses ? (
+          <ExpensesPanel />
+        ) : (
+          <>
         {prod.currentStep === 1 && (
           <section className="prod-panel">
             <h3>1 · Script ingestion</h3>
@@ -1679,6 +1695,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         {prod.currentStep === 2 && (
           <section className="prod-panel">
             <h3>2 · Design</h3>
+
+            {err && <p className="error-text">{err}</p>}
 
             <DesignSection title="Visual styles" prodId={prod.meta.id}>
               <p className="hint">
@@ -1839,6 +1857,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onSubmit={runRefGen}
               />
             )}
+
+            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
 
             <StepFooter prod={prod} onNext={goNext} />
           </section>
@@ -2282,6 +2302,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
         {prod.currentStep === 5 && (
           <AssemblyPanel prod={prod} onApply={apply} log={visibleLog} />
+        )}
+          </>
         )}
       </div>
 

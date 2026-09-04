@@ -24,6 +24,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Assembly | `app/src/main/assembly.ts` | Step 5 editor handoff + render: media gathering into `out/assembly/`, CMX3600 EDL, After Effects rebuild `.jsx`, manifest, and the 3-pass ffmpeg render. Pure builders are unit-tested; `assemble()`/`renderAnimatic()` take an injected ffmpeg `run`/`probe` seam (`app/src/main/ffmpeg.ts`). |
 | ffmpeg seam | `app/src/main/ffmpeg.ts` | Locating the ffmpeg binary (bundled `ffmpeg-static`, asar-unpacked when packaged, else PATH) + `runFfmpeg`/`probeMedia` that `assembly.ts` injects. Pure node — never imports Electron. |
 | Production store | `app/src/main/productions.ts` | Production document persistence + migration. |
+| Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), the `userData/ledger.json` singleton, and the human-readable `userData/expenses.csv` mirror. Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
 | Document store | `app/src/main/store.ts` | The generic JSON-document store (`createStore`) behind sessions, productions, and agents: atomic temp+rename writes, newest-first list, archive/ soft-deletes, decode/encode hooks, side-file hooks. Settings stays a bespoke singleton (encryption + memo cache). |
 | IPC contract | `app/src/shared/ipc.ts` | The single channel map (`ipcContract`) that derives the renderer API, drives the preload adapter, and validates every main-process handler. Adding a channel = one contract entry, not three files. |
 | Production views | `app/src/renderer/src/components/production/` | The workspace's extracted panels — `animatic.tsx` (Step 4 playback engine + timeline), `boards.tsx` (board cards + gen modals), `prompt-panel.tsx`, `references.tsx`, `brand.tsx`, `hex.ts`, `assembly.tsx` (Step 5 export package + render) — orchestrated by `ProductionWorkspace.tsx`. |
@@ -48,6 +49,10 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 - **Style** — a named generation prompt (up to 5); `styles[0]` is the master.
 - **Brand** — palette swatches + optional font appended to every board prompt.
 - **Board** — a shot's generated frame (`artwork` on the shot, in `boardsDir`).
+- **Expense rule** — a pricing rule (kind + model + resolution + optional video
+  length → dollar price) the user configures in Settings; exact matches beat
+  wildcards, and generations matching none are priced at $0. Prices are stamped
+  at record time, so editing a rule never reprices history.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields.
 - **Animatic** — Step 4 playback: timing, voiceover, music, per-shot video clips.

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
-import { useExternalImageMenu } from "../external-menu.js";
+import { cascadeMedia } from "./animatic.js";
+import { useImageContextMenu } from "../image-context-menu.js";
 
 export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
   prod: Production;
@@ -80,12 +81,12 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
 
   const shownImg = histIdx === null ? img : histCache[String(histIdx)] ?? null;
 
-  // Right-click → edit the underlying file (full-res) in the external editor, not the thumbnail data URL.
+  // Right-click → native image menu, with the full-res file pinned for "Edit externally".
   const relForExternal = histIdx === null ? shot.artwork : shot.artworkHistory?.[histIdx ?? 0];
-  const canEditExternal = !!relForExternal;
-  const externalMenu = useExternalImageMenu(() => {
-    if (!relForExternal) return;
-    void window.cascade.openInExternalEditor({ productionId: prod.meta.id, relPath: relForExternal }).catch(() => {});
+  const externalMenu = useImageContextMenu({
+    src: relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined),
+    productionId: relForExternal ? prod.meta.id : undefined,
+    relPath: relForExternal ?? undefined,
   });
 
   // Load the effective prompt into the editor when this shot OR the design
@@ -251,7 +252,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
               alt={`Shot ${shot.number}`}
               className="prod-board-frame-img"
               onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, prompt); }}
-              onContextMenu={canEditExternal ? externalMenu.onContextMenu : undefined}
+              onContextMenu={externalMenu.onContextMenu}
               onDragStart={(e) => {
                 // Carry this frame's identity so another frame can accept it as a reference.
                 e.dataTransfer.setData(
@@ -260,9 +261,8 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
                 );
                 e.dataTransfer.effectAllowed = "copy";
               }}
-              title={canEditExternal ? "Click to edit this shot's prompt — right-click to edit externally — or drag onto another frame" : "Click to edit this shot's prompt — or drag onto another frame to use it as a reference"}
+              title="Click to edit this shot's prompt — right-click for image options — or drag onto another frame as a reference"
             />
-            {canEditExternal && externalMenu.menu}
           </>
         ) : (
           <span className="prod-board-empty">{shot.artwork ? "…" : pending ? "pending…" : "no frame"}</span>

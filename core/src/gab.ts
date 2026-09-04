@@ -11,28 +11,28 @@ const READ_TIMEOUT_MS = 210_000;
 export function friendlyApiError(e: unknown): string {
   const msg = String(e);
   if (msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
-    return "Your Gab.ai API key was rejected. Check it in Settings.";
+    return "Your API key was rejected. Check it in Settings.";
   }
   if (msg.includes("HTTP 402") || msg.toLowerCase().includes("insufficient")) {
-    return "You're out of Gab.ai credits. Top up or wait for your monthly reset.";
+    return "You're out of credits. Top up or wait for your monthly reset.";
   }
   if (msg.includes("HTTP 429")) {
-    return "Rate limited by Gab.ai — wait a minute and try again.";
+    return "Rate limited by the API — wait a minute and try again.";
   }
   if (msg.includes("HTTP 504") || msg.includes("upstream_timeout")) {
     return "The model timed out repeatedly. Try again, or switch to a faster model.";
   }
   if (msg.includes("fetch failed") || msg.includes("ENOTFOUND") || msg.includes("EAI_AGAIN") || msg.includes("ECONNRE")) {
-    return "Can't reach Gab.ai — check your internet connection.";
+    return "Can't reach the API — check your internet connection.";
   }
   if (msg.includes("TimeoutError") || msg.includes("aborted")) {
     return "The request was interrupted.";
   }
-  // Gab wraps every upstream model failure in a generic banner that hides the
-  // real reason (provider refusal, content-policy block, timeout, outage).
+  // The API wraps every upstream model failure in a generic banner that hides
+  // the real reason (provider refusal, content-policy block, timeout, outage).
   // Surface it as something actionable instead of a confusing dead-end.
   if (msg.includes("gab.ai error") || msg.includes("failed to generate a response")) {
-    return "Gab's model failed to respond. This is often a temporary outage, a safety/content block, or a model-specific issue — try again, switch to a different model, or rephrase the request.";
+    return "The model failed to respond. This is often a temporary outage, a safety/content block, or a model-specific issue — try again, switch to a different model, or rephrase the request.";
   }
   return msg;
 }

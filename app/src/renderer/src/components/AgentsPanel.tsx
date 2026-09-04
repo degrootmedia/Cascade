@@ -172,7 +172,7 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
               </div>
               <label>Model</label>
               <select value={editing.meta.model ?? "arya"} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, model: e.target.value } })} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
-                {models.length ? models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>) : <option value="arya">arya</option>}
+                {models.length ? [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id)).map((m) => <option key={m.id} value={m.id}>{m.id}</option>) : <option value="arya">arya</option>}
                 {!models.find((m) => m.id === editing.meta.model) && editing.meta.model && <option value={editing.meta.model}>{editing.meta.model}</option>}
               </select>
               <label>Allowed tools</label>

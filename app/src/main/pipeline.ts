@@ -239,9 +239,10 @@ export async function refineStylePrompt(
   style: string,
   scriptExcerpt: string,
   apiKey: string,
-  model: string
+  model: string,
+  baseUrl?: string
 ): Promise<string> {
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -281,9 +282,10 @@ export async function refineCharacterDescription(
   description: string,
   scriptExcerpt: string,
   apiKey: string,
-  model: string
+  model: string,
+  baseUrl?: string
 ): Promise<string> {
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -324,9 +326,10 @@ export async function generateStyleSet(
   scriptExcerpt: string,
   apiKey: string,
   model: string,
-  maxStyles = 5
+  maxStyles = 5,
+  baseUrl?: string
 ): Promise<{ name: string; prompt: string }[]> {
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -375,9 +378,10 @@ export async function stylePromptFromImage(
   imageDataUrl: string,
   scriptExcerpt: string,
   apiKey: string,
-  model: string
+  model: string,
+  baseUrl?: string
 ): Promise<{ name: string; prompt: string }> {
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -473,7 +477,8 @@ export async function generateMagicPrompts(
   p: Production,
   apiKey: string,
   model: string,
-  emit: EmitFn
+  emit: EmitFn,
+  baseUrl?: string
 ): Promise<Production> {
   const shots = p.scenes.flatMap((s) => s.shots);
   if (!shots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
@@ -516,7 +521,7 @@ export async function generateMagicPrompts(
     'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.';
 
   emit(`Generating Magic Prompts for ${shots.length} shot(s) (model: ${model})…`);
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -1567,12 +1572,13 @@ export async function planAnimatic(
   p: Production,
   apiKey: string,
   model: string,
-  emit: EmitFn
+  emit: EmitFn,
+  baseUrl?: string
 ): Promise<Production> {
   const shots = p.scenes.flatMap((s) => s.shots);
   if (!shots.length) throw new Error("No shots yet — run Step 1 first.");
   emit(`Timing ${shots.length} shot(s) (model: ${model})…`);
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -1650,7 +1656,8 @@ export async function ingestScript(
   source: string,
   apiKey: string,
   model: string,
-  emit: EmitFn
+  emit: EmitFn,
+  baseUrl?: string
 ): Promise<Production> {
   const label = isGoogleDocUrl(source) ? "Google Doc" : path.basename(source);
   emit(`Extracting text from ${label}…`);
@@ -1665,7 +1672,7 @@ export async function ingestScript(
   }
 
   emit(`Breaking into scenes and shots (model: ${model})…`);
-  const gab = new GabClient(apiKey);
+  const gab = new GabClient(apiKey, baseUrl);
   const { text: reply } = await gab.completeOnce(model, [systemMessage(), breakdownPrompt(scriptText)], 8000);
   const parsed = parseBreakdownJson(reply);
   const scenes = normalizeScenes(parsed);

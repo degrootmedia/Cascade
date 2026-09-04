@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
-import type { ModelInfo, SettingsView } from "../../../shared/ipc.js";
+import { useEffect, useMemo, useState } from "react";
+import type { ExpensePriceRule, ModelInfo, OpenArtModelChoice, SettingsView } from "../../../shared/ipc.js";
+import { API_PROVIDERS } from "../../../shared/providers.js";
 import { McpSection } from "./McpSection.js";
 import { applyAccent } from "../theme.js";
+import { uid } from "./production/hex.js";
 
 const ACCENT_PRESETS = [
   { name: "Blue", value: "#4f8ef7" },
@@ -12,7 +14,162 @@ const ACCENT_PRESETS = [
   { name: "Pink", value: "#f778ba" },
 ];
 
+/** Editable price-rule row draft (text fields so number inputs don't fight
+ *  the user mid-keystroke; parsed into ExpensePriceRule on save). */
+interface PriceDraft {
+  id: string;
+  kind: "image" | "video";
+  model: string;
+  resolution: string;
+  durationText: string;
+  priceText: string;
+}
+
+const RESOLUTION_SUGGESTIONS = ["1k", "2k", "4k", "480p", "720p", "1080p", "4K"];
+
+/** Settings → Expense pricing: rules that turn a generation's (kind, model,
+ *  resolution, video length) into a dollar amount. Blank fields = any. */
+function ExpensePricingSection() {
+  const [drafts, setDrafts] = useState<PriceDraft[]>([]);
+  const [models, setModels] = useState<OpenArtModelChoice[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    void window.cascade
+      .getExpensePriceRules()
+      .then((rules) =>
+        setDrafts(
+          rules.map((r) => ({
+            id: r.id,
+            kind: r.kind,
+            model: r.model,
+            resolution: r.resolution,
+            durationText: r.durationSec == null ? "" : String(r.durationSec),
+            priceText: String(r.price),
+          }))
+        )
+      )
+      .catch((e) => setError(String(e)));
+    void window.cascade.listOpenArtModels().then(setModels).catch(() => {});
+  }, []);
+
+  const update = (i: number, patch: Partial<PriceDraft>) => {
+    setSaved(false);
+    setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
+  };
+
+  const addRule = () => {
+    setSaved(false);
+    setDrafts((ds) => [
+      ...ds,
+      { id: uid("expense-rule"), kind: "image", model: "", resolution: "", durationText: "", priceText: "" },
+    ]);
+  };
+
+  const removeRule = (i: number) => {
+    setSaved(false);
+    setDrafts((ds) => ds.filter((_, j) => j !== i));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const rules: ExpensePriceRule[] = drafts.map((d) => ({
+        id: d.id,
+        kind: d.kind,
+        model: d.model.trim(),
+        resolution: d.resolution.trim(),
+        durationSec: d.kind === "video" && d.durationText.trim() ? Number(d.durationText) || null : null,
+        price: Number(d.priceText) || 0,
+      }));
+      await window.cascade.setExpensePriceRules(rules);
+      setSaved(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <label>Expense pricing</label>
+      <p className="hint">
+        Price per generation: kind · model · resolution (and video length). A blank field means "any";
+        exact matches win over wildcards, and generations matching nothing count as $0.
+      </p>
+      <div className="expense-pricing">
+        <div className="expense-rule expense-rule-head">
+          <span>Kind</span>
+          <span>Model</span>
+          <span>Resolution</span>
+          <span>Length (video)</span>
+          <span>Price</span>
+          <span />
+        </div>
+        {drafts.map((d, i) => (
+          <div className="expense-rule" key={d.id}>
+            <select value={d.kind} onChange={(e) => update(i, { kind: e.target.value as PriceDraft["kind"] })}>
+              <option value="image">image</option>
+              <option value="video">video</option>
+            </select>
+            <select value={d.model || "*"} onChange={(e) => update(i, { model: e.target.value === "*" ? "" : e.target.value })}>
+              <option value="*">Any model</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>{m.displayName}</option>
+              ))}
+            </select>
+            <input
+              value={d.resolution}
+              list="expense-resolutions"
+              placeholder="any"
+              onChange={(e) => update(i, { resolution: e.target.value })}
+            />
+            {d.kind === "video" ? (
+              <input
+                type="number"
+                min="1"
+                placeholder="any"
+                value={d.durationText}
+                onChange={(e) => update(i, { durationText: e.target.value })}
+              />
+            ) : (
+              <span className="hint">—</span>
+            )}
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="$0.00"
+              value={d.priceText}
+              onChange={(e) => update(i, { priceText: e.target.value })}
+            />
+            <button className="link" onClick={() => removeRule(i)} title="Remove price rule">×</button>
+          </div>
+        ))}
+        <datalist id="expense-resolutions">
+          {RESOLUTION_SUGGESTIONS.map((r) => (
+            <option key={r} value={r} />
+          ))}
+        </datalist>
+        <div className="expense-pricing-actions">
+          <button onClick={addRule}>+ Add price</button>
+          <button className="primary" onClick={() => void save()} disabled={saving}>
+            {saving ? "Saving…" : "Save prices"}
+          </button>
+          {saved && <span className="hint">Saved.</span>}
+        </div>
+      </div>
+      {error && <p className="error-text">{error}</p>}
+    </>
+  );
+}
+
 export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: SettingsView; onClose: () => void; onOpenAgents?: () => void }) {
+  const [provider, setProvider] = useState(settings.provider);
   const [apiKey, setApiKeyInput] = useState("");
   const [workspace, setWorkspace] = useState(settings.workspace);
   const [model, setModel] = useState(settings.model);
@@ -22,10 +179,55 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   const [hasKey, setHasKey] = useState(settings.hasApiKey);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Why the model list is empty (real HTTP/API message, shown inline). */
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  const providerLabel = API_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
+
+  // Cheapest first; stable by id for ties.
+  const sortedModels = useMemo(
+    () => [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id)),
+    [models]
+  );
 
   useEffect(() => {
-    if (hasKey) void window.cascade.listModels().then(setModels).catch(() => {});
+    if (hasKey) void loadModels();
   }, [hasKey]);
+
+  // A provider may have no stored model yet (or its saved model is gone) —
+  // fall back to its first listed model so we never send an empty model.
+  useEffect(() => {
+    if (sortedModels.length === 0) return;
+    if (!sortedModels.some((m) => m.id === model)) {
+      void changeModel(sortedModels[0].id);
+    }
+  }, [sortedModels, model]);
+
+  /** Fetch the current provider's models; surfaces the real failure reason. */
+  async function loadModels(): Promise<ModelInfo[]> {
+    const res = await window.cascade.listModels();
+    if (!res.ok) {
+      setModelError(res.error);
+      return [];
+    }
+    setModelError(null);
+    return res.models;
+  }
+
+  async function changeProvider(id: string) {
+    setProvider(id);
+    setError(null);
+    try {
+      await window.cascade.setProvider(id);
+      const s = await window.cascade.getSettings();
+      setHasKey(s.hasApiKey);
+      setModel(s.model);
+      setApiKeyInput("");
+      setModels(s.hasApiKey ? await loadModels() : []);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function saveKey() {
     if (!apiKey.trim()) return;
@@ -35,6 +237,9 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
       await window.cascade.setApiKey(apiKey.trim());
       setApiKeyInput("");
       setHasKey(true);
+      // Refresh the model list for the current provider immediately — the
+      // key just changed, so stale models (or an empty list) would be wrong.
+      setModels(await loadModels());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -50,6 +255,11 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   async function changeModel(id: string) {
     setModel(id);
     await window.cascade.setModel(id);
+  }
+
+  async function refreshModels() {
+    setError(null);
+    setModels(await loadModels());
   }
 
   /** Persist + live-apply a new accent color. */
@@ -96,7 +306,17 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
       <div className="modal settings">
         <h3>Settings</h3>
 
-        <label>Gab.ai API key</label>
+        <label>API provider</label>
+        <select value={provider} onChange={(e) => void changeProvider(e.target.value)}>
+          {API_PROVIDERS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <p className="hint">Which API powers chat, auto-titles, and the production pipeline's LLM steps. Each provider keeps its own key and model.</p>
+
+        <label>{providerLabel} API key</label>
         {hasKey ? (
           <p className="hint">
             Key saved (encrypted). <button className="link" onClick={() => setHasKey(false)}>Replace</button>
@@ -106,7 +326,6 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
             <input
               type="password"
               value={apiKey}
-              placeholder="gab_…"
               onChange={(e) => setApiKeyInput(e.target.value)}
             />
             <button onClick={() => void saveKey()} disabled={saving || !apiKey.trim()}>
@@ -134,15 +353,21 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
         </p>
 
         <label>Model</label>
-        <select value={model} onChange={(e) => void changeModel(e.target.value)} disabled={!hasKey}>
-          {models.length === 0 && <option value={model}>{model}</option>}
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.id}
-            </option>
-          ))}
-        </select>
-        <p className="hint">arya is cheapest; premium models use credits much faster.</p>
+        <div className="row">
+          <select value={model} onChange={(e) => void changeModel(e.target.value)} disabled={!hasKey} style={{ flex: 1 }}>
+            {sortedModels.length === 0 && <option value={model}>{model}</option>}
+            {sortedModels.map((m) => (
+              <option key={m.id} value={m.id} title={m.costTitle}>
+                {m.costLabel.startsWith("$") ? `${m.id} (${m.costLabel})` : m.id}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => void refreshModels()} disabled={!hasKey} title="Re-fetch the model list from this provider">
+            Refresh models
+          </button>
+        </div>
+        {hasKey && models.length === 0 && modelError && <p className="error-text">{modelError}</p>}
+        <p className="hint">Models are listed cheapest first. Hover a cost badge in the header picker for details.</p>
 
         <label>Accent color</label>
         <div className="accent-row">
@@ -199,6 +424,8 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
             Open skills folder
           </button>
         </p>
+
+        <ExpensePricingSection />
 
         {error && <p className="error-text">{error}</p>}
 

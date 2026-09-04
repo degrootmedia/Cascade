@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CustomRef, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
-import { useExternalImageMenu } from "../external-menu.js";
+import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 
 interface RefItem {
@@ -239,9 +239,11 @@ function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }:
   const isVideo = r.media === "video" && !!r.mediaPath;
   const hasImage = !!imgUrl && !isVideo;
   const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
-  const menu = useExternalImageMenu(() => {
-    if (r.imagePath) void window.cascade.openInExternalEditor({ productionId: prodId, relPath: r.imagePath }).catch(() => {});
-    else if (r.artwork) void window.cascade.openInExternalEditor({ dataUrl: r.artwork }).catch(() => {});
+  const menu = useImageContextMenu({
+    src: imgUrl ?? undefined,
+    productionId: r.imagePath ? prodId : undefined,
+    relPath: r.imagePath ?? undefined,
+    dataUrl: r.imagePath ? undefined : (r.artwork ?? undefined),
   });
   return (
     <figure className="prod-ref">
@@ -255,7 +257,6 @@ function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }:
       {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(r.id)}>⤒</button>}
       {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={() => onEditRef(r)}>✎</button>}
       <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
-      {hasImage && menu.menu}
       {zoom && (
         <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
           <figure className="prod-ref-lightbox-card">

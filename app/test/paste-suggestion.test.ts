@@ -58,7 +58,7 @@ function cascadeMock(): Record<string, unknown> {
   const stub = () => Promise.resolve();
   return {
     boardThumbnail: async () => null,
-    openInExternalEditor: async () => {},
+    showImageMenu: async () => {},
     videoModelOptions: async () => null,
     getOpenArtCredits: async () => null,
     listProductions: async () => [{ id: "p1", name: "Test production", folder: "C:/test", shotCount: 0, stepDone: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],

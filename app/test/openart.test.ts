@@ -6,11 +6,18 @@
  * and async-wait logic exactly as the real server would. Electron is mocked so
  * the pipeline module (nativeImage) loads in a plain node process.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
 import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
+
+const { dataDir } = vi.hoisted(() => {
+  const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
+  return { dataDir: `${base}/cascade-openart-${process.pid}-${Date.now()}` };
+});
 
 vi.mock("electron", () => ({
   nativeImage: {
@@ -93,6 +100,10 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+});
+
+afterAll(() => {
+  fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 // ---- tests -----------------------------------------------------------------
@@ -479,5 +490,101 @@ describe("OpenArtClient pending-image contingency", () => {
 
     // Rechecking a dead job throws too.
     await expect(client.recheckPendingImage({ historyId: "h-fail2", prompt: "any", model: "m", at: "" })).rejects.toThrow(/failed/i);
+  });
+});
+
+describe("OpenArtClient generation recorder", () => {
+  it("records a successful image generation with its resolved metadata", async () => {
+    const onGeneration = vi.fn();
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "kling-v2", displayName: "Kling V2", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              aspectRatio: { type: "string", enum: ["16:9", "1:1"] },
+              resolution: { type: "string", enum: ["1k", "2k", "4k"] },
+            },
+          },
+        }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-rec","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("rec-jpeg")] }),
+    });
+    const client = new OpenArtClient(mcp, { onGeneration });
+    const gen = client.imageGenFn(makeProduction())!;
+    const s: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+
+    const out = await gen("Draw a castle", [], s);
+    expect(out.toString()).toBe("rec-jpeg");
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+    expect(onGeneration).toHaveBeenCalledWith({
+      kind: "image",
+      model: "kling-v2",
+      resolution: "1k",
+      aspectRatio: "16:9",
+      at: expect.any(Number),
+      productionId: "prod-1",
+      shotId: "s1",
+    });
+  });
+
+  it("does not record a failed image submission", async () => {
+    const onGeneration = vi.fn();
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-fail","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"FAILED"}', images: [], uris: [] }),
+    });
+    const client = new OpenArtClient(mcp, { onGeneration });
+    const gen = client.imageGenFn(makeProduction())!;
+
+    await expect(gen("any", [])).rejects.toThrow(/failed/i);
+    expect(onGeneration).not.toHaveBeenCalled();
+  });
+
+  it("records a successful video generation with its resolution and length", async () => {
+    const onGeneration = vi.fn();
+    const folder = path.join(dataDir, "prod");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              resolution: { type: "string", enum: ["720p", "1080p"] },
+              duration: { type: "string", enum: ["5s", "10s"] },
+            },
+          },
+        }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-vid","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const client = new OpenArtClient(mcp, { onGeneration });
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+
+    const { rel } = await client.generateVideoClip(
+      prod,
+      shot,
+      { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate" },
+      () => {}
+    );
+    expect(rel).toContain("shot-0100-");
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+    expect(onGeneration).toHaveBeenCalledWith({
+      kind: "video",
+      model: "veo-3",
+      resolution: "1080p",
+      durationSec: 5,
+      at: expect.any(Number),
+      productionId: "prod-1",
+      shotId: "s1",
+    });
   });
 });

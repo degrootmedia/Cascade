@@ -28,6 +28,7 @@ import {
 } from "../shared/prompt-grammar.js";
 import type {
   ImageGenAspectRatio,
+  LedgerGenMeta,
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
@@ -129,7 +130,23 @@ export class OpenArtClient {
   private readonly videoOptionsCache = new Map<string, { o: VideoModelOptions | null; at: number }>();
   private readonly VIDEO_OPTIONS_NULL_TTL_MS = 2 * 60_000;
 
-  constructor(private readonly mcp: McpManager) {}
+  /** A recorder (the expenses ledger) that observes every successful
+   *  generation with its resolved metadata. Injected so the tally is testable
+   *  at the same seam as the McpManager fake. */
+  constructor(
+    private readonly mcp: McpManager,
+    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void }
+  ) {}
+
+  /** Fire the generation recorder; a tally write must never break a
+   *  generation, so recorder errors are non-fatal. */
+  private fireGeneration(meta: LedgerGenMeta): void {
+    try {
+      this.recorder?.onGeneration(meta);
+    } catch {
+      /* ignored */
+    }
+  }
 
   // ---- tool discovery -------------------------------------------------------
 
@@ -918,15 +935,29 @@ for (const { tag, name } of refTagMatches(prompt)) {
       }
       const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps, aspectRatio);
       const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
-      if (images.length) return images[0];
+
+      // Ledger metadata is in scope on every success path below — model and
+      // resolution are resolved here, not at the IPC handler call sites.
+      const genMeta: LedgerGenMeta = {
+        kind: "image",
+        model: modelId ?? "",
+        resolution: cfgUsed.resolution,
+        aspectRatio,
+        at: Date.now(),
+        productionId: p.meta.id,
+        shotId: shot?.id,
+      };
+
+      let buffer: Buffer | null = null;
+      if (images.length) buffer = images[0];
 
 // OpenArt's generate tool is async — a PENDING submission carries the
       // historyId but no pixels. Wait for the finished image before giving up.
       const historyId = this.openArtHistoryId(text);
-      if (historyId) {
+      if (!buffer && historyId) {
         try {
           const done = await this.waitOpenArtImage(historyId);
-          if (done) return done;
+          if (done) buffer = done;
           // no image surfaced despite completion — fall through to URL scan
         } catch (e) {
           if (e instanceof OpenArtImagePendingError) {
@@ -940,20 +971,25 @@ for (const { tag, name } of refTagMatches(prompt)) {
       }
 
       // Many MCP image tools return text containing a URL to the result.
-      const url =
+      if (!buffer) {
+        const url =
 text.match(IMAGE_URL_RX)?.[0] ??
-        text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
-      if (!url) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
-      try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
-        return Buffer.from(await res.arrayBuffer());
-      } catch (e) {
-        // The image is ready but couldn't be fetched — record the URL so a
-        // recheck can retry the download without regenerating.
-        this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto" });
-        throw e;
+          text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
+        if (!url) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
+        try {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
+          buffer = Buffer.from(await res.arrayBuffer());
+        } catch (e) {
+          // The image is ready but couldn't be fetched — record the URL so a
+          // recheck can retry the download without regenerating.
+          this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto" });
+          throw e;
+        }
       }
+
+      this.fireGeneration(genMeta);
+      return buffer;
     };
   }
 
@@ -1067,6 +1103,17 @@ text.match(IMAGE_URL_RX)?.[0] ??
     const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
     fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
     fs.writeFileSync(assetPath(p, rel), done.buf);
+
+    this.fireGeneration({
+      kind: "video",
+      model: modelId ?? "",
+      resolution: opts.resolution || "",
+      durationSec: opts.durationSec,
+      at: Date.now(),
+      productionId: p.meta.id,
+      shotId: shot.id,
+    });
+
     return { rel };
   }
 }

@@ -1,15 +1,22 @@
 /**
  * Settings persistence. The API key is encrypted with Electron safeStorage
  * (OS keychain-backed) and stored base64-encoded; it is never written in
- * plain text and never sent to the renderer.
+ * plain text and never sent to the renderer. Keys and models are stored per
+ * LLM API provider (see shared/providers.ts) — switching providers in
+ * Settings keeps each one's key and model choice intact.
  */
 import { app, safeStorage } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getProvider } from "../shared/providers.js";
 
 interface SettingsFile {
-  encryptedApiKey?: string; // base64
-  model: string;
+  /** Selected LLM API provider id (see shared/providers.ts). */
+  provider: string;
+  /** base64-encrypted API keys, one per provider id. */
+  encryptedApiKeys: Record<string, string>;
+  /** Last chosen model per provider id. */
+  models: Record<string, string>;
   workspace: string | null;
   /** Most recently used folders, most-recent first. */
   recentWorkspaces: string[];
@@ -28,7 +35,9 @@ interface SettingsFile {
 }
 
 const DEFAULTS: SettingsFile = {
-  model: "arya",
+  provider: "gab",
+  encryptedApiKeys: {},
+  models: {},
   workspace: null,
   recentWorkspaces: [],
   recentProductions: [],
@@ -47,11 +56,24 @@ let cache: SettingsFile | null = null;
 
 function load(): SettingsFile {
   if (cache) return cache;
+  let s: SettingsFile = { ...DEFAULTS };
   try {
-    cache = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsPath(), "utf8")) };
+    s = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsPath(), "utf8")) };
   } catch {
-    cache = { ...DEFAULTS };
+    // no settings file yet — use defaults
   }
+  // Migration from pre-provider settings: a single key + model belonged to gab.
+  const legacy = s as unknown as { encryptedApiKey?: string; model?: string };
+  if (legacy.encryptedApiKey && !s.encryptedApiKeys["gab"]) {
+    s.encryptedApiKeys["gab"] = legacy.encryptedApiKey;
+  }
+  if (legacy.model && !s.models["gab"]) {
+    s.models["gab"] = legacy.model;
+  }
+  delete legacy.encryptedApiKey;
+  delete legacy.model;
+  if (!getProvider(s.provider)) s.provider = "gab";
+  cache = s;
   return cache!;
 }
 
@@ -60,31 +82,60 @@ function save(): void {
   fs.writeFileSync(settingsPath(), JSON.stringify(load(), null, 2), "utf8");
 }
 
-export function getApiKey(): string | null {
+function currentProvider(): string {
+  const p = load().provider;
+  return getProvider(p) ? p : "gab";
+}
+
+/** Base URL of the selected provider (e.g. "https://gab.ai/v1"). */
+export function getBaseUrl(): string {
+  return getProvider(currentProvider())?.baseUrl ?? "";
+}
+
+export function getProviderId(): string {
+  return currentProvider();
+}
+
+export function setProvider(id: string): void {
+  if (!getProvider(id)) return;
+  load().provider = id;
+  save();
+}
+
+export function getApiKey(provider?: string): string | null {
   const s = load();
-  if (!s.encryptedApiKey) return null;
+  const enc = s.encryptedApiKeys[provider ?? currentProvider()];
+  if (!enc) return null;
   try {
-    return safeStorage.decryptString(Buffer.from(s.encryptedApiKey, "base64"));
+    return safeStorage.decryptString(Buffer.from(enc, "base64"));
   } catch {
     return null;
   }
 }
 
-export function setApiKey(key: string): void {
+export function hasApiKey(provider?: string): boolean {
+  return getApiKey(provider) !== null;
+}
+
+export function setApiKey(key: string, provider?: string): void {
   const s = load();
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error("OS encryption unavailable; refusing to store API key in plain text");
   }
-  s.encryptedApiKey = safeStorage.encryptString(key).toString("base64");
+  s.encryptedApiKeys[provider ?? currentProvider()] = safeStorage.encryptString(key).toString("base64");
   save();
 }
 
-export function getModel(): string {
-  return load().model;
+export function getModel(provider?: string): string {
+  const s = load();
+  const id = provider ?? currentProvider();
+  const model = s.models[id];
+  if (model) return model;
+  return getProvider(id)?.defaultModel ?? "";
 }
 
-export function setModel(model: string): void {
-  load().model = model;
+export function setModel(model: string, provider?: string): void {
+  load().models[provider ?? currentProvider()] = model;
   save();
 }
 

@@ -28,6 +28,8 @@ export interface ChatEvent {
 }
 
 export interface SettingsView {
+  /** Selected LLM API provider id (see shared/providers.ts). */
+  provider: string;
   hasApiKey: boolean;
   model: string;
   workspace: string | null;
@@ -41,9 +43,20 @@ export interface ModelInfo {
   id: string;
   thinking: boolean;
   vision: boolean;
-  /** Credits per request at base context. */
+  /** Numeric cost used for cheapest-first ordering; units are provider-specific
+   *  (gab credits vs. USD per 1M output tokens for Cheaper Inference). */
   baseCost: number;
+  /** Short badge text, e.g. "12" (gab credits) or "$3.50/1M". */
+  costLabel: string;
+  /** Tooltip detail, e.g. "12 credits per message" or "in $0.70 / out $3.50 per 1M tokens". */
+  costTitle: string;
 }
+
+/** Result of listing the current provider's models — carries the real failure
+ *  reason so Settings can show it instead of an empty dropdown. */
+export type ModelListResult =
+  | { ok: true; models: ModelInfo[] }
+  | { ok: false; error: string };
 
 export interface SkillInfo {
   name: string;
@@ -395,6 +408,66 @@ export interface VideoModelOptions {
   durations: number[];
 }
 
+/** One row in the expenses ledger — a priced AI generation or a manual
+ *  "purchased asset" entry the user adds by hand. */
+export interface LedgerEntry {
+  /** Stable identity. */
+  id: string;
+  /** What was generated: image / video, or "manual" for custom purchased-asset rows. */
+  kind: "image" | "video" | "manual";
+  /** Resolved OpenArt model id (empty for manual rows). */
+  model: string;
+  /** Resolution label: "1k"/"2k"/"4k" bucket for images, e.g. "1080p" for video. */
+  resolution: string;
+  /** Clip length in seconds (video only). */
+  durationSec?: number;
+  /** Aspect ratio for images (e.g. "16:9"). */
+  aspectRatio?: string;
+  /** The price stamped when the entry was recorded ($0 when no rule matched). */
+  price: number;
+  /** When the generation completed / the manual row was added. */
+  at: number;
+  /** Custom label for manual entries. */
+  label?: string;
+  /** Production the generation belongs to. */
+  productionId?: string;
+  /** Shot the generation belongs to. */
+  shotId?: string;
+}
+
+/** A pricing rule: kind + model + resolution + (video) duration → price. Empty
+ *  string / null fields act as "*" wildcards. Exact matches beat wildcards;
+ *  generations matching no rule are priced at $0. */
+export interface ExpensePriceRule {
+  id: string;
+  kind: "image" | "video";
+  model: string;
+  resolution: string;
+  /** Video length in seconds this rule prices (null = any). Ignored for images. */
+  durationSec: number | null;
+  price: number;
+}
+
+/** The renderer read model for the Expenses page. */
+export interface LedgerView {
+  entries: LedgerEntry[];
+  total: number;
+  imageCount: number;
+  videoCount: number;
+}
+
+/** Metadata handed to the generation seam for one successful AI generation. */
+export interface LedgerGenMeta {
+  kind: "image" | "video";
+  model: string;
+  resolution: string;
+  durationSec?: number;
+  aspectRatio?: string;
+  at: number;
+  productionId?: string;
+  shotId?: string;
+}
+
 /** Aspect ratios offered when generating reference images (Design, Step 2). */
 export type ImageGenAspectRatio = "1:1" | "4:3" | "16:9";
 
@@ -565,16 +638,17 @@ export interface CascadeApi {
   getSettings(): Promise<SettingsView>;
   setApiKey(key: string): Promise<void>;
   setModel(model: string): Promise<void>;
+  setProvider(id: string): Promise<void>;
   setAccent(color: string): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
-  /** Open an image in the external editor (or the OS default when none is set). */
-  openInExternalEditor(opts: { productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
+  /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
+  showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
   onOpenSettings(cb: () => void): () => void;
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
   onZoomChanged(cb: () => void): () => void;
-  listModels(): Promise<ModelInfo[]>;
+  listModels(): Promise<ModelListResult>;
   getCredits(): Promise<number | null>;
   /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
   getOpenArtCredits(): Promise<number | null>;
@@ -846,6 +920,18 @@ export interface CascadeApi {
   assemblyRender(productionId: string): Promise<Production>;
   /** Step 5: open the export folder in the OS file manager. */
   assemblyOpenFolder(productionId: string): Promise<void>;
+  /** Expenses: the full ledger (entries + running total + per-kind counts). */
+  getLedger(): Promise<LedgerView>;
+  /** Expenses: the pricing rules edited from Settings. */
+  getExpensePriceRules(): Promise<ExpensePriceRule[]>;
+  /** Expenses: persist the pricing rules edited from Settings. */
+  setExpensePriceRules(rules: ExpensePriceRule[]): Promise<void>;
+  /** Expenses: add a manual "purchased asset" row with a custom dollar amount. */
+  addManualExpense(label: string, amount: number): Promise<LedgerView>;
+  /** Expenses: remove one ledger row. */
+  removeLedgerEntry(id: string): Promise<LedgerView>;
+  /** Expenses: open the human-readable CSV ledger in the OS file manager. */
+  openLedgerFile(): Promise<void>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }
 
@@ -883,10 +969,11 @@ export const ipcContract = {
   "settings:get": { method: "getSettings", kind: "invoke" },
   "settings:setApiKey": { method: "setApiKey", kind: "invoke" },
   "settings:setModel": { method: "setModel", kind: "invoke" },
+  "settings:setProvider": { method: "setProvider", kind: "invoke" },
   "settings:setAccent": { method: "setAccent", kind: "invoke" },
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
-  "external:open": { method: "openInExternalEditor", kind: "invoke" },
+  "image:showMenu": { method: "showImageMenu", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
 
@@ -987,6 +1074,12 @@ export const ipcContract = {
   "production:assemblyBuild": { method: "assemblyBuild", kind: "invoke" },
   "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
   "production:assemblyOpenFolder": { method: "assemblyOpenFolder", kind: "invoke" },
+  "ledger:get": { method: "getLedger", kind: "invoke" },
+  "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
+  "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },
+  "ledger:addManual": { method: "addManualExpense", kind: "invoke" },
+  "ledger:removeEntry": { method: "removeLedgerEntry", kind: "invoke" },
+  "ledger:openFile": { method: "openLedgerFile", kind: "invoke" },
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */

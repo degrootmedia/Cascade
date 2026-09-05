@@ -2,7 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage, protocol } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage, protocol, screen } from "electron";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2709,10 +2709,57 @@ function installApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/**
+ * Whether saved bounds overlap any connected display. Guards against
+ * restoring an off-screen window after a monitor was unplugged.
+ */
+function isBoundsVisible(x: number, y: number, width: number, height: number): boolean {
+  try {
+    const centerX = Math.floor(x + width / 2);
+    const centerY = Math.floor(y + height / 2);
+    return screen.getAllDisplays().some((d) => {
+      const b = d.workArea;
+      return centerX >= b.x && centerX < b.x + b.width && centerY >= b.y && centerY < b.y + b.height;
+    });
+  } catch {
+    return true; // screen not ready in tests — don't block restore
+  }
+}
+
+/** Persist the current window geometry. While maximized/fullscreen only the
+ *  flag is stored so the previous normal bounds survive for un-maximize. */
+function saveWindowState(): void {
+  if (!win || win.isDestroyed()) return;
+  try {
+    const maximized = win.isMaximized() || win.isFullScreen();
+    if (maximized) {
+      const prev = settings.getWindowState();
+      settings.setWindowState({
+        x: prev?.x ?? null,
+        y: prev?.y ?? null,
+        width: prev?.width ?? 1100,
+        height: prev?.height ?? 780,
+        isMaximized: true,
+      });
+      return;
+    }
+    const b = win.getNormalBounds?.() ?? win.getBounds();
+    settings.setWindowState({ x: b.x, y: b.y, width: b.width, height: b.height, isMaximized: false });
+  } catch {
+    /* non-fatal — window metrics must never break quit */
+  }
+}
+
 function createWindow() {
+  const saved = settings.getWindowState();
+  const restored = saved && saved.x !== null && saved.y !== null
+    && isBoundsVisible(saved.x, saved.y, saved.width, saved.height)
+    ? { x: saved.x, y: saved.y, width: saved.width, height: saved.height }
+    : saved
+      ? { width: saved.width, height: saved.height }
+      : { width: 1100, height: 780 };
   win = new BrowserWindow({
-    width: 1100,
-    height: 780,
+    ...restored,
     minWidth: 720,
     minHeight: 500,
     title: "Cascade",
@@ -2724,8 +2771,23 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  if (saved?.isMaximized) win.maximize();
 
   installApplicationMenu();
+
+  // Remember size/position across restarts. Resize/move fire continuously,
+  // so debounce to a single write shortly after the user settles; close
+  // saves synchronously as a final guarantee.
+  let saveTimer: NodeJS.Timeout | null = null;
+  const saveSoon = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; saveWindowState(); }, 500);
+  };
+  win.on("resize", saveSoon);
+  win.on("move", saveSoon);
+  win.on("maximize", saveSoon);
+  win.on("unmaximize", saveSoon);
+  win.on("close", () => saveWindowState());
 
   // Zoom shortcuts. Chromium's built-in binding misses Ctrl+= / Ctrl++ on
   // some layouts, so handle the whole family explicitly (and swallow the key

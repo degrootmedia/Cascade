@@ -34,6 +34,17 @@ interface SettingsFile {
   externalEditor: string | null;
   /** base64-encrypted 3D AI Studio API key (separate from the LLM keys). */
   encrypted3daiApiKey: string | null;
+  /** Last main-window bounds + maximized flag, restored on launch. */
+  windowState: WindowState | null;
+}
+
+/** Persisted main-window geometry. x/y are null when never positioned. */
+export interface WindowState {
+  x: number | null;
+  y: number | null;
+  width: number;
+  height: number;
+  isMaximized: boolean;
 }
 
 const DEFAULTS: SettingsFile = {
@@ -47,6 +58,7 @@ const DEFAULTS: SettingsFile = {
   accent: "#4f8ef7",
   externalEditor: null,
   encrypted3daiApiKey: null,
+  windowState: null,
 };
 const MAX_RECENT_WORKSPACES = 10;
 const MAX_RECENT_PRODUCTIONS = 10;
@@ -229,5 +241,30 @@ export function set3daiApiKey(key: string): void {
     throw new Error("OS encryption unavailable; refusing to store API key in plain text");
   }
   s.encrypted3daiApiKey = key ? safeStorage.encryptString(key).toString("base64") : null;
+  save();
+}
+
+/** Last saved main-window geometry, or null on first run. Validates shape
+ *  so a hand-edited settings.json can't create an unsized window. */
+export function getWindowState(): WindowState | null {
+  const w = load().windowState;
+  if (!w || typeof w !== "object") return null;
+  const width = Math.floor(Number(w.width));
+  const height = Math.floor(Number(w.height));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (width < 720 || height < 500 || width > 7680 || height > 4320) return null;
+  const x = w.x === null || w.x === undefined ? null : Math.floor(Number(w.x));
+  const y = w.y === null || w.y === undefined ? null : Math.floor(Number(w.y));
+  return {
+    x: x !== null && Number.isFinite(x) ? x : null,
+    y: y !== null && Number.isFinite(y) ? y : null,
+    width,
+    height,
+    isMaximized: w.isMaximized === true,
+  };
+}
+
+export function setWindowState(state: WindowState): void {
+  load().windowState = { ...state };
   save();
 }

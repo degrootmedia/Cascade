@@ -68,7 +68,7 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
     musicPath: "music/music.mp3",
     musicVolume: 0.5,
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     ...overrides,
   };
 }

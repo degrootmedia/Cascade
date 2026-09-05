@@ -16,6 +16,7 @@ import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
+import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic } from "./assembly.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
@@ -24,7 +25,7 @@ import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, OpenArtModelChoice, Model3dGenOptions } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -43,8 +44,8 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 /** Content-Type for a production media asset based on its extension. The
- *  cascade-media:// protocol serves both audio (VO / music) and video (per-shot
- *  generated clips). */
+ *  cascade-media:// protocol serves audio (VO / music), video (per-shot
+ *  generated clips), and GLB 3D models (design-page model viewer). */
 function mediaMimeForPath(rel: string): string {
   const ext = path.extname(rel).slice(1).toLowerCase();
   switch (ext) {
@@ -67,6 +68,7 @@ function mediaMimeForPath(rel: string): string {
     case "bmp": return "image/bmp";
     case "avif": return "image/avif";
     case "svg": return "image/svg+xml";
+    case "glb": return "model/gltf-binary";
     default: return "audio/mpeg";
   }
 }
@@ -91,6 +93,10 @@ function registerMediaProtocol(): void {
         "Accept-Ranges": "bytes",
         "Content-Length": String(stat.size),
         "Cache-Control": "no-store",
+        // The renderer's <model-viewer> loads GLBs via fetch() from this
+        // custom scheme, which is a different origin than the app — the fetch
+        // would fail CORS without an explicit allow.
+        "Access-Control-Allow-Origin": "*",
       };
       const range = req.headers.get("range");
       if (range) {
@@ -635,6 +641,11 @@ function registerIpc() {
   // prices it against the user's rules and keeps the CSV tally in sync.
   const openart = new OpenArtClient(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) });
 
+  // 3D AI Studio REST integration (design-page model generator). The API key
+  // is read from encrypted settings on demand; the client's HTTP surface is
+  // testable in isolation (modelgen.ts).
+  const modelgen = new ModelGenClient(() => settings.get3daiApiKey());
+
   // IPC channels are declared in the shared contract (shared/ipc.ts), which the
   // preload adapter also consumes — so adding a channel means editing one map,
   // not three files. These wrappers enforce the contract on the main side: an
@@ -795,11 +806,17 @@ function registerIpc() {
     workspace: settings.getWorkspace(),
     accent: settings.getAccent(),
     externalEditor: settings.getExternalEditor(),
+    has3daiApiKey: settings.has3daiApiKey(),
   }));
 
   handle("settings:setApiKey", (_e, key: string) => {
     settings.setApiKey(key.trim());
     resetAllAgents();
+  });
+
+  handle("settings:set3daiApiKey", (_e, key: string) => {
+    if (typeof key !== "string") return;
+    settings.set3daiApiKey(key.trim());
   });
 
   handle("settings:setModel", (_e, model: string) => {
@@ -1639,6 +1656,68 @@ function registerIpc() {
   // account lookup fails.
   handle("production:openArtCredits", async (): Promise<number | null> => openart.getCredits());
 
+  // Step 2: the 3D AI Studio account's remaining credit balance (shown in the
+  // design-page 3D model panel). Null when no key is stored.
+  handle("production:3daiCredits", async (): Promise<number | null> => modelgen.getCredits());
+
+  // Step 2: generate a 3D model via 3D AI Studio (Tencent Hunyuan Pro). The
+  // finished GLB is downloaded into the production's models folder and the
+  // record is appended to prod.models3d. The renderer resolves reference
+  // images / multi-view angles to data URLs before calling.
+  handle("production:generate3dModel", async (_e, id: string, opts: Model3dGenOptions) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (!settings.get3daiApiKey()) throw new Error("Add your 3D AI Studio API key in Settings first.");
+    return runProductionJob(id, "3D model: submitting Tencent Hunyuan Pro generation", async (pq, emit) => {
+      const at = Date.now();
+      const bytes = await modelgen.generate(opts, (status, progress) => {
+        emit(`3D model: ${status}${typeof progress === "number" ? ` (${progress}%)` : ""}…`);
+      });
+      const rel = `${pq.assets.modelsDir}/${modelFileName(opts, at)}`;
+      const abs = assetPath(pq, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, bytes);
+      pq.models3d = [toProductionModel(rel, opts, at), ...(pq.models3d ?? [])];
+      emit(`3D model: saved ${rel}.`, "done");
+    });
+  });
+
+  // Step 2: delete a generated 3D model (removes the .glb file + record).
+  handle("production:delete3dModel", (_e, id: string, modelId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const m = (p.models3d ?? []).find((m) => m.id === modelId);
+    if (m) {
+      try {
+        fs.unlinkSync(assetPath(p, m.glbPath));
+      } catch {
+        /* file already gone */
+      }
+      p.models3d = (p.models3d ?? []).filter((x) => x.id !== modelId);
+    }
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Step 2: copy a generated GLB to a user-chosen location via the native
+  // Save As dialog. Resolves to the saved path, or null when cancelled.
+  handle("production:save3dModel", async (_e, id: string, modelId: string): Promise<string | null> => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const m = (p.models3d ?? []).find((m) => m.id === modelId);
+    if (!m) throw new Error("Model not found.");
+    const src = assetPath(p, m.glbPath);
+    if (!fs.existsSync(src)) throw new Error("Model file is missing on disk.");
+    const res = await dialog.showSaveDialog(win!, {
+      title: "Save 3D model",
+      defaultPath: path.join(app.getPath("downloads"), path.basename(m.glbPath)),
+      filters: [{ name: "GLB 3D model", extensions: ["glb"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    fs.copyFileSync(src, res.filePath);
+    return res.filePath;
+  });
+
   // Step 3 manual workflow: pick generated frames anywhere on disk.
   handle("production:pickBoardImages", async () => {
     const res = await dialog.showOpenDialog(win!, {
@@ -2470,6 +2549,58 @@ function registerIpc() {
   });
   handle("ledger:openFile", async (): Promise<void> => {
     await ledger.openLedgerFile();
+  });
+  handle("ledger:exportRules", async (): Promise<string | null> => {
+    const res = await dialog.showSaveDialog(win!, {
+      title: "Export expense price rules",
+      defaultPath: path.join(app.getPath("documents"), "cascade-expense-prices.csv"),
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    ledger.writePriceRulesFile(res.filePath, ledger.getPriceRules());
+    return res.filePath;
+  });
+  handle("ledger:importRules", async (): Promise<{ path: string; rules: ExpensePriceRule[] } | null> => {
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Import expense price rules",
+      properties: ["openFile"],
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    const filePath = res.filePaths[0];
+    if (res.canceled || !filePath) return null;
+    const rules = ledger.parsePriceRulesCsv(fs.readFileSync(filePath, "utf8"));
+    ledger.setPriceRules(rules);
+    return { path: filePath, rules: ledger.getPriceRules() };
+  });
+  handle("ledger:exportTemplate", async (): Promise<string | null> => {
+    let choices: OpenArtModelChoice[] = [];
+    try {
+      choices = await openart.listModelChoices();
+    } catch {
+      choices = [];
+    }
+    const imageModels = choices.filter((m) => m.imageInput).map((m) => ({ id: m.id }));
+    const videoModels = choices.filter((m) => m.videoInput).map((m) => ({ id: m.id }));
+    if (!imageModels.length && !videoModels.length) return null;
+
+    // Read each video model's live resolution/length options (fallback buckets
+    // apply when a form can't be introspected).
+    const videoOpts: Record<string, { resolutions: string[]; durations: number[] }> = {};
+    for (const m of videoModels) {
+      const o = await openart.videoModelOptions(m.id, true);
+      if (o) videoOpts[m.id] = o;
+    }
+    const rules = ledger.buildPriceTemplate(imageModels, videoModels, (id) => videoOpts[id] ?? null);
+    if (!rules.length) return null;
+
+    const res = await dialog.showSaveDialog(win!, {
+      title: "Export price template",
+      defaultPath: path.join(app.getPath("documents"), "cascade-price-template.csv"),
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    ledger.writePriceRulesFile(res.filePath, rules);
+    return res.filePath;
   });
 
   handle("agents:getSessionAgent", (_e, sessionId: string) => {

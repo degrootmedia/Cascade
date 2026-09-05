@@ -2532,6 +2532,19 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- settings ---------- */
 .settings label { display: block; margin: 16px 0 6px; font-weight: 600; }
+.settings-tabs { display: flex; gap: 6px; margin: 12px 0 4px; border-bottom: 1px solid var(--border); }
+.settings-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.settings-tab:hover { color: var(--text); }
+.settings-tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .settings .row { display: flex; gap: 8px; align-items: center; }
 .settings input, .settings select {
   flex: 1;
@@ -2554,6 +2567,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .hint { color: var(--text-dim); font-size: 0.82rem; margin: 6px 0 0; }
 .error-text { color: var(--danger); font-size: 0.85rem; }
 .link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 0.9rem; }
+/* External links in Settings (e.g. the 3D AI Studio dashboard) match the app's
+   accent-colored link treatment instead of the browser default blue. */
+.settings a { color: var(--accent); cursor: pointer; }
+.settings a:hover { text-decoration: underline; }
 
 /* ---------- expense pricing rules (Settings) ---------- */
 .expense-pricing { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
@@ -3181,6 +3198,115 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
    description + settings; the selected one is highlighted. */
 .prod-char-sel { cursor: pointer; }
 .prod-char-sel.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+/* Step 2: 3D model generator (Tencent Hunyuan Pro via 3D AI Studio). */
+.prod-3d { margin-top: 18px; display: flex; flex-direction: column; gap: 14px; }
+.prod-3d-num {
+  width: 100%;
+  margin-top: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+.prod-3d-num:focus { outline: none; border-color: var(--accent); }
+/* PBR checkbox row — sits in the same label row as the generation-type select,
+   using the accent checkbox treatment used across the production panels. */
+.prod-3d-pbr { display: flex; flex-direction: row; align-items: center; gap: 6px; margin: 0; align-self: center; }
+.prod-3d-pbr input { accent-color: var(--accent); cursor: pointer; }
+/* 3D reference drop zones — fill a row (single) or grid (multi-view); each
+   slot accepts an in-app reference, an external drop, or a click-to-browse. */
+.prod-3d-drop-zone { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 2px; }
+.prod-3d-drop-grid .prod-3d-drop { flex: 1 1 120px; }
+.prod-3d-drop {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 160px;
+  min-height: 110px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 10px;
+  text-align: center;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.prod-3d-drop:hover { border-color: var(--accent); color: var(--text); }
+.prod-3d-drop.dragover { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.prod-3d-drop.required:not(.filled) { border-color: var(--accent); }
+.prod-3d-drop.filled { border: 1px solid var(--border); }
+.prod-3d-drop img { width: 100%; height: 86px; object-fit: cover; border-radius: 7px; }
+.prod-3d-drop-hint { font-weight: 600; font-size: 0.85rem; }
+.prod-3d-drop-sub { font-size: 0.72rem; line-height: 1.35; }
+.prod-3d-drop-clear {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.prod-3d-drop-clear:hover { background: var(--danger); }
+.prod-3d-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0c0e13;
+}
+.prod-3d-viewer model-viewer { display: block; background: linear-gradient(180deg, #161a22, #0c0e13); }
+.prod-3d-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--bg-panel);
+  font-size: 0.92rem;
+}
+.prod-3d-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prod-3d-actions { display: flex; align-items: center; gap: 8px; }
+.prod-3d-delete { color: var(--danger); }
+.prod-3d-tile {
+  width: 140px;
+  height: 96px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 6px;
+  transition: border-color .12s, background .12s;
+}
+.prod-3d-tile:hover { border-color: var(--accent); background: var(--bg-raised); }
+.prod-3d-tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.prod-3d-tile-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; color: var(--text-dim); }
+.prod-3d-tile-icon { font-size: 1.6rem; line-height: 1; }
 
 /* Step 2: "active model can't see images" popup. */
 .prod-vision-panel { width: min(440px, 92vw); gap: 8px; }

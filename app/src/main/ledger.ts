@@ -19,6 +19,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExpensePriceRule, LedgerEntry, LedgerGenMeta, LedgerView } from "../shared/ipc.js";
 
+/** Fallback video resolution labels when a video model's live form can't be
+ *  read (mirrors the renderer fallback in boards.tsx). */
+export const FALLBACK_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"] as const;
+/** Fallback video lengths in seconds when a video model's live form can't be
+ *  read (mirrors the renderer fallback in boards.tsx). */
+export const FALLBACK_VIDEO_DURATIONS = [5, 10, 15, 20] as const;
+
+/** Image resolution buckets offered for template pricing (mirrors the board
+ *  config buckets in shared/ipc.ts). */
+export const IMAGE_RESOLUTIONS = ["1k", "2k", "4k"] as const;
+
 let userDataDir: string | null = null;
 let shell: typeof import("electron").shell | undefined;
 void import("electron")
@@ -247,6 +258,119 @@ export function setPriceRules(rules: ExpensePriceRule[]): void {
   f.priceRules = Array.isArray(rules) ? rules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null) : [];
   f.updatedAt = new Date().toISOString();
   save();
+}
+
+/** Serialize price rules to CSV text. Header + one row per rule
+ *  (`kind,model,resolution,duration_sec,price`); blank model/resolution mean
+ *  "any", and blank duration means any video length. Pure — unit-tested. */
+export function priceRulesToCsv(rules: ExpensePriceRule[]): string {
+  const esc = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = rules.map((r) =>
+    [
+      r.kind,
+      r.model,
+      r.resolution,
+      r.kind === "video" && r.durationSec != null ? String(r.durationSec) : "",
+      r.price.toFixed(2),
+    ]
+      .map(esc)
+      .join(",")
+  );
+  return ["kind,model,resolution,duration_sec,price", ...rows].join("\r\n") + "\r\n";
+}
+
+/** Split one CSV line into fields, honoring double-quoted fields ("" escapes
+ *  a quote). The only CSV the ledger reads is its own export format. */
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i += 1; }
+        else inQuotes = false;
+      } else cur += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { out.push(cur); cur = ""; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+/** Parse the price-rule CSV export format back into rules. Header + blank
+ *  lines are skipped; malformed rows are dropped. Fresh ids are assigned
+ *  (rules never carry identity across files). Pure — unit-tested. */
+export function parsePriceRulesCsv(text: string): ExpensePriceRule[] {
+  const rules: ExpensePriceRule[] = [];
+  for (const rawLine of String(text ?? "").split(/\r\n|\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const cells = splitCsvLine(line).map((c) => c.trim());
+    if (cells.length < 5) continue;
+    const [kindCell, modelCell, resCell, durCell, priceCell] = cells;
+    // Skip the header row.
+    if (kindCell.toLowerCase() === "kind" && modelCell.toLowerCase() === "model") continue;
+    const kind = kindCell === "video" ? "video" : kindCell === "image" ? "image" : null;
+    if (!kind) continue;
+    const parsedDur = Number(durCell);
+    const durationSec = durCell === "" ? null : Number.isFinite(parsedDur) ? parsedDur : null;
+    const rule = normalizeRule({
+      id: newId(),
+      kind,
+      model: modelCell,
+      resolution: resCell,
+      durationSec: kind === "video" ? durationSec : null,
+      price: Number.isFinite(Number(priceCell)) ? Number(priceCell) : 0,
+    });
+    if (rule) rules.push(rule);
+  }
+  return rules;
+}
+
+/** Write the price rules as CSV to an arbitrary user-picked path (atomic
+ *  temp+rename). Used by the Settings → Expense pricing export button. */
+export function writePriceRulesFile(filePath: string, rules: ExpensePriceRule[]): void {
+  const body = priceRulesToCsv(rules);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  fs.writeFileSync(tmp, body, "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
+/** Build a full price-rule template: one row per (model × resolution) for
+ *  image models, and one per (model × resolution × duration) for video models.
+ *  Every price starts at 0 — the user fills in the dollar amounts. Pure —
+ *  unit-tested. */
+export function buildPriceTemplate(
+  imageModels: { id: string }[],
+  videoModels: { id: string }[],
+  videoOptions: (modelId: string) => { resolutions: string[]; durations: number[] } | null,
+  overrides: { imageResolutions?: string[]; videoResolutions?: string[]; videoDurations?: number[] } = {}
+): ExpensePriceRule[] {
+  const imageRes = overrides.imageResolutions ?? [...IMAGE_RESOLUTIONS];
+  const videoRes = overrides.videoResolutions ?? [...FALLBACK_VIDEO_RESOLUTIONS];
+  const videoDur = overrides.videoDurations ?? [...FALLBACK_VIDEO_DURATIONS];
+
+  const rules: ExpensePriceRule[] = [];
+  for (const m of imageModels) {
+    for (const res of imageRes) {
+      rules.push({ id: newId(), kind: "image", model: m.id, resolution: res, durationSec: null, price: 0 });
+    }
+  }
+  for (const m of videoModels) {
+    const opts = videoOptions(m.id);
+    const resolutions = opts && opts.resolutions.length ? opts.resolutions : videoRes;
+    const durations = opts && opts.durations.length ? opts.durations : videoDur;
+    for (const res of resolutions) {
+      for (const dur of durations) {
+        rules.push({ id: newId(), kind: "video", model: m.id, resolution: res, durationSec: dur, price: 0 });
+      }
+    }
+  }
+  return rules;
 }
 
 /** Open the CSV text ledger in the OS file manager. */

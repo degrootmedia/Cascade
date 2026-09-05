@@ -16,6 +16,7 @@ import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
 import { BrandSwatchRow } from "./production/brand.js";
+import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 
@@ -1842,6 +1843,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
               />
+            </DesignSection>
+
+            <DesignSection title="3D models" prodId={prod.meta.id}>
+              <ModelGenSection prod={prod} onGenerated={(next) => setProd(next)} />
             </DesignSection>
 
             {refGen && (

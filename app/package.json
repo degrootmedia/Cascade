@@ -12,13 +12,15 @@
     "package": "electron-vite build && electron-builder --win nsis"
   },
   "dependencies": {
+    "@google/model-viewer": "^4.3.1",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@xyflow/react": "^12.11.5",
     "dompurify": "^3.1.0",
     "ffmpeg-static": "^5.2.0",
     "mammoth": "^1.12.1",
     "marked": "^14.1.0",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^2.4.5",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",

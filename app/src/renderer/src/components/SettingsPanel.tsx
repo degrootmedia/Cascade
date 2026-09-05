@@ -27,41 +27,41 @@ interface PriceDraft {
 
 const RESOLUTION_SUGGESTIONS = ["1k", "2k", "4k", "480p", "720p", "1080p", "4K"];
 
+/** Persisted rules → editable draft rows (text fields for number inputs). */
+const rulesToDrafts = (rules: ExpensePriceRule[]): PriceDraft[] =>
+  rules.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    model: r.model,
+    resolution: r.resolution,
+    durationText: r.durationSec == null ? "" : String(r.durationSec),
+    priceText: String(r.price),
+  }));
+
 /** Settings → Expense pricing: rules that turn a generation's (kind, model,
  *  resolution, video length) into a dollar amount. Blank fields = any. */
 function ExpensePricingSection() {
   const [drafts, setDrafts] = useState<PriceDraft[]>([]);
   const [models, setModels] = useState<OpenArtModelChoice[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
     void window.cascade
       .getExpensePriceRules()
-      .then((rules) =>
-        setDrafts(
-          rules.map((r) => ({
-            id: r.id,
-            kind: r.kind,
-            model: r.model,
-            resolution: r.resolution,
-            durationText: r.durationSec == null ? "" : String(r.durationSec),
-            priceText: String(r.price),
-          }))
-        )
-      )
+      .then((rules) => setDrafts(rulesToDrafts(rules)))
       .catch((e) => setError(String(e)));
     void window.cascade.listOpenArtModels().then(setModels).catch(() => {});
   }, []);
 
   const update = (i: number, patch: Partial<PriceDraft>) => {
-    setSaved(false);
+    setNote(null);
     setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
   };
 
   const addRule = () => {
-    setSaved(false);
+    setNote(null);
     setDrafts((ds) => [
       ...ds,
       { id: uid("expense-rule"), kind: "image", model: "", resolution: "", durationText: "", priceText: "" },
@@ -69,28 +69,76 @@ function ExpensePricingSection() {
   };
 
   const removeRule = (i: number) => {
-    setSaved(false);
+    setNote(null);
     setDrafts((ds) => ds.filter((_, j) => j !== i));
   };
 
+  const toRules = (): ExpensePriceRule[] =>
+    drafts.map((d) => ({
+      id: d.id,
+      kind: d.kind,
+      model: d.model.trim(),
+      resolution: d.resolution.trim(),
+      durationSec: d.kind === "video" && d.durationText.trim() ? Number(d.durationText) || null : null,
+      price: Number(d.priceText) || 0,
+    }));
+
   const save = async () => {
-    setSaving(true);
+    setBusy(true);
     setError(null);
     try {
-      const rules: ExpensePriceRule[] = drafts.map((d) => ({
-        id: d.id,
-        kind: d.kind,
-        model: d.model.trim(),
-        resolution: d.resolution.trim(),
-        durationSec: d.kind === "video" && d.durationText.trim() ? Number(d.durationText) || null : null,
-        price: Number(d.priceText) || 0,
-      }));
-      await window.cascade.setExpensePriceRules(rules);
-      setSaved(true);
+      await window.cascade.setExpensePriceRules(toRules());
+      setNote("Prices saved.");
     } catch (e) {
       setError(String(e));
     } finally {
-      setSaving(false);
+      setBusy(false);
+    }
+  };
+
+  const exportRules = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const file = await window.cascade.exportExpensePriceRules();
+      setNote(file ? `Exported ${drafts.length} rules to ${file}.` : null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportTemplate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const file = await window.cascade.exportExpensePriceTemplate();
+      setNote(
+        file
+          ? `Template saved to ${file} — fill in the prices, then Import CSV.`
+          : "No models available to build a template (is OpenArt connected?)."
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importRules = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await window.cascade.importExpensePriceRules();
+      if (res) {
+        setDrafts(rulesToDrafts(res.rules));
+        setNote(`Imported ${res.rules.length} rules from ${res.path}.`);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -99,7 +147,9 @@ function ExpensePricingSection() {
       <label>Expense pricing</label>
       <p className="hint">
         Price per generation: kind · model · resolution (and video length). A blank field means "any";
-        exact matches win over wildcards, and generations matching nothing count as $0.
+        exact matches win over wildcards, and generations matching nothing count as $0. Use
+        <strong> Export template</strong> to get every model × resolution × video-length combination at $0,
+        fill in the prices, then <strong>Import CSV</strong>.
       </p>
       <div className="expense-pricing">
         <div className="expense-rule expense-rule-head">
@@ -156,11 +206,20 @@ function ExpensePricingSection() {
           ))}
         </datalist>
         <div className="expense-pricing-actions">
-          <button onClick={addRule}>+ Add price</button>
-          <button className="primary" onClick={() => void save()} disabled={saving}>
-            {saving ? "Saving…" : "Save prices"}
+          <button onClick={addRule} disabled={busy}>+ Add price</button>
+          <button className="primary" onClick={() => void save()} disabled={busy}>
+            {busy ? "Working…" : "Save prices"}
           </button>
-          {saved && <span className="hint">Saved.</span>}
+          <button onClick={() => void exportRules()} disabled={busy} title="Save the rules above to a CSV file">
+            Export CSV
+          </button>
+          <button onClick={() => void importRules()} disabled={busy} title="Load price rules from a CSV file">
+            Import CSV
+          </button>
+          <button onClick={() => void exportTemplate()} disabled={busy} title="Pre-fill every model × resolution × video-length combination at $0">
+            Export template
+          </button>
+          {note && <span className="hint" title={note}>{note.length > 90 ? `${note.slice(0, 90)}…` : note}</span>}
         </div>
       </div>
       {error && <p className="error-text">{error}</p>}
@@ -181,6 +240,11 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   const [error, setError] = useState<string | null>(null);
   /** Why the model list is empty (real HTTP/API message, shown inline). */
   const [modelError, setModelError] = useState<string | null>(null);
+  /** Which settings tab is open. */
+  const [tab, setTab] = useState<"general" | "expenses">("general");
+  /** 3D AI Studio API key (design-page 3D model generator). */
+  const [has3daiKey, setHas3daiKey] = useState(settings.has3daiApiKey);
+  const [apiKey3dai, setApiKey3daiInput] = useState("");
 
   const providerLabel = API_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
 
@@ -247,6 +311,21 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
     }
   }
 
+  async function save3daiKey() {
+    if (!apiKey3dai.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await window.cascade.set3daiApiKey(apiKey3dai.trim());
+      setApiKey3daiInput("");
+      setHas3daiKey(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function pickWorkspace() {
     const dir = await window.cascade.pickWorkspace();
     if (dir) setWorkspace(dir);
@@ -306,6 +385,13 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
       <div className="modal settings">
         <h3>Settings</h3>
 
+        <div className="settings-tabs" role="tablist">
+          <button role="tab" className={"settings-tab" + (tab === "general" ? " active" : "")} onClick={() => setTab("general")}>General</button>
+          <button role="tab" className={"settings-tab" + (tab === "expenses" ? " active" : "")} onClick={() => setTab("expenses")}>Expenses</button>
+        </div>
+
+        {tab === "general" && (
+          <>
         <label>API provider</label>
         <select value={provider} onChange={(e) => void changeProvider(e.target.value)}>
           {API_PROVIDERS.map((p) => (
@@ -410,6 +496,30 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
           Windows Store apps (e.g. <code>...\WindowsApps\Affinity.exe</code>) are ACL-locked — the file picker can't enter that folder, so paste the full path above. It will be launched elevated (UAC) automatically.
         </p>
 
+        <label>3D AI Studio API key</label>
+        {has3daiKey ? (
+          <p className="hint">
+            Key saved (encrypted). <button className="link" onClick={() => setHas3daiKey(false)}>Replace</button>
+          </p>
+        ) : (
+          <div className="row">
+            <input
+              type="password"
+              value={apiKey3dai}
+              placeholder="3D AI Studio API key"
+              onChange={(e) => setApiKey3daiInput(e.target.value)}
+            />
+            <button onClick={() => void save3daiKey()} disabled={saving || !apiKey3dai.trim()}>
+              Save
+            </button>
+          </div>
+        )}
+        <p className="hint">
+          Powers the 3D model generator on the Design page (Tencent Hunyuan Pro via 3dai.studio). Get a key and buy
+          credits in the{" "}
+          <a href="https://www.3daistudio.com/Platform/API" target="_blank" rel="noreferrer">3D AI Studio API dashboard</a>.
+        </p>
+
         <label>Agents</label>
         <p className="hint">
           Custom personas with their own prompt, model, avatar, and tools.
@@ -425,11 +535,15 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
           </button>
         </p>
 
-        <ExpensePricingSection />
-
         {error && <p className="error-text">{error}</p>}
 
         <McpSection />
+          </>
+        )}
+
+        {tab === "expenses" && (
+          <ExpensePricingSection />
+        )}
 
         <div className="modal-actions">
           <button className="primary" onClick={onClose} disabled={!ready}>

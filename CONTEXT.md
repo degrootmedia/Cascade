@@ -20,6 +20,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Agent core | `core/src/` | The streaming agent loop (tool-calling, approval gating, undo journal, compaction). The deep, tested module. |
 | OpenArtClient | `app/src/main/openart.ts` | The whole OpenArt integration: model discovery, live form-schema introspection, per-model option assignment, async image/video generation + polling, project resolution, video-options cache. Takes the `McpManager` as its constructor seam — that interface IS the test surface. |
 | MCP manager | `app/src/main/mcp.ts` | Connecting/owning MCP servers; namespaced tools; the `callRaw*` host-side call surface OpenArtClient uses. |
+| ModelgenClient | `app/src/main/modelgen.ts` | The 3D AI Studio REST integration: Tencent Hunyuan Pro text/image-to-3D generation (submit → poll → download), GLB bytes + credit balance. Takes the API key getter and an `HttpFetch` as constructor seams — that injection IS the test surface (`app/test/modelgen.test.ts`). |
 | Pipeline | `app/src/main/pipeline.ts` | Prompt derivation + deterministic transforms (script breakdown, board prompts, animatic planning). Receives `ImageGenFn` from OpenArtClient — never imports it. |
 | Assembly | `app/src/main/assembly.ts` | Step 5 editor handoff + render: media gathering into `out/assembly/`, CMX3600 EDL, After Effects rebuild `.jsx`, manifest, and the 3-pass ffmpeg render. Pure builders are unit-tested; `assemble()`/`renderAnimatic()` take an injected ffmpeg `run`/`probe` seam (`app/src/main/ffmpeg.ts`). |
 | ffmpeg seam | `app/src/main/ffmpeg.ts` | Locating the ffmpeg binary (bundled `ffmpeg-static`, asar-unpacked when packaged, else PATH) + `runFfmpeg`/`probeMedia` that `assembly.ts` injects. Pure node — never imports Electron. |
@@ -56,6 +57,14 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields.
 - **Animatic** — Step 4 playback: timing, voiceover, music, per-shot video clips.
+- **3D model** — a Step 2 design-page asset generated via 3D AI Studio's Tencent
+  Hunyuan Pro (text-to-3D, single-image-to-3D, or multi-view image-to-3D, GLB,
+  optional PBR). GLBs always land in the production's `modelsDir` (`models/`),
+  are previewed in-place with a bundled `<model-viewer>` custom element
+  (lazy-loaded chunk), and can be copied anywhere via a native Save-As dialog.
+  Records live on `prod.models3d`. Input images arrive as data URLs resolved in
+  the renderer (from dragged in-app references, external drops, or the native
+  file browser).
 
 ## Serialization grammars
 

@@ -93,7 +93,7 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
     products: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     ...overrides,
   };
 }

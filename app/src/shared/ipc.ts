@@ -37,6 +37,8 @@ export interface SettingsView {
   accent: string;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
+  /** Whether a 3D AI Studio API key is stored (encrypted). */
+  has3daiApiKey: boolean;
 }
 
 export interface ModelInfo {
@@ -512,6 +514,60 @@ export interface CharacterSheetGenOptions {
   view: CharacterSheetView;
 }
 
+/** A generated 3D model stored in the production's models folder. */
+export interface ProductionModel {
+  /** Stable identity. */
+  id: string;
+  /** Workspace-relative path of the .glb file. */
+  glbPath: string;
+  /** The prompt (or description) this model was generated from. */
+  prompt: string;
+  /** Tencent Hunyuan edition ("pro"). */
+  edition: string;
+  /** Whether PBR textures were enabled. */
+  pbr: boolean;
+  /** Whether the generation ran text-to-3D (true) or image-to-3D (false). */
+  fromImage: boolean;
+  /** ISO timestamp of generation completion. */
+  at: string;
+}
+
+/** Choices made in the Step 2 3D-model generator. Tencent Hunyuan Pro
+ *  (text-to-3D / image-to-3D / multi-view, GLB output). */
+export type Model3dViewType =
+  | "front" | "left" | "right" | "back"
+  | "top" | "bottom" | "left_front" | "right_front";
+
+/** One multi-view reference image for 3D generation. The Tencent Pro API
+ *  requires a "front" view; the other angles are optional and version-limited
+ *  (3.0: front/left/right/back, 3.1 adds top/bottom/left_front/right_front). */
+export interface Model3dViewImage {
+  viewType: Model3dViewType;
+  /** Data URL of the view image. */
+  dataUrl: string;
+}
+
+export interface Model3dGenOptions {
+  /** The prompt (text-to-3D). For Sketch mode a prompt is sent alongside the
+   *  image; for Normal/Geometry/LowPoly image-to-3D it is omitted (the API
+   *  rejects a prompt+image pair outside Sketch). */
+  prompt: string;
+  /** Single reference image for image-to-3D, as a data URL. */
+  imageDataUrl?: string;
+  /** Multi-view reference images for multi-view image-to-3D (must include
+   *  "front"). Takes precedence over `imageDataUrl`. */
+  multiViewImages?: Model3dViewImage[];
+  /** Model version: "3.0" or "3.1". */
+  version: "3.0" | "3.1";
+  /** Enable PBR textures (adds credits). */
+  enablePbr: boolean;
+  /** Generation mode: "Normal" (textured), "Geometry" (white, no texture),
+   *  "LowPoly" (3.0 only), "Sketch" (3.0 only, requires prompt + image). */
+  generateType: "Normal" | "Geometry" | "LowPoly" | "Sketch";
+  /** Target polygon count (40,000 to 1,500,000). */
+  faceCount: number;
+}
+
 /** Step 5 assembly configuration + last-run bookkeeping.
  *  `fps`/`width`/`height` describe the exported timeline and the MP4 render;
  *  `exportDir` is workspace-relative (defaults to `<outDir>/assembly`). */
@@ -580,11 +636,13 @@ export interface Production {
   magicPrompts?: Record<string, string>;
   magicEnabled?: boolean;
   status: Record<number, "todo" | "running" | "done" | "error">;
+  /** Step 2: generated 3D models (design-page generator). Newest first. */
+  models3d?: ProductionModel[];
   /** Which source was last ingested (shown in the Step 1 card). */
   scriptSource?: string;
   /** Step 5 assembly configuration + last-run bookkeeping. */
   assembly?: ProductionAssembly;
-  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string };
+  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string };
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -642,6 +700,8 @@ export interface CascadeApi {
   setAccent(color: string): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
+  /** Set (or clear with "") the 3D AI Studio API key, encrypted at rest. */
+  set3daiApiKey(key: string): Promise<void>;
   /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
   showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
@@ -900,6 +960,19 @@ export interface CascadeApi {
   generateMagicPrompts(productionId: string): Promise<Production>;
   /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
   setMagicEnabled(productionId: string, enabled: boolean): Promise<Production>;
+  /**
+   * Step 2: generate a 3D model via the 3D AI Studio API (Tencent Hunyuan Pro).
+   * Downloads the finished GLB into the production's models folder, records it
+   * in `prod.models3d`, and returns the updated production. Requires a stored
+   * 3D AI Studio API key.
+   */
+  generate3dModel(productionId: string, opts: Model3dGenOptions): Promise<Production>;
+  /** Step 2: remove a generated 3D model (deletes the .glb + removes the record). */
+  delete3dModel(productionId: string, modelId: string): Promise<Production>;
+  /** Step 2: open a native "Save As" dialog and copy a generated .glb to the user's chosen location. */
+  save3dModel(productionId: string, modelId: string): Promise<string | null>;
+  /** The 3D AI Studio credit balance (null when no key is stored). */
+  get3daiCredits(): Promise<number | null>;
   /** Board external edit — re-encode any externally modified originals to their JPEG previews. */
   checkExternalEdits(): Promise<void>;
   /** Fired after an externally edited board's JPEG preview has been regenerated. */
@@ -926,6 +999,16 @@ export interface CascadeApi {
   getExpensePriceRules(): Promise<ExpensePriceRule[]>;
   /** Expenses: persist the pricing rules edited from Settings. */
   setExpensePriceRules(rules: ExpensePriceRule[]): Promise<void>;
+  /** Expenses: save the current price rules to a user-picked CSV file.
+   *  Resolves to the saved path, or null when the user cancels. */
+  exportExpensePriceRules(): Promise<string | null>;
+  /** Expenses: load price rules from a user-picked CSV file and apply them.
+   *  Resolves to the applied rules (or null when the user cancels). */
+  importExpensePriceRules(): Promise<{ path: string; rules: ExpensePriceRule[] } | null>;
+  /** Expenses: export a pre-filled price template (every model × resolution ×
+   *  video-length combination at $0) to a user-picked CSV file. Resolves to
+   *  the saved path, or null when cancelled / no models are available. */
+  exportExpensePriceTemplate(): Promise<string | null>;
   /** Expenses: add a manual "purchased asset" row with a custom dollar amount. */
   addManualExpense(label: string, amount: number): Promise<LedgerView>;
   /** Expenses: remove one ledger row. */
@@ -973,6 +1056,7 @@ export const ipcContract = {
   "settings:setAccent": { method: "setAccent", kind: "invoke" },
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
+  "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
   "image:showMenu": { method: "showImageMenu", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
@@ -1070,6 +1154,10 @@ export const ipcContract = {
   "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
+  "production:generate3dModel": { method: "generate3dModel", kind: "invoke" },
+  "production:delete3dModel": { method: "delete3dModel", kind: "invoke" },
+  "production:save3dModel": { method: "save3dModel", kind: "invoke" },
+  "production:3daiCredits": { method: "get3daiCredits", kind: "invoke" },
   "production:checkExternalEdits": { method: "checkExternalEdits", kind: "invoke" },
   "production:assemblyBuild": { method: "assemblyBuild", kind: "invoke" },
   "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
@@ -1077,6 +1165,9 @@ export const ipcContract = {
   "ledger:get": { method: "getLedger", kind: "invoke" },
   "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
   "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },
+  "ledger:exportRules": { method: "exportExpensePriceRules", kind: "invoke" },
+  "ledger:importRules": { method: "importExpensePriceRules", kind: "invoke" },
+  "ledger:exportTemplate": { method: "exportExpensePriceTemplate", kind: "invoke" },
   "ledger:addManual": { method: "addManualExpense", kind: "invoke" },
   "ledger:removeEntry": { method: "removeLedgerEntry", kind: "invoke" },
   "ledger:openFile": { method: "openLedgerFile", kind: "invoke" },

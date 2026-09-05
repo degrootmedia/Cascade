@@ -20,8 +20,11 @@ vi.mock("electron", () => ({
 
 import {
   addManualEntry,
+  buildPriceTemplate,
   getPriceRules,
   matchPriceRule,
+  parsePriceRulesCsv,
+  priceRulesToCsv,
   recordGeneration,
   removeEntry,
   setLedgerUserDataDir,
@@ -140,5 +143,74 @@ describe("ledger records", () => {
     const rules = getPriceRules();
     expect(rules[0]).toMatchObject({ model: "veo", durationSec: 5, price: 0 });
     expect(rules[1]).toMatchObject({ model: "flux-pro", durationSec: null, price: 0.5 });
+  });
+});
+
+describe("price rule CSV export/import", () => {
+  it("round-trips rules through CSV, quoting model names with commas", () => {
+    const rules: ExpensePriceRule[] = [
+      { id: "r1", kind: "image", model: "flux,pro", resolution: "1k", durationSec: null, price: 0.3 },
+      { id: "r2", kind: "video", model: "veo", resolution: "1080p", durationSec: 5, price: 0.5 },
+      { id: "r3", kind: "video", model: "kling", resolution: "", durationSec: null, price: 1.0 },
+    ];
+    const csv = priceRulesToCsv(rules);
+    expect(csv.split("\r\n")[0]).toBe("kind,model,resolution,duration_sec,price");
+    expect(csv).toContain('"flux,pro"');
+
+    const parsed = parsePriceRulesCsv(csv);
+    expect(parsed).toHaveLength(3);
+    // ids are freshly assigned, never carried across the file.
+    expect(parsed[0].id).not.toBe("r1");
+    expect(parsed[0]).toMatchObject({ kind: "image", model: "flux,pro", resolution: "1k", durationSec: null, price: 0.3 });
+    expect(parsed[1]).toMatchObject({ kind: "video", model: "veo", resolution: "1080p", durationSec: 5, price: 0.5 });
+    expect(parsed[2]).toMatchObject({ kind: "video", model: "kling", resolution: "", durationSec: null, price: 1.0 });
+  });
+
+  it("skips the header, blank lines, and malformed rows", () => {
+    const csv = [
+      "kind,model,resolution,duration_sec,price",
+      "",
+      "image,flux,1k,,0.25",
+      "video,veo,1080p,5,0.50",
+      "garbage line",
+      "video,veo,1080p,5", // too few cells
+      "bogus-kind,x,1k,,0.1",
+    ].join("\r\n");
+    const parsed = parsePriceRulesCsv(csv);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatchObject({ kind: "image", model: "flux", price: 0.25 });
+    expect(parsed[1]).toMatchObject({ kind: "video", model: "veo", durationSec: 5, price: 0.5 });
+  });
+});
+
+describe("buildPriceTemplate", () => {
+  it("emits every image model × resolution and video model × resolution × duration combo at $0", () => {
+    const rules = buildPriceTemplate(
+      [{ id: "img-a" }, { id: "img-b" }],
+      [{ id: "vid-a" }],
+      (id) => (id === "vid-a" ? { resolutions: ["720p", "1080p"], durations: [5, 10] } : null)
+    );
+    expect(rules).toHaveLength(2 * 3 + 2 * 2);
+    const imageRules = rules.filter((r) => r.kind === "image");
+    const videoRules = rules.filter((r) => r.kind === "video");
+    expect(imageRules).toHaveLength(6);
+    expect(videoRules).toHaveLength(4);
+    expect(imageRules).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "image", model: "img-a", resolution: "1k", price: 0 }),
+      expect.objectContaining({ kind: "image", model: "img-b", resolution: "4k", price: 0 }),
+    ]));
+    expect(videoRules).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "video", model: "vid-a", resolution: "720p", durationSec: 5, price: 0 }),
+      expect.objectContaining({ kind: "video", model: "vid-a", resolution: "1080p", durationSec: 10, price: 0 }),
+    ]));
+    // Rules carry unique ids (importable directly).
+    expect(new Set(rules.map((r) => r.id)).size).toBe(rules.length);
+  });
+
+  it("falls back to the default resolution/length buckets when a video form can't be read", () => {
+    const rules = buildPriceTemplate([], [{ id: "vid-a" }], () => null);
+    expect(rules).toHaveLength(3 * 4);
+    expect(rules[0]).toMatchObject({ kind: "video", model: "vid-a", resolution: "480p", durationSec: 5 });
+    expect(rules[rules.length - 1]).toMatchObject({ resolution: "1080p", durationSec: 20 });
   });
 });

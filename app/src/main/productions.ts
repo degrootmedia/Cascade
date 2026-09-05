@@ -32,12 +32,13 @@ function normalize(p: ProductionFile): ProductionFile {
   p.styles ??= [];
   p.brand ??= { colors: [], font: "" };
   p.currentStep ??= 1;
-  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" };
+  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" };
   p.assets.voiceoverDir ??= "voiceover";
   p.assets.musicDir ??= "music";
   p.assets.videosDir ??= "videos";
   p.assets.referencesDir ??= "references";
   p.assets.assemblyDir ??= "assembly";
+  p.assets.modelsDir ??= "models";
   p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
   p.magicPrompts ??= {};
   if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
@@ -247,11 +248,11 @@ export function newProduction(name: string, folder: string): ProductionFile {
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
   };
   // Scaffold the asset folders inside the user's production folder.
-  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
     } catch {

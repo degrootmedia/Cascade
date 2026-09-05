@@ -98,7 +98,7 @@ describe("renderAnimatic against real ffmpeg", () => {
       voiceoverPath: "voiceover/vo.wav", voiceoverVolume: 1,
       musicPath: "music/music.wav", musicVolume: 0.5,
       assembly: { fps: 24, width: 640, height: 360, exportDir: "out/assembly" },
-      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly" },
+      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     });
 
     const emit = (m: string) => ff([m]);

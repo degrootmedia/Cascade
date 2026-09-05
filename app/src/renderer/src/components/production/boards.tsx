@@ -4,6 +4,7 @@ import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
 import { useImageContextMenu } from "../image-context-menu.js";
+import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, InsertIcon, MagnifyIcon, RegenerateIcon } from "../icons.js";
 
 export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
   prod: Production;
@@ -145,7 +146,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
     >
       {isReorderTarget && (
         <div className="prod-board-insert-indicator" aria-hidden>
-          <span className="prod-board-insert-label">Insert before {shot.number}</span>
+          <span className="prod-board-insert-label"><InsertIcon size={12} /> Insert before {shot.number}</span>
         </div>
       )}
       {draggable && onReorderDragStart && (
@@ -157,7 +158,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           onDragStart={(e) => { e.stopPropagation(); onReorderDragStart(shot.id, e); }}
           onDragEnd={(e) => { e.stopPropagation(); e.currentTarget.blur(); if (onReorderDragEnd) onReorderDragEnd(); }}
         >
-          ⋮⋮
+          <DragHandleIcon size={14} />
         </button>
       )}
       <div
@@ -275,7 +276,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             pending
           </span>
         )}
-        <button
+<button
           className="prod-board-zoom"
           title={shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
           disabled={!img && !shot.videoPath}
@@ -290,32 +291,34 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
               void window.cascade.boardImageFull(prod.meta.id, shot.id).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } });
             }
           }}
-        >⌕</button>
-        <button
-          className="prod-board-video"
-          title={shot.videoPath ? "Replace this shot's video" : "Generate a video from this frame"}
-          disabled={regenerating || !img}
-          onClick={(e) => { e.stopPropagation(); onVideo(); }}
-        >
-          {videoBusy ? "…" : "▶"}
-        </button>
-        <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(); }}>⤒</button>
-        <button
-          className="prod-board-edit"
-          title="Edit this frame with AI (image-input model + prompt)"
-          disabled={regenerating || !img}
-          onClick={onEdit}
-        >
-          ✎
-        </button>
-<button
-          className="prod-board-regen"
-          title="Regenerate this frame"
-          disabled={regenerating}
-          onClick={onRegenerate}
-        >
-          {regenerating ? "…" : "↻"}
-        </button>
+        ><MagnifyIcon size={12} /></button>
+        <div className="prod-board-actions">
+          <button
+            className="prod-board-regen"
+            title="Regenerate this frame"
+            disabled={regenerating}
+            onClick={onRegenerate}
+          >
+            {regenerating ? "…" : <RegenerateIcon size={12} />}
+          </button>
+          <button
+            className="prod-board-edit"
+            title="Edit this frame with AI (image-input model + prompt)"
+            disabled={regenerating || !img}
+            onClick={onEdit}
+          >
+            <EditIcon size={12} />
+          </button>
+          <button
+            className="prod-board-video"
+            title={shot.videoPath ? "Replace this shot's video" : "Generate a video from this frame"}
+            disabled={regenerating || !img}
+            onClick={(e) => { e.stopPropagation(); onVideo(); }}
+          >
+            {videoBusy ? "…" : <FilmStripIcon size={12} />}
+          </button>
+          <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(); }}><ImportIcon size={12} /></button>
+        </div>
         {pending && (
           <button
             className="prod-board-recheck"

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CustomRef, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
+import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 
@@ -42,8 +43,10 @@ function RefSection({ title, items, emptyHint, onAttach, onRemove, onAdd, addKin
           {withArt.map((i) => (
             <figure key={i.id} className="prod-ref">
               <img src={i.artwork} alt={i.name} />
+              <div className="prod-ref-actions">
+                <button className="prod-ref-remove" title="Remove this reference" onClick={() => onRemove(i.id)}><XIcon size={12} /></button>
+              </div>
               <figcaption>{i.name}</figcaption>
-              <button className="prod-ref-remove" title="Remove this reference" onClick={() => onRemove(i.id)}>×</button>
             </figure>
           ))}
         </div>
@@ -76,7 +79,7 @@ function RefSection({ title, items, emptyHint, onAttach, onRemove, onAdd, addKin
               <button className="prod-btn ghost" onClick={() => { setAdding(false); setAddName(""); setAddKey(""); }}>Cancel</button>
             </>
           ) : (
-            <button className="prod-btn" onClick={() => setAdding(true)}>＋ Add {addKind}…</button>
+            <button className="prod-btn" onClick={() => setAdding(true)}><PlusIcon size={14} /> Add {addKind}…</button>
           )}
         </div>
     </div>
@@ -118,16 +121,18 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
                 title="Rename this reference"
               />
 </figcaption>
-            {i.artwork
-              ? <button className="prod-ref-remove" title="Remove reference image" onClick={() => onRemoveImage(i.id)}>×</button>
-              : <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(i.id)}>⤒</button>}
-            <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(i.id)}>🗑</button>
+            <div className="prod-ref-actions">
+              {i.artwork
+                ? <button className="prod-ref-remove" title="Remove reference image" onClick={() => onRemoveImage(i.id)}><XIcon size={12} /></button>
+                : <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(i.id)}><ImportIcon size={12} /></button>}
+              <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(i.id)}><XIcon size={12} /></button>
+            </div>
           </figure>
         ))}
       </div>
       <div className="prod-ref-new form">
         <input className="prod-ref-new-name" placeholder="Reference name (e.g. Gondola Interior)" value={name} onChange={(e) => setName(e.target.value)} />
-        <button className="prod-btn" disabled={!name.trim()} onClick={submit}>＋ Add reference…</button>
+        <button className="prod-btn" disabled={!name.trim()} onClick={submit}><PlusIcon size={14} /> Add reference…</button>
       </div>
     </div>
   );
@@ -159,7 +164,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       <p className="hint">Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto <em>From image</em> to generate a style.</p>
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
-        <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}>＋ Add category</button>
+        <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}><PlusIcon size={14} /> Add category</button>
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
@@ -169,7 +174,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       <div className="prod-ref-new form">
         <input className="prod-ref-new-name" placeholder="Reference name" value={name} onChange={(e) => setName(e.target.value)} />
         <select className="prod-openart-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}><option value="">Uncategorized</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-        <button className="prod-btn" disabled={!name.trim()} onClick={add}>＋ Add reference</button>
+        <button className="prod-btn" disabled={!name.trim()} onClick={add}><PlusIcon size={14} /> Add reference</button>
       </div>
     </div>
   );
@@ -252,11 +257,13 @@ function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }:
         : isVideo
           ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }} />
           : <div className="prod-ref-blank">＋</div>}
+      <div className="prod-ref-actions">
+        {hasImage && <button className="prod-ref-zoom" title="Enlarge this reference" onClick={() => setZoom({ name: r.name, url: imgUrl! })}><MagnifyIcon size={12} /></button>}
+        {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(r.id)}><ImportIcon size={12} /></button>}
+        {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={() => onEditRef(r)}><EditIcon size={12} /></button>}
+        <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}><XIcon size={12} /></button>
+      </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
-      {hasImage && <button className="prod-ref-zoom" title="Enlarge this reference" onClick={() => setZoom({ name: r.name, url: imgUrl! })}>⌕</button>}
-      {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(r.id)}>⤒</button>}
-      {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={() => onEditRef(r)}>✎</button>}
-      <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}>×</button>
       {zoom && (
         <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
           <figure className="prod-ref-lightbox-card">
@@ -335,7 +342,7 @@ export function shotStyleSelectValue(shot: ProductionShot, prod: Production): st
 /** Small glyph for media references that have no image thumbnail. */
 
 export function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
-  return <span className="prod-ref-chip-ico">{media === "audio" ? "♪" : "▶"}</span>;
+  return <span className="prod-ref-chip-ico">{media === "audio" ? "♪" : <FilmStripIcon size={12} />}</span>;
 }
 
 /** Step 2 character builder: generate a character-sheet reference image via
@@ -462,7 +469,9 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
               title={`Load ${c.name}'s description and generation settings`}
             >
               <img src={c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork} alt={c.name} />
-              <button className="prod-ref-zoom" title="Enlarge this character sheet" onClick={(e) => { e.stopPropagation(); setZoom({ name: c.name, url: c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork! }); }}>⌕</button>
+              <div className="prod-ref-actions">
+                <button className="prod-ref-zoom" title="Enlarge this character sheet" onClick={(e) => { e.stopPropagation(); setZoom({ name: c.name, url: c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork! }); }}><MagnifyIcon size={12} /></button>
+              </div>
               <figcaption>{c.name}</figcaption>
             </figure>
           ))}

@@ -12,6 +12,7 @@ import { AgentsPanel } from "./components/AgentsPanel.js";
 import { ViewTabs, type AppView } from "./components/ViewTabs.js";
 import { ProductionWorkspace } from "./components/ProductionWorkspace.js";
 import { AutoTextarea } from "./components/AutoTextarea.js";
+import { AttachFileIcon, StopButtonIcon, XIcon } from "./components/icons.js";
 
 import { applyAccent } from "./theme.js";
 
@@ -386,7 +387,7 @@ export function App() {
             {attachments.map((a, i) => (
               <div key={i} className={`attachment${isImage(a) ? "" : " file"}`}>
                 {isImage(a) ? <img src={a.dataUrl} alt={a.name} /> : <span className="attach-file">{a.name}</span>}
-                <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>×</button>
+                <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}><XIcon size={11} /></button>
               </div>
             ))}
             {attachments.some(isImage) && modelInfo && !modelInfo.vision && (
@@ -413,9 +414,7 @@ export function App() {
             disabled={busy}
             onClick={() => fileInputRef.current?.click()}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M16.5 8.5a3 3 0 0 0-4.24-0.15l-6 6a4.5 4.5 0 0 0 6.36 6.36l7.5-7.5a3 3 0 0 0-4.24-4.24L10 18.79a1.5 1.5 0 0 1-2.12-2.12l7.07-7.07" />
-            </svg>
+            <AttachFileIcon size={18} className="attach-glyph" />
           </button>
           <AutoTextarea
             ref={textareaRef}
@@ -441,6 +440,7 @@ export function App() {
                 setBusyIds((p) => ({ ...p, [currentId as string]: false }));
               }}
             >
+              <StopButtonIcon size={15} />
               Stop
             </button>
           ) : (

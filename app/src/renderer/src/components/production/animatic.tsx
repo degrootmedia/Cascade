@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
+import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 
 /** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
@@ -139,7 +140,7 @@ export function MiniAudioPlayer({ src, onDurationKnown, audioRef }: {
         disabled={!src}
         aria-label={playing ? "Pause preview" : "Play preview"}
       >
-        {playing ? "❚❚" : "▶"}
+{playing ? "❚❚" : <PlayButtonIcon size={12} />}
       </button>
       <div className="prod-mini-bar" ref={barRef} onClick={seek} title="Click to seek">
         <div className="prod-mini-fill" style={{ width: `${pct}%` }} />
@@ -844,17 +845,17 @@ export function AnimaticTimeline({
   };
 
   /** Seek by pointer position. `ref` is the element whose rect defines the
-   *  coordinate system: the zoomed strip maps px→s via the current scale plus
-   *  its scroll offset, while the narrower transport scrubber stays a fixed
-   *  full-range overview. */
+   *  coordinate system: the zoomed strip is the scrolled content itself, so
+   *  its bounding rect already accounts for scrollLeft and px map directly
+   *  via the current scale — while the narrower transport scrubber stays a
+   *  fixed full-range overview. */
   const seekFromEvent = (ref: React.RefObject<HTMLElement>, clientX: number) => {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     if (ref === stripRef) {
       if (pps <= 0) return;
-      const scrolled = scrollWrapRef.current?.scrollLeft ?? 0;
-      const next = (clientX - r.left + scrolled) / pps;
+      const next = (clientX - r.left) / pps;
       setPlayhead(Math.max(0, Math.min(total, next)));
       return;
     }
@@ -957,16 +958,15 @@ export function AnimaticTimeline({
         />
       </div>
 
-      <div className="prod-animatic-transport">
+<div className="prod-animatic-transport">
         <button
-          className="primary"
           onClick={() => void play()}
           disabled={!shots.length}
           title={playing ? "Pause playback" : "Play from playhead"}
         >
-          {playing ? "❚❚" : "▶"}
+          {playing ? "❚❚" : <PlayButtonIcon size={15} />}
         </button>
-        <button onClick={() => { stop(); setPlayhead(0); }} title="Stop and rewind">■</button>
+        <button onClick={() => { stop(); setPlayhead(0); }} title="Stop and rewind"><StopButtonIcon size={15} /></button>
         <div
           className="prod-animatic-scrub"
           ref={scrubRef}

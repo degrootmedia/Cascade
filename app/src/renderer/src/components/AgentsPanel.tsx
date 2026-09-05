@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AgentMeta, ModelInfo } from "../../../shared/ipc.js";
 import { AgentHoverCard } from "./AgentIdCard.js";
 import { AutoTextarea } from "./AutoTextarea.js";
+import { ImportIcon, PlusIcon } from "./icons.js";
 
 const BUILTIN_TOOLS = ["read_file","write_file","edit_file","list_directory","glob","grep","run_command"];
 const BUILTIN_LABELS: Record<string,string> = {
@@ -83,8 +84,8 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
         <p className="hint">Agents are available in every workspace. Each has its own prompt (<code>.md</code>), model, avatar, and allowed tools. Chats can switch agents at any time.</p>
 
         <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-          <button className="primary" onClick={openNew} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--accent)", color: "white", cursor: "pointer" }}>+ New agent</button>
-          <button onClick={() => setImportOpen((v) => !v)} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-raised)", color: "var(--text)", cursor: "pointer" }}>Import…</button>
+          <button className="primary" onClick={openNew} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--accent)", color: "white", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><PlusIcon size={14} /> New agent</button>
+          <button onClick={() => setImportOpen((v) => !v)} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-raised)", color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><ImportIcon size={14} /> Import…</button>
         </div>
 
         {importOpen && (

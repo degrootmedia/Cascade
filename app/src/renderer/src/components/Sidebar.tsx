@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SessionMeta } from "../../../shared/ipc.js";
+import { PlusIcon, SearchIcon, TokenIcon } from "./icons.js";
 
 type BucketKey = "today" | "yesterday" | "week" | "month" | "older";
 
@@ -116,16 +117,20 @@ export function Sidebar({
   return (
     <aside className="sidebar" style={width ? { width } : undefined}>
       <button className="new-chat" onClick={onNew}>
-        + New chat
+        <PlusIcon size={15} />
+        New chat
       </button>
       {total > 3 && (
-        <input
-          className="sidebar-search"
-          type="search"
-          placeholder="Search chats…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <div className="sidebar-search-wrap">
+          <SearchIcon size={13} className="sidebar-search-icon" />
+          <input
+            className="sidebar-search"
+            type="search"
+            placeholder="Search chats…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
       )}
       <nav className="session-list">
         {groups.length === 0 && (
@@ -206,7 +211,7 @@ export function Sidebar({
         </div>
       )}
       <div className="sidebar-footer">
-        {credits !== null && <div className="credits">~{credits} credits</div>}
+        {credits !== null && <div className="credits"><TokenIcon size={12} /> ~{credits} credits</div>}
         <button className="link" onClick={onSettings}>
           Settings
         </button>

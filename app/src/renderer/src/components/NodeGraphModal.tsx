@@ -31,6 +31,7 @@ import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, pa
 import { TriplePrompt } from "./TriplePrompt.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { useImageContextMenu } from "./image-context-menu.js";
+import { EditIcon, FilmStripIcon, MagnifyIcon, PlusIcon, XIcon } from "./icons.js";
 
 function isTagReorder(a: string, b: string): boolean {
   const ra = refTagNames(a);
@@ -225,7 +226,7 @@ const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) 
               title="View larger"
               onClick={() => data.onZoom(data.name, data.artwork)}
             >
-              <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.6" /><line x1="10" y1="10" x2="14.5" y2="14.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+              <MagnifyIcon size={9} />
             </button>
           )}
           <button
@@ -233,7 +234,7 @@ const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) 
             title={data.tagged ? "Remove this reference from the prompt" : "Add this reference to the prompt"}
             onClick={() => data.onToggle(data.name, data.tagged)}
           >
-            {data.tagged ? "×" : "＋"}
+            {data.tagged ? <XIcon size={9} /> : <PlusIcon size={9} />}
           </button>
           {!data.tagged && data.onRemove && data.refId && (
             <button
@@ -241,7 +242,7 @@ const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) 
               title="Remove this reference from the canvas"
               onClick={() => data.onRemove?.(data.refId!)}
             >
-              <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+              <XIcon size={9} />
             </button>
           )}
         </div>
@@ -2167,7 +2168,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                   e.dataTransfer.effectAllowed = "copy";
                 }}
               >
-                <svg className="prod-graph-tools-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 3l9 5-9 5V3z" fill="currentColor" /></svg>
+                <FilmStripIcon size={14} className="prod-graph-tools-icon" />
                 <span className="prod-graph-tools-label">Video generation</span>
                 {hasVideoTool && (
                   <button
@@ -2175,7 +2176,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                     disabled={videoGenActive}
                     title={videoGenActive ? "In use — has clips or pipes" : "Remove from the canvas"}
                     onClick={() => removeTool("video")}
-                  >×</button>
+                  ><XIcon size={9} /></button>
                 )}
               </div>
               <div
@@ -2187,7 +2188,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                   e.dataTransfer.effectAllowed = "copy";
                 }}
               >
-                <svg className="prod-graph-tools-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M11.5 1.5l3 3-8 8-4 1 1-4 8-8z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /></svg>
+                <EditIcon size={14} className="prod-graph-tools-icon" />
                 <span className="prod-graph-tools-label">Edit image</span>
                 {hasEditTool && (
                   <button
@@ -2195,7 +2196,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                     disabled={editGenActive}
                     title={editGenActive ? "In use — has edits or pipes" : "Remove from the canvas"}
                     onClick={() => removeTool("edit")}
-                  >×</button>
+                  ><XIcon size={9} /></button>
                 )}
               </div>
             </div>

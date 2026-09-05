@@ -4,6 +4,7 @@ import { API_PROVIDERS } from "../../../shared/providers.js";
 import { McpSection } from "./McpSection.js";
 import { applyAccent } from "../theme.js";
 import { uid } from "./production/hex.js";
+import { ExpensesIcon, ImportIcon, PlusIcon } from "./icons.js";
 
 const ACCENT_PRESETS = [
   { name: "Blue", value: "#4f8ef7" },
@@ -206,15 +207,15 @@ function ExpensePricingSection() {
           ))}
         </datalist>
         <div className="expense-pricing-actions">
-          <button onClick={addRule} disabled={busy}>+ Add price</button>
+          <button onClick={addRule} disabled={busy} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><PlusIcon size={13} /> Add price</button>
           <button className="primary" onClick={() => void save()} disabled={busy}>
             {busy ? "Working…" : "Save prices"}
           </button>
           <button onClick={() => void exportRules()} disabled={busy} title="Save the rules above to a CSV file">
             Export CSV
           </button>
-          <button onClick={() => void importRules()} disabled={busy} title="Load price rules from a CSV file">
-            Import CSV
+          <button onClick={() => void importRules()} disabled={busy} title="Load price rules from a CSV file" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <ImportIcon size={13} /> Import CSV
           </button>
           <button onClick={() => void exportTemplate()} disabled={busy} title="Pre-fill every model × resolution × video-length combination at $0">
             Export template
@@ -387,7 +388,7 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
 
         <div className="settings-tabs" role="tablist">
           <button role="tab" className={"settings-tab" + (tab === "general" ? " active" : "")} onClick={() => setTab("general")}>General</button>
-          <button role="tab" className={"settings-tab" + (tab === "expenses" ? " active" : "")} onClick={() => setTab("expenses")}>Expenses</button>
+          <button role="tab" className={"settings-tab" + (tab === "expenses" ? " active" : "")} onClick={() => setTab("expenses")}><ExpensesIcon size={13} /> Expenses</button>
         </div>
 
         {tab === "general" && (

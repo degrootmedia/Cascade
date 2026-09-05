@@ -1,43 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelInfo } from "../../../shared/ipc.js";
-
-/** Gab-style cost badge: gray token icon + exact credit cost (credit_cost.base_cost). */
-function TokenIcon() {
-  return (
-    <svg className="token-icon" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <circle cx="8" cy="8" r="2.75" fill="currentColor" />
-    </svg>
-  );
-}
+import { ImageIcon, TokenIcon } from "./icons.js";
 
 /** Clean line-art "image input" indicator (replaces the 📷 emoji). */
 function VisionIcon() {
-  return (
-    <svg
-      className="vision-icon"
-      viewBox="0 0 16 16"
-      width="13"
-      height="13"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" />
-      <circle cx="5.6" cy="6.4" r="1.2" />
-      <path d="M2.5 11.5l3.2-3.2 2.4 2.4 3-3 2.4 2.4" />
-    </svg>
-  );
+  return <ImageIcon size={13} />;
 }
 
 function CostBadge({ info }: { info: ModelInfo }) {
   const isUsd = info.costLabel.startsWith("$");
   return (
     <span className="cost-badge" title={info.costTitle}>
-      {!isUsd && <TokenIcon />}
+      {!isUsd && <TokenIcon size={13} />}
       {info.costLabel}
     </span>
   );

@@ -19,6 +19,7 @@ import { BrandSwatchRow } from "./production/brand.js";
 import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
+import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
@@ -1597,7 +1598,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     {m.shotCount} shots{m.stepDone ? ` · step ${m.stepDone} done` : ""} · {new Date(m.updatedAt).toLocaleDateString()}
                   </span>
                 </button>
-                <button className="prod-card-remove" title="Remove from Cascade (files on disk are untouched)" onClick={() => void remove(m.id)}>×</button>
+                <button className="prod-card-remove" title="Remove from Cascade (files on disk are untouched)" onClick={() => void remove(m.id)}><XIcon size={14} /></button>
               </div>
             ))}
           </div>
@@ -1653,6 +1654,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           onClick={() => setShowExpenses(true)}
           title="Running tally of every AI generation and purchased asset"
         >
+          <ExpensesIcon size={14} className="prod-step-icon" />
           <span className="prod-step-title">Expenses</span>
         </button>
       </nav>
@@ -1733,16 +1735,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                         disabled={refiningStyleId !== null || !s.prompt.trim()}
                         onClick={() => void refineStyle(s.id)}
                       >
-                        {refiningStyleId === s.id ? "…" : "✨"}
+                        {refiningStyleId === s.id ? "…" : <MagicIcon size={13} />}
                       </button>
-                      <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}>×</button>
+                      <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}><XIcon size={12} /></button>
                     </div>
                   ))}
                 </div>
               )}
               <div className="prod-style-actions">
                 <button className="prod-btn" disabled={(prod.styles?.length ?? 0) >= MAX_STYLES} onClick={addStyle}>
-                  ＋ Add style
+                  <PlusIcon size={14} /> Add style
                 </button>
                 <button
                   className="prod-btn"
@@ -1767,7 +1769,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   }}
                   title="Generate a style prompt from an image — or drag a reference image here"
                 >
-                  {styleImgBusy ? "Reading image…" : "🖼 From image…"}
+                  {styleImgBusy ? "Reading image…" : <><ImageIcon size={14} /> From image…</>}
                 </button>
               </div>
             </DesignSection>
@@ -1788,7 +1790,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   />
                 ))}
                 {brandColors.length < 5 && (
-                  <button className="prod-brand-add" title="Add a palette swatch" onClick={() => setBrandColor(brandColors.length, "#1A2B3C")}>＋</button>
+                  <button className="prod-brand-add" title="Add a palette swatch" onClick={() => setBrandColor(brandColors.length, "#1A2B3C")}><PlusIcon size={14} /></button>
                 )}
               </div>
               <label className="prod-brand-font">
@@ -1822,7 +1824,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                         <span><strong>{s.name}</strong><small>{s.kind === "character" ? "Character suggestion" : "Prop suggestion"}</small></span>
                         <div className="prod-suggestion-actions">
                           <button className="prod-btn" onClick={() => approveSuggestion(s)}>Add reference</button>
-                          <button className="prod-suggestion-remove" title="Dismiss this suggestion" onClick={() => dismissSuggestion(s)}>×</button>
+                          <button className="prod-suggestion-remove" title="Dismiss this suggestion" onClick={() => dismissSuggestion(s)}><XIcon size={12} /></button>
                         </div>
                       </div>
                     ))}
@@ -1901,7 +1903,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   }}
                   title={prod.magicEnabled ? "Disable Magic Prompt — restore original prompts" : "Enable Magic Prompt — AI generates content-only prompts for all shots"}
                 >
-                  {magicBusy ? "…" : prod.magicEnabled ? "✨ Magic On" : "✨ Magic Prompt"}
+                  {magicBusy ? "…" : prod.magicEnabled ? <><MagicIcon size={13} /> Magic On</> : <><MagicIcon size={13} /> Magic Prompt</>}
                 </button>
                 {prod.magicEnabled && (
                   <button
@@ -1917,7 +1919,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     }}
                     title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
                   >
-                    ↻
+                    <RegenerateIcon size={13} />
                   </button>
                 )}
               </div>
@@ -1961,7 +1963,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </button>
               {boardsDone > 0 && (
                 <button disabled={boardsBusy || importBusy} onClick={() => void genBoards(true)}>
-                  Regenerate all
+                  <RegenerateIcon size={13} /> Regenerate all
                 </button>
               )}
               <label className="prod-boards-cap">
@@ -2232,7 +2234,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                             >
                               Replace…
                             </button>
-                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}>×</button>
+                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}><XIcon size={12} /></button>
                           </div>
                         ) : (
                           <div className="prod-audio-file">
@@ -2262,7 +2264,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                               title="Background music volume"
                             />
                             <button onClick={() => void importMusic()}>Replace…</button>
-                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}>×</button>
+                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}><XIcon size={12} /></button>
                           </div>
                         ) : (
                           <div className="prod-audio-file">
@@ -2317,7 +2319,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           <div className="prod-edit-panel prod-vision-panel" onClick={(e) => e.stopPropagation()}>
             <div className="prod-edit-head">
               <span className="prod-edit-title">⚠ Vision-capable model needed</span>
-              <button className="prod-btn" onClick={() => setVisionWarnModel(null)}>×</button>
+              <button className="prod-btn" onClick={() => setVisionWarnModel(null)}><XIcon size={12} /></button>
             </div>
             <p className="prod-vision-text">
               The active model (<strong>{visionWarnModel}</strong>) can't see images. Switch to a

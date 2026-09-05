@@ -9,6 +9,7 @@
 import { useRef, useState } from "react";
 import type { Production, ProductionScene } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
+import { DragHandleIcon, InsertIcon, PlusIcon, XIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 
 interface Props {
@@ -82,7 +83,8 @@ function SceneBlock({ scene, prod, onMutation, dragId, dragIdRef, activeZone, on
           title="Insert a shot at the start of this scene"
           onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0))}
         >
-          + Shot
+          <PlusIcon size={13} />
+          Shot
         </button>
       </header>
       {open && (
@@ -234,7 +236,7 @@ function ShotRow({ prod, scene, index, onMutation, dragId, dragIdRef, onDragStar
         onDragEnd={onDragEnd}
         aria-label="Drag to reorder shot"
       >
-        ⋮⋮
+        <DragHandleIcon size={14} />
       </button>
       <span className="shot-number" title={shot.id}>{shot.number}</span>
       <AutoTextarea
@@ -257,14 +259,14 @@ function ShotRow({ prod, scene, index, onMutation, dragId, dragIdRef, onDragStar
           title={`Insert a shot between ${shot.number} and the next (mid-numbered)`}
           onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, index + 1))}
         >
-          ↳
+          <InsertIcon size={13} />
         </button>
         <button
           className="shot-delete"
           title="Delete this shot (numbers keep their gaps)"
           onClick={() => onMutation(window.cascade.deleteShot(prod.meta.id, shot.id))}
         >
-          ×
+          <XIcon size={13} />
         </button>
       </span>
     </div>

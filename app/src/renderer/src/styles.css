@@ -14,6 +14,24 @@
 
 * { box-sizing: border-box; }
 
+/* Full-color SVG icons (assets/icons/*) — the shared default is a small,
+   inline-flex, non-draggable image that sits on the text baseline. */
+.cascade-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: middle;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+/* Icon + label buttons: center the glyph next to the text. */
+button:has(> .cascade-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
 /* ---------- modern minimal scrollbars ---------- */
 * {
   scrollbar-width: thin;
@@ -177,6 +195,9 @@ body {
   color: var(--text-dim);
   cursor: pointer;
   font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .prod-card-remove:hover { color: var(--danger); }
 
@@ -252,6 +273,7 @@ body {
 .prod-panel { padding: 20px 24px 40px; max-width: 1100px; margin: 0 auto; }
 .prod-storyboard-panel { max-width: none; }
 .prod-panel h3 { margin: 0 0 14px; }
+.prod-panel h3 .cascade-icon { vertical-align: -3px; margin-right: 4px; }
 .prod-ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .prod-ingest-url { flex: 1 1 320px; }
 .prod-ingest-url input {
@@ -419,6 +441,9 @@ body {
   cursor: pointer;
   font-size: 0.9rem;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .prod-style-remove:hover { color: var(--danger); border-color: var(--danger); }
 
@@ -593,6 +618,9 @@ body {
   cursor: pointer;
   font-size: 1.2rem;
   align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .prod-brand-add:hover { border-color: var(--accent); color: var(--accent); }
 .prod-brand-font { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
@@ -730,6 +758,7 @@ body {
 .prod-btn.ghost { background: none; border: 1px solid transparent; color: var(--text-dim); }
 .prod-btn.ghost:hover { border-color: var(--border); color: var(--text); }
 .prod-btn.inline { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; white-space: normal; }
+.prod-btn.inline:has(.cascade-icon) { text-decoration: none; }
 
 /* Step 5 Assembly (export package + render). */
 .prod-assembly-layout {
@@ -828,7 +857,11 @@ body {
   white-space: nowrap;
   box-shadow: 0 2px 10px rgba(0,0,0,0.35);
   pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
+.prod-board-insert-label .cascade-icon { filter: brightness(0) invert(1); }
 @keyframes prod-insert-pulse { from { opacity: 0.85; } to { opacity: 1; } }
 /* End-of-grid drop placeholder */
 .prod-board-end-zone {
@@ -884,14 +917,15 @@ body {
   align-items: center;
   justify-content: center;
 }
-.prod-board-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.prod-board-frame > img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .prod-board-frame-img { cursor: pointer; }
 .prod-board-frame-video { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
 .prod-board-empty { color: var(--text-dim); font-size: 12px; }
 .prod-boards-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+/* Storyboard frame overlay buttons. The zoom/enlarge button sits alone in the
+   top-left; the action row (Regenerate · Edit · Movie · Import) is centered at
+   the bottom of the frame. */
 .prod-board-regen, .prod-board-import, .prod-board-zoom, .prod-board-video, .prod-board-delete {
-  position: absolute;
-  top: 6px;
   width: 26px;
   height: 26px;
   padding: 0;
@@ -902,25 +936,51 @@ body {
   cursor: pointer;
   font-size: 0.85rem;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.prod-board-zoom {
+  position: absolute;
+  top: 6px;
+  left: 6px;
   opacity: 0;
   transition: opacity 0.12s;
 }
-.prod-board-regen { right: 6px; }
-.prod-board-import { right: 38px; }
-.prod-board-zoom { left: 6px; }
-.prod-board-video { left: 38px; }
-.prod-board-delete { right: 6px; bottom: 6px; top: auto; }
-.prod-board-regen:hover, .prod-board-import:hover, .prod-board-zoom:hover, .prod-board-video:hover, .prod-board-delete:hover { border-color: var(--accent); color: var(--accent); }
-.prod-board-regen:disabled, .prod-board-import:disabled, .prod-board-zoom:disabled, .prod-board-video:disabled, .prod-board-delete:disabled { opacity: 0.4 !important; cursor: default; }
-.prod-board-delete:disabled { opacity: 0 !important; }
+.prod-board-zoom:hover { border-color: var(--accent); color: var(--accent); }
 .prod-board-zoom:disabled { opacity: 0 !important; }
-.prod-board-video:disabled { opacity: 0 !important; }
-.prod-board-frame:hover .prod-board-regen,
-.prod-board-frame:hover .prod-board-edit,
-.prod-board-frame:hover .prod-board-import,
-.prod-board-frame:hover .prod-board-zoom,
-.prod-board-frame:hover .prod-board-video,
-.prod-board-frame:hover .prod-board-delete { opacity: 1; }
+.prod-board-frame:hover .prod-board-zoom { opacity: 1; }
+/* Bottom-center action row — Regenerate, Edit, Movie, Import in order. */
+.prod-board-actions {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 2;
+}
+.prod-board-actions button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.prod-board-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.prod-board-actions button:disabled { opacity: 0.4 !important; cursor: default; }
+.prod-board-frame:hover .prod-board-actions { opacity: 1; }
 .prod-board figcaption .shot-number { color: var(--text); font-variant-numeric: tabular-nums; }
 .prod-board-prompt-head { display: flex; align-items: center; min-height: 22px; gap: 8px; }
 .prod-board-prompt-head .prod-board-prompt-refresh { margin-left: 0; }
@@ -1274,79 +1334,40 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
   font-size: 0.75rem;
   background: var(--bg-raised);
 }
-.prod-ref-addimg {
-  position: absolute;
-  top: 4px;
-  right: 30px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1;
-}
-.prod-ref-addimg:hover { background: var(--accent); }
-/* AI-edit button on a reference figure that has an image (mirrors the
-   addimg slot, so the two never overlap). */
-.prod-ref-edit-ai {
-  position: absolute;
-  top: 4px;
-  right: 30px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity .12s;
-}
-.prod-ref:hover .prod-ref-edit-ai, .prod-ref-edit-ai:focus { opacity: 1; }
-.prod-ref-edit-ai:hover { background: var(--accent); }
-.prod-ref-del {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  cursor: pointer;
-  font-size: 0.7rem;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity .12s;
-}
-.prod-ref:hover .prod-ref-del, .prod-ref-del:focus { opacity: 1; }
-.prod-ref-del:hover { background: var(--danger); }
-/* Magnify a reference/character-sheet image (top-left slot, mirrors the
-   del/edit buttons that sit on the right). */
-.prod-ref-zoom {
+/* Left-edge action rail on reference figures (enlarge / import / edit /
+   delete). Buttons stack vertically, styled like the storyboard frame
+   buttons: dark round chips revealed on hover. */
+.prod-ref-actions {
   position: absolute;
   top: 4px;
   left: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity .12s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 2;
 }
-.prod-ref:hover .prod-ref-zoom, .prod-ref-zoom:focus { opacity: 1; }
-.prod-ref-zoom:hover { background: var(--accent); }
+.prod-ref-actions button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity .12s, border-color .12s, color .12s;
+}
+.prod-ref:hover .prod-ref-actions button,
+.prod-ref-actions button:focus { opacity: 1; }
+.prod-ref-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.prod-ref-actions .prod-ref-del:hover { border-color: var(--danger); color: var(--danger); }
+.prod-ref-actions .prod-ref-remove:hover { border-color: var(--danger); color: var(--danger); }
 .prod-ref-new { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .prod-ref-new.form { margin-top: 8px; }
 .prod-ref-add { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
@@ -1601,6 +1622,11 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   cursor: pointer;
   font-size: 0.9rem;
   min-width: 40px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 .prod-animatic-transport button.primary { background: var(--accent); border-color: var(--accent); color: white; }
 .prod-animatic-transport button:hover:not(:disabled) { border-color: var(--accent); }
@@ -1851,7 +1877,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 10px;
   overflow: hidden;
 }
-.prod-ref img { width: 100%; height: 110px; object-fit: cover; display: block; }
+.prod-ref > img { width: 100%; height: 110px; object-fit: cover; display: block; }
 .prod-ref-video { width: 100%; height: 110px; object-fit: cover; display: block; background: #000; }
 .prod-ref figcaption {
   padding: 6px 8px;
@@ -1861,21 +1887,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.prod-ref-remove {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(0, 0, 0, 0.6);
-  color: white;
-  cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1;
-}
-.prod-ref-remove:hover { background: var(--danger); }
 .prod-ref-add { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
 .prod-ref-add select {
   background: var(--bg-panel);
@@ -2040,6 +2051,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   cursor: pointer;
   font-size: 0.85rem;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .shot-actions .shot-insert:hover { color: var(--text); border-color: var(--accent); }
 .shot-actions .shot-delete:hover { color: var(--danger); border-color: var(--danger); }
@@ -2083,13 +2097,15 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   cursor: pointer;
 }
 .new-chat:hover { border-color: var(--accent); }
+.sidebar-search-wrap { position: relative; display: flex; align-items: center; }
+.sidebar-search-icon { position: absolute; left: 10px; pointer-events: none; opacity: 0.65; }
 .sidebar-search {
   width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
-  padding: 7px 10px;
+  padding: 7px 10px 7px 28px;
   font-size: 0.85rem;
 }
 .sidebar-search:focus { outline: none; border-color: var(--accent); }
@@ -2179,7 +2195,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   justify-content: space-between;
   align-items: center;
 }
-.credits { color: var(--text-dim); font-size: 0.85rem; }
+.credits { color: var(--text-dim); font-size: 0.85rem; display: inline-flex; align-items: center; gap: 5px; }
 
 /* ---------- chat ---------- */
 .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -2660,7 +2676,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
 }
-.token-icon { color: var(--border); flex-shrink: 0; }
 .model-menu {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -2791,7 +2806,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   opacity: 0.4;
   cursor: default;
 }
-.composer .attach svg {
+.composer .attach svg,
+.composer .attach .cascade-icon {
   width: 18px;
   height: 18px;
   stroke-width: 1.75;
@@ -2987,31 +3003,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-board-promote:hover { border-color: var(--accent); color: white; }
 
-/* AI edit button on a board frame (pencil). */
-.prod-board-edit {
-  position: absolute;
-  /* Sits to the left of the import button in the frame's top-right row. */
-  top: 6px;
-  right: 70px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.55);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 0.85rem;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.12s;
-  z-index: 2;
-}
-.prod-board-frame:hover .prod-board-edit { opacity: 1; }
-.prod-board-edit:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-/* Disabled (no frame yet) stays invisible until hover, matching the other icons. */
-.prod-board-frame:hover .prod-board-edit:disabled { opacity: 0.4; cursor: default; }
-
 /* "pending" badge — an OpenArt frame job outlived its wait; recheck to claim it. */
 .prod-board-pending {
   position: absolute;
@@ -3027,6 +3018,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   pointer-events: none;
   z-index: 2;
 }
+
+/* AI edit button on a board frame (pencil). */
 .prod-board-recheck {
   position: absolute;
   top: 6px;
@@ -3541,7 +3534,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-editgen { padding-left: 84px; }
 
 .prod-graph-ref { display: flex; align-items: center; gap: 9px; }
-.prod-graph-ref img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 64px; height: 48px; flex-shrink: 0; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
+.prod-graph-ref > img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 64px; height: 48px; flex-shrink: 0; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
 .prod-graph-ref-video { background: #000; }
 .prod-graph-ref-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-weight: 700; }
 .prod-graph-ref-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
@@ -3558,6 +3551,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--text-dim);
   cursor: pointer;
   font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .prod-graph-ref-btn:hover { border-color: var(--accent); color: var(--accent); }
 .prod-graph-ref-actions { display: flex; gap: 6px; }

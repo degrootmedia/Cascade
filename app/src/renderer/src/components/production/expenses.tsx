@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LedgerView } from "../../../../shared/ipc.js";
+import { ExpensesIcon, XIcon } from "../icons.js";
 
 function formatPrice(p: number): string {
   return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -58,7 +59,7 @@ export function ExpensesPanel() {
 
   return (
     <section className="prod-panel prod-expenses">
-      <h3>Expenses</h3>
+      <h3><ExpensesIcon size={18} className="prod-panel-title-icon" /> Expenses</h3>
       <p className="hint">
         Every AI generation is priced against the rules in Settings → Expense pricing and tallied here.
         Rows are mirrored to a CSV text file (expenses.csv) you can open anytime.
@@ -103,7 +104,7 @@ export function ExpensesPanel() {
               <td className="num">{formatPrice(e.price)}</td>
               <td>
                 <button className="prod-btn inline" onClick={() => void remove(e.id)} title="Remove row" disabled={busy}>
-                  ×
+                  <XIcon size={12} />
                 </button>
               </td>
             </tr>

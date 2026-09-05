@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import { composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../../shared/prompt-grammar.js";
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
+import { NodesIcon } from "../icons.js";
 
 export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, onKeyDown, onFocus, onBlur }: {
   value: string;
@@ -123,7 +124,7 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, scriptVisual,
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber} prompt` : "Frame prompt"}</span>
-        {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt">Nodes</button>}
+        {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
         {shotNumber && <label className="prod-brand-toggle"><input type="checkbox" checked={includeBrand} onChange={(e) => onToggleBrand(e.target.checked)} /> Include Brand Identity</label>}
       </div>
       {shotNumber ? <>

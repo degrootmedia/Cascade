@@ -66,6 +66,7 @@ function cascadeMock(): Record<string, unknown> {
     boardThumbnail: async () => null,
     showImageMenu: async () => {},
     videoModelOptions: async () => null,
+    videoEndFrameModels: async () => [],
     getOpenArtCredits: async () => null,
     listProductions: async () => [{ id: "p1", name: "Test production", folder: "C:/test", shotCount: 2, stepDone: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
     onProductionEvent: () => () => {},

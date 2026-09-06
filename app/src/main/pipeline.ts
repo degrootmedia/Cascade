@@ -26,7 +26,7 @@ import {
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, TweenBlock } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1219,6 +1219,116 @@ export function recordGraphEditGen(shot: ProductionShot, rel: string, prompt: st
   shot.graphEditGenIndex = 0;
 }
 
+// ---- in-betweener ----------------------------------------------------------
+
+/** Keyframe sockets on the tween node: at least 2, at most 5. */
+export const TWEEN_MIN_REFS = 2;
+export const TWEEN_MAX_REFS = 5;
+/** Timeline grid: keyframes snap to whole seconds, gaps are 1–15s, and the
+ *  whole timeline caps at 15s. */
+export const TWEEN_GRID_SEC = 1;
+export const TWEEN_MIN_GAP_SEC = 1;
+export const TWEEN_MAX_GAP_SEC = 15;
+export const TWEEN_MAX_TOTAL_SEC = 15;
+
+/** Snap a second value onto the tween timeline grid (whole seconds, ≥ 0). */
+export function tweenSnapSec(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.round(v / TWEEN_GRID_SEC) * TWEEN_GRID_SEC);
+}
+
+/** Clamp a block gap to the allowed 1–15s range, snapped to the grid. */
+export function tweenClampGap(v: number): number {
+  return Math.max(TWEEN_MIN_GAP_SEC, Math.min(TWEEN_MAX_GAP_SEC, tweenSnapSec(v)));
+}
+
+/** Derive action blocks from the ordered keyframe ref ids: one block per
+ *  adjacent pair. Existing prompts and per-block generation history survive
+ *  re-derivation — blocks are matched by their `startRefId→endRefId` pair, so
+ *  reordering keyframes keeps the right prompt on the right pair. Gaps are
+ *  clamped to 1–15s and the timeline is capped at 15s total (later blocks are
+ *  shortened to fit; blocks that no longer fit are dropped).
+ *
+ *  Timing model: the first keyframe sits at t=0; each block's duration is its
+ *  outgoing gap. `gapSec` optionally supplies per-pair durations (index-aligned
+ *  with the pairs); absent entries default to the previous duration or 2s. */
+export function deriveTweenBlocks(
+  refIds: string[],
+  prev: TweenBlock[] = [],
+  gapSec: number[] = []
+): TweenBlock[] {
+  const ids = (Array.isArray(refIds) ? refIds : []).filter((r) => typeof r === "string" && r);
+  if (ids.length < TWEEN_MIN_REFS) return [];
+  const byPair = new Map(prev.map((b) => [`${b.startRefId}→${b.endRefId}`, b]));
+  const blocks: TweenBlock[] = [];
+  let t = 0;
+  for (let i = 0; i + 1 < ids.length; i++) {
+    if (t >= TWEEN_MAX_TOTAL_SEC) break;
+    const prevBlock = byPair.get(`${ids[i]}→${ids[i + 1]}`);
+    const prevDur = prevBlock && Number.isFinite(prevBlock.durationSec) ? prevBlock.durationSec : undefined;
+    const want = i < gapSec.length && Number.isFinite(gapSec[i]) ? gapSec[i] : prevDur ?? 2;
+    const dur = Math.min(tweenClampGap(want), TWEEN_MAX_TOTAL_SEC - t);
+    if (dur < TWEEN_MIN_GAP_SEC) break;
+    blocks.push({
+      id: `tw${i}`,
+      startRefId: ids[i],
+      endRefId: ids[i + 1],
+      prompt: prevBlock?.prompt ?? "",
+      startSec: t,
+      durationSec: dur,
+      gens: prevBlock?.gens,
+      genIndex: prevBlock?.genIndex,
+    });
+    t += dur;
+  }
+  return blocks;
+}
+
+/** Store a generated clip on an action block's history (newest first). */
+export function recordTweenBlockGen(block: TweenBlock, rel: string, prompt: string, model: string): void {
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  block.gens = [item, ...(block.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  block.genIndex = 0;
+}
+
+/** The selected clip per block, in timeline order — the stitch input. Blocks
+ *  whose selection is missing (no gens yet, or `genIndex` pointing at nothing)
+ *  are skipped so the caller can report exactly which blocks are unready. */
+export function tweenSelectedClips(blocks: TweenBlock[] = []): { blockId: string; path: string; durationSec: number }[] {
+  return (Array.isArray(blocks) ? blocks : []).flatMap((b) => {
+    const sel = b.gens?.[b.genIndex ?? 0];
+    return sel?.path ? [{ blockId: b.id, path: sel.path, durationSec: b.durationSec }] : [];
+  });
+}
+
+/** Reconcile a shot's tween state against the production's live references:
+ *  drop keyframe ids with no image (deleted refs), cap at TWEEN_MAX_REFS, then
+ *  re-derive the blocks (prompts, timing, and history survive via the pair-key
+ *  match). Returns true when anything changed. This is the write-side guard so
+ *  a stale renderer save or a deleted reference can never leave phantom
+ *  blocks behind — generate/stitch call it on every run. */
+export function syncTweenBlocks(p: Production, shot: ProductionShot): boolean {
+  if (!shot.graphTweenRefIds?.length && !shot.graphTweenBlocks?.length && !shot.graphTweenOutput) return false;
+  const before = JSON.stringify([shot.graphTweenRefIds, shot.graphTweenBlocks]);
+  const live = new Set<string>();
+  for (const c of p.characters ?? []) if (c.id && refArtworkDataUrl(p, c)) live.add(c.id);
+  for (const pr of p.products ?? []) if (pr.id && refArtworkDataUrl(p, pr)) live.add(pr.id);
+  for (const r of p.references ?? []) if (r.id && refArtworkDataUrl(p, r)) live.add(r.id);
+  const ids = (Array.isArray(shot.graphTweenRefIds) ? shot.graphTweenRefIds : [])
+    .filter((id) => typeof id === "string" && live.has(id))
+    .slice(0, TWEEN_MAX_REFS);
+  shot.graphTweenRefIds = ids;
+  shot.graphTweenBlocks = deriveTweenBlocks(ids, Array.isArray(shot.graphTweenBlocks) ? shot.graphTweenBlocks : []);
+  return JSON.stringify([shot.graphTweenRefIds, shot.graphTweenBlocks]) !== before;
+}
+
+/** Build the lines of an ffmpeg concat-demuxer list file for the given clip
+ *  absolute paths (one `file '<abs>'` line each). The caller writes them to a
+ *  temp file and runs `ffmpeg -f concat -safe 0 -i list …`. */
+export function buildTweenConcatList(absPaths: string[]): string {
+  return absPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n";
+}
+
 /** Apply a video clip as the shot's output AND guarantee it has a still frame.
  *  When the shot has no primary artwork yet (the video was animated from a
  *  node-graph image pipe, not from the shot's own frame), the video's source
@@ -1236,9 +1346,9 @@ export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallba
  *  piped into the output yet, bind the image node as the feed and apply its
  *  newest frame so the storyboard AND the node view both show the result.
  *  When the image node is already piped, the new frame still auto-applies;
- *  a deliberate videogen/ref pipe is never displaced. */
+ *  a deliberate videogen/tween/ref pipe is never displaced. */
 export function hookImageGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
+  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
   shot.graphOutputSource = "imagegen";
   const cur = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
   if (cur) recordBoardArtwork(shot, cur.path);
@@ -1247,7 +1357,7 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
 /** Auto-hook a classic video generation into the node graph: when nothing is
  *  piped into the output yet, bind the video node as the feed. */
 export function hookVideoGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
+  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
   shot.graphOutputSource = "videogen";
 }
 
@@ -1283,6 +1393,19 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
       if (vidSel?.path) {
         let changed = false;
         if (shot.videoPath !== vidSel.path) { shot.videoPath = vidSel.path; changed = true; }
+        if (!shot.artwork && imgSel?.path && shot.artwork !== imgSel.path) { shot.artwork = imgSel.path; changed = true; }
+        return changed;
+      }
+      if (shot.videoPath !== undefined) { shot.videoPath = undefined; return true; }
+      return false;
+    }
+    case "tween": {
+      // The tween feed is the stitched clip: re-derive videoPath from
+      // graphTweenOutput. The storyboard still needs a frame, so backfill
+      // artwork from the image node when the shot has none.
+      if (shot.graphTweenOutput) {
+        let changed = false;
+        if (shot.videoPath !== shot.graphTweenOutput) { shot.videoPath = shot.graphTweenOutput; changed = true; }
         if (!shot.artwork && imgSel?.path && shot.artwork !== imgSel.path) { shot.artwork = imgSel.path; changed = true; }
         return changed;
       }

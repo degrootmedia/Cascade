@@ -9,6 +9,7 @@ import expensesUrl from "../assets/icons/expenses.svg";
 import filmStripUrl from "../assets/icons/film-strip.svg";
 import imageUrl from "../assets/icons/Image.svg";
 import importUrl from "../assets/icons/import.svg";
+import inbetweenUrl from "../assets/icons/inbetween.svg";
 import insertUrl from "../assets/icons/insert.svg";
 import magicUrl from "../assets/icons/magic.svg";
 import magnifyUrl from "../assets/icons/Magnify.svg";
@@ -67,6 +68,8 @@ export const DragHandleIcon = (p: IconProps) => <Icon src={dragHandleUrl} {...p}
 export const InsertIcon = (p: IconProps) => <Icon src={insertUrl} {...p} />;
 /** Blue download/import arrow — import a file. */
 export const ImportIcon = (p: IconProps) => <Icon src={importUrl} {...p} />;
+/** Blue/green interpolation arrows — in-betweener node. */
+export const InbetweenIcon = (p: IconProps) => <Icon src={inbetweenUrl} {...p} />;
 /** Film strip — animatic / video timeline. */
 export const FilmStripIcon = (p: IconProps) => <Icon src={filmStripUrl} {...p} />;
 /** Wallet/receipt — expenses ledger. */

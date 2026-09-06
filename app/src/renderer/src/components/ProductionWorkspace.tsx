@@ -82,7 +82,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // strictly one at a time; clicks during a run join the next batch.
   const regenRunningRef = useRef(false);
   const regenPendingRef = useRef<string[]>([]);
-  const [boardBust, setBoardBust] = useState(0); // cache-buster after (re)generation
+  // Per-shot thumbnail cache-busters: bumping one shot reloads only that
+  // card's thumbnail (BoardCard's effect depends on its own bust value).
+  // `boardBustAll` is the global epoch for bulk changes (generate-all,
+  // reorder, import-scan) that genuinely touch every frame.
+  const [boardBustMap, setBoardBustMap] = useState<Record<string, number>>({});
+  const [boardBustAll, setBoardBustAll] = useState(0);
+  const bustOne = useCallback((shotId: string) => {
+    setBoardBustMap((prev) => ({ ...prev, [shotId]: (prev[shotId] ?? 0) + 1 }));
+  }, []);
+  const bustMany = useCallback((ids: string[]) => {
+    setBoardBustMap((prev) => {
+      const next = { ...prev };
+      for (const id of ids) next[id] = (next[id] ?? 0) + 1;
+      return next;
+    });
+  }, []);
+  const bustAll = useCallback(() => { setBoardBustAll((b) => b + 1); }, []);
+  const boardBustFor = useCallback((shotId: string) => (boardBustMap[shotId] ?? 0) + boardBustAll * 1_000_000, [boardBustMap, boardBustAll]);
   const [boardDragId, setBoardDragId] = useState<string | null>(null);
   const [boardDropTarget, setBoardDropTarget] = useState<string | null>(null);
   const boardDragRef = useRef<string | null>(null);
@@ -138,15 +155,21 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   // External edit: when the high-quality original is edited in Photoshop etc.,
   // main re-encodes the JPEG preview on window focus and notifies here — bump
-  // the board cache-buster and reload the production so the updated frame shows.
+  // only that frame's cache-buster and reload the production so it shows.
   useEffect(() => {
     const off = window.cascade.onBoardExternalUpdate(async (e) => {
       if (prod?.meta.id && e.productionId !== prod.meta.id) return;
-      setBoardBust((b) => b + 1);
       try {
         const next = await window.cascade.loadProduction(e.productionId);
-        if (next) setProd(next);
-      } catch {}
+        if (next) {
+          const hit = next.scenes.flatMap((sc) => sc.shots).find((s) => s.artwork === e.jpegRel);
+          if (hit) bustOne(hit.id);
+          else bustAll();
+          setProd(next);
+        } else {
+          bustAll();
+        }
+      } catch { bustAll(); }
       void refreshList();
     });
     const onWindowFocus = () => {
@@ -157,7 +180,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       off();
       window.removeEventListener("focus", onWindowFocus);
     };
-  }, [prod?.meta.id, refreshList]);
+  }, [prod?.meta.id, refreshList, bustOne, bustAll]);
 
   // Keep the rename draft in sync when switching productions.
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
@@ -228,7 +251,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // from changes (manual override, style, references, characters/products,
   // brand, magic prompts). Without this, a reference drop that mutates prod
   // wouldn't refresh the side panel if the shot was already focused (the
-  // boardBust/promptShotId deps alone miss it).
+  // focused-bust/promptShotId deps alone miss it).
   const focusedShot = promptShotId ? prod?.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId) : undefined;
   const focusedSig = promptShotId ? JSON.stringify([
     promptShotId,
@@ -246,6 +269,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     (prod?.products ?? []).map((p) => [p.id, p.name, !!(p.artwork || p.imagePath)]),
     (prod?.references ?? []).map((r) => [r.name, !!(r.artwork || r.imagePath || r.media)]),
   ]) : "";
+  // Only the focused shot's bust (plus bulk epochs) should refetch its prompt —
+  // an unrelated shot's frame change must not touch this editor.
+  const focusedBust = promptShotId ? (boardBustMap[promptShotId] ?? 0) + boardBustAll * 1_000_000 : 0;
   useEffect(() => {
     if (!promptShotId) return;
     let live = true;
@@ -270,7 +296,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }).catch(() => {});
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardBust, promptShotId, prod?.meta.id, focusedSig]);
+  }, [focusedBust, promptShotId, prod?.meta.id, focusedSig]);
 
   async function pickFolder() {
     const dir = await window.cascade.pickProductionFolder();
@@ -672,6 +698,21 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     return () => window.removeEventListener("paste", onPaste);
   }, [graphShotId, prod?.references, prod?.meta.id]);
 
+  // In-betweener: which video models declare a dedicated end-frame slot (live
+  // form schemas, warmed when the OpenArt models were listed, so this is
+  // usually instant). Null = not loaded yet → the tween lists show every
+  // video model until it resolves.
+  const [endFrameModelIds, setEndFrameModelIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!graphShotId) return;
+    let live = true;
+    setEndFrameModelIds(null);
+    window.cascade.videoEndFrameModels()
+      .then((ids) => { if (live) setEndFrameModelIds(ids); })
+      .catch(() => { if (live) setEndFrameModelIds([]); });
+    return () => { live = false; };
+  }, [graphShotId, prod?.meta.id]);
+
   /** Step 2: remove a style and renumber the rest. */
   function removeStyle(idx: number) {
     if (!prod) return;
@@ -721,7 +762,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.generateBoards(prod.meta.id, { maxShots: boardCap, regenerateAll });
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustAll();
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -742,7 +783,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.regenerateBoards(prod.meta.id, batch);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustMany(batch);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -786,7 +827,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.recheckBoard(prod.meta.id, shotId);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -824,7 +865,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       if (!files.length) return;
       const next = await window.cascade.importBoards(prod.meta.id, files, shotId);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      if (shotId) bustOne(shotId);
+      else bustAll();
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -840,7 +882,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.importBoards(prod.meta.id);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustAll();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
@@ -1082,7 +1124,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const prompt = addRefTag(currentPrompt, name);
       // Keep the prompt cache in sync so a later selection of this shot (via
       // focusPrompt, which reads the cache) shows the tagged prompt — the
-      // board-refresh effect (boardBust) may not have fired yet.
+      // board-refresh effect (focusedBust) may not have fired yet.
       promptCacheRef.current[shotId] = prompt;
       if (promptShotId === shotId) setFocusedPrompt(prompt);
       const references = upsertReference(name, ref, shotId);
@@ -1224,7 +1266,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.applyGraphOutput(prod.meta.id, shotId, { kind, path });
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1277,7 +1319,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.applyGraphRefOutput(prod.meta.id, shotId, refId);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1320,6 +1362,64 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
     if (shot.graphOutputSource === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+  }
+
+  /** Step 3 in-betweener: replace the ordered keyframe ref ids. Blocks are
+   *  re-derived main-side on save (prompts/history survive the pair match). */
+  function setTweenRefs(shotId: string, refIds: string[]) {
+    if (!prod) return;
+    saveGraphShotFields(shotId, { graphTweenRefIds: refIds.slice(0, 5) });
+  }
+
+  /** Step 3 in-betweener: pipe the stitched continuous clip into the output —
+   *  binds the tween as the feed and applies the stitch. The storyboard
+   *  mirrors the output node: a leftover frame is cleared, and an unstitched
+   *  node leaves the frame blank. */
+  function pipeTweenToOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const path = shot.graphTweenOutput;
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "tween",
+      graphOutputRefId: undefined,
+      artwork: undefined,
+      ...(path ? {} : { videoPath: undefined }),
+    });
+    if (path) void applyGraphOutput(shotId, "video", path);
+  }
+
+  /** Step 3 in-betweener: unbind the tween output feed (the stitched clip and
+   *  per-block takes live on in the node's history). */
+  function unpipeTweenGen(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    if (shot.graphOutputSource === "tween") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+  }
+
+  /** Step 3 in-betweener: generate one action block's clip (prompt = the
+   *  block's; keyframes resolved main-side). */
+  async function runTweenBlock(shotId: string, blockId: string) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.generateTweenBlock(prod.meta.id, shotId, blockId, {});
+      setProd(next);
+      bustOne(shotId);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
+  /** Step 3 in-betweener: stitch every block's selected clip into the
+   *  continuous shot (and apply it when the tween feeds the output). */
+  async function stitchTweenShot(shotId: string) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.stitchTween(prod.meta.id, shotId);
+      setProd(next);
+      bustOne(shotId);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
   /** Step 3 node graph: pipe the edit-image node's output into the output —
@@ -1368,7 +1468,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution });
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1382,7 +1482,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const sourcePath = cur?.graphImageToVideo ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path : undefined;
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [] });
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1395,7 +1495,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { prompt: cur?.graphEditPrompt ?? "", model, resolution });
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -1474,7 +1574,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.editBoard(prod.meta.id, shotId, model, prompt);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -1522,7 +1622,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.promoteBoardHistory(prod.meta.id, shotId, index);
       setProd(next);
-      setBoardBust((b) => b + 1);
+      bustOne(shotId);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -1547,7 +1647,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod || shotId === beforeShotId) return;
     apply(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId));
     // Bust board thumbnails after reorder (numbers and folders changed)
-    setBoardBust((b) => b + 1);
+    bustAll();
     setBoardDragId(null);
     setBoardDropTarget(null);
     boardDragRef.current = null;
@@ -1884,19 +1984,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     if (prod.magicEnabled) {
                       setMagicBusy(true); setErr(null);
                       void window.cascade.setMagicEnabled(prod.meta.id, false).then((next) => {
-                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        setProd(next); void refreshList();
                         if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
                       }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
                     } else if (prod.magicPrompts && Object.keys(prod.magicPrompts).length) {
                       setMagicBusy(true); setErr(null);
                       void window.cascade.setMagicEnabled(prod.meta.id, true).then((next) => {
-                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        setProd(next); void refreshList();
                         if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
                       }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
                     } else {
                       setMagicBusy(true); setErr(null);
                       void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
-                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        setProd(next); void refreshList();
                         if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
                       }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
                     }
@@ -1913,7 +2013,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                       if (!prod) return;
                       setMagicBusy(true); setErr(null);
                       void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
-                        setProd(next); setBoardBust((b) => b + 1); void refreshList();
+                        setProd(next); void refreshList();
                         if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
                       }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
                     }}
@@ -2012,7 +2112,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     key={shot.id}
                     prod={prod}
                     shot={shot}
-                    bust={boardBust}
+                    bust={boardBustFor(shot.id)}
                     regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id)}
                     videoBusy={videoBusyIds.includes(shot.id)}
                     pending={!!shot.pendingImageGen}
@@ -2115,7 +2215,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <NodeGraphModal
                   prod={prod}
                   shot={gs}
-                  bust={boardBust}
+                  bust={boardBustFor(gs.id)}
                   prompt={focusedPrompt}
                   references={promptRefsForShot(prod, graphShotId)}
                   styles={prod.styles ?? []}
@@ -2129,22 +2229,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
                   imageModels={imageModels}
                   videoModels={openArtModels.filter((m) => m.videoInput)}
+                  endFrameModelIds={endFrameModelIds}
                   defaultImageModel={prod.openArt?.model ?? "auto"}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
                   onRunEditGen={(model, resolution) => graphShotId ? runEditGenNode(graphShotId, model, resolution) : Promise.resolve()}
+                  onRunTweenBlock={(blockId) => graphShotId ? runTweenBlock(graphShotId, blockId) : Promise.resolve()}
+                  onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onSelectGraphGen={(kind, index) => { if (graphShotId) selectGraphGen(graphShotId, kind, index); }}
                   onCycleGraphGen={(kind, dir) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir); }}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
                   onPipeImageToOutput={() => { if (graphShotId) pipeImageToOutput(graphShotId); }}
                   onPipeVideoToOutput={() => { if (graphShotId) pipeVideoToOutput(graphShotId); }}
+                  onPipeTweenToOutput={() => { if (graphShotId) pipeTweenToOutput(graphShotId); }}
                   onPipeEditToOutput={() => { if (graphShotId) pipeEditToOutput(graphShotId); }}
                   onPipeRefToOutput={(refId) => { if (graphShotId) void pipeRefToOutput(graphShotId, refId); }}
+                  onTweenRefs={(refIds) => { if (graphShotId) setTweenRefs(graphShotId, refIds); }}
                   onUnpipeImageGen={() => { if (graphShotId) unpipeImageGen(graphShotId); }}
                   onUnpipeImageToVideo={() => { if (graphShotId) unpipeImageToVideo(graphShotId); }}
                   onUnpipeVideoGen={() => { if (graphShotId) unpipeVideoGen(graphShotId); }}
+                  onUnpipeTweenGen={() => { if (graphShotId) unpipeTweenGen(graphShotId); }}
                   onUnpipeEditGen={() => { if (graphShotId) unpipeEditGen(graphShotId); }}
                   onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
                   onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}

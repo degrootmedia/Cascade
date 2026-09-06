@@ -1597,3 +1597,130 @@ Requires a dev restart (main-process change).
 - [x] Manual: generate a board + a clip, confirm two CSV rows and correct total
       after setting a matching price rule; add a manual row; delete a row.
 - [x] Requires a dev restart (main-process change).
+
+---
+
+# In-betweener Node (IMPLEMENTED — all confirmations applied)
+
+New node-graph node that interpolates 2–5 keyframes into one continuous shot.
+One action block = 1 start frame + 1 end frame + 1 action prompt, submitted as
+a start→end video gen. Blocks stitch into a single clip that pipes to the
+frame output node. Timeline UI is styleframe.ai-like: keyframes on a 1s grid,
+prompt tracks between them, preview above, per-block history dropdown.
+
+Decisions confirmed by user: renderer modal (not BrowserWindow); keyframes =
+wired reference nodes; user-dragged gaps with model duration clamped;
+ffmpeg concat stitch; stitched clip becomes shot.videoPath via "tween" feed.
+Lossless requirement: lossless `-c copy` first, re-encoded preview fallback
+flagged — and the assembly package ALWAYS uses the original per-block clips
+back-to-back (EDL `TW<NNNN><X>` reels, folder package, AE script, render).
+
+## Decisions assumed (confirm before build)
+
+All five confirmed yes by the user (modal surface, ref keyframes,
+user-dragged gaps, ffmpeg stitch, tween output feed), plus: the stitch must
+be lossless; where impossible the assembly room (EDL, folder package, AE
+script) uses the original clips one after another.
+
+## Data model (`app/src/shared/ipc.ts`, back-fill in `productions.ts`)
+
+- [x] `TweenBlock { id, startRefId, endRefId, prompt, startSec, durationSec,
+  gens?: GraphGenItem[], genIndex?: number }` — per-block prompt + timing +
+  history live on the block so the dropdown (`Keyframes` + gens) is per block.
+- [x] `ProductionShot.graphTweenRefIds?: string[]` (ordered keyframe refs, 2–5).
+- [x] `ProductionShot.graphTweenBlocks?: TweenBlock[]` (derived when refs move,
+  but prompt + gens survive re-derivation, matched by `startRefId→endRefId`).
+- [x] `ProductionShot.graphTweenModel?: string`,
+  `graphTweenResolution?: string` (video model selector state on the node).
+- [x] `ProductionShot.graphTweenOutput?: string` (stitched clip rel path) +
+  `graphOutputSource` union gains `"tween"`.
+- [x] `normalize` back-fills `[]`/defaults; stale ref ids pruned on load;
+  `syncBoardOutputToPipe` (pipeline.ts) learns the `"tween"` feed so a stale
+  renderer save can never clobber it (lesson 2026-09-02 pattern).
+
+## OpenArt seam (`app/src/main/openart.ts` — probe first)
+
+- [x] Probe live video-model form schemas for end-frame fields
+  (`endFrame|lastFrame|endImage|...`). Implemented generically: `videoRefsAssign`
+  fills `endFrame|lastFrame|endImage|targetImage|outputImage` object slots from
+  the second uploaded reference (same fill-every-sub-prop rule as the Grok fix);
+  models without the slot get BOTH frames via the array field merge, so the end
+  keyframe is never silently dropped. No live probe was possible from here —
+  the first real start→end submission will show which path the model took.
+- [x] Per-block submit reuses the `generateVideoClip` wait/poll/ledger path
+  (new `frameRefs` param carries start/end data URLs; no new polling machinery).
+
+## IPC (`shared/ipc.ts` `ipcContract` + `index.ts` handlers, preload mechanical)
+
+- [x] `generateTweenBlock(productionId, shotId, blockId, opts)` — resolves the
+  block's start/end refs to data URLs, calls the extended `generateVideoClip`,
+  appends to `block.gens` (newest first, index 0), returns production. Blocks
+  re-derived via `syncTweenBlocks` on every call (pair-key match preserves
+  prompts/history; dead refs pruned).
+- [x] `stitchTween(productionId, shotId)` — ffmpeg-concats the selected gen per
+  block (timeline order) into `videosDir/shot-<num>-tween-<tag>.mp4`: lossless
+  `-c copy` first, re-encoded preview fallback flagged on
+  `graphTweenReencoded`. Sets `graphTweenOutput`; applies to `videoPath` when
+  the tween feeds the output.
+- [x] Reused `videoUrl` / `videoModelOptions(model, true)` / `applyGraphOutput`
+  — no new channels for those.
+
+## Renderer
+
+- [x] Node graph (`NodeGraphModal.tsx`): new `tween` node type — 5 fixed
+  keyframe sockets (`in-tween-0..4`, slot-positional wiring, image refs only,
+  5-max), video model selector persisted on the shot (shared with the modal),
+  "Open timeline" button, `e-tween-out` output pipe + preview of the stitched
+  clip. Right-panel "In-betweener" tile (drag onto canvas). Delete/drag-off
+  paths strip keyframes; ref deletion prunes the wiring.
+- [x] `TweenTimelineModal.tsx` (new): ≤15s 1s-snap track; draggable keyframe
+  thumbs (first pinned at 0s, 1s min gaps); per-block action prompt (draft +
+  blur-save) + Submit + takes dropdown (`Keyframes` default + prior gens);
+  preview above (selected take's clip, else start→end keyframes); model +
+  resolution selects; Stitch button (disabled until every block has a take);
+  "Pipe to output" after stitching; `graphTweenReencoded` badge explains the
+  preview-vs-assembly distinction.
+- [x] Output node preview: `"tween"` feed shows the stitched clip (blank until
+  first stitch, like any empty pipe).
+- [x] Styles in `styles.css` (`.prod-tween-*`, overlay z-110 above the graph).
+
+## Tests + verify
+
+- [x] `app/test/tween.test.ts` (19 tests): block derivation from ref order
+  (prompt/timing/takes survive, fresh pairs default, 15s cap), snap/clamp,
+  per-block history newest-first, stitch-input selection skips unready blocks,
+  concat-list quoting, `syncBoardOutputToPipe` `"tween"` round-trip + blanking,
+  `syncTweenBlocks` no-op/prune, end-frame assignment (both slots, single-ref
+  unchanged, array merge, array fallback), assembly expansion (original clips
+  back-to-back, stitched preview excluded, `TW0100A` reels, single-clip
+  fallback when unready).
+- [x] `npm run typecheck`, `npm test` (235 passed, 1 pre-existing skip),
+  `npm run build` (app) — all green. `graph-shelf.test.ts` tile count 2→3.
+- [ ] Manual: wire 3 refs → open timeline → drag to 2s/4s gaps → prompt each
+  block → submit per block → dropdown swaps preview (incl. Keyframes) →
+  stitch → pipe → storyboard + animatic play one continuous clip; assembly
+  package contains the original block clips with TW reels.
+- [x] Restart required (main-process change: new IPCs + schema back-fill).
+
+## Review
+
+Implemented across `app/src/shared/ipc.ts`,
+`app/src/main/{pipeline,openart,index,productions,assembly}.ts`,
+`app/src/renderer/src/components/{NodeGraphModal,TweenTimelineModal,ProductionWorkspace}.tsx`,
+`styles.css`, `app/test/{tween,graph-shelf}.test.ts`, `CONTEXT.md`.
+
+- **Deep module behavior** — block derivation + pipe authority + concat-list
+  building stay pure in `pipeline.ts` behind the tested seam; `generateVideoClip`
+  grows an optional `frameRefs` param (existing callers untouched);
+  `stitchTween` reuses the `ffmpeg.ts` resolve/run seam with temp-list cleanup.
+- **Lossless guarantee shape** — the copy-first/re-encode-fallback keeps the
+  output/animatic preview always playable, while `assemblyPlan` expands tween
+  shots to the original per-block clips (own durations, `TW<NNNN><X>` reels,
+  media dedupe) so EDL/package/AE/render never touch a re-encode. When blocks
+  are missing files it falls back to the single-clip path so timing never shifts.
+- **Known limitation (not re-litigated)** — the animatic plays the stitched
+  clip inside the shot's own `durationSec` window (loop/cut per existing clip
+  behavior), which may differ from the tween timeline total; assembly uses the
+  block durations. Also, no live OpenArt end-frame probe was possible here —
+  the generic slot filler covers both schema shapes, and the first real
+  submission's MCP log will confirm which path was taken.

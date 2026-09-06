@@ -56,6 +56,23 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   at record time, so editing a rule never reprices history.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields.
+- **In-betweener** — a node-graph node that interpolates 2–5 keyframe references
+  into one continuous shot. One **action block** = 1 start keyframe + 1 end
+  keyframe + 1 action prompt (`TweenBlock` in `shared/ipc.ts`); each block
+  generates its own start→end clip via `generateTweenBlock`, keeps per-block
+  history (`gens`/`genIndex`, with a `Keyframes` view), and the selected clips
+  stitch via `stitchTween` (lossless `-c copy` concat, re-encoded preview
+  fallback flagged on `graphTweenReencoded`). The stitched clip feeds the frame
+  output node (`graphOutputSource === "tween"`); the assembly package always
+  lays the ORIGINAL per-block clips back-to-back (`TW<NNNN><X>` EDL reels) so
+  no recompression reaches the editor handoff. Block derivation
+  (`deriveTweenBlocks`, pair-key preservation, 1–15s gaps, 15s cap) lives in
+  `pipeline.ts`; the timeline modal mirrors it client-side for display.
+  End-frame capability is probed from each video model's live form schema
+  (`endFrameSlotKey`, shared by the submit path and the probe): the tween
+  model lists show only proven end-frame models (Auto always stays, and Auto
+  itself prefers them), falling back to the full video list when none is
+  proven — unproven models still receive both frames via the array fallback.
 - **Animatic** — Step 4 playback: timing, voiceover, music, per-shot video clips.
 - **3D model** — a Step 2 design-page asset generated via 3D AI Studio's Tencent
   Hunyuan Pro (text-to-3D, single-image-to-3D, or multi-view image-to-3D, GLB,

@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionAssembly } from "../shared/ipc.js";
-import { assetPath, formatRuntime, originalForJpegRel } from "./pipeline.js";
+import { assetPath, formatRuntime, originalForJpegRel, tweenSelectedClips } from "./pipeline.js";
 
 export type AssemblyEmit = (message: string, level?: "info" | "error" | "done") => void;
 
@@ -140,6 +140,30 @@ export function assemblyPlan(p: Production): AssemblyPlan {
       const clipRel = shot.videoPath || undefined;
       const stillRel = shot.artwork ? originalForJpegRel(p, shot.artwork) ?? shot.artwork : undefined;
 
+      // In-betweener shots lay their ORIGINAL per-block clips back-to-back —
+      // never the stitched preview (which may be a re-encode). Each block
+      // keeps its own timeline duration, so no recompression ever reaches the
+      // EDL, the export folder, the AE script, or the render.
+      if (shot.graphOutputSource === "tween") {
+        const clips = tweenSelectedClips(shot.graphTweenBlocks ?? []);
+        const filesExist = clips.length > 0 && clips.every((c) => {
+          try { return fs.existsSync(assetPath(p, c.path)); } catch { return false; }
+        });
+        if (filesExist) {
+          if (stillRel) addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
+          clips.forEach((c, i) => {
+            const letter = String.fromCharCode(97 + Math.min(i, 25));
+            const mediaRel = addMedia(c.path, `clips/${shot.number}-tween-${letter}${extOf(c.path, ".mp4")}`);
+            const bDur = Math.max(0.1, c.durationSec);
+            events.push({ shotId: shot.id, number: `${shot.number}${letter}`, kind: "clip", srcRel: c.path, mediaRel, durationSec: bDur, muted: !!shot.muted, startSec: t, endSec: t + bDur });
+            t += bDur;
+          });
+          continue;
+        }
+        // Unstitched / missing blocks: fall through to the normal single-clip
+        // path below (stitched preview or blank) so the timeline never shifts.
+      }
+
       if (stillRel) addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
       if (clipRel) {
         const mediaRel = addMedia(clipRel, `clips/${shot.number}${extOf(clipRel, ".mp4")}`);
@@ -166,6 +190,15 @@ export function assemblyPlan(p: Production): AssemblyPlan {
 }
 
 // ---- buildEdl --------------------------------------------------------------
+
+/** EDL reel for an event: normal shots ride `SHOT<NNNN>`; in-betweener block
+ *  sub-events (number `NNNNx`) ride `TW<NNNN><X>` so every reel stays within
+ *  the 8-char CMX3600 field while remaining distinct per original clip. */
+export function edlReelFor(number: string): string {
+  const m = /^(\d{4})([a-z])$/.exec(number);
+  if (m) return `TW${m[1]}${m[2].toUpperCase()}`;
+  return `SHOT${number}`;
+}
 
 /** CMX3600 EDL. Stills use source-in == source-out == 0 (a freeze); clips use
  *  the planned (probe-clamped) duration; blank slots use the `BL` reel with a
@@ -200,7 +233,7 @@ export function buildEdl(plan: AssemblyPlan, fps: number, title: string): string
     const srcFrames =
       ev.kind === "clip" ? Math.round(Math.min(ev.probedSec ?? ev.durationSec, ev.durationSec) * fps) : 0;
     event(
-      `SHOT${ev.number}`,
+      edlReelFor(ev.number),
       "V",
       "00:00:00:00",
       framesToTc(srcFrames, fps),

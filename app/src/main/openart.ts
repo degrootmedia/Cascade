@@ -80,14 +80,39 @@ export class OpenArtImagePendingError extends Error {
 /** Minimal shape of an OpenArt project (from list or create). */
 interface RawProject { id?: unknown; name?: unknown; canGenerate?: unknown }
 
+/** Single-image start-frame field names in a video model's form schema. */
+export const START_FRAME_KEY_RX = /^(startFrame|firstFrame|startImage|sourceImage|inputImage|referenceImage|imageRef|image)$/i;
+/** Dedicated end-frame (in-betweening) field names in a video model's form
+ *  schema. A model declaring one of these gets the end keyframe in its own
+ *  slot; every other model still receives both frames via the array fallback. */
+export const END_FRAME_KEY_RX = /^(endFrame|lastFrame|endImage|targetImage|outputImage)$/i;
+
+/** The form key `videoRefsAssign` would fill with the end keyframe (first
+ *  non-array match), or null when the schema declares no dedicated end-frame
+ *  slot. Shared by the submit path and the capability probe so the two can
+ *  never disagree about what "accepts an end frame" means. */
+export function endFrameSlotKey(props: Record<string, unknown>): string | null {
+  for (const key of Object.keys(props)) {
+    if (!END_FRAME_KEY_RX.test(key)) continue;
+    const p = props[key] as { type?: string; items?: unknown } | undefined;
+    if (!p) continue;
+    if (p.type === "array" || p.items) continue;
+    return key;
+  }
+  return null;
+}
+
 /** Fit the uploaded visual references into the video model's reference field.
- *  The workflow is always "text prompt + start frame" (image2video): the frame
- *  is a single image, so single-image object fields (startFrame, inputImage, …)
- *  are preferred over array-style fields (visualReferences). Returns null when
- *  no reference field is found — the caller then falls back to
- *  `params.visualReferences`.
+ *  The workflow is normally "text prompt + start frame" (image2video): the
+ *  frame is a single image, so single-image object fields (startFrame,
+ *  inputImage, …) are preferred over array-style fields (visualReferences).
+ *  When TWO references are uploaded (the in-betweener's start + end keyframes),
+ *  end-frame object fields (endFrame, lastFrame, …) are filled from the second
+ *  reference as well; models without an end-frame slot still get both frames
+ *  via the array fallback. Returns null when no reference field is found — the
+ *  caller then falls back to `params.visualReferences`.
  *
- *  For an object-shaped start-frame field, EVERY schema sub-property is filled
+ *  For an object-shaped frame field, EVERY schema sub-property is filled
  *  from the uploaded reference (exact field name first, then the conventional
  *  aliases). Schemas like Grok's `startFrame {type,label,url,id}` require
  *  `type` and `label`; mapping only url/id dropped them and the server rejected
@@ -95,35 +120,62 @@ interface RawProject { id?: unknown; name?: unknown; canGenerate?: unknown }
 export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<string, unknown>): Record<string, unknown> | null {
   if (!refs.length) return null;
   const keys = Object.keys(props);
-  // Pass 1: single start-frame object fields (the common image2video shape).
+  const fillObject = (ref: Record<string, unknown>, properties: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const pk of Object.keys(properties)) {
+      const name = pk.toLowerCase().replace(/[_-]/g, "");
+      if (name === "type" || name === "kind") out[pk] = ref.type ?? "image";
+      else if (name === "label" || name === "name" || name === "title") out[pk] = String(ref.label ?? ref.name ?? "");
+      else if (/imageurl|image|url|src|uri|path/.test(name)) out[pk] = String(ref.url ?? ref.accessURL ?? "");
+      else if (/referenceid|refid|^id$/.test(name)) out[pk] = String(ref.id ?? "");
+      else if (ref[pk] !== undefined) out[pk] = ref[pk];
+    }
+    return out;
+  };
+  const out: Record<string, unknown> = {};
+  // Pass 1a: single start-frame object fields (the common image2video shape).
   for (const key of keys) {
-    if (!/^(startFrame|firstFrame|startImage|sourceImage|inputImage|referenceImage|imageRef|image)$/i.test(key)) continue;
+    if (!START_FRAME_KEY_RX.test(key)) continue;
     const p = props[key] as { type?: string; items?: unknown; properties?: Record<string, unknown> } | undefined;
     if (!p) continue;
     if (p.type === "array" || p.items) { /* array-shaped — handle in pass 2 */ continue; }
     if (p.properties && typeof p.properties === "object") {
-      const ref = refs[0] as Record<string, unknown>;
-      const out: Record<string, unknown> = {};
-      for (const pk of Object.keys(p.properties)) {
-        const name = pk.toLowerCase().replace(/[_-]/g, "");
-        if (name === "type" || name === "kind") out[pk] = ref.type ?? "image";
-        else if (name === "label" || name === "name" || name === "title") out[pk] = String(ref.label ?? ref.name ?? "");
-        else if (/imageurl|image|url|src|uri|path/.test(name)) out[pk] = String(ref.url ?? ref.accessURL ?? "");
-        else if (/referenceid|refid|^id$/.test(name)) out[pk] = String(ref.id ?? "");
-        else if (ref[pk] !== undefined) out[pk] = ref[pk];
-      }
-      return { [key]: Object.keys(out).length ? out : ref };
+      const filled = fillObject(refs[0] as Record<string, unknown>, p.properties);
+      out[key] = Object.keys(filled).length ? filled : refs[0];
+    } else {
+      out[key] = refs[0];
     }
-    return { [key]: refs[0] };
+    break;
   }
-  // Pass 2: array-style reference fields.
+  // Pass 1b: end-frame object fields (in-betweening) — only when a second
+  // reference was uploaded. Models without this slot ignore it; both frames
+  // still reach the model through the pass-2 array field below.
+  let endFilled = false;
+  if (refs.length > 1) {
+    const endKey = endFrameSlotKey(props);
+    if (endKey) {
+      const p = props[endKey] as { properties?: Record<string, unknown> } | undefined;
+      if (p?.properties && typeof p.properties === "object") {
+        const filled = fillObject(refs[1] as Record<string, unknown>, p.properties);
+        out[endKey] = Object.keys(filled).length ? filled : refs[1];
+      } else {
+        out[endKey] = refs[1];
+      }
+      endFilled = true;
+    }
+  }
+  if (Object.keys(out).length && (refs.length < 2 || endFilled)) return out;
+  // Pass 2: array-style reference fields. When two frames were uploaded but
+  // the schema has no end-frame slot, BOTH frames ride the array field (merged
+  // with any start-frame object assignment above) so the model still sees the
+  // end keyframe.
   for (const key of keys) {
     if (!/visualReference|references/i.test(key)) continue;
     const p = props[key] as { type?: string; items?: unknown } | undefined;
     if (!p) continue;
-    if (p.type === "array" || p.items) return { [key]: refs };
+    if (p.type === "array" || p.items) return { ...out, [key]: refs };
   }
-  return null;
+  return Object.keys(out).length ? out : null;
 }
 
 export class OpenArtClient {
@@ -292,6 +344,25 @@ export class OpenArtClient {
     return out;
   }
 
+  /** Resolve a video model's live form props (first image2video or
+   *  text2video mode whose form parses, mirroring generateVideoClip's mode
+   *  selection). Null when the form tool is missing or no mode parses. */
+  private async fetchVideoFormProps(modelId: string, withImage: boolean): Promise<Record<string, unknown> | null> {
+    const formRaw = this.findTool(/^openart_model_form_get$/);
+    if (!formRaw) return null;
+    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
+    const modes = withImage
+      ? ["image2video", "image_to_video", "img2video", "video2video"]
+      : ["text2video", "text_to_video", "video2video"];
+    for (const mode of modes) {
+      try {
+        const props = this.parseModelFormProperties(await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode }));
+        if (props) return props;
+      } catch { /* try the next mode spelling */ }
+    }
+    return null;
+  }
+
   /** Resolve a video model's accepted resolutions/lengths from its live form
    *  schema. Mode-aware: image-to-video and text-to-video forms declare
    *  different option sets, so the caller says which one it needs.
@@ -301,21 +372,8 @@ export class OpenArtClient {
    *  accepts, never a different mode's resolutions (a text2video enum must not
    *  leak 1080p into an image2video node that the site limits to 480p/720p). */
   private async fetchVideoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
-    const formRaw = this.findTool(/^openart_model_form_get$/);
-    if (!formRaw) return null;
-    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
-    const modes = withImage
-      ? ["image2video", "image_to_video", "img2video", "video2video"]
-      : ["text2video", "text_to_video", "video2video"];
-    for (const mode of modes) {
-      let props: Record<string, unknown> | null = null;
-      try {
-        props = this.parseModelFormProperties(await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode }));
-      } catch { continue; }
-      if (!props) continue;
-      return this.extractVideoOptions(props);
-    }
-    return null;
+    const props = await this.fetchVideoFormProps(modelId, withImage);
+    return props ? this.extractVideoOptions(props) : null;
   }
 
   /** Cached options for a model+mode, honoring the null-result TTL. */
@@ -355,7 +413,49 @@ export class OpenArtClient {
         seen.add(key);
         void this.resolveVideoOptions(m.id, withImage).catch(() => {});
       }
+      // The in-betweener filters its model list to end-frame-capable models,
+      // so their capability rides the same warm-up pass (same fetched schemas).
+      void this.resolveVideoEndFrame(m.id).catch(() => {});
     }
+  }
+
+  /** Whether a video model's image-to-video form declares a dedicated
+   *  end-frame slot (the in-betweener's start→end submit path fills it).
+   *  Tri-state: true/false when the form parses, null when the form can't be
+   *  read (unknown — the caller decides whether unknowns qualify). Cached
+   *  with the same null-result TTL as the options cache. */
+  async videoEndFrameSupport(modelId: string): Promise<boolean | null> {
+    return this.resolveVideoEndFrame(modelId);
+  }
+
+  private readonly videoEndFrameCache = new Map<string, { v: boolean | null; at: number }>();
+
+  /** Resolve (from cache when fresh) + store one model's end-frame support. */
+  private async resolveVideoEndFrame(modelId: string): Promise<boolean | null> {
+    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
+    const hit = this.videoEndFrameCache.get(modelId);
+    if (hit && (hit.v !== null || Date.now() - hit.at < this.VIDEO_OPTIONS_NULL_TTL_MS)) return hit.v;
+    let v: boolean | null = null;
+    try {
+      const props = await this.fetchVideoFormProps(modelId, true);
+      if (props) v = endFrameSlotKey(props) !== null;
+    } catch { /* unknown — leave null */ }
+    this.videoEndFrameCache.set(modelId, { v, at: Date.now() });
+    return v;
+  }
+
+  /** Ids of the video-capable models whose forms declare a dedicated
+   *  end-frame slot. Empty when none is proven (the caller then falls back to
+   *  the full video list — those models still receive both frames via the
+   *  array fallback). Capability lookups run concurrently off the warm cache. */
+  async videoEndFrameModels(): Promise<string[]> {
+    let models: OpenArtModelChoice[] = [];
+    try {
+      models = await this.listModelChoices();
+    } catch { return []; }
+    const video = models.filter((m) => m.videoInput && m.id && m.id !== "auto");
+    const support = await Promise.all(video.map(async (m) => ({ id: m.id, v: await this.resolveVideoEndFrame(m.id).catch(() => null) })));
+    return support.filter((s) => s.v === true).map((s) => s.id);
   }
 
 // ---- option assignment ----------------------------------------------------
@@ -476,11 +576,12 @@ export class OpenArtClient {
   }
 
 /** Fit the uploaded visual references into the video model's reference field.
-   *  The workflow is always "text prompt + start frame" (image2video): the
-   *  frame is a single image, so single-image object fields (startFrame,
-   *  inputImage, …) are preferred over array-style fields (visualReferences).
-   *  Returns null when no reference field is found — the caller then falls back
-   *  to `params.visualReferences`. */
+   *  The workflow is "text prompt + start frame" (image2video) — or start +
+   *  end frames for in-betweening: the frames are single images, so
+   *  single-image object fields (startFrame/endFrame, inputImage, …) are
+   *  preferred over array-style fields (visualReferences). Returns null when
+   *  no reference field is found — the caller then falls back to
+   *  `params.visualReferences`. */
 private videoRefsAssign = videoRefsAssign;
 
   /** Build the OpenArt generate-tool arguments for one board.
@@ -1007,7 +1108,8 @@ text.match(IMAGE_URL_RX)?.[0] ??
     opts: VideoGenOptions,
     emit: OpenArtEmit,
     sourcePathOverride?: string,
-    extraRefs?: { name: string; dataUrl: string }[]
+    extraRefs?: { name: string; dataUrl: string }[],
+    frameRefs?: { start: { name: string; dataUrl: string }; end?: { name: string; dataUrl: string } }
   ): Promise<{ rel: string }> {
     const toolName = this.findTool(/^openart_.*generate.*video$/i);
     if (!toolName) throw new Error("OpenArt MCP isn't connected (no video-generation tool found), so videos can't be generated in-app.");
@@ -1017,18 +1119,24 @@ text.match(IMAGE_URL_RX)?.[0] ??
       models = await this.listModelChoices();
     } catch { models = []; }
 
-    // References: the source frame first (occupies @image1) — the shot's own
-    // artwork unless a node-graph pipe supplies another frame — then any extra
-    // references wired into the video node's reference sockets, then the
-    // @[name] tags in the prompt, each uploaded as a visualReference.
-    const sourceRel = sourcePathOverride?.trim() || shot.artwork;
-    if (!sourceRel) throw new Error("No source frame — pipe a frame into the video node or generate one first.");
+    // References: the source frame(s) first (occupying @image1, and @image2
+    // for an in-betweening end frame) — the shot's own artwork unless a
+    // node-graph pipe supplies another frame (or the caller passes keyframe
+    // data URLs directly) — then any extra references, then the @[name] tags
+    // in the prompt, each uploaded as a visualReference.
     const refs: { name: string; dataUrl: string }[] = [];
-    {
-      const buf = fs.readFileSync(assetPath(p, sourceRel));
-      const ext = (path.extname(sourceRel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
-      refs.push({ name: `Shot ${shot.number} frame`, dataUrl: `data:${mime};base64,${buf.toString("base64")}` });
+    if (frameRefs) {
+      refs.push(frameRefs.start);
+      if (frameRefs.end) refs.push(frameRefs.end);
+    } else {
+      const sourceRel = sourcePathOverride?.trim() || shot.artwork;
+      if (!sourceRel) throw new Error("No source frame — pipe a frame into the video node or generate one first.");
+      {
+        const buf = fs.readFileSync(assetPath(p, sourceRel));
+        const ext = (path.extname(sourceRel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+        const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+        refs.push({ name: `Shot ${shot.number} frame`, dataUrl: `data:${mime};base64,${buf.toString("base64")}` });
+      }
     }
     refs.push(...(extraRefs ?? []));
     const { resolved, extras } = this.resolvePromptRefs(p, opts.prompt, refs.length);
@@ -1056,9 +1164,18 @@ text.match(IMAGE_URL_RX)?.[0] ??
     // the mode the model's form accepts: image-to-video when references are
     // present, text-to-video otherwise. Try the common OpenArt mode spellings
     // so a slow/failed form lookup for one spelling doesn't drop the refs.
-    const modelId = opts.model && opts.model !== "auto"
-      ? opts.model
-      : (models.find((m) => m.videoInput)?.id ?? "");
+    // In-betweening ("auto" + an end keyframe) prefers a model with a
+    // dedicated end-frame slot; anything else falls back to the first video
+    // model (both frames still ride the array fallback).
+    let modelId = opts.model && opts.model !== "auto" ? opts.model : "";
+    if (!modelId) {
+      const video = models.filter((m) => m.videoInput);
+      if (frameRefs?.end && video.length > 1) {
+        const support = await Promise.all(video.map(async (m) => this.resolveVideoEndFrame(m.id).catch(() => null)));
+        modelId = video.find((_, i) => support[i] === true)?.id ?? "";
+      }
+      modelId = modelId || video[0]?.id || "";
+    }
     const modeCandidates = refs.length
       ? ["image2video", "image_to_video", "img2video", "video2video", "video"]
       : ["text2video", "text_to_video", "video"];

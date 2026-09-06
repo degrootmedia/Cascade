@@ -588,3 +588,52 @@ describe("OpenArtClient generation recorder", () => {
     });
   });
 });
+
+describe("OpenArtClient.videoEndFrameModels", () => {
+  const formWith = (extra: Record<string, unknown>) => JSON.stringify({
+    jsonSchema: {
+      properties: {
+        startFrame: { type: "object", properties: { type: {}, url: {} } },
+        ...extra,
+      },
+    },
+  });
+  const listOf = (...models: Record<string, unknown>[]) => JSON.stringify(models);
+  const vid = (model: string) => ({ model, displayName: model, media: ["video"] });
+
+  it("detects the end-frame slot, caches it, and reports null when unreadable", async () => {
+    let formCalls = 0;
+    const mcp = fakeMcp({
+      openart_model_form_get: (args) => {
+        formCalls++;
+        expect(args.mode).toBe("image2video");
+        return formWith(args.model === "tween-pro" ? { endFrame: { type: "object", properties: { type: {}, url: {} } } } : {});
+      },
+    });
+    const client = new OpenArtClient(mcp);
+    expect(await client.videoEndFrameSupport("tween-pro")).toBe(true);
+    expect(await client.videoEndFrameSupport("plain-vid")).toBe(false);
+    expect(await client.videoEndFrameSupport("tween-pro")).toBe(true);
+    expect(formCalls).toBe(2); // third call served from cache
+    expect(await client.videoEndFrameSupport("auto")).toBeNull();
+  });
+
+  it("returns null (unknown) when no form parses", async () => {
+    const mcp = fakeMcp({ openart_model_form_get: () => { throw new Error("no form"); } });
+    expect(await new OpenArtClient(mcp).videoEndFrameSupport("mystery")).toBeNull();
+  });
+
+  it("lists only the proven end-frame video models", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => listOf(vid("tween-pro"), vid("plain-vid"), { model: "picasso", displayName: "Picasso", media: ["image"] }),
+      openart_model_form_get: (args) => formWith(args.model === "tween-pro" ? { lastFrame: { type: "object", properties: {} } } : {}),
+    });
+    const ids = await new OpenArtClient(mcp).videoEndFrameModels();
+    expect(ids).toEqual(["tween-pro"]);
+  });
+
+  it("returns [] when the model list itself fails", async () => {
+    const mcp = fakeMcp({ openart_model_list: () => { throw new Error("down"); } });
+    expect(await new OpenArtClient(mcp).videoEndFrameModels()).toEqual([]);
+  });
+});

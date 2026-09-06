@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe } from "./pipeline.js";
+import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks } from "./pipeline.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -125,6 +125,9 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
       // renderer save with a stale or missing frame can't diverge from the
       // graph's frame output node (e.g. an edit-image node piped to output).
       syncBoardOutputToPipe(rest);
+      // Tween keyframes must point at live references — prune deleted refs so
+      // a stale save can't leave phantom action blocks behind.
+      syncTweenBlocks(p, rest);
       return rest;
     }),
   })) : [];
@@ -189,6 +192,7 @@ function migrateBoardArtwork(p: Production): boolean {
     for (const s of sc.shots) {
       if (migrateGraphGenerations(s)) changed = true;
       if (migrateGraphPipes(s)) changed = true;
+      if (syncTweenBlocks(p, s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;
       if (syncBoardOutputToPipe(s)) changed = true;

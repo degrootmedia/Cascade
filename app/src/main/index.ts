@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { OpenArtClient } from "./openart.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
@@ -1929,6 +1929,103 @@ function registerIpc() {
     })
   );
 
+  /** Resolve an in-betweener keyframe ref id to its display name + image data
+   *  URL (characters, products, and custom image references all qualify —
+   *  only refs with artwork can be keyframes). */
+  function tweenKeyframeArtwork(p: Production, refId: string): { name: string; dataUrl: string } | null {
+    const pool = [
+      ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
+      ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+      ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+    ];
+    const ref = pool.find((r) => r.id === refId);
+    return ref?.artwork ? { name: ref.name, dataUrl: ref.artwork } : null;
+  }
+
+  // Step 3 in-betweener node: generate one action block's clip — a start→end
+  // keyframe interpolation driven by the block's action prompt. Blocks are
+  // re-derived from the wired keyframes on every call so a stale renderer save
+  // can't submit phantom blocks; prompts and history survive via the pair-key
+  // match in deriveTweenBlocks. The clip lands on the block's history — it
+  // joins the continuous output only through production:stitchTween.
+  handle("production:generateTweenBlock", (_e, id: string, shotId: string, blockId: string, opts: { model?: string; resolution?: string; durationSec?: number }) =>
+    runProductionJob(id, "generating an in-between", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      syncTweenBlocks(p, shot);
+      const block = (shot.graphTweenBlocks ?? []).find((b) => b.id === blockId);
+      if (!block) throw new Error("Action block not found — reconnect the keyframes and try again.");
+      const prompt = block.prompt.trim();
+      if (!prompt) throw new Error("Describe the action first (e.g. \"she turns toward the window, coat trailing\").");
+      const start = tweenKeyframeArtwork(p, block.startRefId);
+      const end = tweenKeyframeArtwork(p, block.endRefId);
+      if (!start || !end) throw new Error("Both keyframes need images — pick references with artwork.");
+      const clean: VideoGenOptions = {
+        model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
+        resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
+        durationSec: tweenClampGap(Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : block.durationSec),
+        prompt,
+      };
+      emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      const { rel } = await openart.generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
+      recordTweenBlockGen(block, rel, prompt, clean.model);
+      emit(`Shot ${shot.number}: in-between ready — pick it in the block's dropdown to preview.`, "done");
+    })
+  );
+
+  // Step 3 in-betweener node: stitch every action block's selected clip (in
+  // timeline order) into one continuous clip for the frame output node and the
+  // animatic. The concat demuxer with `-c copy` is lossless (no recompression)
+  // when all block clips share a codec; when they differ the copy fails and we
+  // fall back to a re-encoded preview stitch — flagged on
+  // `graphTweenReencoded` — while the assembly package (Step 5) always lays
+  // the ORIGINAL per-block clips back-to-back instead (see assemblyPlan).
+  handle("production:stitchTween", (_e, id: string, shotId: string) =>
+    runProductionJob(id, "stitching the in-between", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      syncTweenBlocks(p, shot);
+      const blocks = shot.graphTweenBlocks ?? [];
+      if (!blocks.length) throw new Error("Wire at least two keyframes into the in-betweener first.");
+      const clips = tweenSelectedClips(blocks);
+      if (clips.length < blocks.length) {
+        const missing = blocks.filter((b) => !clips.some((c) => c.blockId === b.id)).map((b) => b.id).join(", ");
+        throw new Error(`Generate every action block first — still missing: ${missing}.`);
+      }
+      const absPaths = clips.map((c) => assetPath(p, c.path));
+      for (const [i, abs] of absPaths.entries()) {
+        if (!fs.existsSync(abs)) throw new Error(`Block ${clips[i].blockId}: clip file is gone — regenerate it.`);
+      }
+      const bin = await resolveFfmpeg();
+      if (!bin) throw new Error("No ffmpeg found — install it or keep previewing the per-block clips.");
+      const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+      const rel = `${p.assets.videosDir}/shot-${shot.number}-tween-${tag}.mp4`;
+      const absOut = assetPath(p, rel);
+      fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
+      const listPath = path.join(os.tmpdir(), `cascade-tween-${tag}.txt`);
+      fs.writeFileSync(listPath, buildTweenConcatList(absPaths));
+      try {
+        try {
+          await runFfmpeg(bin, ["-hide_banner", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", absOut], (m) => emit(m, "info"));
+          shot.graphTweenReencoded = undefined;
+          emit(`Shot ${shot.number}: stitched ${clips.length} blocks losslessly (no recompression).`, "info");
+        } catch {
+          emit("Block codecs differ — re-encoding the preview stitch (the assembly package still uses the original clips).", "info");
+          await runFfmpeg(bin, ["-hide_banner", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", absOut], (m) => emit(m, "info"));
+          shot.graphTweenReencoded = true;
+        }
+      } finally {
+        try { fs.unlinkSync(listPath); } catch { /* temp file already gone */ }
+      }
+      if (shot.graphTweenOutput && shot.graphTweenOutput !== rel) {
+        try { fs.unlinkSync(assetPath(p, shot.graphTweenOutput)); } catch { /* old stitch already gone */ }
+      }
+      shot.graphTweenOutput = rel;
+      if (shot.graphOutputSource === "tween") applyVideoOutput(shot, rel);
+      emit(`Shot ${shot.number}: continuous shot ready.`, "done");
+    })
+  );
+
   // Step 3 node graph: AI-edit one image for the edit-image node. The source
   // image is the node's source pipe — the image node's selected generation,
   // else a reference's artwork — falling back to the shot's current frame.
@@ -2070,6 +2167,18 @@ function registerIpc() {
   // caller falls back to a generic set.
   handle("production:videoModelOptions", async (_e, modelId: string, withImage?: boolean): Promise<VideoModelOptions | null> => {
     return openart.videoModelOptions(String(modelId ?? ""), withImage === true);
+  });
+
+  // Step 3 in-betweener: which video models declare a dedicated end-frame
+  // slot. The tween node/modal filter their model lists to these (plus Auto);
+  // an empty result means nothing is proven, so the renderer falls back to
+  // every video model instead of an empty dropdown.
+  handle("production:videoEndFrameModels", async (): Promise<string[]> => {
+    try {
+      return await openart.videoEndFrameModels();
+    } catch {
+      return [];
+    }
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a

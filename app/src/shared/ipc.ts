@@ -219,6 +219,25 @@ graphImageGenIndex?: number;
    *  image input. Independent of the output feed — the image node can pipe to
    *  the video node AND the output simultaneously. */
   graphImageToVideo?: boolean;
+  /** Reference ids wired into the in-betweener node's keyframe sockets, in
+   *  timeline order (2–5 image refs). Each adjacent pair forms an action
+   *  block (see `graphTweenBlocks`). */
+  graphTweenRefIds?: string[];
+  /** Action blocks derived from `graphTweenRefIds` (one per adjacent pair).
+   *  Prompts and per-block generation history survive re-derivation when
+   *  keyframes are reordered. */
+  graphTweenBlocks?: TweenBlock[];
+  /** The in-betweener node's video model id ("auto" when Cascade picks). */
+  graphTweenModel?: string;
+  /** The in-betweener node's output resolution label (e.g. "1080p"). */
+  graphTweenResolution?: string;
+  /** Workspace-relative path of the last stitched tween output (the single
+   *  continuous clip previewed by the output node and the animatic). */
+  graphTweenOutput?: string;
+  /** True when the stitched preview clip was re-encoded (block codecs
+   *  differed, so lossless `-c copy` concat failed). The assembly package
+   *  always uses the original per-block clips regardless. */
+  graphTweenReencoded?: boolean;
   /** Whether the style node is plugged into the image prompt (composer). When
    *  false the Style paragraph is absent from that prompt but the plug is
    *  remembered — switching the style to None removes the paragraph without
@@ -229,8 +248,9 @@ graphImageGenIndex?: number;
   /** Whether the style node is plugged into the edit-prompt node. */
   graphEditStyleConnected?: boolean;
   /** Which node is piped into the output (becomes the shot's primary
-   *  artwork/videoPath): an image/video generation node, or a reference. */
-  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "ref";
+   *  artwork/videoPath): an image/video generation node, the in-betweener
+   *  node, or a reference. */
+  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "tween" | "ref";
   /** The reference feeding the output when `graphOutputSource === "ref"`. */
   graphOutputRefId?: string;
   /** One-time marker: classic generations were moved into the gen nodes. */
@@ -252,6 +272,30 @@ export interface GraphGenItem {
   model: string;
   /** ISO timestamp. */
   at: string;
+}
+
+/** One action block on the in-betweener timeline: a start keyframe, an end
+ *  keyframe, and the action prompt describing the motion between them. Each
+ *  block generates its own clip (start→end interpolation); the selected clips
+ *  stitch into the shot's continuous output. History lives on the block so the
+ *  per-block dropdown (Keyframes + previous generations) is independent. */
+export interface TweenBlock {
+  /** Stable identity ("tw0", "tw1", … in keyframe order). */
+  id: string;
+  /** Reference id of the start keyframe. */
+  startRefId: string;
+  /** Reference id of the end keyframe. */
+  endRefId: string;
+  /** Action prompt describing the motion from start to end. */
+  prompt: string;
+  /** Timeline position of the block start in seconds (1s grid). */
+  startSec: number;
+  /** Block length in seconds (1–15, 1s grid). */
+  durationSec: number;
+  /** Generated clips for this block (newest first). */
+  gens?: GraphGenItem[];
+  /** Selected generation index (0 = newest). Absent = show keyframes. */
+  genIndex?: number;
 }
 
 /** An OpenArt async image job that outlived the generating call — the wait
@@ -930,6 +974,23 @@ export interface CascadeApi {
    */
   generateVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
   /**
+   * Step 3 in-betweener node: generate one action block's clip (start keyframe
+   * → end keyframe interpolation for `blockId`). The clip is stored on the
+   * block's history; it joins the stitched output only via `stitchTween`.
+   * Returns the updated production.
+   */
+  generateTweenBlock(productionId: string, shotId: string, blockId: string, opts: { model?: string; resolution?: string; durationSec?: number }): Promise<Production>;
+  /**
+   * Step 3 in-betweener node: stitch every action block's selected clip (in
+   * timeline order) into one continuous clip. Tries a lossless `-c copy`
+   * concat first; when the block codecs differ it falls back to a re-encoded
+   * preview stitch (flagged on `graphTweenReencoded`) — the assembly package
+   * always uses the original per-block clips regardless. When the tween node
+   * is piped to the output, the stitched clip becomes the shot's videoPath.
+   * Returns the updated production.
+   */
+  stitchTween(productionId: string, shotId: string): Promise<Production>;
+  /**
    * Step 3 node graph: AI-edit one image for the edit-image node. The source
    * image is the node's source pipe (image node selection, else a reference),
    * falling back to the shot's current frame. The result is stored on the
@@ -956,6 +1017,11 @@ export interface CascadeApi {
   /** Step 4: the resolution / length options a video model accepts (from its
    *  live form schema). Null when the model form can't be read. */
   videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
+  /** Step 3 in-betweener: ids of the video-capable models whose live form
+   *  schema declares a dedicated end-frame slot. Empty when none is proven —
+   *  the tween model lists then fall back to every video model (both frames
+   *  still reach those via the array fallback). */
+  videoEndFrameModels(): Promise<string[]>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
   /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
@@ -1146,12 +1212,15 @@ export const ipcContract = {
 "production:generateVideo": { method: "generateVideo", kind: "invoke" },
   "production:generateFrameNode": { method: "generateFrameNode", kind: "invoke" },
   "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
+  "production:generateTweenBlock": { method: "generateTweenBlock", kind: "invoke" },
+  "production:stitchTween": { method: "stitchTween", kind: "invoke" },
   "production:generateEditNode": { method: "generateEditNode", kind: "invoke" },
   "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
   "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },
   "production:videoUrl": { method: "videoUrl", kind: "invoke" },
   "production:removeVideo": { method: "removeVideo", kind: "invoke" },
   "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
+  "production:videoEndFrameModels": { method: "videoEndFrameModels", kind: "invoke" },
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
   "production:generate3dModel": { method: "generate3dModel", kind: "invoke" },

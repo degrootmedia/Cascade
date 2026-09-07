@@ -218,17 +218,23 @@ describe("upsertCharacterSheetRef", () => {
 });
 
 describe("boardPrompt", () => {
-  it("composes style, brand, character key, and action paragraphs", () => {
+  it("composes style, brand, character key, and action paragraphs when brand is opted in", () => {
     const p = makeProduction({
       brand: { colors: ["#112233"] },
       characters: [{ id: "c-gandalf", name: "Gandalf", key: "grey wizard with a staff" }],
-      scenes: [makeScene([makeShot({ number: "0100", audio: "Gandalf speaks", visual: "A hero walks through the valley." })])],
+      scenes: [makeScene([makeShot({ number: "0100", audio: "Gandalf speaks", visual: "A hero walks through the valley.", includeBrandIdentity: true })])],
     });
     const prompt = boardPrompt(p, p.scenes[0].shots[0]);
     expect(prompt).toContain("Style: Heroic 3D render style");
     expect(prompt).toContain("Brand identity: Color palette: #112233.");
     expect(prompt).toContain("Gandalf: grey wizard with a staff.");
     expect(prompt).toContain("A hero walks through the valley.");
+  });
+
+  it("omits the brand paragraph by default (brand identity is opt-in)", () => {
+    const p = makeProduction({ brand: { colors: ["#112233"] } });
+    const prompt = boardPrompt(p, makeShot());
+    expect(prompt).not.toContain("Brand identity:");
   });
 
   it("uses the per-shot style override over the master", () => {
@@ -263,13 +269,19 @@ describe("boardPrompt", () => {
 });
 
 describe("effectivePrompt", () => {
-  it("prefers the manual prompt and appends the brand exactly once", () => {
+  it("prefers the manual prompt and appends the brand exactly once when brand is opted in", () => {
     const p = makeProduction({ brand: { colors: ["#112233"] } });
-    const shot = makeShot({ prompt: "My custom prompt", promptManual: true });
+    const shot = makeShot({ prompt: "My custom prompt", promptManual: true, includeBrandIdentity: true });
     const prompt = effectivePrompt(p, shot);
     expect(prompt).toContain("My custom prompt");
     expect(prompt.match(/Brand identity:/g)).toHaveLength(1);
     expect(prompt).toContain("Brand identity: Color palette: #112233.");
+  });
+
+  it("leaves a manual prompt untouched when brand is not opted in", () => {
+    const p = makeProduction({ brand: { colors: ["#112233"] } });
+    const shot = makeShot({ prompt: "My custom prompt", promptManual: true });
+    expect(effectivePrompt(p, shot)).toBe("My custom prompt");
   });
 
   it("does not duplicate a brand the manual prompt already carries (regression)", () => {

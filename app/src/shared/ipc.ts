@@ -183,7 +183,9 @@ export interface ProductionShot {
   /** True once the user has edited `prompt` by hand: a manual prompt survives
    *  script re-ingestion and design changes (it never auto-regenerates). */
   promptManual?: boolean;
-  /** Whether the generated prompt includes the production brand identity. */
+  /** Whether the generated prompt includes the production brand identity.
+   *  Opt-in: brand identity is excluded by default and only appears when this
+   *  is explicitly true. */
   includeBrandIdentity?: boolean;
   /** Per-reference prompt overrides for this frame, keyed by reference id
    *  (character, product, or custom reference). A non-blank entry replaces
@@ -686,7 +688,36 @@ export interface Production {
   scriptSource?: string;
   /** Step 5 assembly configuration + last-run bookkeeping. */
   assembly?: ProductionAssembly;
+  /**
+   * Step 3 storyboard-PDF export settings, remembered per production: the
+   * last-used version label + panel layout, and the workspace-relative logo
+   * asset (`logoRel`, copied into the production folder on pick) printed in
+   * the lower-right corner of every page.
+   */
+  storyboardPdf?: StoryboardPdfSettings;
   assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string };
+}
+
+/** Remembered Step 3 storyboard-PDF export settings (see `Production.storyboardPdf`). */
+export interface StoryboardPdfSettings {
+  /** Last-used version label (free-typed, e.g. "v3"). */
+  version?: string;
+  /** 1-panel or 3-panels-per-page layout. */
+  panelsPerPage?: 1 | 3;
+  /** Workspace-relative logo image copied into the production folder. */
+  logoRel?: string;
+}
+
+/** Options the renderer passes for one storyboard-PDF export. */
+export interface StoryboardPdfExportOptions {
+  panelsPerPage: 1 | 3;
+  version: string;
+}
+
+/** Result of a storyboard-PDF export: saved path (null when cancelled) + updated production. */
+export interface StoryboardPdfExportResult {
+  filePath: string | null;
+  production: Production;
 }
 
 /** Log line streamed to the Production UI while a step runs. */
@@ -1059,6 +1090,22 @@ export interface CascadeApi {
   assemblyRender(productionId: string): Promise<Production>;
   /** Step 5: open the export folder in the OS file manager. */
   assemblyOpenFolder(productionId: string): Promise<void>;
+  /**
+   * Step 3: render the storyboard (panel stills + Audio/Visual boxes) to a
+   * landscape PDF via a Save dialog. Remembers the version label + layout on
+   * the production. Resolves to the saved path (null when cancelled) and the
+   * updated production.
+   */
+  exportStoryboardPdf(productionId: string, opts: StoryboardPdfExportOptions): Promise<StoryboardPdfExportResult>;
+  /** Step 3: pick a logo image (PNG/JPG) — copied into the production folder
+   *  and printed in the lower-right corner of every storyboard-PDF page.
+   *  Resolves to the updated production, or null when the user cancels. */
+  pickStoryboardLogo(productionId: string): Promise<Production | null>;
+  /** Step 3: remove the stored storyboard-PDF logo. */
+  clearStoryboardLogo(productionId: string): Promise<Production>;
+  /** Step 3: data URL of the stored storyboard-PDF logo (for the export
+   *  dialog preview), or null when none is attached. */
+  storyboardLogoImage(productionId: string): Promise<string | null>;
   /** Expenses: the full ledger (entries + running total + per-kind counts). */
   getLedger(): Promise<LedgerView>;
   /** Expenses: the pricing rules edited from Settings. */
@@ -1231,6 +1278,10 @@ export const ipcContract = {
   "production:assemblyBuild": { method: "assemblyBuild", kind: "invoke" },
   "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
   "production:assemblyOpenFolder": { method: "assemblyOpenFolder", kind: "invoke" },
+  "production:exportStoryboardPdf": { method: "exportStoryboardPdf", kind: "invoke" },
+  "production:pickStoryboardLogo": { method: "pickStoryboardLogo", kind: "invoke" },
+  "production:clearStoryboardLogo": { method: "clearStoryboardLogo", kind: "invoke" },
+  "production:storyboardLogoImage": { method: "storyboardLogoImage", kind: "invoke" },
   "ledger:get": { method: "getLedger", kind: "invoke" },
   "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
   "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },

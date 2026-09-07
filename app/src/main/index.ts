@@ -19,6 +19,7 @@ import { OpenArtClient } from "./openart.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic } from "./assembly.js";
+import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
@@ -1519,6 +1520,107 @@ function registerIpc() {
     exportBoardPrompts(p, (m, l) => productionEmit(id, m, l));
     productions.saveProduction(p);
     return p;
+  });
+
+  // Step 3: storyboard PDF — landscape pages (1 or 3 panels per page), each
+  // panel a still frame (or placeholder) over Audio:/Visual: boxes, with the
+  // production name + version lower-left and the stored logo lower-right.
+  handle("production:exportStoryboardPdf", async (_e, id: string, opts?: { panelsPerPage?: 1 | 3; version?: string }) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shots = p.scenes.flatMap((s) => s.shots);
+    if (!shots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
+    const panelsPerPage = opts?.panelsPerPage === 3 ? 3 : 1;
+    const version = sanitizeVersion(opts?.version ?? p.storyboardPdf?.version ?? "v1");
+    const readFile = (abs: string): Uint8Array | null => {
+      try {
+        return new Uint8Array(fs.readFileSync(abs));
+      } catch {
+        return null;
+      }
+    };
+    const panels = shots.map((shot) => ({
+      number: shot.number,
+      audio: shot.audio,
+      visual: shot.visual,
+      image: loadPanelImage(p, shot, readFile),
+    }));
+    const pdfBytes = await buildStoryboardPdf(panels, {
+      productionName: p.meta.name,
+      version,
+      panelsPerPage,
+      logo: loadLogoImage(p, readFile),
+    });
+    const res = await dialog.showSaveDialog(win!, {
+      title: "Export storyboard PDF",
+      defaultPath: path.join(p.meta.folder, p.assets.outDir, storyboardPdfFileName(p.meta.name, version)),
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (res.canceled || !res.filePath) return { filePath: null as string | null, production: p };
+    p.storyboardPdf = { ...p.storyboardPdf, version, panelsPerPage };
+    productions.saveProduction(p);
+    fs.mkdirSync(path.dirname(res.filePath), { recursive: true });
+    fs.writeFileSync(res.filePath, Buffer.from(pdfBytes));
+    productionEmit(id, `Storyboard PDF exported: ${res.filePath}`, "done");
+    return { filePath: res.filePath as string | null, production: p };
+  });
+
+  // Step 3: pick the storyboard-PDF logo (PNG/JPG) — copied into the
+  // production folder and printed in the lower-right corner of every page.
+  handle("production:pickStoryboardLogo", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Choose storyboard logo",
+      properties: ["openFile"],
+      filters: [
+        { name: "Images", extensions: ["png", "jpg", "jpeg"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    const file = res.canceled ? null : res.filePaths[0];
+    if (!file) return null;
+    const buf = fs.readFileSync(file);
+    if (buf.length > 15 * 1024 * 1024) throw new Error("Image is larger than 15 MB.");
+    const kind = detectImageKind(new Uint8Array(buf));
+    if (!kind) throw new Error("That file isn't a PNG or JPEG image.");
+    const rel = `${p.assets.boardsDir}/storyboard-logo.${kind === "png" ? "png" : "jpg"}`;
+    const prev = p.storyboardPdf?.logoRel;
+    if (prev && prev !== rel) archiveAsset(p, prev);
+    fs.mkdirSync(path.dirname(assetPath(p, rel)), { recursive: true });
+    fs.writeFileSync(assetPath(p, rel), buf);
+    p.storyboardPdf = { ...p.storyboardPdf, logoRel: rel };
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Step 3: remove the stored storyboard-PDF logo (file + setting).
+  handle("production:clearStoryboardLogo", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (p.storyboardPdf?.logoRel) {
+      try {
+        fs.unlinkSync(assetPath(p, p.storyboardPdf.logoRel));
+      } catch { /* missing file is already removed */ }
+      delete p.storyboardPdf.logoRel;
+      productions.saveProduction(p);
+    }
+    return p;
+  });
+
+  // Step 3: data URL of the stored storyboard-PDF logo for the export dialog
+  // preview (null when none is attached).
+  handle("production:storyboardLogoImage", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    const rel = p?.storyboardPdf?.logoRel;
+    if (!p || !rel) return null;
+    try {
+      const buf = fs.readFileSync(assetPath(p, rel));
+      const mime = rel.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return null;
+    }
   });
 
   // Step 3: per-frame copy — return the effective prompt (same source the export uses).

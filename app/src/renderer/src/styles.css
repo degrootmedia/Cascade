@@ -778,11 +778,9 @@ body {
 .prod-assembly-status { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 0; }
 .prod-assembly-render { display: block; width: 100%; max-width: none; max-height: 420px; background: #000; border-radius: 8px; }
 
-/* Step 3 model / resolution selectors + cap input. */
-.prod-boards-cap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+/* Step 3 model / resolution selectors. */
 .prod-openart-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 .prod-openart-select,
-.prod-boards-cap input,
 .prod-ref-new-name,
 .prod-ref-new-key {
   background: var(--bg-panel);
@@ -792,9 +790,7 @@ body {
   padding: 7px 9px;
 }
 .prod-openart-select { min-width: 130px; }
-.prod-openart-select:focus,
-.prod-boards-cap input:focus { outline: none; border-color: var(--accent); }
-.prod-boards-cap input { width: 64px; }
+.prod-openart-select:focus { outline: none; border-color: var(--accent); }
 .prod-ref-new-name { min-width: 150px; }
 .prod-ref-new-key { flex: 1; min-width: 200px; }
 
@@ -814,7 +810,6 @@ body {
 .prod-prompt-sidepanel .prod-ref-prompt-editor { display: flex; flex-direction: column; height: 300px; flex: none; margin-top: 10px; }
 .prod-prompt-sidepanel .prod-ref-prompt-editor { height: auto; flex: 1; min-height: 0; }
 .prod-prompt-sidepanel .prod-prompt-drawer-text { height: auto; flex: 1; min-height: 0; }
-.prod-prompt-sidepanel .prod-prompt-script { flex: none; margin-top: 14px; }
 .prod-prompt-submit { align-self: stretch; margin-top: 14px; }
 .prod-brand-toggle { display: inline-flex; align-items: center; gap: 9px; margin-left: auto; color: var(--text-dim); font-size: .82rem; cursor: pointer; }
 .prod-brand-toggle input { appearance: none; width: 34px; height: 20px; margin: 0; border: 1px solid var(--border); border-radius: 999px; background: var(--bg); cursor: pointer; transition: background .12s, border-color .12s; }
@@ -1067,63 +1062,34 @@ body {
 }
 .prod-prompt-drawer-text:focus { outline: none; border-color: var(--accent); }
 
-/* Read-only script visual direction, shown in the bottom half of the prompt
-   drawer so the shot's source text stays visible while editing the prompt. */
-.prod-prompt-script {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.prod-prompt-script-title {
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-}
-.prod-prompt-script-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  background: var(--bg);
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  padding: 12px;
-  font-size: 0.86rem;
-  line-height: 1.5;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-}
-.prod-prompt-script-body em { opacity: 0.7; }
-.prod-prompt-script-audio {
-  margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-/* Per-shot render-style override (overrides the Step 2 master style). */
-.prod-board-style-row { display: flex; align-items: center; gap: 6px; min-height: 18px; }
-.prod-board-style {
+/* Per-shot render-style override (overrides the Step 2 master style). Shown in
+   the prompt sidebar directly above the leading Style: paragraph it drives. */
+.prod-prompt-style { width: 100%; }
+/* Prompt-box label carrying its docked control (sidebar brand toggle) — the
+   toggle's margin-left pushes it to the row's right end. */
+.prod-prompt-box-label-row { display: flex; align-items: center; gap: 8px; }
+/* Per-shot Audio/Visual direction boxes under each board frame (Step 3).
+ * Same input language as .prod-board-prompt; same audio/visual tint as
+ * .shot-cell in the Step 1 table. */
+.prod-board-script { display: flex; flex-direction: column; gap: 4px; }
+.prod-board-script-field { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.prod-board-script-title { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-dim); }
+.prod-board-script-input {
+  width: 100%;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  color: var(--text);
   border-radius: 8px;
-  padding: 3px 7px;
-  font-size: 0.76rem;
-  width: 100%;
+  color: var(--text);
+  padding: 4px 7px;
+  font-size: 0.74rem;
+  font-family: inherit;
+  line-height: 1.45;
+  resize: none;
+  overflow: hidden;
 }
-.prod-board-style:focus { outline: none; border-color: var(--accent); }
-.prod-board-style-tag {
-  flex-shrink: 0;
-  font-size: 0.62rem;
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  padding: 1px 7px;
-  white-space: nowrap;
-}
+.prod-board-script-input:focus { outline: none; border-color: var(--accent); }
+.prod-board-script-input.visual { color: var(--text-dim); }
+.prod-board-script-input.visual:focus { color: var(--text); }
 
 /* Per-shot custom-reference association on each board card. */
 .prod-board-refs { position: relative; display: flex; align-items: center; min-height: 18px; }
@@ -3346,7 +3312,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- Node graph (visual prompt construction) ---------- */
 .prod-graph-open { margin-left: auto; flex-shrink: 0; }
-.prod-prompt-drawer-head .prod-brand-toggle { margin-left: 0; }
 .prod-graph-overlay { z-index: 90; }
 /* The video dialog can open FROM the node graph (output node) — stack it above. */
 .prod-video-overlay { z-index: 100; }
@@ -3754,6 +3719,24 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-prompt-sidepanel.magic-active .prompt-content-editor:focus {
   border-color: transparent;
+}
+/* Node-graph composer mirrors the classic side panel's Magic state: the same
+   animated rainbow border on the content box while Magic Prompt is active. */
+.prod-graph-composer.magic-active .prompt-content-editor {
+  position: relative;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  background: linear-gradient(var(--bg), var(--bg)) padding-box,
+              linear-gradient(90deg, #ff6b6b, #f59e0b, #84cc16, #06b6d4, #8b5cf6, #ec4899, #ff6b6b) border-box;
+  background-size: auto, 300% 100%;
+  animation: magic-border-cycle 3s linear infinite;
+}
+.prod-graph-composer.magic-active .prompt-content-editor:focus {
+  border-color: transparent;
+}
+.prod-graph-panel.magic-active {
+  border-color: color-mix(in srgb, #a78bfa 55%, var(--border));
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px color-mix(in srgb, #a78bfa 30%, transparent);
 }
 
 /* ---------- In-betweener (node graph + timeline) ---------- */

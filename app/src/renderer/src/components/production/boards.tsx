@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
-import { promptRefsForShot, shotStyleSelectValue } from "./references.js";
+import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
+import { AutoTextarea } from "../AutoTextarea.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, InsertIcon, MagnifyIcon, RegenerateIcon } from "../icons.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onStyleChange, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
+export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -24,7 +25,10 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   onEdit: () => void;
   /** Open the video-generation modal for this frame. */
   onVideo: () => void;
-  onStyleChange: (style: string) => void;
+  /** Persist the shot's Audio/Visual direction edited in the card's boxes. */
+  onTextChange: (patch: { audio: string; visual: string }) => void;
+  /** Whether the Audio/Visual direction boxes render under the frame. */
+  showScript: boolean;
   onPromptFocus: (shotId: string, prompt: string) => void;
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
@@ -44,6 +48,19 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string>("");
+  // Shot direction edited on the card (Step 1's table edits the same fields).
+  // Local drafts commit on blur; incoming saves resync while not focused.
+  const [audio, setAudio] = useState(shot.audio);
+  const [visual, setVisual] = useState(shot.visual);
+  const [textFocused, setTextFocused] = useState(false);
+  useEffect(() => {
+    if (textFocused) return;
+    setAudio(shot.audio);
+    setVisual(shot.visual);
+  }, [shot.audio, shot.visual, textFocused]);
+  function commitText() {
+    if (audio !== shot.audio || visual !== shot.visual) onTextChange({ audio, visual });
+  }
   // Hover-preview video for the shot's generated clip (muted, looping). Falls
   // back to the still image if the clip can't be loaded.
   const boardVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -330,20 +347,37 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           </button>
         )}
       </div>
-      <div className="prod-board-style-row">
-        <select
-          className="prod-board-style"
-          value={shotStyleSelectValue(shot, prod)}
-          onChange={(e) => onStyleChange(e.target.value)}
-          title="Render style for this frame (from the styles created in Design, Step 2)"
-        >
-          <option value="">None</option>
-          {(prod.styles ?? []).map((s) => (
-            <option key={s.id} value={s.id}>{s.index}. {s.name || `Style ${s.index}`}</option>
-          ))}
-        </select>
-      </div>
       <div className="prod-board-number" title={`Shot ${shot.number}`}>{shot.number}</div>
+      {showScript && (
+        <div className="prod-board-script" onBlur={commitText}>
+          <label className="prod-board-script-field">
+            <span className="prod-board-script-title">Audio</span>
+            <AutoTextarea
+              className="prod-board-script-input audio"
+              value={audio}
+              maxHeight={120}
+              placeholder="Dialogue / VO / SFX"
+              onChange={(e) => setAudio(e.target.value)}
+              onFocus={() => setTextFocused(true)}
+              onBlur={() => setTextFocused(false)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
+            />
+          </label>
+          <label className="prod-board-script-field">
+            <span className="prod-board-script-title">Visual</span>
+            <AutoTextarea
+              className="prod-board-script-input visual"
+              value={visual}
+              maxHeight={120}
+              placeholder="What we see"
+              onChange={(e) => setVisual(e.target.value)}
+              onFocus={() => setTextFocused(true)}
+              onBlur={() => setTextFocused(false)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
+            />
+          </label>
+        </div>
+      )}
       {expanded && (expandedImg || expandedVideo) && (
         <div className="prod-ref-lightbox" onClick={() => setExpanded(false)}>
           <figure className="prod-ref-lightbox-card">
@@ -589,6 +623,165 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
           onClick={() => onSubmit(model, prompt)}
         >
           Edit frame
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Step 3 storyboard-PDF export dialog: landscape pages with 1 or 3 panels
+ * per page (still frame or placeholder over Audio:/Visual: boxes), production
+ * name + version lower-left, optional attached logo lower-right. The version
+ * label, layout, and logo are remembered on the production.
+ */
+export function StoryboardPdfModal({ prod, onClose, onDone }: {
+  prod: Production;
+  onClose: () => void;
+  /** Updated production after pick/clear/export; filePath is null when the
+   *  Save dialog was cancelled or no file was written yet. */
+  onDone: (next: Production, filePath: string | null) => void;
+}) {
+  const [panelsPerPage, setPanelsPerPage] = useState<1 | 3>(prod.storyboardPdf?.panelsPerPage === 3 ? 3 : 1);
+  const [version, setVersion] = useState(prod.storyboardPdf?.version ?? "v1");
+  const [logo, setLogo] = useState<string | null>(null);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const logoRel = prod.storyboardPdf?.logoRel ?? null;
+
+  useEffect(() => {
+    if (!logoRel) {
+      setLogo(null);
+      return;
+    }
+    let live = true;
+    void window.cascade.storyboardLogoImage(prod.meta.id).then((d) => {
+      if (live) setLogo(d);
+    }).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [prod.meta.id, logoRel]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function pickLogo() {
+    if (logoBusy || busy) return;
+    setLogoBusy(true);
+    setErr(null);
+    try {
+      const next = await window.cascade.pickStoryboardLogo(prod.meta.id);
+      if (next) onDone(next, null);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
+  async function removeLogo() {
+    if (logoBusy || busy) return;
+    setLogoBusy(true);
+    setErr(null);
+    try {
+      const next = await window.cascade.clearStoryboardLogo(prod.meta.id);
+      onDone(next, null);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
+  async function runExport() {
+    if (busy || logoBusy) return;
+    setBusy(true);
+    setErr(null);
+    setSavedPath(null);
+    try {
+      const res = await window.cascade.exportStoryboardPdf(prod.meta.id, { panelsPerPage, version });
+      onDone(res.production, res.filePath);
+      setVersion(res.production.storyboardPdf?.version ?? version);
+      if (res.filePath) setSavedPath(res.filePath);
+      // Cancelled Save dialog: stay open silently so settings aren't lost.
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="prod-edit-overlay" onClick={onClose}>
+      <div className="prod-edit-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="prod-edit-head">
+          <span className="prod-edit-title">Export storyboard PDF</span>
+          <button className="prod-btn" onClick={onClose}>Cancel</button>
+        </div>
+        <p className="hint">
+          Landscape A4 pages — one still frame (or placeholder) per panel with
+          Audio: and Visual: boxes underneath. The footer shows the production
+          name and version on the left and the logo on the right.
+        </p>
+        <label className="prod-label">Panels per page</label>
+        <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+          <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="radio"
+              name="storyboard-pdf-layout"
+              checked={panelsPerPage === 1}
+              onChange={() => setPanelsPerPage(1)}
+            />
+            1 panel
+          </label>
+          <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="radio"
+              name="storyboard-pdf-layout"
+              checked={panelsPerPage === 3}
+              onChange={() => setPanelsPerPage(3)}
+            />
+            3 panels
+          </label>
+        </div>
+        <label className="prod-label">Storyboard version</label>
+        <input
+          className="prod-openart-select"
+          style={{ width: "100%", marginBottom: 12 }}
+          value={version}
+          maxLength={24}
+          placeholder="v1"
+          onChange={(e) => setVersion(e.target.value)}
+          title="Printed in the footer and used in the file name"
+        />
+        <label className="prod-label">Logo (lower-right corner)</label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+          {logo ? (
+            <img src={logo} alt="Storyboard logo" style={{ maxHeight: 40, maxWidth: 130, objectFit: "contain" }} />
+          ) : (
+            <span className="hint" style={{ margin: 0 }}>{logoRel ? "Loading…" : "No logo attached"}</span>
+          )}
+          <button className="prod-btn" disabled={logoBusy || busy} onClick={() => void pickLogo()}>
+            {logoBusy ? "…" : logoRel ? "Change…" : "Attach…"}
+          </button>
+          {logoRel && (
+            <button className="prod-btn" disabled={logoBusy || busy} onClick={() => void removeLogo()}>
+              Remove
+            </button>
+          )}
+        </div>
+        {err && <p className="error-text">{err}</p>}
+        {savedPath && <p className="hint">Saved to <code>{savedPath}</code></p>}
+        <button className="prod-btn prod-edit-go" disabled={busy || logoBusy} onClick={() => void runExport()}>
+          {busy ? "Exporting…" : "Export PDF"}
         </button>
       </div>
     </div>

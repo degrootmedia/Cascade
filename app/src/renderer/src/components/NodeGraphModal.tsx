@@ -32,7 +32,7 @@ import { TriplePrompt } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { useImageContextMenu } from "./image-context-menu.js";
-import { EditIcon, FilmStripIcon, InbetweenIcon, MagnifyIcon, PlusIcon, XIcon } from "./icons.js";
+import { EditIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 function isTagReorder(a: string, b: string): boolean {
   const ra = refTagNames(a);
@@ -108,6 +108,9 @@ interface ComposerData extends Record<string, unknown> {
   openHandleId: string;
   /** Whether the brand section currently exists (drives the Brand box). */
   includeBrand: boolean;
+  /** Magic Prompt state — drives the rainbow border + forces a full resync
+   *  on toggle (content switches wholesale between original and magic). */
+  magicActive?: boolean;
   onChange: (value: string) => void;
   registerApplier: (applier: PromptDraftApplier | undefined) => void;
 }
@@ -295,6 +298,7 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
   const rootRef = useRef<HTMLDivElement>(null);
   const draftRef = useRef(localValue);
   const dataRef = useRef(data);
+  const prevMagicRef = useRef(data.magicActive);
   useEffect(() => { draftRef.current = localValue; }, [localValue]);
   useEffect(() => { dataRef.current = data; }, [data]);
   const syncToParent = () => {
@@ -311,6 +315,18 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
       if (!rootRef.current?.contains(document.activeElement)) syncToParent();
     }, 0);
   };
+  // Magic toggle switches the whole content (original <-> magic). A focused
+  // composer would otherwise keep its local content draft and silently undo
+  // the toggle on blur — force a full resync so both views mirror each other.
+  useEffect(() => {
+    if (prevMagicRef.current !== data.magicActive) {
+      prevMagicRef.current = data.magicActive;
+      emitted.current.clear();
+      emitted.current.add(data.value);
+      setLocalValue(data.value);
+      draftRef.current = data.value;
+    }
+  }, [data.magicActive, data.value]);
   useEffect(() => {
     if (emitted.current.has(data.value)) return;
     const active = document.activeElement as HTMLElement | null;
@@ -397,7 +413,7 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
   ];
   return (
-    <div ref={rootRef} className="prod-graph-node prod-graph-composer">
+    <div ref={rootRef} className={"prod-graph-node prod-graph-composer" + (data.magicActive ? " magic-active" : "")}>
       {sockets.map((s) => (
         <Fragment key={s.id}>
           <Handle
@@ -411,7 +427,7 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
           <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
         </Fragment>
       ))}
-      <div className="prod-graph-node-title">Prompt</div>
+      <div className="prod-graph-node-title">Prompt{data.magicActive ? " ✨" : ""}</div>
       <TriplePrompt
         className="prod-graph-composer-text nodrag nowheel"
         sideRows={3}
@@ -1164,7 +1180,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -1174,6 +1190,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   styles: ProductionStyle[];
   styleValue: string;
   includeBrand: boolean;
+  /** Magic Prompt state — mirrors the storyboard toggle; the composer shows
+   *  the rainbow border while active. */
+  magicActive?: boolean;
+  magicBusy?: boolean;
+  onToggleMagic?: () => void;
+  onRegenMagic?: () => void;
   /** Previously saved canvas state for this shot (positions + viewport). */
   initialLayout?: GraphLayout;
   onPromptChange: (value: string) => void;
@@ -1750,7 +1772,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "composer",
         type: "composer" as const,
         position: ORIGIN,
-        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(prompt), onChange: stable.onPromptChange, registerApplier: (a) => stable.registerApplier("composer", a) },
+        data: { value: prompt, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: hasBrandParagraph(prompt), magicActive, onChange: stable.onPromptChange, registerApplier: (a) => stable.registerApplier("composer", a) },
         deletable: false,
       }),
       build({
@@ -1807,7 +1829,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(hasEditTool ? toolPair("edit", ORIGIN, ORIGIN).map((n) => build(n)) : []),
       ...(hasTweenTool ? [build(tweenNode(ORIGIN))] : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode]);
+  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -1834,7 +1856,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const b = old.data as Record<string, unknown>;
       let equal = true;
       if (d.type !== old.type) equal = false;
-      else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
+      else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.magicActive as boolean) === (b.magicActive as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
       else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean) && (a.savedModel as string) === (b.savedModel as string) && (a.savedResolution as string) === (b.savedResolution as string) && ((a.models as { id: string }[]).map((m) => m.id).join("|") === (b.models as { id: string }[]).map((m) => m.id).join("|"));
       else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
@@ -2330,10 +2352,30 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   return (
     <div className="prod-edit-overlay prod-graph-overlay" onClick={onClose}>
-      <div className="prod-graph-panel" onClick={(e) => e.stopPropagation()}>
+      <div className={"prod-graph-panel" + (magicActive ? " magic-active" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="prod-graph-head">
           <span className="prod-graph-title">Shot {shot.number} — node graph</span>
           <span className="prod-graph-hint">Prompt text is the source of truth · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off a socket to detach it</span>
+          {onToggleMagic && (
+            <button
+              className={"prod-btn prod-magic-btn" + (magicActive ? " active" : "")}
+              disabled={magicBusy}
+              onClick={onToggleMagic}
+              title={magicActive ? "Disable Magic Prompt — restore original prompt" : "Enable Magic Prompt — show AI-generated content prompt"}
+            >
+              {magicBusy ? "…" : magicActive ? <><MagicIcon size={13} /> Magic On</> : <><MagicIcon size={13} /> Magic</>}
+            </button>
+          )}
+          {magicActive && onRegenMagic && (
+            <button
+              className="prod-btn prod-magic-refresh"
+              disabled={magicBusy}
+              onClick={onRegenMagic}
+              title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
+            >
+              <RegenerateIcon size={13} />
+            </button>
+          )}
           <button className="prod-btn" onClick={onClose}>Close</button>
         </div>
         <div className="prod-graph-body">

@@ -1,10 +1,11 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import { composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../../shared/prompt-grammar.js";
+import type { ProductionStyle } from "../../../../shared/ipc.js";
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 import { NodesIcon } from "../icons.js";
 
-export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, onKeyDown, onFocus, onBlur }: {
+export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, styleControl, brandControl, onKeyDown, onFocus, onBlur }: {
   value: string;
   includeBrand: boolean;
   onChange: (value: string) => void;
@@ -14,6 +15,9 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   resizable?: boolean;
   autoFocus?: boolean;
   placeholder: string;
+  /** Optional control under the Style label / next to the Brand identity label (see TriplePrompt). */
+  styleControl?: ReactNode;
+  brandControl?: ReactNode;
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
@@ -75,6 +79,8 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         value={value}
         includeBrand={includeBrand}
         placeholder={placeholder}
+        styleControl={styleControl}
+        brandControl={brandControl}
         onChange={onChange}
         onContentChange={updateQuery}
         onContentKeyDown={keyDown}
@@ -119,17 +125,42 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
  *  (references are stored as files on disk now, so thumbnails + previews load
  *  through the streaming protocol rather than inline data URLs). */
 
-export function PromptSidePanel({ shotNumber, value, includeBrand, scriptVisual, scriptAudio, references, onChange, onToggleBrand, onSubmit, submitting, onOpenGraph, magicActive }: { shotNumber?: string; value: string; includeBrand: boolean; scriptVisual?: string; scriptAudio?: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; magicActive?: boolean }) {
+export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, onOpenGraph, magicActive }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; magicActive?: boolean }) {
   return (
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
-        <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber} prompt` : "Frame prompt"}</span>
+        <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber}` : "Frame prompt"}</span>
         {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
-        {shotNumber && <label className="prod-brand-toggle"><input type="checkbox" checked={includeBrand} onChange={(e) => onToggleBrand(e.target.checked)} /> Include Brand Identity</label>}
       </div>
       {shotNumber ? <>
-        <ReferencePromptEditor className="prod-prompt-drawer-text" rows={12} resizable value={value} includeBrand={includeBrand} references={references} placeholder="Generation prompt — type @ to add a reference" onChange={onChange} />
-        <div className="prod-prompt-script"><span className="prod-prompt-script-title">Visual direction from the script</span><div className="prod-prompt-script-body">{scriptVisual || <em>No visual direction recorded for this shot.</em>}{scriptAudio && <p className="prod-prompt-script-audio">Audio: {scriptAudio}</p>}</div></div>
+        <ReferencePromptEditor
+          className="prod-prompt-drawer-text"
+          rows={12}
+          resizable
+          value={value}
+          includeBrand={includeBrand}
+          references={references}
+          placeholder="Generation prompt — type @ to add a reference"
+          onChange={onChange}
+          styleControl={
+            <select
+              className="prod-openart-select prod-prompt-style"
+              value={styleValue}
+              onChange={(e) => onStyleChange(e.target.value)}
+              title="Render style for this frame (from the styles created in Design, Step 2)"
+            >
+              <option value="">None</option>
+              {styles.map((s) => (
+                <option key={s.id} value={s.id}>{s.index}. {s.name || `Style ${s.index}`}</option>
+              ))}
+            </select>
+          }
+          brandControl={
+            <label className="prod-brand-toggle" title="Include brand identity in this prompt">
+              <input type="checkbox" checked={includeBrand} onChange={(e) => onToggleBrand(e.target.checked)} />
+            </label>
+          }
+        />
         <button className="prod-btn prod-prompt-submit" disabled={submitting} onClick={onSubmit}>{submitting ? "Generating…" : "Submit frame"}</button>
       </> : <p className="hint">Click a storyboard prompt to edit it here.</p>}
     </aside>

@@ -656,7 +656,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // reference's unique id; exports keep the literal token next to a numbered
   // reference list.
   const consistency: string[] = [];
-   const brand = shot.includeBrandIdentity !== false ? brandPrompt(p) : "";
+   const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
   if (brand) consistency.push(`Brand identity: ${brand}`);
   const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
   const excludedIds = new Set(shot.refExcluded ?? []);
@@ -744,7 +744,7 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     const style = effectiveShotStyle(p, shot);
     if (style) paras.push(`Style: ${style}`);
     const consistency: string[] = [];
-    const brand = shot.includeBrandIdentity !== false ? brandPrompt(p) : "";
+    const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
     if (brand) consistency.push(`Brand identity: ${brand}`);
     const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
     const excludedIds = new Set(shot.refExcluded ?? []);
@@ -760,9 +760,13 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
   }
   if (shot.prompt?.trim()) {
     const base = shot.prompt.trim();
-    const brand = brandPrompt(p);
     if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
-    if (brand) return insertBrandParagraph(base, brand);
+    // Brand identity is opt-in: only an explicit true appends it to a manual
+    // prompt (an unset flag leaves hand-written text exactly as written).
+    if (shot.includeBrandIdentity === true) {
+      const brand = brandPrompt(p);
+      if (brand) return insertBrandParagraph(base, brand);
+    }
     return base;
   }
   return boardPrompt(p, shot);

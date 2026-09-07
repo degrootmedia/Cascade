@@ -5,14 +5,14 @@
  * a box removes its section. Purely a view over the text; nothing here is
  * stored separately.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PromptContentEditor, type PromptContentHandle } from "./PromptContentEditor.js";
 import { composePromptBoxes, parsePromptBoxes, type PromptBoxes } from "../../../shared/prompt-grammar.js";
 
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
-export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, styleControl, brandControl, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
   value: string;
   /** When false the Brand box is hidden (the brand checkbox/node owns existence). */
   includeBrand: boolean;
@@ -24,6 +24,14 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   placeholder?: string;
   /** Ref to the content editor (autocomplete caret math). */
   contentRef?: { current: PromptContentHandle | null };
+  /** Optional control rendered under the Style label (e.g. the sidebar's
+   *  render-style picker). When provided, the label row stays visible even
+   *  while the Style section is detached so it can be re-attached. */
+  styleControl?: ReactNode;
+  /** Optional control rendered next to the Brand identity label (e.g. the
+   *  sidebar's brand toggle). When provided, the label row stays visible
+   *  even while the brand is excluded so it can be toggled back on. */
+  brandControl?: ReactNode;
   onChange: (value: string) => void;
   /** Fires with the raw content-box text on every content edit. */
   onContentChange?: (content: string) => void;
@@ -144,9 +152,14 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
       ref={containerRef}
       className="prod-prompt-triple"
     >
-      {styleAttached && (
+      {(styleAttached || styleControl) && (
         <>
           <span className="prod-prompt-box-label style">Style</span>
+          {styleControl}
+        </>
+      )}
+      {styleAttached && (
+        <>
           <textarea
             ref={styleRef}
             className={`prod-prompt-box side${cls}`}
@@ -182,9 +195,9 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
         onBlur={onBlur}
         deferExternalWhileFocused={deferExternalWhileFocused}
       />
-      {includeBrand && (
+      {(includeBrand || brandControl) && (
         <>
-          {resizable && (
+          {includeBrand && resizable && (
             <div
               className="prod-prompt-divider"
               title="Drag to resize — double-click to reset"
@@ -194,7 +207,8 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
               onDoubleClick={() => setBrandH(null)}
             />
           )}
-          <span className="prod-prompt-box-label brand">Brand identity</span>
+          <span className={brandControl ? "prod-prompt-box-label brand prod-prompt-box-label-row" : "prod-prompt-box-label brand"}>Brand identity{brandControl}</span>
+          {includeBrand && (
           <textarea
             ref={brandRef}
             className={`prod-prompt-box side${cls}`}
@@ -206,6 +220,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
             onFocus={onFocus}
             onBlur={onBlur}
           />
+          )}
         </>
       )}
     </div>

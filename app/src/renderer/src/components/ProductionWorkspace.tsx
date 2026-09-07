@@ -12,7 +12,7 @@ import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
-import { BoardCard, EditBoardModal, VideoGenModal } from "./production/boards.js";
+import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
 import { BrandSwatchRow } from "./production/brand.js";
@@ -69,9 +69,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // step 2: set when the active chat model can't see images (shows a popup)
   const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
   // step 3: board generation
-  const [boardCap, setBoardCap] = useState(50);
   const [frameZoom, setFrameZoom] = useState(250);
   const [boardsBusy, setBoardsBusy] = useState(false);
+  // Step 3: whether the Audio/Visual direction boxes render under each frame.
+  const [showBoardText, setShowBoardText] = useState(true);
   /** Shot ids currently regenerating (a Set so several frames can run in parallel). */
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
   /** Shot ids whose pending OpenArt job is being rechecked. */
@@ -123,6 +124,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // the background (videoBusyIds tracks in-flight shots for button spinners).
   const [videoShotId, setVideoShotId] = useState<string | null>(null);
   const [videoBusyIds, setVideoBusyIds] = useState<string[]>([]);
+  // Step 3 storyboard-PDF export dialog (layout + version + logo options).
+  const [pdfOpen, setPdfOpen] = useState(false);
   // Step 2 reference-image generation/edit modal. `refId` preselects edit mode
   // (that reference becomes the AI source); `categoryId` defaults the generate
   // mode's target category.
@@ -755,12 +758,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 3: generate boards for shots missing artwork (or regenerate all). */
-  async function genBoards(regenerateAll = false) {
+  /** Step 3: generate frames for shots missing artwork. Uncapped up to the
+   *  pipeline's own 200-frame ceiling (the per-run cap field was removed). */
+  async function genBoards() {
     if (!prod || boardsBusy) return;
     setBoardsBusy(true); setErr(null);
     try {
-      const next = await window.cascade.generateBoards(prod.meta.id, { maxShots: boardCap, regenerateAll });
+      const next = await window.cascade.generateBoards(prod.meta.id, { maxShots: 200 });
       setProd(next);
       bustAll();
       void refreshList();
@@ -1237,6 +1241,86 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   function focusPrompt(shotId: string, _prompt: string) {
     setPromptShotId(shotId);
     setFocusedPrompt(promptCacheRef.current[shotId] ?? "");
+    // The node graph and the classic side panel mirror the same shot's prompt:
+    // focusing another board while the graph is open moves the graph along so
+    // the two editors can never show different shots.
+    setGraphShotId((cur) => (cur != null && cur !== shotId ? shotId : cur));
+  }
+
+  /** After a Magic Prompt state change, both the classic side panel and the
+   *  node graph (which share `focusedPrompt`) must show the same effective
+   *  prompt: magic content when enabled, the untouched original when disabled.
+   *  Magic edits live in `magicPrompts` so the original `shot.prompt` survives;
+   *  disabling only flips the flag — this refresh makes both views show it. */
+  async function refreshPromptAfterMagic(next: Production) {
+    // Classic + node share `focusedPrompt` for the mirrored shot; refresh the
+    // cache for both ids but only push the mirrored shot's text live.
+    const ids = new Set<string>();
+    if (promptShotId) ids.add(promptShotId);
+    if (graphShotId) ids.add(graphShotId);
+    // The button click already moved focus off any editor, so the composer /
+    // side-panel guards won't clobber this wholesale content switch. Blur
+    // defensively anyway (e.g. keyboard-invoked toggles while typing).
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    for (const id of ids) {
+      try {
+        const p = await window.cascade.getBoardPrompt(next.meta.id, id);
+        if (p != null) {
+          promptCacheRef.current[id] = p;
+          if (id === (promptShotId ?? graphShotId)) setFocusedPrompt(p);
+        }
+      } catch { /* keep the last good prompt on IPC failure */ }
+    }
+  }
+
+  /** Shared Magic Prompt toggle for the storyboard head + the node graph head.
+   *  Disabling restores the original prompts (magic edits stay stored for
+   *  re-enable); enabling shows the stored magic content. */
+  function toggleMagic() {
+    if (!prod || magicBusy) return;
+    setMagicBusy(true); setErr(null);
+    const run = prod.magicEnabled
+      ? window.cascade.setMagicEnabled(prod.meta.id, false)
+      : (prod.magicPrompts && Object.keys(prod.magicPrompts).length)
+        ? window.cascade.setMagicEnabled(prod.meta.id, true)
+        : window.cascade.generateMagicPrompts(prod.meta.id);
+    void run.then((next) => {
+      setProd(next); void refreshList();
+      void refreshPromptAfterMagic(next);
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** Regenerate all Magic content prompts (stays enabled). Both views refresh. */
+  function regenMagic() {
+    if (!prod || magicBusy) return;
+    setMagicBusy(true); setErr(null);
+    void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
+      setProd(next); void refreshList();
+      void refreshPromptAfterMagic(next);
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** Step 3: persist a shot's Audio/Visual direction edited on its board card
+   *  (Step 1's table edits the same fields). The auto-derived prompt includes
+   *  the shot text, so the focused side panel refreshes — unless its editor
+   *  holds focus, where a refresh would yank in-flight keystrokes. */
+  async function saveShotText(shotId: string, patch: { audio: string; visual: string }) {
+    if (!prod) return;
+    try {
+      const next = await window.cascade.updateShot(prod.meta.id, shotId, patch);
+      setProd(next);
+      if (promptShotId === shotId) {
+        const updated = await window.cascade.getBoardPrompt(next.meta.id, shotId);
+        if (updated != null) {
+          promptCacheRef.current[shotId] = updated;
+          const el = document.activeElement;
+          const editing = el instanceof HTMLTextAreaElement && el.classList.contains("prod-prompt-drawer-text");
+          if (!editing) setFocusedPrompt(updated);
+        }
+      }
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
   }
 
   /** Step 3 node graph: the style link was detached — clear the shot's style
@@ -1979,28 +2063,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <button
                   className={"prod-btn prod-magic-btn" + (prod.magicEnabled ? " active" : "")}
                   disabled={magicBusy || !shotCount}
-                  onClick={() => {
-                    if (!prod) return;
-                    if (prod.magicEnabled) {
-                      setMagicBusy(true); setErr(null);
-                      void window.cascade.setMagicEnabled(prod.meta.id, false).then((next) => {
-                        setProd(next); void refreshList();
-                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
-                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
-                    } else if (prod.magicPrompts && Object.keys(prod.magicPrompts).length) {
-                      setMagicBusy(true); setErr(null);
-                      void window.cascade.setMagicEnabled(prod.meta.id, true).then((next) => {
-                        setProd(next); void refreshList();
-                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
-                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
-                    } else {
-                      setMagicBusy(true); setErr(null);
-                      void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
-                        setProd(next); void refreshList();
-                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
-                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
-                    }
-                  }}
+                  onClick={toggleMagic}
                   title={prod.magicEnabled ? "Disable Magic Prompt — restore original prompts" : "Enable Magic Prompt — AI generates content-only prompts for all shots"}
                 >
                   {magicBusy ? "…" : prod.magicEnabled ? <><MagicIcon size={13} /> Magic On</> : <><MagicIcon size={13} /> Magic Prompt</>}
@@ -2009,14 +2072,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   <button
                     className="prod-btn prod-magic-refresh"
                     disabled={magicBusy}
-                    onClick={() => {
-                      if (!prod) return;
-                      setMagicBusy(true); setErr(null);
-                      void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
-                        setProd(next); void refreshList();
-                        if (promptShotId) void window.cascade.getBoardPrompt(next.meta.id, promptShotId).then((p) => { if (p != null) { promptCacheRef.current[promptShotId] = p; setFocusedPrompt(p); } });
-                      }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
-                    }}
+                    onClick={regenMagic}
                     title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
                   >
                     <RegenerateIcon size={13} />
@@ -2058,25 +2114,18 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   <option value="4k">4k</option>
                 </select>
               </label>
-              <button className="primary" disabled={boardsBusy || importBusy || !shotCount} onClick={() => void genBoards(false)}>
+              <button className="primary" disabled={boardsBusy || importBusy || !shotCount} onClick={() => void genBoards()}>
                 {boardsBusy ? "Generating…" : boardsDone ? "Generate missing frames" : "Generate Storyboard"}
               </button>
-              {boardsDone > 0 && (
-                <button disabled={boardsBusy || importBusy} onClick={() => void genBoards(true)}>
-                  <RegenerateIcon size={13} /> Regenerate all
-                </button>
-              )}
-              <label className="prod-boards-cap">
-                Cap
-                <input
-                  type="number" min={1} max={200} value={boardCap}
-                  onChange={(e) => setBoardCap(Math.max(1, Math.min(200, Number(e.target.value) || 1)))}
-                  title="Max frames per run (image generation is expensive)"
-                />
-              </label>
+              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setShowBoardText((v) => !v)} title="Show or hide the Audio/Visual direction boxes under each frame">
+                {showBoardText ? "Hide direction" : "Show direction"}
+              </button>
               <span className="prod-boards-sep" />
               <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void exportPrompts()} title={`Write every shot's prompt to ${prod.assets.boardsDir}/prompts.md`}>
                 Export prompts
+              </button>
+              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setPdfOpen(true)} title="Export the storyboard (frames + Audio/Visual) to a landscape PDF">
+                Export storyboard PDF
               </button>
               <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
             </div>
@@ -2122,7 +2171,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     onImport={() => void importFrames(shot.id)}
                     onEdit={() => setEditShotId(shot.id)}
                     onVideo={() => setVideoShotId(shot.id)}
-                    onStyleChange={(style) => updateShotStyle(shot.id, style)}
+                    onTextChange={(patch) => void saveShotText(shot.id, patch)}
+                    showScript={showBoardText}
                     onPromptFocus={focusPrompt}
                     selected={promptShotId === shot.id}
                     onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
@@ -2192,14 +2242,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 )}
               </div>
               <PromptSidePanel
-                shotNumber={prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === promptShotId)?.number}
+                shotNumber={focusedShot?.number}
                 value={focusedPrompt}
-                includeBrand={prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === promptShotId)?.includeBrandIdentity !== false}
-                scriptVisual={prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === promptShotId)?.visual}
-                scriptAudio={prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === promptShotId)?.audio}
+                includeBrand={focusedShot?.includeBrandIdentity === true}
+                styles={prod.styles ?? []}
+                styleValue={focusedShot ? shotStyleSelectValue(focusedShot, prod) : ""}
                 references={promptShotId ? promptRefsForShot(prod, promptShotId) : []}
                 onChange={(value) => { setFocusedPrompt(value); if (promptShotId) { promptCacheRef.current[promptShotId] = value; void saveShotPrompt(promptShotId, value); } }}
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
+                onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                 onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
                 submitting={!!promptShotId && regenIds.has(promptShotId)}
                 onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
@@ -2220,7 +2271,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   references={promptRefsForShot(prod, graphShotId)}
                   styles={prod.styles ?? []}
                   styleValue={shotStyleSelectValue(gs, prod)}
-                  includeBrand={gs.includeBrandIdentity !== false}
+                  includeBrand={gs.includeBrandIdentity === true}
+                  magicActive={!!prod.magicEnabled}
+                  magicBusy={magicBusy}
+                  onToggleMagic={toggleMagic}
+                  onRegenMagic={regenMagic}
                   initialLayout={gs.graphLayout}
                   onPromptChange={(value) => { setFocusedPrompt(value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
                   onStyleChange={(style) => setGraphStyle(graphShotId!, style)}
@@ -2293,6 +2348,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 />
               ) : null;
             })()}
+            {pdfOpen && (
+              <StoryboardPdfModal
+                prod={prod}
+                onClose={() => setPdfOpen(false)}
+                onDone={(next) => setProd(next)}
+              />
+            )}
             <StepFooter prod={prod} onNext={goNext} />
           </section>
         )}

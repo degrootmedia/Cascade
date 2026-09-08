@@ -12,7 +12,7 @@ Turn the entire shot list (audio + visual direction + references) into cohesive,
 ## Generation parameters
 
 ### Model
-- Use the production's configured chat model (`settings.getModel()` via GabClient) — a fast, JSON-capable model (e.g. `arya`/`gpt-4o-mini` class). No image input needed.
+- Use the production's configured chat model (`settings.getModel()` via ChatClient) — a fast, JSON-capable model of the active provider. No image input needed.
 - Temperature: default (0.7). Max tokens: ~8000 for full storyboard (scale with shot count).
 
 ### System message

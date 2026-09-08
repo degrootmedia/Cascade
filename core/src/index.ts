@@ -1,5 +1,5 @@
 export { Agent } from "./agent.js";
-export { GabClient, friendlyApiError } from "./gab.js";
+export { ChatClient, friendlyApiError } from "./chat.js";
 export { suggestChatTitle, titlePrompt } from "./compact.js";
 export { TOOLS, TOOL_DEFINITIONS, classifyCommand, lineDiff } from "./tools.js";
 export { resolveSafe, WorkspaceError, loadWorkspaceInstructions, workspaceInstructionsFile } from "./workspace.js";

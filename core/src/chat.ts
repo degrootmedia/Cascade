@@ -1,6 +1,9 @@
 /**
- * Minimal Gab.ai API client (OpenAI-compatible), raw fetch, streaming.
- * Proven against the live API in phase0/test-tool-calling.mjs.
+ * Minimal OpenAI-compatible chat client, raw fetch, streaming. Every LLM
+ * provider Cascade talks to (Gab, Cheaper Inference, OpenAI, …) speaks this
+ * protocol — the provider registry (app/src/shared/providers.ts) supplies the
+ * base URL, so this class stays provider-agnostic.
+ * Proven against the live gab.ai API in phase0/test-tool-calling.mjs.
  */
 import type { ChatMessage, ToolDefinition, ToolCall, Usage } from "./types.js";
 
@@ -42,7 +45,7 @@ export interface CompletionResult {
   usage: Usage;
 }
 
-export class GabClient {
+export class ChatClient {
   constructor(
     private apiKey: string,
     private baseUrl: string = DEFAULT_BASE
@@ -100,7 +103,7 @@ export class GabClient {
       stream_options: { include_usage: true },
       max_tokens: 8000,
     };
-    console.log(`[gab] streaming payload (${model}, ${messages.length} msgs, ${tools?.length ?? 0} tools):`);
+    console.log(`[chat] streaming payload (${model}, ${messages.length} msgs, ${tools?.length ?? 0} tools):`);
     console.log(JSON.stringify(payload, null, 2));
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -172,7 +175,7 @@ export class GabClient {
   /** Non-streaming completion without tools — used for summarization. Usage data IS present on non-streaming responses. */
   async completeOnce(model: string, messages: ChatMessage[], maxTokens = 1000): Promise<{ text: string; usage: Usage }> {
     const payload = { model, messages, max_tokens: maxTokens };
-    console.log(`[gab] summarization payload (${model}, ${messages.length} msgs):`);
+    console.log(`[chat] summarization payload (${model}, ${messages.length} msgs):`);
     console.log(JSON.stringify(payload, null, 2));
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -188,11 +191,17 @@ export class GabClient {
     return { text: json.choices?.[0]?.message?.content ?? "", usage: json.usage ?? {} };
   }
 
-  async credits(): Promise<unknown> {
+  /**
+   * Account balance, when the provider exposes one (gab: /credits →
+   * total_available). Returns null for providers without a balance endpoint
+   * or an unrecognized response — callers hide the balance display then.
+   */
+  async balance(): Promise<number | null> {
     const res = await fetch(`${this.baseUrl}/credits`, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    if (!res.ok) return null;
+    const c = (await res.json().catch(() => null)) as { total_available?: unknown } | null;
+    return typeof c?.total_available === "number" ? c.total_available : null;
   }
 }

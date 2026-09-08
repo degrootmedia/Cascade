@@ -79,6 +79,8 @@ function cascadeMock(): Record<string, unknown> {
     saveProduction: async (p: Record<string, unknown>) => { disk = JSON.parse(JSON.stringify(p)) as Record<string, unknown>; savedProds.push(disk); },
     getMcpStatus: async () => [],
     listOpenArtModels: async () => [],
+    getMediaProvider: async () => "openart",
+    listMediaProviders: async () => [{ id: "openart", displayName: "OpenArt", available: true }],
     listModels: async () => [],
     getSettings: async () => ({}),
     generateBoards: stub, regenerateBoards: stub, exportBoardPrompts: stub, saveBoardPrompts: stub,

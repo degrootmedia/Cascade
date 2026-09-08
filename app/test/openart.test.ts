@@ -2,7 +2,8 @@
  * OpenArtClient tests — the module's interface IS the test surface.
  *
  * The McpManager is injected, so a fake substitutes for the live OpenArt MCP
- * server: canned tool replies drive the parsing, option-assignment, token-swap
+ * server: canned tool replies drive the parsing, option-assignment, positional
+ * citation
  * and async-wait logic exactly as the real server would. Electron is mocked so
  * the pipeline module (nativeImage) loads in a plain node process.
  */
@@ -12,6 +13,7 @@ import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
 import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
+import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
@@ -109,7 +111,7 @@ afterAll(() => {
 // ---- tests -----------------------------------------------------------------
 
 describe("OpenArtClient.listModelChoices", () => {
-  it("parses the model list, prepends Auto, and classifies image/video input + cost", async () => {
+  it("parses the model list and classifies image/video input + cost (no synthetic Auto)", async () => {
     const mcp = fakeMcp({
       openart_model_list: () =>
         JSON.stringify([
@@ -118,10 +120,10 @@ describe("OpenArtClient.listModelChoices", () => {
         ]),
     });
     const choices = await new OpenArtClient(mcp).listModelChoices();
-    expect(choices).toHaveLength(3);
-    expect(choices[0]).toMatchObject({ id: "auto", displayName: "Auto" });
-    expect(choices[1]).toMatchObject({ id: "foo-video", imageInput: true, videoInput: true });
-    expect(choices[2]).toMatchObject({ id: "bar-img", videoInput: false, cost: 4 });
+    expect(choices).toHaveLength(2);
+    expect(choices.some((c) => c.id === "auto")).toBe(false);
+    expect(choices[0]).toMatchObject({ id: "foo-video", imageInput: true, videoInput: true });
+    expect(choices[1]).toMatchObject({ id: "bar-img", videoInput: false, cost: 4 });
   });
 
   it("tolerates fenced replies with stray prose", async () => {
@@ -129,8 +131,8 @@ describe("OpenArtClient.listModelChoices", () => {
       openart_model_list: () => '```json\n{ "models": [ { "id": "m1", "name": "M1" } ] }\n``` done',
     });
     const choices = await new OpenArtClient(mcp).listModelChoices();
-    expect(choices).toHaveLength(2);
-    expect(choices[1].id).toBe("m1");
+    expect(choices).toHaveLength(1);
+    expect(choices[0].id).toBe("m1");
   });
 });
 
@@ -171,19 +173,102 @@ describe("OpenArtClient.videoModelOptions", () => {
     expect(formCalls).toBe(1); // served from cache
   });
 
+  it("assigns a free-form string duration field as \"Ns\"", async () => {
+    const folder = path.join(dataDir, "prod-wan");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    let seenParams: Record<string, unknown> | undefined;
+    const base = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "wan3-0", displayName: "Wan 3.0", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              prompt: { type: "string" },
+              startFrame: { type: "object", properties: { url: {} } },
+              endFrame: { type: "object", properties: { url: {} } },
+              resolution: { type: "string", enum: ["480p", "720p", "1080p"] },
+              duration: { type: "string", description: "Clip length in seconds (e.g. 2s)" },
+            },
+          },
+        }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-wan","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const orig = base.callRawFull.bind(base);
+    (base as { callRawFull: unknown }).callRawFull = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "openart_generate_video") seenParams = (a as { params: Record<string, unknown> }).params;
+      return orig(s, t, a);
+    };
+    const client = new OpenArtClient(base);
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    // A free-form string duration field must be sent as "2s" — never dropped
+    // (a dropped length makes OpenArt fall back to its 5s default).
+    await client.generateVideoClip(
+      prod, shot, { model: "auto", resolution: "1080p", durationSec: 2, prompt: "animate" }, () => {}
+    );
+    expect(seenParams?.duration).toBe("2s");
+    expect(seenParams?.resolution).toBe("1080p");
+  });
+
+  it("never submits a sentinel or coerced length — validation rejects unsupported ones (real Wan shape)", async () => {
+    const folder = path.join(dataDir, "prod-wan-sentinel");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    const formFor = () =>
+      JSON.stringify({
+        jsonSchema: {
+          properties: {
+            prompt: { type: "string" },
+            resolution: { type: "string", enum: ["480p", "720p", "1080p"] },
+            // oneOf consts with a -1 "auto/random" sentinel first — the shape
+            // that previously turned a 2s request into an auto-length clip.
+            duration: {
+              title: "Duration",
+              oneOf: [
+                { const: -1, title: "Auto" },
+                { const: 5, title: "5 seconds" },
+                { const: 10, title: "10 seconds" },
+                { const: 15, title: "15 seconds" },
+                { const: 20, title: "20 seconds" },
+              ],
+            },
+          },
+        },
+      });
+    const base = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "wan3-0", displayName: "Wan 3.0", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: formFor,
+      openart_generate_video: () => { throw new Error("should not submit"); },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const client = new OpenArtClient(base);
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    // 2s is not among the real options (5/10/15/20s) — fail loudly, name them,
+    // and never burn credits on an auto-length clip.
+    await expect(
+      client.generateVideoClip(prod, shot, { model: "auto", resolution: "1080p", durationSec: 2, prompt: "animate" }, () => {})
+    ).rejects.toThrow(/doesn't support a 2s clip \(supports 5, 10, 15, 20s\)/);
+  });
+
   it("returns null for the auto placeholder", async () => {
     const mcp = fakeMcp({ openart_model_form_get: () => '{"jsonSchema":{"properties":{}}}' });
     expect(await new OpenArtClient(mcp).videoModelOptions("auto", true)).toBeNull();
   });
 });
 
-describe("OpenArtClient.resolvePromptRefs", () => {
+describe("resolvePromptRefs (providers/refs, ex-OpenArtClient method)", () => {
   it("maps @[name] tags to portable tokens and dedupes the uploaded extras", () => {
     const p = makeProduction({
       characters: [{ id: "c1", name: "Gandalf", key: "", artwork: "data:image/png;base64,QUFBQQ==" }],
     });
-    const client = new OpenArtClient(fakeMcp({}));
-    const { resolved, extras } = client.resolvePromptRefs(p, "Show @[Gandalf] and @[gandalf] together", 2);
+    const { resolved, extras } = resolvePromptRefs(p, "Show @[Gandalf] and @[gandalf] together", 2);
     expect(resolved).toBe("Show @image3 and @image3 together");
     expect(extras).toEqual([{ name: "Gandalf", dataUrl: "data:image/png;base64,QUFBQQ==" }]);
   });
@@ -193,8 +278,7 @@ describe("OpenArtClient.resolvePromptRefs", () => {
       characters: [{ id: "c1", name: "Gandalf", key: "", artwork: "data:image/png;base64,QUFBQQ==" }],
       products: [{ id: "p1", name: "Empty" }],
     });
-    const client = new OpenArtClient(fakeMcp({}));
-    const { resolved, extras } = client.resolvePromptRefs(p, "Show @[Empty] and @[Gandalf]", 0);
+    const { resolved, extras } = resolvePromptRefs(p, "Show @[Empty] and @[Gandalf]", 0);
     expect(resolved).toBe("Show @[Empty] and @image1");
     expect(extras).toEqual([{ name: "Gandalf", dataUrl: "data:image/png;base64,QUFBQQ==" }]);
   });
@@ -303,7 +387,7 @@ describe("OpenArtClient.imageGenFn", () => {
     expect(params.imageCount).toBe(1);
   });
 
-  it("uploads references, swaps @imageN tokens for their uploaded ids, and runs in image2image mode", async () => {
+  it("uploads references, cites them positionally, and runs in image2image mode", async () => {
     const generated: Record<string, unknown>[] = [];
     const mcp = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "kling-v2", displayName: "Kling V2", media: ["image"], modes: [] }]),
@@ -336,7 +420,7 @@ describe("OpenArtClient.imageGenFn", () => {
       const args = generated[0] as Record<string, unknown>;
       expect(args.mode).toBe("image2image");
       const params = args.params as Record<string, unknown>;
-      expect(params.prompt).toBe("Make it look like vr-1");
+      expect(params.prompt).toBe("Make it look like Hero (reference image 1)");
       expect(params.visualReferences).toEqual([{ id: "vr-1", url: "https://example.invalid/vr" }]);
     } finally {
       globalThis.fetch = realFetch;
@@ -586,6 +670,38 @@ describe("OpenArtClient generation recorder", () => {
       productionId: "prod-1",
       shotId: "s1",
     });
+  });
+
+  it("fails loudly instead of coercing when the model can't do the requested length", async () => {
+    const folder = path.join(dataDir, "prod-short");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    let submitted = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              resolution: { type: "string", enum: ["720p", "1080p"] },
+              duration: { type: "string", enum: ["5s", "10s"] },
+            },
+          },
+        }),
+      openart_generate_video: () => { submitted = true; return '{"status":"PENDING","historyId":"h-vid","pollAfterSeconds":0}'; },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const client = new OpenArtClient(mcp, { onGeneration: vi.fn() });
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    // The form proves 5s/10s only: a 2s tween block must error naming the
+    // supported lengths, never submit the nearest pick (a 5s clip).
+    await expect(
+      client.generateVideoClip(prod, shot, { model: "auto", resolution: "1080p", durationSec: 2, prompt: "animate" }, () => {})
+    ).rejects.toThrow(/doesn't support a 2s clip.*5, 10s/);
+    expect(submitted).toBe(false);
   });
 });
 

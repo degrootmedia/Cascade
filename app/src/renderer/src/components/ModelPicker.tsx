@@ -7,11 +7,35 @@ function VisionIcon() {
   return <ImageIcon size={13} />;
 }
 
+/** Relative cost shown as token icons: 1 = cheapest, 2 = mid, 3 = priciest. */
+function TierIcons({ tier }: { tier: NonNullable<ModelInfo["costTier"]> }) {
+  const count = tier === "cheapest" ? 1 : tier === "priciest" ? 3 : 2;
+  return (
+    <span className="cost-badge" title={TIER_TITLES[tier]}>
+      {[0, 1, 2].slice(0, count).map((i) => (
+        <TokenIcon key={i} size={13} />
+      ))}
+    </span>
+  );
+}
+
+const TIER_TITLES: Record<NonNullable<ModelInfo["costTier"]>, string> = {
+  cheapest: "Cheapest tier (relative cost)",
+  mid: "Mid tier (relative cost)",
+  priciest: "Priciest tier (relative cost)",
+};
+
 function CostBadge({ info }: { info: ModelInfo }) {
-  const isUsd = info.costLabel.startsWith("$");
+  // Per-token providers can't price a single message exactly — show the
+  // auto-computed relative tier (1/2/3 token icons) instead; exact rates
+  // stay in the tooltip.
+  if (info.costKind === "per-token" && info.costTier) {
+    return <TierIcons tier={info.costTier} />;
+  }
+  const isCredits = info.costKind === "per-message";
   return (
     <span className="cost-badge" title={info.costTitle}>
-      {!isUsd && <TokenIcon size={13} />}
+      {isCredits && <TokenIcon size={13} />}
       {info.costLabel}
     </span>
   );

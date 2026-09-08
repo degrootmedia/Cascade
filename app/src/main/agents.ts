@@ -119,7 +119,8 @@ export function createAgent(data: {
     name,
     description: (data.description ?? "").trim(),
     avatar: data.avatar ?? null,
-    model: (data.model ?? "arya").trim() || "arya",
+    // Empty model = follow the app's selected model at run time.
+    model: (data.model ?? "").trim(),
     allowedTools: data.allowedTools ?? "all",
     createdAt: now,
     updatedAt: now,
@@ -232,7 +233,7 @@ export function importAgent(jsonText: string, mdText: string): string {
     name,
     description: typeof parsed.description === "string" ? parsed.description : "",
     avatar: parsed.avatar && typeof parsed.avatar === "object" && "kind" in parsed.avatar ? (parsed.avatar as AvatarKind) : null,
-    model: typeof parsed.model === "string" ? parsed.model : "arya",
+    model: typeof parsed.model === "string" ? parsed.model : "",
     allowedTools: Array.isArray(parsed.allowedTools) || parsed.allowedTools === "all" ? parsed.allowedTools : "all",
     prompt: mdText ?? "",
   });

@@ -114,7 +114,7 @@ export function App() {
   const items = currentId ? (transcripts[currentId] ?? []) : [];
   const busy = currentId ? !!busyIds[currentId] : false;
 
-  const currentModel = settings?.model ?? "arya";
+  const currentModel = settings?.model ?? "";
   const effectiveModel = activeMeta?.model ?? currentModel;
   const modelInfo = models.find((m) => m.id === effectiveModel);
   /** Pure chat = no folder selected for this chat. */

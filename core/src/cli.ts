@@ -3,18 +3,18 @@
  *
  * Usage:
  *   $env:GAB_API_KEY = "..."          (PowerShell)
- *   npm run cli -- --workspace ../sandbox [--model arya]
+ *   npm run cli -- --workspace ../sandbox [--model arya] [--base-url https://gab.ai/v1]
  */
 import * as readline from "node:readline/promises";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "./agent.js";
-import { GabClient } from "./gab.js";
+import { ChatClient } from "./chat.js";
 import type { ApprovalRequest, ApprovalDecision, AgentEvent } from "./types.js";
 
-const apiKey = process.env.GAB_API_KEY;
+const apiKey = process.env.GAB_API_KEY ?? process.env.CASCADE_API_KEY;
 if (!apiKey) {
-  console.error('Set GAB_API_KEY first, e.g. PowerShell: $env:GAB_API_KEY = "your-key"');
+  console.error('Set GAB_API_KEY (or CASCADE_API_KEY) first, e.g. PowerShell: $env:GAB_API_KEY = "your-key"');
   process.exit(1);
 }
 
@@ -25,6 +25,7 @@ function argValue(flag: string): string | undefined {
 
 const workspaceRoot = path.resolve(argValue("--workspace") ?? "./workspace");
 const model = argValue("--model") ?? "arya";
+const baseUrl = argValue("--base-url");
 fs.mkdirSync(workspaceRoot, { recursive: true });
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -70,20 +71,20 @@ function onEvent(e: AgentEvent) {
   }
 }
 
-const client = new GabClient(apiKey);
+const client = new ChatClient(apiKey, baseUrl);
 
 async function showBalance() {
   try {
-    const c = (await client.credits()) as { total_available?: number };
-    if (typeof c.total_available === "number") {
-      console.log(dim(`\n[credits remaining: ~${c.total_available}]`));
+    const balance = await client.balance();
+    if (balance !== null) {
+      console.log(dim(`\n[credits remaining: ~${balance}]`));
     }
   } catch {
     /* balance display is best-effort */
   }
 }
 
-const agent = new Agent({ apiKey, model, workspaceRoot, requestApproval, onEvent });
+const agent = new Agent({ apiKey, model, baseUrl, workspaceRoot, requestApproval, onEvent });
 
 console.log(`Cascade CLI — model: ${model} — workspace: ${workspaceRoot}`);
 console.log(dim('Type a request, or "exit" to quit.\n'));

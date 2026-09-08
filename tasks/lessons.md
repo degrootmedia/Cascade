@@ -2,6 +2,8 @@
 
 No session-specific lessons yet.
 
+- Storyboard history must derive from the generation nodes, including edits. Promoting a frame must update the owning node's selected index and output pipe, not just `artwork`, or read-time reconciliation will undo the selection. Test promotion followed by save/load, and ensure storyboard edits use the edit-node recorder.
+
 - Renderer-only changes hot-reload, but the Electron **main process** keeps the build it
   started with. New `ipcMain.handle`s don't exist until the main process restarts (full
   `npm run dev` restart, or `npm run package` for the packaged exe). Symptom: renderer
@@ -34,6 +36,7 @@ No session-specific lessons yet.
 - React's delegated wheel/touch listeners are passive: `e.preventDefault()` inside a component's `onWheel` cannot stop page scroll. Attach a native listener with `{ passive: false }` when an element needs to own the wheel gesture (zooming timelines/canvases).
 - Anchoring zoom on a moving reference (playhead): compute target scrollLeft from (refTime × newScale − refTime × oldScale − oldScrollLeft), store it in a ref, apply in `useLayoutEffect` after the resized content commits. Also freeze auto-follow while the user is drag-scrubbing or it fights the cursor.
 - When a canvas visualization must redraw per scroll-frame, precompute fixed-bucket min/max peaks once from raw PCM instead of rescanning samples every frame (same idea as per-decode AudioBuffer peaks).
+- Paid probe scripts must be crash-safe: `node --check` catches syntax but NOT missing identifiers, and a crash mid-probe can strand a spend. Structure every paid probe as resumable phases (submit → followup `<jobId>`), and dry-run the full code path against fakes before the live run. The followup mode rescued the 2-credit refs probe after a UUID_RX ReferenceError.
 - Never append to markdown files via PowerShell `Add-Content`/here-strings on this machine — backslash sequences become tabs and non-ASCII chars turn into mojibake; use file-edit tooling instead.
 
 ## 2026-08-27 — OpenArt credits line missing (video modal)
@@ -91,3 +94,24 @@ No session-specific lessons yet.
   3. When a job mutates renderer-owned collections (characters/references),
      wholesale-copy from the job's copy on change; the concurrent-edit window is
      the job duration and matches how `status`/`assembly` are already handled.
+
+## Lesson: PowerShell text cmdlets corrupt non-ASCII source files (2026-09-07)
+
+Mistake: rewrote `higgsfield.ts` with `(Get-Content $p) -replace ... | Set-Content -Encoding UTF8`.
+PowerShell 5.1 `Get-Content` decodes UTF-8 as ANSI (cp1252), so every em dash
+became literal mojibake; `FAILED_RX` silently stopped matching a real
+`� cancelled` job reply. The scripted repair (latin1 round-trip) restored most
+chars but cp1252's unmappable bytes became U+FFFD irreversibly, plus stray
+control chars � only a byte-level scan found them.
+
+- Rules:
+  1. NEVER use PowerShell text cmdlets (Get-Content/Set-Content/-replace
+     pipelines) to rewrite source files. Use the Edit tool. If a scripted
+     rewrite is unavoidable, do it in node at byte level: read utf8, replace
+     in JS, write utf8.
+  2. After ANY scripted file rewrite, grep the file for non-ASCII/control
+     residue (`[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]`) before
+     trusting the change.
+  3. Encoding damage hides as logic bugs, not syntax errors � a regex over
+     prose (em dash separators) is exactly where it bites. Tests that match
+     real server prose are the safety net.

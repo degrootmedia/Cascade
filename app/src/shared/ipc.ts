@@ -52,6 +52,13 @@ export interface ModelInfo {
   costLabel: string;
   /** Tooltip detail, e.g. "12 credits per message" or "in $0.70 / out $3.50 per 1M tokens". */
   costTitle: string;
+  /** Billing semantics detected from the model's own fields (see providers.ts).
+   *  "per-message" prices a request exactly; "per-token" only supports a
+   *  relative ranking, so the UI shows costTier instead of costLabel. */
+  costKind: import("./providers.js").CostKind;
+  /** Relative rank across the provider's list ("cheapest"/"mid"/"priciest"),
+   *  or null when the model is unpriced or costs can't be ranked. */
+  costTier: import("./providers.js").CostTier;
 }
 
 /** Result of listing the current provider's models — carries the real failure
@@ -94,6 +101,17 @@ export interface McpStatusIpc {
   status: "connected" | "error" | "disabled";
   toolCount: number;
   error?: string;
+}
+
+/** Which MCP vendor serves image/video generation (global setting). */
+export type MediaProviderId = "openart" | "higgsfield";
+
+/** One generation vendor for the Settings picker. */
+export interface MediaProviderInfo {
+  id: MediaProviderId;
+  displayName: string;
+  /** Whether the vendor's generation tools are currently connected. */
+  available: boolean;
 }
 
 export interface AgentMeta {
@@ -221,9 +239,12 @@ graphImageGenIndex?: number;
    *  image input. Independent of the output feed — the image node can pipe to
    *  the video node AND the output simultaneously. */
   graphImageToVideo?: boolean;
-  /** Reference ids wired into the in-betweener node's keyframe sockets, in
-   *  timeline order (2–5 image refs). Each adjacent pair forms an action
-   *  block (see `graphTweenBlocks`). */
+  /** Keyframe source ids wired into the in-betweener node's keyframe sockets,
+   *  in timeline order (2–5). Each is a bare reference id OR a generation-node
+   *  sentinel (`TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN`), so keyframes can be
+   *  reference images, the image node's selected frame, or the edit node's
+   *  selected edit. Each adjacent pair forms an action block (see
+   *  `graphTweenBlocks`). */
   graphTweenRefIds?: string[];
   /** Action blocks derived from `graphTweenRefIds` (one per adjacent pair).
    *  Prompts and per-block generation history survive re-derivation when
@@ -264,6 +285,22 @@ graphImageGenIndex?: number;
   pendingImageGen?: PendingImageGen;
 }
 
+/** In-betweener keyframe source sentinels that read a generation node's output
+ *  instead of a production reference's artwork. They are stored in
+ *  `graphTweenRefIds` (and `TweenBlock.startRefId`/`endRefId`) alongside bare
+ *  reference ids — a reference id (base36 timestamp + random suffix, see
+ *  `store.newId`) can never equal these node ids, so the two are
+ *  unambiguous. The image node is structural and always present; the edit
+ *  node is optional but both resolve to their selected generation. */
+export const TWEEN_KEY_IMGGEN = "imagegen";
+export const TWEEN_KEY_EDITGEN = "editgen";
+
+/** True when an in-betweener keyframe source id refers to a generation node's
+ *  output rather than a production reference. */
+export function isTweenGenKeyframe(id: string): boolean {
+  return id === TWEEN_KEY_IMGGEN || id === TWEEN_KEY_EDITGEN;
+}
+
 /** One stored output of a node-graph generation node. */
 export interface GraphGenItem {
   /** Workspace-relative path (boards JPEG for frames, videos file for clips). */
@@ -284,9 +321,11 @@ export interface GraphGenItem {
 export interface TweenBlock {
   /** Stable identity ("tw0", "tw1", … in keyframe order). */
   id: string;
-  /** Reference id of the start keyframe. */
+  /** Keyframe source id of the start keyframe (reference id or a
+   *  `TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN` sentinel). */
   startRefId: string;
-  /** Reference id of the end keyframe. */
+  /** Keyframe source id of the end keyframe (reference id or a
+   *  `TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN` sentinel). */
   endRefId: string;
   /** Action prompt describing the motion from start to end. */
   prompt: string;
@@ -777,6 +816,9 @@ export interface CascadeApi {
   setExternalEditor(path: string | null): Promise<void>;
   /** Set (or clear with "") the 3D AI Studio API key, encrypted at rest. */
   set3daiApiKey(key: string): Promise<void>;
+  /** Video model ids the user manually declared end-frame capable. */
+  getEndFrameModels(): Promise<string[]>;
+  setEndFrameModels(ids: string[]): Promise<void>;
   /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
   showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
@@ -814,6 +856,11 @@ export interface CascadeApi {
   /** Server names whose tools attach only on user request (leaner default payload). */
   getMcpOnDemand(): Promise<string[]>;
   setMcpOnDemand(names: string[]): Promise<void>;
+  /** Generation vendors (OpenArt/Higgsfield) with their connection state. */
+  listMediaProviders(): Promise<MediaProviderInfo[]>;
+  /** Which vendor serves image/video generation (global setting). */
+  getMediaProvider(): Promise<MediaProviderId>;
+  setMediaProvider(id: MediaProviderId): Promise<void>;
 
   listAgents(): Promise<AgentMeta[]>;
   getAgent(id: string): Promise<AgentDetail | null>;
@@ -833,6 +880,8 @@ export interface CascadeApi {
   /** Native folder dialog for a new production. Returns abs path or null. */
   pickProductionFolder(): Promise<string | null>;
   createProduction(name: string, folder: string): Promise<Production>;
+  /** Re-register an existing production folder whose JSON is missing. Returns the existing document when the folder is already registered. */
+  importProduction(folder: string): Promise<Production>;
   loadProduction(id: string): Promise<Production | null>;
   saveProduction(p: Production): Promise<void>;
   removeProduction(id: string, mode: "delete" | "archive"): Promise<boolean>;
@@ -906,6 +955,10 @@ export interface CascadeApi {
   updateShot(productionId: string, shotId: string, patch: { audio?: string; visual?: string }): Promise<Production>;
   /** Move a shot before another shot (or to the end when beforeShotId is null). Re-numbers and relocates board files. */
   reorderShot(productionId: string, shotId: string, beforeShotId: string | null): Promise<Production>;
+  /** Start a production without a script: one scene with five blank shots (refuses when scenes already exist). */
+  startBlank(productionId: string): Promise<Production>;
+  /** Insert an empty scene after the given ordinal (0 = before the first, null = at the end); later scenes renumber. */
+  addScene(productionId: string, afterSceneNumber: number | null): Promise<Production>;
   /**
    * Step 3: generate storyboard frames via the OpenArt MCP server. Generates
    * for shots without artwork (or all shots when `regenerateAll`), capped at
@@ -947,12 +1000,12 @@ export interface CascadeApi {
    */
   importBoards(productionId: string, files?: string[], shotId?: string): Promise<Production>;
   /** Load a board frame as a data URL (thumbnail) for the contact sheet.
-   *  `index` selects an entry of the shot's `artworkHistory` (0 = most recent
-   *  previous frame); omit it for the current frame. */
-  boardImage(productionId: string, shotId: string, index?: number): Promise<string | null>;
+   *  `framePath` selects a frame from either generation node or legacy history;
+   *  omit it for the current frame. */
+  boardImage(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   /** Load a board frame at full resolution (no downscale) for the lightbox. */
-  boardImageFull(productionId: string, shotId: string, index?: number): Promise<string | null>;
-  boardThumbnail(productionId: string, shotId: string, index?: number): Promise<string | null>;
+  boardImageFull(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
+  boardThumbnail(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   deleteBoardImage(productionId: string, shotId: string): Promise<Production>;
   /**
    * Step 3: edit a shot's current frame via an image-input model — the frame
@@ -961,11 +1014,10 @@ export interface CascadeApi {
    */
   editBoard(productionId: string, shotId: string, model: string, prompt: string): Promise<Production>;
   /**
-   * Step 3: promote a history frame back to primary for a shot. The current
-   * `artwork` moves into `artworkHistory`; the selected history entry becomes
-   * the active frame. Returns the updated production.
+   * Step 3: make a stored frame primary, selecting its image/edit generation
+   * and wiring that node to the output. The path stays stable as history grows.
    */
-  promoteBoardHistory(productionId: string, shotId: string, index: number): Promise<Production>;
+  promoteBoardHistory(productionId: string, shotId: string, framePath: string): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
@@ -1022,6 +1074,14 @@ export interface CascadeApi {
    */
   stitchTween(productionId: string, shotId: string): Promise<Production>;
   /**
+   * Step 3 in-betweener node: undo a stitch — drop the continuous clip
+   * (`graphTweenOutput`) and, when the tween feeds the output, unbind the
+   * feed so the shot falls back to its individual block clips. The per-block
+   * clips and the timeline stay intact, so the user can view/edit and re-stitch.
+   * Returns the updated production.
+   */
+  unstitchTween(productionId: string, shotId: string): Promise<Production>;
+  /**
    * Step 3 node graph: AI-edit one image for the edit-image node. The source
    * image is the node's source pipe (image node selection, else a reference),
    * falling back to the shot's current frame. The result is stored on the
@@ -1048,10 +1108,10 @@ export interface CascadeApi {
   /** Step 4: the resolution / length options a video model accepts (from its
    *  live form schema). Null when the model form can't be read. */
   videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
-  /** Step 3 in-betweener: ids of the video-capable models whose live form
-   *  schema declares a dedicated end-frame slot. Empty when none is proven —
-   *  the tween model lists then fall back to every video model (both frames
-   *  still reach those via the array fallback). */
+  /** Step 3 in-betweener: ids of the video-capable models that accept a
+   *  dedicated end-frame slot (live form/schema probe) unioned with the
+   *  user's manual allowlist (Settings → Media generation). The tween model
+   *  lists offer ONLY these ids. */
   videoEndFrameModels(): Promise<string[]>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
@@ -1170,6 +1230,8 @@ export const ipcContract = {
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
   "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
+  "settings:getEndFrameModels": { method: "getEndFrameModels", kind: "invoke" },
+  "settings:setEndFrameModels": { method: "setEndFrameModels", kind: "invoke" },
   "image:showMenu": { method: "showImageMenu", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
@@ -1193,6 +1255,9 @@ export const ipcContract = {
   "mcp:reload": { method: "reloadMcp", kind: "invoke" },
   "mcp:onDemand": { method: "getMcpOnDemand", kind: "invoke" },
   "mcp:setOnDemand": { method: "setMcpOnDemand", kind: "invoke" },
+  "media:listProviders": { method: "listMediaProviders", kind: "invoke" },
+  "media:getProvider": { method: "getMediaProvider", kind: "invoke" },
+  "media:setProvider": { method: "setMediaProvider", kind: "invoke" },
 
   "agents:list": { method: "listAgents", kind: "invoke" },
   "agents:get": { method: "getAgent", kind: "invoke" },
@@ -1210,6 +1275,7 @@ export const ipcContract = {
   "production:list": { method: "listProductions", kind: "invoke" },
   "production:pickFolder": { method: "pickProductionFolder", kind: "invoke" },
   "production:create": { method: "createProduction", kind: "invoke" },
+  "production:import": { method: "importProduction", kind: "invoke" },
   "production:load": { method: "loadProduction", kind: "invoke" },
   "production:save": { method: "saveProduction", kind: "invoke" },
   "production:remove": { method: "removeProduction", kind: "invoke" },
@@ -1229,6 +1295,8 @@ export const ipcContract = {
   "production:deleteShot": { method: "deleteShot", kind: "invoke" },
   "production:updateShot": { method: "updateShot", kind: "invoke" },
   "production:reorderShot": { method: "reorderShot", kind: "invoke" },
+  "production:startBlank": { method: "startBlank", kind: "invoke" },
+  "production:addScene": { method: "addScene", kind: "invoke" },
   "production:generateBoards": { method: "generateBoards", kind: "invoke" },
   "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
   "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },
@@ -1261,6 +1329,7 @@ export const ipcContract = {
   "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
   "production:generateTweenBlock": { method: "generateTweenBlock", kind: "invoke" },
   "production:stitchTween": { method: "stitchTween", kind: "invoke" },
+  "production:unstitchTween": { method: "unstitchTween", kind: "invoke" },
   "production:generateEditNode": { method: "generateEditNode", kind: "invoke" },
   "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
   "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },

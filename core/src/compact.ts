@@ -1,17 +1,14 @@
 /**
  * Context compaction: when the conversation grows past a character budget,
  * older turns are replaced by a model-written summary so long sessions don't
- * blow the context window (or the credit budget — Gab has no prompt caching,
- * so every turn resends the whole history).
+ * blow the context window (or the credit budget — providers without prompt
+ * caching resend the whole history every turn).
  */
-import { GabClient } from "./gab.js";
+import { ChatClient } from "./chat.js";
 import { contentText, type ChatMessage } from "./types.js";
 
 /** ~4 chars/token heuristic; 120k chars ≈ 30k tokens, safe for all our chat models. */
 export const DEFAULT_CHAR_BUDGET = 120_000;
-
-/** Cheap model used for background task (compaction, chat naming). */
-export const TITLE_MODEL = "arya";
 
 /** Never summarize away the most recent turns. */
 const KEEP_RECENT = 8;
@@ -100,16 +97,16 @@ export function titlePrompt(messages: ChatMessage[]): ChatMessage[] {
 /**
  * Ask the cheap model to name a chat from its transcript. Returns a short
  * title, or "New chat" if the model couldn't be reached (never throws).
+ * `model` is the provider's cheap background model (see AgentConfig.helperModel).
  */
 export async function suggestChatTitle(
   messages: ChatMessage[],
-  apiKey?: string,
-  client?: GabClient
+  client?: ChatClient,
+  model?: string
 ): Promise<string> {
-  const gab = client ?? (apiKey ? new GabClient(apiKey) : undefined);
-  if (!gab) return "New chat";
+  if (!client || !model) return "New chat";
   try {
-    const { text } = await gab.completeOnce(TITLE_MODEL, titlePrompt(messages), 20);
+    const { text } = await client.completeOnce(model, titlePrompt(messages), 20);
     const title = text.trim().replace(/^["'\s]+|["'\s]+$/g, "").slice(0, 48);
     return title || "New chat";
   } catch {

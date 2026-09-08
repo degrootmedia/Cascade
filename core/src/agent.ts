@@ -1,20 +1,18 @@
 /**
  * The Cascade agent loop.
  *
- * Sends the conversation to Gab, executes any tool calls (routing mutating
- * ones through the approval gate), appends results, and repeats until the
- * model produces a plain text answer or maxIterations is hit.
+ * Sends the conversation to the configured OpenAI-compatible provider (see
+ * shared/providers.ts for the registry), executes any tool calls (routing
+ * mutating ones through the approval gate), appends results, and repeats
+ * until the model produces a plain text answer or maxIterations is hit.
  */
-import { GabClient, friendlyApiError } from "./gab.js";
+import { ChatClient, friendlyApiError } from "./chat.js";
 import { TOOLS } from "./tools.js";
 import { systemPrompt, pureChatSystemPrompt } from "./prompts.js";
 import { loadWorkspaceInstructions, resolveSafe, WorkspaceError } from "./workspace.js";
 import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
 import { contentText, attachmentParts, type AgentConfig, type AgentTool, type Attachment, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
-
-/** Cheap model used for background summarization. */
-const COMPACT_MODEL = "arya";
 
 const DEFAULT_MAX_ITERATIONS = 50;
 
@@ -27,7 +25,7 @@ const FIRST_PARTY_COMPANIONS = ["openart"];
 
 export class Agent {
   private messages: ChatMessage[] = [];
-  private client: GabClient;
+  private client: ChatClient;
   private sessionAllowed = new Set<string>(); // tools granted "always allow" this session
   private sessionAllowedGroups = new Set<string>(); // server prefixes (e.g. "openart") granted wholesale
   private abort?: AbortController;
@@ -42,7 +40,7 @@ export class Agent {
   totalCredits = 0;
 
   constructor(private config: AgentConfig) {
-    this.client = new GabClient(config.apiKey, config.baseUrl);
+    this.client = new ChatClient(config.apiKey, config.baseUrl);
     const pureChat = config.pureChat === true;
     this.tools = pureChat ? {} : { ...TOOLS, ...config.extraTools };
     this.lazyTools = pureChat ? {} : (config.lazyTools ?? {});
@@ -202,12 +200,14 @@ export class Agent {
     }
   }
 
-  /** Fold old turns into a summary when the conversation gets large. */
+  /** Fold old turns into a summary when the conversation gets large. Uses
+   *  the provider's cheap background model (config.helperModel) so compaction
+   *  never requests a model the active provider doesn't have. */
   private async maybeCompact(): Promise<void> {
     const plan = planCompaction(this.messages);
     if (!plan) return;
     try {
-      const { text } = await this.client.completeOnce(COMPACT_MODEL, summaryPrompt(plan.toSummarize));
+      const { text } = await this.client.completeOnce(this.config.helperModel || this.config.model, summaryPrompt(plan.toSummarize));
       if (text.trim()) {
         this.messages = [plan.keep[0], summaryMessage(text.trim()), ...plan.keep.slice(1)];
       }

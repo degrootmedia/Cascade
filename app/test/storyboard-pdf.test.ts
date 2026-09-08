@@ -22,6 +22,8 @@ vi.mock("../src/main/scripting.js", () => ({
 
 import {
   buildStoryboardPdf,
+  contain16x9,
+  coverImageRect,
   detectImageKind,
   fitLines,
   footerText,
@@ -142,6 +144,30 @@ describe("footerText / storyboardPdfFileName", () => {
   it("builds a filename-safe default name", () => {
     expect(storyboardPdfFileName("My Film", "v3")).toBe("My-Film-storyboard-v3.pdf");
     expect(storyboardPdfFileName("", "")).toBe("untitled-production-storyboard-v1.pdf");
+  });
+});
+
+describe("contain16x9 / coverImageRect", () => {
+  it("fits the largest exact-16:9 rect inside the bounds", () => {
+    for (const { w, h } of [contain16x9(770, 310), contain16x9(300, 157), contain16x9(300, 493)]) {
+      expect(w / h).toBeCloseTo(16 / 9, 10);
+    }
+    // Height-constrained: full height used.
+    expect(contain16x9(770, 310)).toMatchObject({ h: 310 });
+    // Width-constrained (tall row): full width used.
+    expect(contain16x9(300, 493)).toMatchObject({ w: 300 });
+  });
+  it("cover-scales square/panoramic sources to fill the frame, centered", () => {
+    const frame = { x: 10, y: 20, w: 320, h: 180 };
+    for (const [iw, ih] of [[1, 1], [400, 100], [100, 400], [1920, 1080]]) {
+      const r = coverImageRect(frame.x, frame.y, frame.w, frame.h, iw, ih);
+      // Preserves aspect, covers the frame, stays centered.
+      expect(r.width / r.height).toBeCloseTo(iw / ih, 10);
+      expect(r.width).toBeGreaterThanOrEqual(frame.w - 1e-9);
+      expect(r.height).toBeGreaterThanOrEqual(frame.h - 1e-9);
+      expect(r.x + r.width / 2).toBeCloseTo(frame.x + frame.w / 2, 10);
+      expect(r.y + r.height / 2).toBeCloseTo(frame.y + frame.h / 2, 10);
+    }
   });
 });
 

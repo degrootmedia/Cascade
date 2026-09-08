@@ -362,7 +362,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [view, setView] = useState<CharacterSheetView>("front");
-  const [model, setModel] = useState(imageModels[0]?.id ?? "auto");
+  const [model, setModel] = useState(imageModels[0]?.id ?? "");
   const [resolution, setResolution] = useState("1k");
   const [busy, setBusy] = useState(false);
   const [refining, setRefining] = useState(false);
@@ -397,11 +397,11 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
   const selectCharacter = (id: string) => {
     setCharacterId(id);
     const c = characters.find((x) => x.id === id);
-    if (!c) { setName(""); setDescription(""); setView("front"); setModel(imageModels[0]?.id ?? "auto"); setResolution("1k"); return; }
+    if (!c) { setName(""); setDescription(""); setView("front"); setModel(imageModels[0]?.id ?? ""); setResolution("1k"); return; }
     setName(c.name);
     setDescription(c.builder?.description ?? "");
     setView(c.builder?.view ?? "front");
-    setModel(c.builder?.model && imageModels.some((m) => m.id === c.builder!.model) ? c.builder!.model : "auto");
+    setModel(c.builder?.model && imageModels.some((m) => m.id === c.builder!.model) ? c.builder!.model : (imageModels[0]?.id ?? ""));
     setResolution(c.builder?.resolution ?? "1k");
   };
 
@@ -434,11 +434,11 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
           <label className="prod-label">Model
             <select
               className="prod-openart-select"
-              value={imageModels.some((m) => m.id === model) ? model : "auto"}
+              value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
               onChange={(e) => setModel(e.target.value)}
-              title="OpenArt image model (Auto lets Cascade pick)"
+              title="Image model"
+              disabled={imageModels.length === 0}
             >
-              {imageModels.length === 0 && <option value="auto">Auto</option>}
               {imageModels.map((m) => (
                 <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
               ))}
@@ -512,7 +512,7 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
   const editable = references.filter((r) => r.imagePath || r.artwork);
   const startInEdit = !!initialRefId && editable.some((r) => r.id === initialRefId);
   const [mode, setMode] = useState<"generate" | "edit">(startInEdit ? "edit" : "generate");
-  const [model, setModel] = useState(imageModels[0]?.id ?? "auto");
+  const [model, setModel] = useState(imageModels[0]?.id ?? "");
   const [resolution, setResolution] = useState("1k");
   const [aspectRatio, setAspectRatio] = useState<ImageGenAspectRatio>("16:9");
   const [prompt, setPrompt] = useState("");
@@ -562,17 +562,17 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
         <label className="prod-label">Model</label>
         <select
           className="prod-openart-select"
-          value={imageModels.some((m) => m.id === model) ? model : "auto"}
+          value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
           onChange={(e) => setModel(e.target.value)}
-          title="OpenArt image model (Auto lets Cascade pick)"
+          title="Image model"
+          disabled={imageModels.length === 0}
         >
-          {imageModels.length === 0 && <option value="auto">Auto</option>}
           {imageModels.map((m) => (
             <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
           ))}
         </select>
         {imageModels.length === 0 && (
-          <p className="hint">No image model reported by OpenArt - Auto will pick a default.</p>
+          <p className="hint">No image models reported — connect the media MCP server.</p>
         )}
 
         <div className="prod-video-row">

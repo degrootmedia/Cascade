@@ -51,7 +51,8 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
   };
   useEffect(() => { void refresh(); }, []);
 
-  const openNew = () => setEditing({ id: null, prompt: "", meta: { name: "", description: "", model: "arya", allowedTools: "all", avatar: null } });
+  // Empty model = follow the app's selected model at run time.
+  const openNew = () => setEditing({ id: null, prompt: "", meta: { name: "", description: "", model: "", allowedTools: "all", avatar: null } });
   const openEdit = async (id: string) => {
     const d = await window.cascade.getAgent(id);
     if (!d) return;
@@ -64,9 +65,9 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
     if (!name) { alert("Name is required"); return; }
     const allowedTools = editing.meta.allowedTools as "all" | string[] | undefined;
     if (editing.id) {
-      await window.cascade.updateAgent(editing.id, { name, description: editing.meta.description ?? "", model: editing.meta.model ?? "arya", allowedTools: allowedTools ?? "all", prompt: editing.prompt, avatar: editing.meta.avatar ?? null });
+      await window.cascade.updateAgent(editing.id, { name, description: editing.meta.description ?? "", model: editing.meta.model ?? "", allowedTools: allowedTools ?? "all", prompt: editing.prompt, avatar: editing.meta.avatar ?? null });
     } else {
-      await window.cascade.createAgent({ name, description: editing.meta.description ?? "", model: editing.meta.model ?? "arya", allowedTools: allowedTools ?? "all", prompt: editing.prompt, avatar: editing.meta.avatar ?? null });
+      await window.cascade.createAgent({ name, description: editing.meta.description ?? "", model: editing.meta.model ?? "", allowedTools: allowedTools ?? "all", prompt: editing.prompt, avatar: editing.meta.avatar ?? null });
     }
     setEditing(null);
     void refresh();
@@ -158,7 +159,7 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
                     // stash as emoji hack: store dataUrl in a temp field, will be handled on save
                     // simplest: create the agent now with placeholder, then upload
                     const name = (editing.meta.name ?? "").trim() || "Agent";
-                    const id = await window.cascade.createAgent({ name, description: editing.meta.description ?? "", model: editing.meta.model ?? "arya", allowedTools: (editing.meta.allowedTools as "all"|string[]) ?? "all", prompt: editing.prompt, avatar: null });
+                    const id = await window.cascade.createAgent({ name, description: editing.meta.description ?? "", model: editing.meta.model ?? "", allowedTools: (editing.meta.allowedTools as "all"|string[]) ?? "all", prompt: editing.prompt, avatar: null });
                     await window.cascade.uploadAgentAvatar(id, dataUrl);
                     setEditing(null);
                     void refresh();
@@ -172,8 +173,9 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
                 {editing.meta.avatar && <button className="link" onClick={() => setEditing({ ...editing, meta: { ...editing.meta, avatar: null } })}>Clear</button>}
               </div>
               <label>Model</label>
-              <select value={editing.meta.model ?? "arya"} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, model: e.target.value } })} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
-                {models.length ? [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id)).map((m) => <option key={m.id} value={m.id}>{m.id}</option>) : <option value="arya">arya</option>}
+              <select value={editing.meta.model ?? ""} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, model: e.target.value } })} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
+                <option value="">(chat default)</option>
+                {models.length ? [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id)).map((m) => <option key={m.id} value={m.id}>{m.id}</option>) : null}
                 {!models.find((m) => m.id === editing.meta.model) && editing.meta.model && <option value={editing.meta.model}>{editing.meta.model}</option>}
               </select>
               <label>Allowed tools</label>

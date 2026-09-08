@@ -180,6 +180,12 @@ export interface AgentConfig {
   apiKey: string;
   model: string;
   baseUrl?: string;
+  /**
+   * Cheap background model used for compaction (titles come through
+   * suggestChatTitle). Resolved per provider by the app from its model list
+   * (the cheapest usable model); falls back to `model` when omitted.
+   */
+  helperModel?: string;
   /** Folder the agent may touch; omitted in pure-chat mode. */
   workspaceRoot?: string;
   maxIterations?: number;

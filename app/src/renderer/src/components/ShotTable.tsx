@@ -4,12 +4,14 @@
  * Shots are draggable via the handle on the left — dropped shots re-number
  * the whole production and relocate board files.
  * Dropzones sit explicitly BETWEEN rows (and at scene ends) with a clear
- * accent insertion line, so landing position is predictable.
+ * accent insertion line, so landing position is predictable. When nothing is
+ * being dragged, the same gaps grow a hover "+" that inserts a blank shot;
+ * the gaps between scenes grow a hover "+" that adds a new scene.
  */
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import type { Production, ProductionScene } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
-import { DragHandleIcon, InsertIcon, PlusIcon, XIcon } from "./icons.js";
+import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 
 interface Props {
@@ -30,21 +32,30 @@ export function ShotTable({ prod, onMutation }: Props) {
   if (!prod.scenes.length) return null;
   return (
     <div className="shot-table">
-      {prod.scenes.map((scene) => (
-        <SceneBlock
-          key={scene.number}
-          scene={scene}
-          prod={prod}
-          onMutation={onMutation}
-          dragId={dragId}
-          dragIdRef={dragIdRef}
-          activeZone={activeZone}
-          onDragStart={(id) => { dragIdRef.current = id; setDragId(id); }}
-          onDragEnd={() => { dragIdRef.current = null; setDragId(null); setActiveZone(null); }}
-          onActiveZone={setActiveZone}
-          onReorder={handleReorder}
-        />
+      {prod.scenes.map((scene, i) => (
+        <Fragment key={scene.number}>
+          {i > 0 && (
+            <SceneInsertZone
+              prodId={prod.meta.id}
+              afterSceneNumber={prod.scenes[i - 1].number}
+              onMutation={onMutation}
+            />
+          )}
+          <SceneBlock
+            scene={scene}
+            prod={prod}
+            onMutation={onMutation}
+            dragId={dragId}
+            dragIdRef={dragIdRef}
+            activeZone={activeZone}
+            onDragStart={(id) => { dragIdRef.current = id; setDragId(id); }}
+            onDragEnd={() => { dragIdRef.current = null; setDragId(null); setActiveZone(null); }}
+            onActiveZone={setActiveZone}
+            onReorder={handleReorder}
+          />
+        </Fragment>
       ))}
+      <SceneInsertZone prodId={prod.meta.id} afterSceneNumber={null} onMutation={onMutation} />
     </div>
   );
 }
@@ -98,17 +109,19 @@ function SceneBlock({ scene, prod, onMutation, dragId, dragIdRef, activeZone, on
           </div>
 
           {scene.shots.map((shot, i) => (
-            <div key={shot.id}>
-              <ShotDropZone
-                beforeId={shot.id}
+            <Fragment key={shot.id}>
+              <ShotGap
                 scene={scene}
                 prod={prod}
+                index={i}
+                beforeId={shot.id}
                 isDragging={isDragging}
                 dragIdRef={dragIdRef}
                 activeZone={activeZone}
                 onActiveZone={onActiveZone}
                 onReorder={onReorder}
                 onDragEnd={onDragEnd}
+                onMutation={onMutation}
               />
               <ShotRow
                 prod={prod}
@@ -120,27 +133,35 @@ function SceneBlock({ scene, prod, onMutation, dragId, dragIdRef, activeZone, on
                 onDragStart={onDragStart}
                 onDragEnd={onDragEnd}
               />
-            </div>
+            </Fragment>
           ))}
           {/* Final insertion point at end of production — only on last scene */}
           {prod.scenes[prod.scenes.length - 1]?.number === scene.number && (
-            <ShotDropZone
-              beforeId={null}
+            <ShotGap
               scene={scene}
               prod={prod}
+              index={scene.shots.length}
+              beforeId={null}
               isDragging={isDragging}
               dragIdRef={dragIdRef}
               activeZone={activeZone}
               onActiveZone={onActiveZone}
               onReorder={onReorder}
               onDragEnd={onDragEnd}
-              isLastInProduction
+              onMutation={onMutation}
             />
           )}
 
           {scene.shots.length === 0 && !isDragging && (
             <div className="shot-row empty-drop" title="Drop a shot here to move it into this scene">
-              Drop shots here
+              <button
+                className="shot-insert-gap"
+                title="Add a blank shot to this scene"
+                onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0))}
+              >
+                <PlusIcon size={12} />
+              </button>
+              <span>Drop shots here</span>
             </div>
           )}
         </div>
@@ -149,22 +170,39 @@ function SceneBlock({ scene, prod, onMutation, dragId, dragIdRef, activeZone, on
   );
 }
 
-function ShotDropZone({ beforeId, scene, prod, isDragging, dragIdRef, activeZone, onActiveZone, onReorder, onDragEnd, isLastInProduction }: {
-  beforeId: string | null;
+/**
+ * The gap between two rows (or at the end of the production). While a shot is
+ * dragged it is a reorder dropzone; otherwise it shows a hover "+" that
+ * inserts a blank shot at `index` within the scene.
+ */
+function ShotGap({ scene, prod, index, beforeId, isDragging, dragIdRef, activeZone, onActiveZone, onReorder, onDragEnd, onMutation }: {
   scene: ProductionScene;
   prod: Production;
+  index: number;
+  beforeId: string | null;
   isDragging: boolean;
   dragIdRef: React.MutableRefObject<string | null>;
   activeZone: string | null;
   onActiveZone: (id: string | null) => void;
   onReorder: (shotId: string, beforeShotId: string | null) => void;
   onDragEnd: () => void;
-  isLastInProduction?: boolean;
+  onMutation: Props["onMutation"];
 }) {
-  const resolvedBeforeId = beforeId;
-  const resolvedKey = zoneKey(resolvedBeforeId);
+  const resolvedKey = zoneKey(beforeId);
 
-  if (!isDragging) return <div className="shot-drop-zone idle" aria-hidden />;
+  if (!isDragging) {
+    return (
+      <div className="shot-insert-zone">
+        <button
+          className="shot-insert-gap"
+          title="Insert a blank shot here"
+          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, index))}
+        >
+          <PlusIcon size={12} />
+        </button>
+      </div>
+    );
+  }
 
   const showActive = activeZone === resolvedKey;
 
@@ -173,7 +211,7 @@ function ShotDropZone({ beforeId, scene, prod, isDragging, dragIdRef, activeZone
       className={"shot-drop-zone" + (showActive ? " active" : "")}
       onDragOver={(e) => {
         if (!dragIdRef.current) return;
-        if (dragIdRef.current === resolvedBeforeId) return;
+        if (dragIdRef.current === beforeId) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         if (activeZone !== resolvedKey) onActiveZone(resolvedKey);
@@ -188,15 +226,33 @@ function ShotDropZone({ beforeId, scene, prod, isDragging, dragIdRef, activeZone
         e.stopPropagation();
         const src = dragIdRef.current;
         onActiveZone(null);
-        if (!src || src === resolvedBeforeId) { onDragEnd(); return; }
-        onReorder(src, resolvedBeforeId);
+        if (!src || src === beforeId) { onDragEnd(); return; }
+        onReorder(src, beforeId);
         onDragEnd();
       }}
     >
       <div className="shot-drop-line">
         <span className="shot-drop-dot" />
-        <span className="shot-drop-label">Drop here — before {resolvedBeforeId ? `#${prod.scenes.flatMap((s) => s.shots).find((s) => s.id === resolvedBeforeId)?.number ?? ""}` : "end"}</span>
       </div>
+    </div>
+  );
+}
+
+/** Hover "+" between two scenes (or after the last) that adds a new scene. */
+function SceneInsertZone({ prodId, afterSceneNumber, onMutation }: {
+  prodId: string;
+  afterSceneNumber: number | null;
+  onMutation: Props["onMutation"];
+}) {
+  return (
+    <div className="scene-insert-zone">
+      <button
+        className="shot-insert-gap"
+        title={afterSceneNumber === null ? "Add a scene at the end" : "Add a scene after this one (later scenes renumber)"}
+        onClick={() => onMutation(window.cascade.addScene(prodId, afterSceneNumber))}
+      >
+        <PlusIcon size={12} />
+      </button>
     </div>
   );
 }
@@ -254,13 +310,6 @@ function ShotRow({ prod, scene, index, onMutation, dragId, dragIdRef, onDragStar
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit(); } }}
       />
       <span className="shot-actions">
-        <button
-          className="shot-insert"
-          title={`Insert a shot between ${shot.number} and the next (mid-numbered)`}
-          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, index + 1))}
-        >
-          <InsertIcon size={13} />
-        </button>
         <button
           className="shot-delete"
           title="Delete this shot (numbers keep their gaps)"

@@ -17,6 +17,12 @@ interface SettingsFile {
   encryptedApiKeys: Record<string, string>;
   /** Last chosen model per provider id. */
   models: Record<string, string>;
+  /**
+   * Cheap background model per provider id (compaction, chat titles),
+   * auto-recorded from each models:list response as the cheapest usable
+   * model. Falls back to the selected model when unknown.
+   */
+  helpers: Record<string, string>;
   workspace: string | null;
   /** Most recently used folders, most-recent first. */
   recentWorkspaces: string[];
@@ -28,12 +34,21 @@ interface SettingsFile {
    * schema set is large and rarely needed.
    */
   mcpOnDemand: string[];
+  /** Which MCP vendor serves image/video generation (global setting). */
+  mediaProvider: string;
   /** UI accent color (hex), applied to the --accent CSS variable. */
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
   externalEditor: string | null;
   /** base64-encrypted 3D AI Studio API key (separate from the LLM keys). */
   encrypted3daiApiKey: string | null;
+  /**
+   * Manual allowlist of video model ids the user has declared end-frame
+   * capable (the in-betweener's start→end submit path). Merged with the
+   * providers' live capability probe in production:videoEndFrameModels —
+   * the union is what the tween node's dropdown offers.
+   */
+  endFrameModels: string[];
   /** Last main-window bounds + maximized flag, restored on launch. */
   windowState: WindowState | null;
 }
@@ -51,13 +66,16 @@ const DEFAULTS: SettingsFile = {
   provider: "gab",
   encryptedApiKeys: {},
   models: {},
+  helpers: {},
   workspace: null,
   recentWorkspaces: [],
   recentProductions: [],
   mcpOnDemand: ["openart"],
+  mediaProvider: "openart",
   accent: "#4f8ef7",
   externalEditor: null,
   encrypted3daiApiKey: null,
+  endFrameModels: [],
   windowState: null,
 };
 const MAX_RECENT_WORKSPACES = 10;
@@ -88,6 +106,11 @@ function load(): SettingsFile {
   delete legacy.encryptedApiKey;
   delete legacy.model;
   if (!getProvider(s.provider)) s.provider = "gab";
+  // Higgsfield exposes ~100 tools — keep it on-demand like OpenArt so the
+  // default agent payload stays lean. Applies to fresh installs (DEFAULTS
+  // lacks it) and migrates existing profiles that predate the vendor.
+  if (!s.mcpOnDemand.includes("higgsfield")) s.mcpOnDemand = [...s.mcpOnDemand, "higgsfield"];
+  if (s.mediaProvider !== "higgsfield" && s.mediaProvider !== "openart") s.mediaProvider = "openart";
   cache = s;
   return cache!;
 }
@@ -154,6 +177,22 @@ export function setModel(model: string, provider?: string): void {
   save();
 }
 
+/**
+ * Cheap background model for the provider (compaction, chat titles): the
+ * auto-recorded cheapest usable model, falling back to the selected model.
+ */
+export function getHelperModel(provider?: string): string {
+  const id = provider ?? currentProvider();
+  return load().helpers?.[id] || getModel(id);
+}
+
+/** Record the provider's background model (called from models:list). */
+export function setHelperModel(model: string, provider?: string): void {
+  if (!model) return;
+  load().helpers[provider ?? currentProvider()] = model;
+  save();
+}
+
 export function getWorkspace(): string | null {
   return load().workspace;
 }
@@ -199,6 +238,17 @@ export function setMcpOnDemand(names: string[]): void {
   save();
 }
 
+/** Which MCP vendor serves image/video generation ("openart" default). */
+export function getMediaProvider(): string {
+  const v = load().mediaProvider;
+  return v === "higgsfield" ? "higgsfield" : "openart";
+}
+
+export function setMediaProvider(id: string): void {
+  load().mediaProvider = id === "higgsfield" ? "higgsfield" : "openart";
+  save();
+}
+
 /** UI accent color (hex string). */
 export function getAccent(): string {
   return load().accent ?? DEFAULTS.accent;
@@ -241,6 +291,25 @@ export function set3daiApiKey(key: string): void {
     throw new Error("OS encryption unavailable; refusing to store API key in plain text");
   }
   s.encrypted3daiApiKey = key ? safeStorage.encryptString(key).toString("base64") : null;
+  save();
+}
+
+/** The user's manual end-frame model allowlist (see endFrameModels). */
+export function getEndFrameModels(): string[] {
+  return load().endFrameModels ?? [];
+}
+
+export function setEndFrameModels(ids: string[]): void {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    if (typeof raw !== "string") continue;
+    const id = raw.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    clean.push(id);
+  }
+  load().endFrameModels = clean.slice(0, 200);
   save();
 }
 

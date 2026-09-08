@@ -11,9 +11,10 @@
  * Panel rule (mirrors the Step 3 board grid): the full-res original is
  * preferred for print, falling back to the JPEG preview when the original is
  * missing or isn't embeddable (webp/gif). Shots with no frame at all render
- * a placeholder box so the Audio/Visual text still prints.
+ * a placeholder box so the Audio/Visual text still prints. Frames are always
+ * exact 16:9 — borderless, image cover-cropped (center) to fill edge to edge.
  */
-import { PDFDocument, StandardFonts, rgb, grayscale, type PDFFont, type PDFPage, type PDFImage } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb, grayscale, pushGraphicsState, popGraphicsState, rectangle, clip, endPath, type PDFFont, type PDFPage, type PDFImage } from "pdf-lib";
 import type { Production, ProductionShot } from "../shared/ipc.js";
 import { assetPath, originalForJpegRel } from "./pipeline.js";
 
@@ -165,6 +166,28 @@ export function fitLines(lines: string[], maxLines: number): string[] {
   return kept;
 }
 
+/** Largest exact-16:9 rect that fits inside maxW × maxH. */
+export function contain16x9(maxW: number, maxH: number): { w: number; h: number } {
+  const ratio = 16 / 9;
+  if (maxW / maxH > ratio) return { w: maxH * ratio, h: maxH };
+  return { w: maxW, h: maxW / ratio };
+}
+
+/** Cover-scale placement: image fills the frame, center-cropped, no distortion. */
+export function coverImageRect(
+  frameX: number,
+  frameY: number,
+  frameW: number,
+  frameH: number,
+  imgW: number,
+  imgH: number
+): { x: number; y: number; width: number; height: number } {
+  const scale = Math.max(frameW / imgW, frameH / imgH);
+  const dw = imgW * scale;
+  const dh = imgH * scale;
+  return { x: frameX + (frameW - dw) / 2, y: frameY + (frameH - dh) / 2, width: dw, height: dh };
+}
+
 interface Fonts {
   regular: PDFFont;
   bold: PDFFont;
@@ -202,7 +225,8 @@ function drawLabeledBox(
   });
 }
 
-/** Fit an image (contain) inside a rect; null image draws the placeholder. */
+/** Draw the still frame: exact-16:9 rect, borderless, image cover-cropped to
+ * fill it. Null image draws the placeholder box (the only framed state). */
 async function drawFrame(
   doc: PDFDocument,
   page: PDFPage,
@@ -214,16 +238,16 @@ async function drawFrame(
   image: StoryboardPdfImage | null | undefined,
   shotNumber: string
 ): Promise<void> {
-  page.drawRectangle({
-    x,
-    y,
-    width: w,
-    height: h,
-    color: image ? undefined : PLACEHOLDER_FILL,
-    borderColor: HAIRLINE,
-    borderWidth: 0.75,
-  });
   if (!image) {
+    page.drawRectangle({
+      x,
+      y,
+      width: w,
+      height: h,
+      color: PLACEHOLDER_FILL,
+      borderColor: HAIRLINE,
+      borderWidth: 0.75,
+    });
     const msg = `No frame yet — Shot ${shotNumber}`;
     const size = 10;
     const tw = fonts.regular.widthOfTextAtSize(msg, size);
@@ -231,10 +255,10 @@ async function drawFrame(
     return;
   }
   const embedded = image.kind === "png" ? await doc.embedPng(image.bytes) : await doc.embedJpg(image.bytes);
-  const scale = Math.min(w / embedded.width, h / embedded.height);
-  const dw = embedded.width * scale;
-  const dh = embedded.height * scale;
-  page.drawImage(embedded, { x: x + (w - dw) / 2, y: y + (h - dh) / 2, width: dw, height: dh });
+  const placed = coverImageRect(x, y, w, h, embedded.width, embedded.height);
+  page.pushOperators(pushGraphicsState(), rectangle(x, y, w, h), clip(), endPath());
+  page.drawImage(embedded, { x: placed.x, y: placed.y, width: placed.width, height: placed.height });
+  page.pushOperators(popGraphicsState());
 }
 
 function drawFooter(
@@ -291,9 +315,12 @@ async function drawSinglePanelPage(
   const gap = 8;
   const availH = cursor - contentBottom;
   const frameH = Math.max(140, Math.min(310, availH - 130));
+  // Exact 16:9, centered — the cover-crop in drawFrame fills it edge to edge.
+  const { w: frameW } = contain16x9(contentW, frameH);
+  const frameX = MARGIN + (contentW - frameW) / 2;
   const boxesH = availH - frameH - gap * 2;
   const boxH = boxesH / 2;
-  await drawFrame(doc, page, fonts, MARGIN, cursor - frameH, contentW, frameH, panel.image, panel.number);
+  await drawFrame(doc, page, fonts, frameX, cursor - frameH, frameW, frameH, panel.image, panel.number);
   cursor -= frameH + gap;
   drawLabeledBox(page, fonts, MARGIN, cursor - boxH, contentW, boxH, "Audio:", panel.audio, 9.5);
   cursor -= boxH + gap;
@@ -316,8 +343,13 @@ async function drawTriplePanelPage(
   let top = contentTop;
   for (const panel of panels) {
     const rowY = top - rowH;
-    const frameW = Math.min(300, rowH * (16 / 9));
-    await drawFrame(doc, page, fonts, MARGIN, rowY, frameW, rowH, panel.image, panel.number);
+    // Exact 16:9 frame, vertically centered in the row; narrow rows keep full
+    // height, tall rows (1–2 panels on the last page) cap at 300 wide.
+    const fitted = contain16x9(Math.min(300, contentW), rowH);
+    const frameW = fitted.w;
+    const frameH = fitted.h;
+    const frameY = rowY + (rowH - frameH) / 2;
+    await drawFrame(doc, page, fonts, MARGIN, frameY, frameW, frameH, panel.image, panel.number);
     const textX = MARGIN + frameW + 10;
     const textW = contentW - frameW - 10;
     const headSize = 11;

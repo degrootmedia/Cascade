@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { classifyCommand, lineDiff } from "../src/tools.js";
 import { planCompaction, historySize, summaryMessage } from "../src/compact.js";
-import { friendlyApiError } from "../src/gab.js";
+import { friendlyApiError } from "../src/chat.js";
 import type { ChatMessage } from "../src/types.js";
 
 describe("classifyCommand", () => {

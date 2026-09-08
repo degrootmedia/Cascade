@@ -14,6 +14,7 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { GraphGenItem, OpenArtModelChoice, TweenBlock, VideoModelOptions } from "../../../shared/ipc.js";
+import { closestResolution } from "./resolution.js";
 
 export const TWEEN_MIN_REFS = 2;
 export const TWEEN_MAX_REFS = 5;
@@ -87,28 +88,62 @@ export interface TweenKeyframe {
 }
 
 /** Limit the tween model lists to the models proven (via their live form
- *  schema) to accept a dedicated end-frame slot. Auto is never filtered —
- *  the submit path prefers end-frame models for it automatically. When
- *  nothing is proven (`null`/empty — forms unreadable or still warming), the
- *  full video list is kept so the dropdown never strands the user; the saved
- *  selection is always kept so a re-filter can't orphan it. */
+ *  schema, or the user's manual allowlist merged in upstream) to accept a
+ *  dedicated end-frame slot. Strict: a resolved list (`[]` included) means
+ *  ONLY those models are selectable — the submit path must ride the start/end
+ *  roles. The full video list shows only while the probe is still pending
+ *  (`null`/`undefined`), so the dropdown never strands on first paint. A
+ *  saved selection outside the set is dropped; callers resolve the effective
+ *  model to the first entry when submitting. */
 export function filterTweenModels(
   videoModels: OpenArtModelChoice[],
-  endFrameIds: string[] | null | undefined,
-  savedModelId?: string
+  endFrameIds: string[] | null | undefined
 ): OpenArtModelChoice[] {
-  if (!endFrameIds?.length) return videoModels;
+  if (!endFrameIds) return videoModels;
   const ids = new Set(endFrameIds);
-  const out = videoModels.filter((m) => ids.has(m.id));
-  if (savedModelId && savedModelId !== "auto" && !out.some((m) => m.id === savedModelId)) {
-    const saved = videoModels.find((m) => m.id === savedModelId);
-    if (saved) out.push(saved);
+  return videoModels.filter((m) => ids.has(m.id));
+}
+
+/** Whether a video model's live duration options cover a tween block length.
+ *  Unknown options (null/undefined, or an empty durations list) mean
+ *  compatible — the form couldn't be read, so the dropdown must not strand
+ *  and blocks must not warn. Otherwise the block length (whole seconds, as
+ *  the timeline snaps) must be one of the model's accepted lengths — e.g. a
+ *  model with a 4s minimum reports [4,5,…] and a 2s block is incompatible. */
+export function tweenSupportsDuration(
+  opts: VideoModelOptions | null | undefined,
+  durationSec: number
+): boolean {
+  if (!opts || !Array.isArray(opts.durations) || opts.durations.length === 0) return true;
+  return opts.durations.includes(Math.round(durationSec));
+}
+
+/** Human-readable summary of a model's accepted lengths ("4–15s" for a
+ *  contiguous range, "4, 8s" for discrete picks, "" when unknown). */
+export function tweenSupportedLabel(durations: number[] | undefined): string {
+  if (!durations?.length) return "";
+  const sorted = [...durations].sort((a, b) => a - b);
+  let contiguous = sorted.length > 2;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] !== sorted[i - 1] + 1) { contiguous = false; break; }
   }
-  return out.length ? out : videoModels;
+  if (contiguous) return `${sorted[0]}–${sorted[sorted.length - 1]}s`;
+  return `${sorted.join(", ")}s`;
 }
 
 function tweenMediaUrl(prodId: string, rel: string): string {
   return `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
+}
+
+/** The take a block previews: the explicitly selected generation, or undefined
+ *  to show the keyframes. A cleared selection (`genIndex` absent — the
+ *  dropdown's "Keyframes" option, or a block that never generated) previews
+ *  the keyframes; an out-of-range index also falls back to keyframes. The
+ *  stitch input is separate — `tweenSelectedClips` still falls back to the
+ *  newest take — so previewing keyframes never un-selects the take. */
+export function tweenPreviewTake(block: TweenBlock): GraphGenItem | undefined {
+  if (block.genIndex === undefined) return undefined;
+  return block.gens?.[block.genIndex];
 }
 
 function genLabel(g: GraphGenItem, i: number): string {
@@ -118,7 +153,7 @@ function genLabel(g: GraphGenItem, i: number): string {
 }
 
 function BlockPreview({ prodId, block, keyframes }: { prodId: string; block: TweenBlock; keyframes: TweenKeyframe[] }) {
-  const sel = block.gens?.[block.genIndex ?? 0];
+  const sel = tweenPreviewTake(block);
   const start = keyframes.find((k) => k.id === block.startRefId);
   const end = keyframes.find((k) => k.id === block.endRefId);
   if (sel?.path) {
@@ -147,7 +182,8 @@ function BlockPreview({ prodId, block, keyframes }: { prodId: string; block: Twe
 export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   prodId: string;
   shotNumber: string;
-  /** Ordered keyframe ref ids (wired on the canvas). */
+  /** Ordered keyframe source ids (wired on the canvas): reference ids or the
+   *  image/edit node sentinels. */
   refIds: string[];
   /** Persisted blocks (prompts, timing, history) — display is derived. */
   blocks: TweenBlock[];
@@ -160,11 +196,15 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   onResolutionChange: (resolution: string) => void;
   /** Persist block edits (prompt, timing, history selection). */
   onBlocksChange: (blocks: TweenBlock[]) => void;
-  /** Generate one block's clip (uses the persisted model/resolution). */
-  onRunBlock: (blockId: string) => Promise<void>;
+  /** Generate one block's clip (uses the persisted model/resolution, plus the
+   *  block's displayed length so a retime that hasn't saved yet still submits
+   *  the timing the user sees). */
+  onRunBlock: (blockId: string, durationSec: number) => Promise<void>;
   busyBlock: string | null;
   /** Stitch every block's selected clip into the continuous shot. */
   onStitch: () => Promise<void>;
+  /** Undo the stitch — back to the individual block clips. */
+  onUnstitch: () => Promise<void>;
   stitching: boolean;
   stitched: boolean;
   reencoded: boolean;
@@ -176,7 +216,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const {
     prodId, shotNumber, refIds, blocks, keyframes, model, resolution, videoModels,
     onModelOptions, onModelChange, onResolutionChange, onBlocksChange,
-    onRunBlock, busyBlock, onStitch, stitching, stitched, reencoded,
+    onRunBlock, busyBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
     onPipeToOutput, piped, onClose,
   } = props;
 
@@ -201,11 +241,44 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   useEffect(() => {
     let live = true;
     setOpts(null);
-    if (model && model !== "auto") void onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+    if (model) void onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
     return () => { live = false; };
   }, [model, onModelOptions]);
 
+  // Duration options for EVERY listed model (image-to-video form — the tween
+  // always submits start+end frames). The per-model cache in NodeGraphModal
+  // makes this cheap; pending entries stay absent so unknown models never
+  // ghost or warn until their real options arrive.
+  const [allOpts, setAllOpts] = useState<Record<string, VideoModelOptions | null>>({});
+  const modelIdsKey = videoModels.map((m) => m.id).join(",");
+  useEffect(() => {
+    let live = true;
+    setAllOpts({});
+    const ids = videoModels.map((m) => m.id).filter(Boolean);
+    if (!ids.length) return () => { live = false; };
+    void Promise.all(ids.map(async (id) => {
+      try {
+        const o = await onModelOptions(id, true);
+        if (live) setAllOpts((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: o }));
+      } catch {
+        if (live) setAllOpts((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: null }));
+      }
+    }));
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelIdsKey, onModelOptions]);
+
   const resolutions = opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"];
+
+  // When a different model's options arrive, re-pick the persisted resolution
+  // to the closest one the model supports (the timeline persists it, so the
+  // stale value must not survive as a phantom dropdown entry).
+  useEffect(() => {
+    if (opts && resolutions.length && !resolutions.includes(resolution)) {
+      onResolutionChange(closestResolution(resolution, resolutions));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opts]);
 
   // Display blocks: derived from the wired order every render (instant even
   // before the save round-trip persists them), overlaid with the active drag.
@@ -218,6 +291,12 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const total = display.length ? display[display.length - 1].startSec + display[display.length - 1].durationSec : 0;
   const focus = display.find((b) => b.id === focusId) ?? display[0];
   const ready = display.filter((b) => b.gens?.[b.genIndex ?? 0]?.path).length;
+  // The model actually driving generation (the dropdown falls back to the
+  // first listed model when the persisted pick isn't offered). Block warnings
+  // and dropdown ghosting both key off its live duration options; unknown
+  // options (still loading, or an empty durations list) never warn/ghost.
+  const effectiveModel = videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? model);
+  const selectedOpts = allOpts[effectiveModel] ?? opts;
 
   const keyTime = (id: string): number => {
     const i = refIds.indexOf(id);
@@ -278,10 +357,32 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
         </div>
 
         <div className="prod-tween-controls">
-          <select className="prod-openart-select" value={model} onChange={(e) => onModelChange(e.target.value)} title="OpenArt video model">
-            <option value="auto">Auto</option>
-            {videoModels.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
+          <select
+            className="prod-openart-select"
+            value={videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? "")}
+            onChange={(e) => onModelChange(e.target.value)}
+            title="Video model"
+            disabled={videoModels.length === 0}
+          >
+            {videoModels.map((m) => {
+              const mo = allOpts[m.id];
+              const bad = !!focus && mo !== undefined && !tweenSupportsDuration(mo, focus.durationSec);
+              const supported = tweenSupportedLabel(mo?.durations);
+              return (
+                <option
+                  key={m.id}
+                  value={m.id}
+                  disabled={bad}
+                  title={bad ? `${m.description ? `${m.description} — ` : ""}Doesn't support the selected ${focus.durationSec}s block${supported ? ` (supports ${supported})` : ""}.` : m.description}
+                >
+                  {bad ? `${m.displayName} (no ${focus.durationSec}s)` : m.displayName}
+                </option>
+              );
+            })}
           </select>
+          {videoModels.length === 0 && (
+            <span className="hint">No end-frame video models available — add ids in Settings → Media generation.</span>
+          )}
           <select className="prod-openart-select" value={resolution} onChange={(e) => onResolutionChange(e.target.value)} title="Resolution">
             {resolutions.includes(resolution) ? null : <option value={resolution}>{resolution}</option>}
             {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
@@ -292,9 +393,15 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
               {reencoded ? "Stitched (preview re-encoded)" : "Stitched losslessly"}
             </span>
           )}
-          <button className="prod-btn primary" disabled={stitching || !display.length || ready < display.length} onClick={() => { void onStitch(); }} title={ready < display.length ? "Generate every action block first" : "Stitch the selected clips into one continuous shot"}>
-            {stitching ? "Stitching…" : "Stitch continuous shot"}
-          </button>
+          {stitched ? (
+            <button className="prod-btn primary" disabled={stitching} onClick={() => { void onUnstitch(); }} title="Undo the stitch — back to the individual block clips so you can view, edit, and re-stitch">
+              {stitching ? "Reverting…" : "Undo stitch"}
+            </button>
+          ) : (
+            <button className="prod-btn primary" disabled={stitching || !display.length || ready < display.length} onClick={() => { void onStitch(); }} title={ready < display.length ? "Generate every action block first" : "Stitch the selected clips into one continuous shot"}>
+              {stitching ? "Stitching…" : "Stitch continuous shot"}
+            </button>
+          )}
           {stitched && !piped && (
             <button className="prod-btn" onClick={onPipeToOutput} title="Feed the stitched clip into the frame output node">
               Pipe to output
@@ -305,7 +412,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
         <div className="prod-tween-preview">
           {focus
             ? <BlockPreview prodId={prodId} block={focus} keyframes={keyframes} />
-            : <div className="prod-tween-preview-empty">Wire 2–5 keyframes into the in-betweener node to start a timeline.</div>}
+            : <div className="prod-tween-preview-empty">Wire 2–5 keyframes (references or generated frames) into the in-betweener node to start a timeline.</div>}
         </div>
 
         {display.length > 0 && (
@@ -314,7 +421,9 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
               const left = (b.startSec / TWEEN_MAX_TOTAL_SEC) * 100;
               const width = (b.durationSec / TWEEN_MAX_TOTAL_SEC) * 100;
               const start = keyframes.find((k) => k.id === b.startRefId);
-              const sel = b.gens?.[b.genIndex ?? 0];
+              const sel = tweenPreviewTake(b);
+              const badLength = !tweenSupportsDuration(selectedOpts, b.durationSec);
+              const supported = tweenSupportedLabel(selectedOpts?.durations);
               return (
                 <div
                   key={b.id}
@@ -324,6 +433,14 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   title={`${start?.name ?? ""} → ${keyframes.find((k) => k.id === b.endRefId)?.name ?? ""} · ${b.durationSec}s`}
                 >
                   <div className="prod-tween-block-label">{b.startSec.toFixed(0)}s → {(b.startSec + b.durationSec).toFixed(0)}s</div>
+                  {badLength && (
+                    <div
+                      className="prod-tween-block-warn"
+                      title={`The chosen model supports ${supported || "other lengths"} — retime the block or pick another model.`}
+                    >
+                      The chosen model doesn't support this block length.
+                    </div>
+                  )}
                   <textarea
                     className="prod-tween-prompt"
                     placeholder="Action leading to the next frame…"
@@ -336,9 +453,9 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   <div className="prod-tween-block-row" onClick={(e) => e.stopPropagation()}>
                     <button
                       className="prod-btn primary prod-tween-go"
-                      disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim()}
-                      onClick={() => { saveDraft(b.id); void onRunBlock(b.id); }}
-                      title="Generate this block's in-between clip"
+                      disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || badLength}
+                      onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec); }}
+                      title={badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
                     >
                       {busyBlock === b.id ? "Generating…" : "Submit block"}
                     </button>
@@ -380,7 +497,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
           </div>
         )}
         {display.length === 0 && (
-          <div className="prod-tween-empty">Connect 2–5 reference images to the in-betweener node's keyframe sockets, then reopen the timeline.</div>
+          <div className="prod-tween-empty">Connect 2–5 keyframes — reference images, the image node's frame, or the edit node's output — to the in-betweener node's sockets, then reopen the timeline.</div>
         )}
       </div>
     </div>

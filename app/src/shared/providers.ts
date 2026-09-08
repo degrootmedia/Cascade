@@ -2,6 +2,11 @@
  * LLM API providers selectable in Settings. Each provider is an
  * OpenAI-compatible endpoint; the selected one drives chat, titles, the model
  * list, and the production pipeline's LLM calls.
+ *
+ * This file is the one home for provider differences: everything a new
+ * provider needs is data here (endpoint, default model, optional balance
+ * endpoint) — cost semantics are derived from each model's own fields by
+ * detectCost, never from the provider id.
  */
 export interface ApiProvider {
   id: string;
@@ -9,11 +14,18 @@ export interface ApiProvider {
   baseUrl: string;
   /** Model used when the provider has no per-provider model saved yet. */
   defaultModel: string;
+  /**
+   * Balance endpoint semantics, when the provider exposes one. "credits" =
+   * GET {baseUrl}/credits → { total_available: number }. Providers without an
+   * entry never get a balance request (the UI hides the balance line).
+   */
+  balance?: "credits";
 }
 
 export const API_PROVIDERS: ApiProvider[] = [
-  { id: "gab", label: "Gab.ai", baseUrl: "https://gab.ai/v1", defaultModel: "arya" },
+  { id: "gab", label: "Gab.ai", baseUrl: "https://gab.ai/v1", defaultModel: "arya", balance: "credits" },
   { id: "cheaperinference", label: "Cheaper Inference", baseUrl: "https://api.cheaperinference.com/v1", defaultModel: "" },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "" },
 ];
 
 export function getProvider(id: string): ApiProvider | undefined {
@@ -80,19 +92,46 @@ function formatUsd(x: number): string {
   return `$${x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** Derive the numeric sort key + display strings from a model's cost fields.
- *  gab charges credits (credit_cost.base_cost); Cheaper Inference charges
- *  USD per million tokens (pricing.output_per_million). */
-function modelCost(m: RawModel): { baseCost: number; costLabel: string; costTitle: string } {
+/**
+ * How a provider bills a model, detected from the raw model entry's own
+ * fields — adding a provider never means touching this function unless it
+ * invents a brand-new billing shape.
+ */
+export type CostKind =
+  | "per-message" // flat rate per request (gab's credit_cost)
+  | "per-token" // USD per million tokens (usage-dependent, not per request)
+  | "unknown"; // no recognizable pricing fields
+
+/** Relative cost rank across the provider's model list, computed after
+ *  normalization. Drives the "cheapest → priciest" indication for providers
+ *  that don't bill a flat per-message rate. */
+export type CostTier = "cheapest" | "mid" | "priciest" | null;
+
+interface DetectedCost {
+  kind: CostKind;
+  /** Numeric sort key (cheapest-first); MAX_SAFE_INTEGER when unknown. */
+  baseCost: number;
+  costLabel: string;
+  costTitle: string;
+}
+
+/** Derive cost semantics + display strings from a model's cost fields.
+ *  Per-message credits (credit_cost.base_cost) show exact badges; per-token
+ *  USD (pricing.*_per_million) can't price a message exactly, so the UI shows
+ *  relative tiers with the exact rates in the tooltip. */
+function detectCost(m: RawModel): DetectedCost {
+  // Flat per-message credits.
   if (m.credit_cost && typeof m.credit_cost.base_cost === "number") {
     const c = m.credit_cost.base_cost;
-    return { baseCost: c, costLabel: String(c), costTitle: `${c} credits per message` };
+    return { kind: "per-message", baseCost: c, costLabel: String(c), costTitle: `${c} credits per message` };
   }
+  // Per-token USD per million.
   const out = parseFloat(m.pricing?.output_per_million ?? "");
   const input = parseFloat(m.pricing?.input_per_million ?? "");
   if (Number.isFinite(out) && out >= 0) {
     const inUsd = Number.isFinite(input) && input >= 0 ? formatUsd(input) : "?";
     return {
+      kind: "per-token",
       baseCost: out,
       costLabel: `${formatUsd(out)}/1M`,
       costTitle: `in ${inUsd} / out ${formatUsd(out)} per 1M tokens`,
@@ -100,9 +139,23 @@ function modelCost(m: RawModel): { baseCost: number; costLabel: string; costTitl
   }
   // gab.ai: an absent credit cost means the cheapest tier (e.g. arya).
   if (m.capabilities && "text" in m.capabilities) {
-    return { baseCost: 1, costLabel: "1", costTitle: "1 credit per message" };
+    return { kind: "per-message", baseCost: 1, costLabel: "1", costTitle: "1 credit per message" };
   }
-  return { baseCost: Number.MAX_SAFE_INTEGER, costLabel: "—", costTitle: "Price unavailable" };
+  return { kind: "unknown", baseCost: Number.MAX_SAFE_INTEGER, costLabel: "—", costTitle: "Price unavailable" };
+}
+
+/** Rank a normalized model list by known cost: bottom third cheapest, top
+ *  third priciest, middle mid. Unpriced models keep a null tier (they can't
+ *  be ranked), and a list without at least two distinct costs gets no tiers. */
+function assignCostTiers(list: Array<{ costKind: CostKind; baseCost: number; costTier: CostTier }>): void {
+  const priced = list.filter((m) => m.costKind !== "unknown");
+  const distinct = new Set(priced.map((m) => m.baseCost));
+  if (distinct.size < 2) return;
+  const sorted = [...priced].sort((a, b) => a.baseCost - b.baseCost);
+  const cut = Math.max(1, Math.round(sorted.length / 3));
+  sorted.forEach((m, i) => {
+    m.costTier = i < cut ? "cheapest" : i >= sorted.length - cut ? "priciest" : "mid";
+  });
 }
 
 /**
@@ -118,18 +171,22 @@ export function normalizeModelList(data: RawModel[]): Array<{
   baseCost: number;
   costLabel: string;
   costTitle: string;
+  costKind: CostKind;
+  costTier: CostTier;
 }> {
-  return (data ?? [])
-    .filter(isUsableChatModel)
-    .map((m) => {
-      const { baseCost, costLabel, costTitle } = modelCost(m);
-      return {
-        id: m.id,
-        thinking: !!m.capabilities?.thinking || !!m.capabilities?.reasoning || !!m.supports_reasoning || !!m.reasoning,
-        vision: !!m.capabilities?.image_input || !!m.capabilities?.vision || !!m.supports_vision || !!m.vision,
-        baseCost,
-        costLabel,
-        costTitle,
-      };
-    });
+  const out = (data ?? []).filter(isUsableChatModel).map((m) => {
+    const cost = detectCost(m);
+    return {
+      id: m.id,
+      thinking: !!m.capabilities?.thinking || !!m.capabilities?.reasoning || !!m.supports_reasoning || !!m.reasoning,
+      vision: !!m.capabilities?.image_input || !!m.capabilities?.vision || !!m.supports_vision || !!m.vision,
+      baseCost: cost.baseCost,
+      costLabel: cost.costLabel,
+      costTitle: cost.costTitle,
+      costKind: cost.kind,
+      costTier: null as CostTier,
+    };
+  });
+  assignCostTiers(out);
+  return out;
 }

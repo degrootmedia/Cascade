@@ -1,24 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
+import { boardFrameHistory } from "../../../../shared/board-frames.js";
+import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { useImageContextMenu } from "../image-context-menu.js";
-import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, InsertIcon, MagnifyIcon, RegenerateIcon } from "../icons.js";
+import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging }: {
+export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
   regenerating: boolean;
   videoBusy: boolean;
-  /** An OpenArt frame job outlived its wait — show a pending badge + recheck. */
+  /** A frame job outlived its wait — show a pending badge + recheck. */
   pending?: boolean;
   /** A recheck is currently polling the pending job. */
   rechecking?: boolean;
   onRegenerate: () => void;
-  /** Recheck the shot's pending OpenArt job and download the frame when ready. */
+  /** Recheck the shot's pending generation job and download the frame when ready. */
   onRecheck?: () => void;
   onImport: () => void;
   /** Open the AI edit dialog for this frame. */
@@ -33,8 +35,8 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
   onDropFrame: (source: { prodId: string; shotId: string; number: number }) => void;
-  /** Promote the browsed history frame (by artworkHistory index) to primary. */
-  onPromoteHistory: (index: number) => void;
+  /** Select the browsed frame on its owning node and wire it to the output. */
+  onPromoteHistory: (framePath: string) => void;
   draggable?: boolean;
   onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
   onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
@@ -42,6 +44,8 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   onReorderDragEnd?: () => void;
   isReorderTarget?: boolean;
   isDragging?: boolean;
+  /** Insert a blank shot in the gutter after this card (Step 3 hover "+"). */
+  onInsertAfter?: () => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -65,16 +69,17 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   // back to the still image if the clip can't be loaded.
   const boardVideoRef = useRef<HTMLVideoElement | null>(null);
   const [videoFailed, setVideoFailed] = useState(false);
-  // Frame history browsing: null = current frame; otherwise an index into
-  // shot.artworkHistory (0 = most recent previous frame). Thumbnails are
-  // fetched lazily and cached per index.
-  const [histIdx, setHistIdx] = useState<number | null>(null);
+  // Browse the nodes' combined history by path, not a shifting array index.
+  const [historyPath, setHistoryPath] = useState<string | null>(null);
   const [histCache, setHistCache] = useState<Record<string, string>>({});
-  const histLen = shot.artworkHistory?.length ?? 0;
+  const history = boardFrameHistory(shot);
+  const histLen = history.length;
+  const histIdx = historyPath && history.includes(historyPath) ? history.indexOf(historyPath) : null;
+  const histPath = histIdx === null ? null : history[histIdx];
   useEffect(() => {
     let live = true;
     setImg(null);
-    setHistIdx(null);
+    setHistoryPath(null);
     setHistCache({});
     setVideoFailed(false);
     if (shot.artwork) {
@@ -85,22 +90,21 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
 
   // Lazily load the history frame being viewed.
   useEffect(() => {
-    if (histIdx === null) return;
+    if (histPath === null) return;
     let live = true;
-    const key = String(histIdx);
-    if (!histCache[key]) {
-        window.cascade.boardThumbnail(prod.meta.id, shot.id, histIdx)
-        .then((d) => { if (live && d) setHistCache((c) => ({ ...c, [key]: d })); })
+    if (!histCache[histPath]) {
+      window.cascade.boardThumbnail(prod.meta.id, shot.id, histPath)
+        .then((d) => { if (live && d) setHistCache((c) => ({ ...c, [histPath]: d })); })
         .catch(() => {});
     }
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [histIdx, prod.meta.id, shot.id]);
+  }, [histPath, prod.meta.id, shot.id]);
 
-  const shownImg = histIdx === null ? img : histCache[String(histIdx)] ?? null;
+  const shownImg = histPath === null ? img : histCache[histPath] ?? null;
 
   // Right-click → native image menu, with the full-res file pinned for "Edit externally".
-  const relForExternal = histIdx === null ? shot.artwork : shot.artworkHistory?.[histIdx ?? 0];
+  const relForExternal = histPath ?? shot.artwork;
   const externalMenu = useImageContextMenu({
     src: relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined),
     productionId: relForExternal ? prod.meta.id : undefined,
@@ -161,9 +165,16 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
       }}
       onDragEnd={() => { if (onReorderDragEnd) onReorderDragEnd(); }}
     >
-      {isReorderTarget && (
-        <div className="prod-board-insert-indicator" aria-hidden>
-          <span className="prod-board-insert-label"><InsertIcon size={12} /> Insert before {shot.number}</span>
+      {isReorderTarget && <div className="prod-board-insert-indicator" aria-hidden />}
+      {onInsertAfter && (
+        /* Anchored to the frame region (top of the card, same 16:9 box) so the
+           "+" is always vertically centered on the frame, not the whole card. */
+        <div className="prod-board-insert-anchor">
+          <button
+            className="prod-board-insert-after"
+            title="Insert a blank shot here"
+            onClick={(e) => { e.stopPropagation(); onInsertAfter(); }}
+          ><PlusIcon size={12} /></button>
         </div>
       )}
       {draggable && onReorderDragStart && (
@@ -197,7 +208,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           <button
             className="prod-board-hist prev"
             title={`Previous frame (${histLen} in history)`}
-            onClick={() => setHistIdx(0)}
+            onClick={(e) => { e.stopPropagation(); setHistoryPath(history[0]); }}
           >
             ‹
           </button>
@@ -208,32 +219,26 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
               className="prod-board-hist prev"
               title={histIdx + 1 < histLen ? "Older frame" : "Start of history"}
               disabled={histIdx + 1 >= histLen}
-              onClick={() => setHistIdx((i) => Math.min((i ?? 0) + 1, histLen - 1))}
+              onClick={(e) => { e.stopPropagation(); setHistoryPath(history[Math.min(histIdx + 1, histLen - 1)]); }}
             >
               ‹
             </button>
             <button
               className={"prod-board-hist next" + (histIdx === 0 ? " to-current" : "")}
               title={histIdx === 0 ? "Back to current frame" : "Newer frame"}
-              onClick={() => setHistIdx((i) => ((i ?? 0) - 1 < 0 ? null : (i ?? 0) - 1))}
+              onClick={(e) => { e.stopPropagation(); setHistoryPath(histIdx === 0 ? null : history[histIdx - 1]); }}
             >
               ›
             </button>
-            <span
-              className={"prod-board-hist-tag" + (histIdx === 0 ? " old" : "")}
-              title={histIdx === 0 ? "Most recent previous frame" : `History frame ${histIdx + 1} of ${histLen}`}
-            >
-              {histIdx === 0 ? "prev" : `−${histIdx}`}
-            </span>
           </>
         )}
-        {histIdx !== null && shownImg && (
+        {histPath !== null && shownImg && (
           <button
             className="prod-board-promote"
             title="Set this history frame as the primary frame for this shot (the current frame moves into history)"
-            onClick={() => onPromoteHistory(histIdx)}
+            onClick={(e) => { e.stopPropagation(); onPromoteHistory(histPath); }}
           >
-            Set as primary
+            Make Primary
           </button>
         )}
         {histIdx === null && shot.videoPath && !videoFailed ? (
@@ -288,24 +293,24 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
         {pending && (
           <span
             className="prod-board-pending"
-            title="This frame is still rendering on OpenArt — recheck to download it when ready"
+            title="This frame is still rendering — recheck to download it when ready"
           >
             pending
           </span>
         )}
-<button
+        <button
           className="prod-board-zoom"
-          title={shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
-          disabled={!img && !shot.videoPath}
+          title={histPath === null && shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
+          disabled={!shownImg && !(histPath === null && shot.videoPath)}
           onClick={(e) => {
             e.stopPropagation();
-            if (shot.videoPath) {
+            if (histPath === null && shot.videoPath) {
               setExpandedImg(null);
               setExpandedVideo(`cascade-media://${prod.meta.id}/${encodeURIComponent(shot.videoPath)}`);
               setExpanded(true);
             } else {
               setExpandedVideo(null);
-              void window.cascade.boardImageFull(prod.meta.id, shot.id).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } });
+              void window.cascade.boardImageFull(prod.meta.id, shot.id, histPath ?? undefined).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } });
             }
           }}
         ><MagnifyIcon size={12} /></button>
@@ -339,7 +344,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
         {pending && (
           <button
             className="prod-board-recheck"
-            title="Recheck the pending OpenArt job and download the frame when ready"
+            title="Recheck the pending generation job and download the frame when ready"
             disabled={rechecking}
             onClick={(e) => { e.stopPropagation(); onRecheck?.(); }}
           >
@@ -416,7 +421,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
   onSubmit: (opts: VideoGenOptions) => void;
 }) {
   const videoModels = models.filter((m) => m.videoInput);
-  const [model, setModel] = useState(videoModels[0]?.id ?? "auto");
+  const [model, setModel] = useState(videoModels[0]?.id ?? "");
   const [resolution, setResolution] = useState("1080p");
   const [durationSec, setDurationSec] = useState(5);
   const fallback = "Animate this reference image with smooth, cinematic motion.";
@@ -456,12 +461,20 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
   }, [model]);
   const resolutions = modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"];
   const durations = modelOpts?.durations?.length ? modelOpts.durations : [5, 10, 15, 20];
-  // Keep the current selection valid when the model's options arrive.
+  // Keep the current selection valid when the model's options arrive — or
+  // when the provider switches under the modal (new model list, new options).
+  // The dep is the joined id list (not the array) because the parent passes a
+  // fresh filtered array every render.
+  const videoModelIds = videoModels.map((m) => m.id).join(",");
   useEffect(() => {
-    if (resolutions.length && !resolutions.includes(resolution)) setResolution(resolutions[0]);
+    if (videoModels.length && !videoModels.some((m) => m.id === model)) setModel(videoModels[0].id);
+    // Snap the selection only once the model's REAL options arrive — the
+    // fallback list would prematurely clobber e.g. a saved "2k".
+    if (!modelOpts) return;
+    if (resolutions.length && !resolutions.includes(resolution)) setResolution(closestResolution(resolution, resolutions));
     if (durations.length && !durations.includes(durationSec)) setDurationSec(durations[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelOpts]);
+  }, [modelOpts, videoModelIds]);
   useEffect(() => {
     void window.cascade.getOpenArtCredits().then((c) => setCredits(c)).catch(() => {});
     window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => setFrame(d)).catch(() => {});
@@ -489,17 +502,18 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         <label className="prod-label">Model</label>
         <select
           className="prod-openart-select"
-          value={videoModels.some((m) => m.id === model) ? model : "auto"}
+          value={videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? "")}
           onChange={(e) => setModel(e.target.value)}
-          title="OpenArt video model (Auto lets Cascade pick)"
+          title="Video model"
+          disabled={videoModels.length === 0}
         >
-          {videoModels.length === 0 && <option value="auto">Auto</option>}
           {videoModels.map((m) => (
             <option key={m.id} value={m.id} title={m.description}>
               {m.displayName}{typeof m.cost === "number" ? ` ◎${m.cost}` : ""}
             </option>
           ))}
         </select>
+        {videoModels.length === 0 && <p className="hint">No video models reported — connect the media MCP server.</p>}
         <div className="prod-video-row">
           <label className="prod-label">Resolution
             <select className="prod-openart-select" value={resolution} onChange={(e) => setResolution(e.target.value)}>
@@ -531,7 +545,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         {(cost != null || credits != null) && (
           <p className="prod-video-cost">
             {cost != null && <>This clip costs about <strong>◎{cost} credits</strong>.</>}
-            {credits != null ? ` You have ~${credits.toLocaleString()} OpenArt credits available.` : ""}
+            {credits != null ? ` You have ~${credits.toLocaleString()} credits available.` : ""}
           </p>
         )}
         <button className="prod-btn prod-edit-go" disabled={!prompt.trim()} onClick={() => onSubmit({ model, resolution, durationSec, prompt: prompt.trim() })}>
@@ -556,7 +570,7 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
   onClose: () => void;
 }) {
   const imageModels = models.filter((m) => m.imageInput);
-  const [model, setModel] = useState(imageModels[0]?.id ?? "auto");
+  const [model, setModel] = useState(imageModels[0]?.id ?? "");
   const external = externalPrompt ?? "";
   const [prompt, setPrompt] = useState(external);
   const [focused, setFocused] = useState(false);
@@ -585,17 +599,17 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
         <label className="prod-label">Model</label>
         <select
           className="prod-openart-select"
-          value={model}
+          value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
           onChange={(e) => setModel(e.target.value)}
           title="Image model that accepts a reference image"
+          disabled={imageModels.length === 0}
         >
-          {imageModels.length === 0 && <option value="auto">Auto</option>}
           {imageModels.map((m) => (
             <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
           ))}
         </select>
         {imageModels.length === 0 && (
-          <p className="hint">No image-input model reported by OpenArt - Auto will pick one that accepts references.</p>
+          <p className="hint">No image-input models reported — connect the media MCP server.</p>
         )}
         <label className="prod-label">Edit prompt</label>
         <textarea

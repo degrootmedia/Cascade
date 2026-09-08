@@ -9,7 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Production, ProductionShot, TweenBlock } from "../src/shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, isTweenGenKeyframe, type Production, type ProductionShot, type TweenBlock } from "../src/shared/ipc.js";
 
 // pipeline.ts imports scripting.ts; the tests never call its helpers and its
 // dynamic pdf-parse import doesn't resolve under Vitest — mock it away.
@@ -27,8 +27,9 @@ import {
   tweenClampGap,
   tweenSelectedClips,
   tweenSnapSec,
+  unstitchTween,
 } from "../src/main/pipeline.js";
-import { applyKeyframeDrag, deriveTweenBlocksClient, filterTweenModels } from "../src/renderer/src/components/TweenTimelineModal.js";
+import { applyKeyframeDrag, deriveTweenBlocksClient, filterTweenModels, tweenPreviewTake, tweenSupportedLabel, tweenSupportsDuration } from "../src/renderer/src/components/TweenTimelineModal.js";
 import { videoRefsAssign } from "../src/main/openart.js";
 import { assemblyPlan, buildEdl, edlReelFor } from "../src/main/assembly.js";
 
@@ -142,20 +143,22 @@ describe("filterTweenModels", () => {
     { id: "plain-vid", displayName: "Plain Vid", description: "", imageInput: false, videoInput: true, cost: null },
   ];
 
-  it("keeps the full list when nothing is proven yet", () => {
+  it("keeps the full list only while the probe is pending", () => {
     expect(filterTweenModels(models, null)).toEqual(models);
-    expect(filterTweenModels(models, [])).toEqual(models);
     expect(filterTweenModels(models, undefined)).toEqual(models);
   });
 
-  it("limits to proven end-frame models", () => {
+  it("limits strictly to proven end-frame models", () => {
     expect(filterTweenModels(models, ["tween-pro"])).toEqual([models[0]]);
   });
 
-  it("never strands the saved selection, and never empties the list", () => {
-    expect(filterTweenModels(models, ["tween-pro"], "plain-vid")).toEqual(models);
-    expect(filterTweenModels(models, ["ghost"], "plain-vid")).toEqual([models[1]]);
-    expect(filterTweenModels(models, ["ghost"])).toEqual(models);
+  it("an empty probe resolves to an empty list (no unproven fallback)", () => {
+    expect(filterTweenModels(models, [])).toEqual([]);
+  });
+
+  it("a saved non-end-frame selection is dropped", () => {
+    expect(filterTweenModels(models, ["ghost"])).toEqual([]);
+    expect(filterTweenModels(models, ["ghost", "plain-vid"])).toEqual([models[1]]);
   });
 });
 
@@ -245,6 +248,158 @@ describe("syncTweenBlocks", () => {
     expect(s.graphTweenRefIds).toEqual(["a", "b"]);
     expect(s.graphTweenBlocks).toHaveLength(1);
     expect(s.graphTweenBlocks![0].prompt).toBe("");
+  });
+
+  it("keeps generation-node keyframes even before they produce output", () => {
+    const p = prodWithRefs();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-gen-"));
+    fs.mkdirSync(path.join(dir, "references"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "references", "a.jpg"), "x");
+    fs.writeFileSync(path.join(dir, "references", "b.jpg"), "x");
+    (p.meta as { folder: string }).folder = dir;
+    // The image/edit sentinels have no generations yet — a pre-generation wire
+    // must survive (it resolves later, and generate reports a clear error if not).
+    const s = shot({
+      graphTweenRefIds: ["a", TWEEN_KEY_IMGGEN, "b", TWEEN_KEY_EDITGEN, "gone"],
+      graphTweenBlocks: [],
+    });
+    syncTweenBlocks(p, s);
+    expect(s.graphTweenRefIds).toEqual(["a", TWEEN_KEY_IMGGEN, "b", TWEEN_KEY_EDITGEN]);
+  });
+
+  it("dedupes repeated keyframe ids (duplicate pairs would share one history)", () => {
+    const p = prodWithRefs();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-dedupe-"));
+    fs.mkdirSync(path.join(dir, "references"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "references", "a.jpg"), "x");
+    fs.writeFileSync(path.join(dir, "references", "b.jpg"), "x");
+    (p.meta as { folder: string }).folder = dir;
+    const s = shot({ graphTweenRefIds: ["a", "b", "a", "b"], graphTweenBlocks: [] });
+    syncTweenBlocks(p, s);
+    expect(s.graphTweenRefIds).toEqual(["a", "b"]);
+    expect(s.graphTweenBlocks).toHaveLength(1);
+  });
+});
+
+describe("tween duration support", () => {
+  it("treats unknown options as compatible (never ghosts or warns)", () => {
+    expect(tweenSupportsDuration(null, 2)).toBe(true);
+    expect(tweenSupportsDuration(undefined, 2)).toBe(true);
+    expect(tweenSupportsDuration({ resolutions: [], durations: [] }, 2)).toBe(true);
+  });
+
+  it("matches the block length against the model's accepted lengths", () => {
+    const seedance = { resolutions: ["720p"], durations: [4, 5, 6, 7, 8] };
+    expect(tweenSupportsDuration(seedance, 2)).toBe(false);
+    expect(tweenSupportsDuration(seedance, 4)).toBe(true);
+    expect(tweenSupportsDuration({ resolutions: [], durations: [4, 8] }, 5)).toBe(false);
+  });
+
+  it("restricts Wan-style models (5/10/15/20s only) from 2s blocks", () => {
+    const wan = { resolutions: ["480p", "720p", "1080p"], durations: [5, 10, 15, 20] };
+    expect(tweenSupportsDuration(wan, 2)).toBe(false);
+    expect(tweenSupportsDuration(wan, 4)).toBe(false);
+    expect(tweenSupportsDuration(wan, 5)).toBe(true);
+    expect(tweenSupportsDuration(wan, 10)).toBe(true);
+    expect(tweenSupportsDuration(wan, 15)).toBe(true);
+    expect(tweenSupportsDuration(wan, 20)).toBe(true);
+  });
+
+  it("summarizes accepted lengths for tooltips", () => {
+    expect(tweenSupportedLabel(undefined)).toBe("");
+    expect(tweenSupportedLabel([])).toBe("");
+    expect(tweenSupportedLabel([4, 5, 6, 7])).toBe("4–7s");
+    expect(tweenSupportedLabel([4, 8])).toBe("4, 8s");
+  });
+});
+
+describe("tweenPreviewTake", () => {  const take = (path: string) => ({ path, prompt: "", model: "", at: "" });
+
+  it("previews the explicitly selected take", () => {
+    const b = block({ gens: [take("videos/new.mp4"), take("videos/old.mp4")], genIndex: 1 });
+    expect(tweenPreviewTake(b)?.path).toBe("videos/old.mp4");
+  });
+
+  it("shows keyframes when the selection is cleared (the dropdown's Keyframes option)", () => {
+    const b = block({ gens: [take("videos/new.mp4")], genIndex: undefined });
+    expect(tweenPreviewTake(b)).toBeUndefined();
+  });
+
+  it("shows keyframes for a block that never generated", () => {
+    expect(tweenPreviewTake(block())).toBeUndefined();
+  });
+
+  it("falls back to keyframes for an out-of-range index", () => {
+    const b = block({ gens: [take("videos/new.mp4")], genIndex: 4 });
+    expect(tweenPreviewTake(b)).toBeUndefined();
+  });
+});
+
+describe("generation-node keyframes", () => {
+  it("isTweenGenKeyframe distinguishes sentinels from reference ids", () => {
+    expect(isTweenGenKeyframe(TWEEN_KEY_IMGGEN)).toBe(true);
+    expect(isTweenGenKeyframe(TWEEN_KEY_EDITGEN)).toBe(true);
+    expect(isTweenGenKeyframe("a")).toBe(false);
+    expect(isTweenGenKeyframe("")).toBe(false);
+  });
+
+  it("derives blocks across generation-node keyframes like any other source", () => {
+    const blocks = deriveTweenBlocks(["a", TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN], []);
+    expect(blocks.map((b) => [b.startRefId, b.endRefId])).toEqual([
+      ["a", TWEEN_KEY_IMGGEN],
+      [TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN],
+    ]);
+    // The pair-key match also survives re-derivation for sentinel pairs.
+    const prev = [block({ startRefId: TWEEN_KEY_IMGGEN, endRefId: TWEEN_KEY_EDITGEN, prompt: "glide", durationSec: 4 })];
+    const kept = deriveTweenBlocks(["a", TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN], prev);
+    expect(kept[1].prompt).toBe("glide");
+    expect(kept[1].durationSec).toBe(4);
+  });
+});
+
+describe("unstitchTween", () => {
+  it("drops the stitched output and unbinds the tween output feed", () => {
+    const s = shot({
+      graphOutputSource: "tween",
+      graphTweenOutput: "videos/tween.mp4",
+      graphTweenReencoded: true,
+      videoPath: "videos/tween.mp4",
+    });
+    const { changed, outputRel } = unstitchTween(s);
+    expect(changed).toBe(true);
+    expect(outputRel).toBe("videos/tween.mp4");
+    expect(s.graphTweenOutput).toBeUndefined();
+    expect(s.graphTweenReencoded).toBeUndefined();
+    expect(s.graphOutputSource).toBeUndefined();
+    expect(s.videoPath).toBeUndefined();
+  });
+
+  it("removes the clip even when the tween isn't piped to the output", () => {
+    const s = shot({ graphTweenOutput: "videos/tween.mp4", graphTweenReencoded: true });
+    const { changed, outputRel } = unstitchTween(s);
+    expect(changed).toBe(true);
+    expect(outputRel).toBe("videos/tween.mp4");
+    expect(s.graphTweenOutput).toBeUndefined();
+    // The output feed was never bound — it stays untouched.
+    expect(s.graphOutputSource).toBeUndefined();
+  });
+
+  it("is a no-op when nothing is stitched", () => {
+    const s = shot({ graphTweenRefIds: ["a", "b"] });
+    expect(unstitchTween(s).changed).toBe(false);
+  });
+
+  it("leaves the per-block clips and timeline intact", () => {
+    const s = shot({
+      graphOutputSource: "tween",
+      graphTweenOutput: "videos/tween.mp4",
+      graphTweenRefIds: ["a", "b"],
+      graphTweenBlocks: [block({ startRefId: "a", endRefId: "b", gens: [{ path: "videos/b0.mp4", prompt: "", model: "", at: "" }], genIndex: 0 })],
+    });
+    unstitchTween(s);
+    expect(s.graphTweenBlocks).toHaveLength(1);
+    expect(s.graphTweenBlocks![0].gens![0].path).toBe("videos/b0.mp4");
+    expect(s.graphTweenRefIds).toEqual(["a", "b"]);
   });
 });
 

@@ -7,15 +7,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { Agent, GabClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, type ChatMessage, type AgentTool } from "@core";
+import { Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, type ChatMessage, type AgentTool } from "@core";
 import * as settings from "./settings.js";
 import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
-import { OpenArtClient } from "./openart.js";
+import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex } from "./pipeline.js";
+import { boardFrameHistory } from "../shared/board-frames.js";
+import { createProviders, resolveProviderId, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { resolvePromptRefs } from "./providers/refs.js";
+import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic } from "./assembly.js";
@@ -23,9 +27,9 @@ import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, san
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
-import { extractModelList, normalizeModelList } from "../shared/providers.js";
+import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, OpenArtModelChoice, Model3dGenOptions } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
@@ -487,6 +491,7 @@ function ensureAgent(entry: LiveChat): Agent {
         apiKey,
         model: settings.getModel(),
         baseUrl: settings.getBaseUrl(),
+        helperModel: settings.getHelperModel(),
         pureChat: true,
         requestApproval: (req) => requestApprovalFromUser(req),
         onEvent: (e) => {
@@ -558,8 +563,10 @@ function ensureAgent(entry: LiveChat): Agent {
 
     const thisAgent = new Agent({
       apiKey,
-      model: agentModel ?? settings.getModel(),
+      // An empty agent model means "follow the app default".
+      model: agentModel || settings.getModel(),
       baseUrl: settings.getBaseUrl(),
+      helperModel: settings.getHelperModel(),
       workspaceRoot: workspace,
       agentPrompt: agentPrompt || undefined,
       skills: skillsList,
@@ -601,6 +608,11 @@ function resetAllAgents() {
   }
 }
 
+/** Provider-aware prompt for a missing API key (label comes from the registry). */
+function apiKeyRequired(): string {
+  return `Add your ${getProvider(settings.getProviderId())?.label ?? "LLM provider"} API key in Settings first.`;
+}
+
 /** Resolve any pending approval modals as denied so an abandoned agent can't act. */
 function rejectPendingApprovals() {
   for (const resolve of pendingApprovals.values()) resolve("deny" as ApprovalDecisionIpc);
@@ -618,7 +630,8 @@ function rejectPendingApprovals() {
 async function applyChatTitle(history: ChatMessage[], targetId: string, force: boolean): Promise<string | null> {
   const apiKey = settings.getApiKey();
   if (!apiKey) return null;
-  const title = await suggestChatTitle(history, apiKey, new GabClient(apiKey, settings.getBaseUrl()));
+  const client = new ChatClient(apiKey, settings.getBaseUrl());
+  const title = await suggestChatTitle(history, client, settings.getHelperModel());
   if (title === "New chat") return null;
   const entry = chats.get(targetId) ?? null;
   const loaded = entry ? entry.session : sessions.loadSession(targetId);
@@ -638,9 +651,12 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 
 // ---- IPC ------------------------------------------------------------------
 function registerIpc() {
-  // Every successful OpenArt generation feeds the expenses ledger, which
-  // prices it against the user's rules and keeps the CSV tally in sync.
-  const openart = new OpenArtClient(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) });
+  // Every successful generation feeds the expenses ledger, which prices it
+  // against the user's rules and keeps the CSV tally in sync.
+  const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) });
+  // The active media vendor (OpenArt/Higgsfield) — a global setting resolved
+  // per call, so every generation flow follows a Settings change immediately.
+  const media = (): MediaProvider => providers[resolveProviderId(settings.getMediaProvider())];
 
   // 3D AI Studio REST integration (design-page model generator). The API key
   // is read from encrypted settings on demand; the client's HTTP surface is
@@ -820,6 +836,12 @@ function registerIpc() {
     settings.set3daiApiKey(key.trim());
   });
 
+  handle("settings:getEndFrameModels", () => settings.getEndFrameModels());
+
+  handle("settings:setEndFrameModels", (_e, ids: string[]) => {
+    settings.setEndFrameModels(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
   handle("settings:setModel", (_e, model: string) => {
     settings.setModel(model);
     resetAllAgents();
@@ -885,6 +907,11 @@ function registerIpc() {
         // showing the raw reply so the schema can be fixed.
         return { ok: false, error: `No usable models in response: ${JSON.stringify(json).slice(0, 200)}` };
       }
+      // Remember the cheapest usable model as this provider's background
+      // model (compaction, chat titles). When no pricing is advertised
+      // (baseCost unknown across the list), the first listed model serves.
+      const ranked = [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id));
+      settings.setHelperModel(ranked[0].id);
       return { ok: true, models };
     } catch (e) {
       return { ok: false, error: String(e) };
@@ -893,10 +920,11 @@ function registerIpc() {
 
   handle("credits:get", async () => {
     const apiKey = settings.getApiKey();
-    if (!apiKey) return null;
+    // Only providers that expose a balance endpoint get a request — the
+    // capability is declared in the provider registry (shared/providers.ts).
+    if (!apiKey || getProvider(settings.getProviderId())?.balance !== "credits") return null;
     try {
-      const c = (await new GabClient(apiKey, settings.getBaseUrl()).credits()) as { total_available?: number };
-      return c.total_available ?? null;
+      return await new ChatClient(apiKey, settings.getBaseUrl()).balance();
     } catch {
       return null;
     }
@@ -1016,6 +1044,16 @@ function registerIpc() {
     resetAllAgents();
   });
 
+  handle("media:listProviders", () =>
+    PROVIDER_IDS.map((id) => ({ id, displayName: PROVIDER_META[id].displayName, available: providers[id].isAvailable() }))
+  );
+
+  handle("media:getProvider", (): MediaProviderId => resolveProviderId(settings.getMediaProvider()));
+
+  handle("media:setProvider", (_e, id: MediaProviderId) => {
+    settings.setMediaProvider(id);
+  });
+
   // ---- agents ----
   handle("agents:list", () => agents.listAgents());
   handle("agents:get", (_e, id: string) => {
@@ -1079,8 +1117,24 @@ function registerIpc() {
     } catch {
       throw new Error(`Can't create or open that folder: ${folder}`);
     }
+    // `folder` is the parent the user picked; newProduction creates a
+    // subfolder named after the production inside it.
     const p = productions.newProduction(name, folder);
-    settings.addRecentProduction(folder);
+    settings.addRecentProduction(p.meta.folder);
+    return p;
+  });
+
+  handle("production:import", (_e, folder: string) => {
+    if (typeof folder !== "string" || !folder) throw new Error("BAD_ARGS");
+    try {
+      fs.statSync(folder);
+    } catch {
+      throw new Error(`That folder doesn't exist: ${folder}`);
+    }
+    // The picked folder IS the production folder (no subfolder is created —
+    // its boards/, script.md, … are adopted as-is).
+    const p = productions.importProduction(folder);
+    settings.addRecentProduction(p.meta.folder);
     return p;
   });
 
@@ -1151,7 +1205,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (typeof source !== "string" || !source.trim()) throw new Error("Pick a script file or paste a Google Docs link first.");
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     p.status[1] = "running";
     productions.saveProduction(p);
     productionEmit(id, `Step 1 started: ${source}`);
@@ -1176,7 +1230,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (typeof style !== "string" || !style.trim()) throw new Error("Write some style notes first, then refine them.");
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Refining the master style prompt…");
     try {
       // A short excerpt of the first scene's visuals gives tone context.
@@ -1199,7 +1253,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (typeof description !== "string" || !description.trim()) throw new Error("Describe the character first, then refine it.");
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Refining the character description…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
@@ -1221,7 +1275,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (typeof notes !== "string" || !notes.trim()) throw new Error("Write some style notes first, then generate styles.");
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Generating up to 5 named visual styles…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
@@ -1244,7 +1298,7 @@ function registerIpc() {
       throw new Error("Pick or paste an image first.");
     }
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Generating a style prompt from the image…");
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
@@ -1317,6 +1371,21 @@ function registerIpc() {
     })
   );
 
+  handle("production:startBlank", (_e, id: string) =>
+    mutateShots(id, (p) => {
+      if (p.scenes.length) throw new Error("This production already has scenes — re-ingest or edit instead.");
+      p.scenes = shotter.blankScenes();
+      p.scriptSource = "Blank start";
+      p.status[1] = "done";
+    })
+  );
+
+  handle("production:addScene", (_e, id: string, afterSceneNumber: number | null) =>
+    mutateShots(id, (p) => {
+      shotter.insertScene(p.scenes, afterSceneNumber);
+    })
+  );
+
   /** Per-production FIFO so concurrent Step-3 jobs (batch generation + AI
    *  edits) don't hold stale copies of the production and overwrite each
    *  other's saved frames. Later submissions queue behind running ones. */
@@ -1366,6 +1435,19 @@ function registerIpc() {
           (shot as unknown as Record<string, unknown>)[key] = next[key];
         }
       }
+      // A mid-job selection change (Make Primary / node cycling) must survive
+      // the job's copied generation arrays — re-anchor at the user's path.
+      const genPairs = [
+        ["graphImageGens", "graphImageGenIndex"],
+        ["graphEditGens", "graphEditGenIndex"],
+        ["graphVideoGens", "graphVideoGenIndex"],
+      ] as const;
+      for (const [arrKey, idxKey] of genPairs) {
+        if (JSON.stringify(prev[arrKey]) === JSON.stringify(next[arrKey])) continue;
+        (shot as unknown as Record<string, unknown>)[idxKey] = rebaseGenIndex(
+          prev[arrKey], prev[idxKey], shot[arrKey], shot[idxKey], next[arrKey], next[idxKey],
+        );
+      }
     }
     return fresh;
   }
@@ -1382,7 +1464,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
     if (opts.needsApiKey !== false && !settings.getApiKey()) {
-      throw new Error("Add your Gab.ai API key in Settings first.");
+      throw new Error(apiKeyRequired());
     }
     p.status[step] = "running";
     productions.saveProduction(p);
@@ -1434,24 +1516,24 @@ function registerIpc() {
   }
 
   // Step 3: storyboard frame generation (batched or single-shot). In-app
-  // generation goes through the OpenArt MCP server; when that isn't
-  // connected we export per-shot prompts instead so the user can generate
-  // the frames elsewhere and import them (production:importBoards).
+  // generation goes through the active media provider (OpenArt/Higgsfield);
+  // when that isn't connected we export per-shot prompts instead so the user
+  // can generate the frames elsewhere and import them (production:importBoards).
   const boardsOrPrompts = async (
     p: Production,
     emit: (m: string, l?: ProductionEvent["level"]) => void,
     genOpts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[] }
   ): Promise<void> => {
-    const gen = openart.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
+    const gen = media().imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
     if (!gen) {
-      emit("OpenArt MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.", "error");
+      emit(`${media().displayName} MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
       exportBoardPrompts(p, emit);
       emit("Generate the frames with those prompts, then use “Import frames…” (name each file with its shot number, e.g. 0100.png).", "info");
       p.status[3] = "todo";
       return;
     }
-    emit("Using the OpenArt MCP server for image generation.");
-    await generateBoards(p, gen, emit, genOpts);
+    emit(`Using the ${media().displayName} MCP server for image generation.`);
+    await generateBoards(p, gen, emit, { ...genOpts, providerName: media().displayName });
   };
 
   handle("production:generateBoards", (_e, id: string, opts?: { maxShots?: number; regenerateAll?: boolean }) =>
@@ -1475,7 +1557,8 @@ function registerIpc() {
     }, { needsApiKey: false })
   );
 
-  // Step 3: reclaim a frame whose OpenArt job outlived the generating call —
+  // Step 3: reclaim a frame whose async vendor job outlived the generating
+  // call — the active provider re-polls it via recheckPendingImage.
   // the wait timed out or the finished image couldn't be downloaded. The job
   // keeps rendering server-side, so a recheck re-polls it and downloads the
   // image when ready, recovering the frame without a second generation.
@@ -1488,10 +1571,10 @@ function registerIpc() {
         emit(`Shot ${shot.number}: nothing pending to recheck.`, "info");
         return;
       }
-      emit(`Shot ${shot.number}: rechecking the pending OpenArt job…`, "info");
+      emit(`Shot ${shot.number}: rechecking the pending generation job…`, "info");
       let buf: Buffer;
       try {
-        const got = await openart.recheckPendingImage(pending);
+        const got = await media().recheckPendingImage(pending);
         if (!got) {
           emit(`Shot ${shot.number}: the frame is still rendering — check again in a minute.`, "info");
           return;
@@ -1507,7 +1590,7 @@ function registerIpc() {
       recordGraphImageGen(shot, jpegRel, pending.prompt, pending.model);
       hookImageGenToOutput(shot);
       delete shot.pendingImageGen;
-      emit(`Shot ${shot.number}: frame recovered from the pending OpenArt job.`, "done");
+      emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
     })
   );
 
@@ -1629,7 +1712,7 @@ function registerIpc() {
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     // Keep human @[name] tags in the editor; transport conversion happens only
-    // inside OpenArtClient.imageGenFn immediately before MCP submission.
+    // inside the active provider's imageGenFn immediately before MCP submission.
     return shot ? stripReferenceClause(effectivePrompt(p, shot)) : null;
   });
 
@@ -1702,7 +1785,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
     const apiKey = settings.getApiKey();
-    if (!apiKey) throw new Error("Add your Gab.ai API key in Settings first.");
+    if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Magic Prompt: generating content prompts for all shots…");
     try {
       await enqueueProduction(id, async () => {
@@ -1740,23 +1823,24 @@ function registerIpc() {
     await checkExternalEdits();
   });
 
-  // Step 3: OpenArt image-capable models for the model dropdown.
+  // Step 3: image/video-capable models for the model dropdowns. Empty on
+  // failure — the renderer shows the empty state instead of a synthetic pick.
   handle("production:openArtModels", async () => {
     try {
-      const choices = await openart.listModelChoices();
+      const choices = await media().listModelChoices();
       // Prefetch the video models' resolution/length options in the background
       // so the video modal and node graph populate instantly on first open.
-      openart.prewarm(choices);
-      return choices.length > 1 ? choices : [{ id: "auto", displayName: "Auto", description: "Cascade picks the best image model for each run.", imageInput: false, cost: null }];
+      media().prewarm?.(choices);
+      return choices;
     } catch {
-      return [{ id: "auto", displayName: "Auto", description: "Cascade picks the best image model for each run.", imageInput: false, cost: null }];
+      return [];
     }
   });
 
   // Step 3: the signed-in OpenArt account's remaining credit balance (shown
   // in the video-generation dialog). Null when OpenArt isn't connected or the
   // account lookup fails.
-  handle("production:openArtCredits", async (): Promise<number | null> => openart.getCredits());
+  handle("production:openArtCredits", async (): Promise<number | null> => media().getCredits());
 
   // Step 2: the 3D AI Studio account's remaining credit balance (shown in the
   // design-page 3D model panel). Null when no key is stored.
@@ -1849,17 +1933,13 @@ function registerIpc() {
 
   // Board thumbnails for the contact sheet — the PNGs live in the production
   // folder; the renderer gets a small data URL (like chat image thumbs).
-  handle("production:boardImage", (_e, id: string, shotId: string, index?: number) => {
+  handle("production:boardImage", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) return null;
-    // `index` selects an entry of the shot's frame history (0 = most recent
-    // previous frame); omitted = the current frame.
-    const rel = typeof index === "number" && index >= 0
-      ? shot.artworkHistory?.[Math.floor(index)]
-      : shot.artwork;
-    if (!rel) return null;
+    const rel = framePath ?? shot.artwork;
+    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
     try {
       const buf = fs.readFileSync(assetPath(p, rel));
       const img = nativeImage.createFromBuffer(buf);
@@ -1872,15 +1952,13 @@ function registerIpc() {
 
   // Full-resolution board frame for the zoom lightbox — the same file as
   // boardImage, but without the 640px downscale.
-  handle("production:boardImageFull", (_e, id: string, shotId: string, index?: number) => {
+  handle("production:boardImageFull", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) return null;
-    const rel = typeof index === "number" && index >= 0
-      ? shot.artworkHistory?.[Math.floor(index)]
-      : shot.artwork;
-    if (!rel) return null;
+    const rel = framePath ?? shot.artwork;
+    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
     try {
       const buf = fs.readFileSync(assetPath(p, rel));
       const mime = rel.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
@@ -1890,12 +1968,13 @@ function registerIpc() {
     }
   });
 
-  handle("production:boardThumbnail", (_e, id: string, shotId: string, index?: number) => {
+  handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    const rel = index == null ? shot?.artwork : shot?.artworkHistory?.[index];
-    if (!rel) return null;
+    if (!shot) return null;
+    const rel = framePath ?? shot.artwork;
+    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
     try {
       const image = nativeImage.createFromPath(assetPath(p, rel)).resize({ width: 480 });
       return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
@@ -1915,32 +1994,23 @@ function registerIpc() {
     return p;
   });
 
-  // Promote a history frame back to primary: the selected history entry
-  // becomes `artwork` and the previous primary moves to the front of the
-  // history (nothing is deleted, so this is fully reversible by browsing).
-  handle("production:promoteBoardHistory", (_e, id: string, shotId: string, index: number) => {
+  // Select the owning generation and output pipe together, using a stable
+  // path so a completed generation cannot shift the frame being promoted.
+  handle("production:promoteBoardHistory", (_e, id: string, shotId: string, framePath: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    const hist = shot.artworkHistory ?? [];
-    const i = Math.floor(index);
-    if (!hist[i]) throw new Error("That history frame no longer exists.");
-    const promoted = hist[i];
-    const current = shot.artwork;
-    shot.artwork = promoted;
-    hist.splice(i, 1);
-    if (current) hist.unshift(current);
-    shot.artworkHistory = hist;
+    selectBoardFrame(shot, framePath);
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: history frame restored as the primary frame.`);
     return p;
   });
 
   // Per-shot video generation: the shot's current frame (full resolution) plus
-  // any @[name] references in the prompt are uploaded to OpenArt as visual
-  // references; the finished clip is stored under videosDir and played by the
-  // animatic timeline for this shot's duration window.
+  // any @[name] references in the prompt are uploaded to the active provider
+  // as visual references; the finished clip is stored under videosDir and
+  // played by the animatic timeline for this shot's duration window.
   handle("production:generateVideo", (_e, id: string, shotId: string, opts: VideoGenOptions) =>
     runProductionJob(id, `Generating a video for a shot`, async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -1954,7 +2024,7 @@ function registerIpc() {
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await openart.generateVideoClip(p, shot, clean, emit);
+      const { rel } = await media().generateVideoClip(p, shot, clean, emit);
       if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
       shot.videoPath = rel;
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
@@ -1980,15 +2050,15 @@ function registerIpc() {
       if (!shot) throw new Error("Shot not found.");
       const prompt = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
       if (!prompt) throw new Error("The prompt is empty — write something in the prompt node first.");
-      const gen = openart.imageGenFn(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined, (m) => emit(m, "info"));
-      if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be generated in-app.");
+      const gen = media().imageGenFn(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${media().displayName} MCP isn't connected, so frames can't be generated in-app.`);
       // References: the @[name] tags the composer prompt actually cites.
-      const { resolved, extras } = openart.resolvePromptRefs(p, prompt, 0);
+      const { resolved, extras } = resolvePromptRefs(p, prompt, 0);
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
       const png = await gen(resolved, extras, shot);
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
-      if (shot.graphOutputSource === "imagegen") shot.artwork = jpegRel;
+      syncBoardOutputToPipe(shot);
       emit(`Shot ${shot.number}: node frame ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -2024,23 +2094,50 @@ function registerIpc() {
       }
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
-      const { rel } = await openart.generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
+      const { rel } = await media().generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
       if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath);
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );
 
-  /** Resolve an in-betweener keyframe ref id to its display name + image data
-   *  URL (characters, products, and custom image references all qualify —
-   *  only refs with artwork can be keyframes). */
-  function tweenKeyframeArtwork(p: Production, refId: string): { name: string; dataUrl: string } | null {
+  /** Read a workspace-relative asset as an uploadable data URL (JPEG/PNG/WebP
+   *  by extension), for feeding stored generations into image-input models. */
+  function fileDataUrl(p: Production, rel: string): string | null {
+    try {
+      const buf = fs.readFileSync(assetPath(p, rel));
+      const ext = (path.extname(rel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
+      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/png";
+      return `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Resolve an in-betweener keyframe source id to its display name + image
+   *  data URL. A generation-node sentinel resolves to that node's selected
+   *  generation (`@imagegen` → the image node's selected frame, `@editgen` →
+   *  the edit node's selected edit); anything else is a reference id looked
+   *  up in characters, products, and custom image references — only entries
+   *  with artwork can be keyframes. Returns null when the source is
+   *  unresolvable. */
+  function tweenKeyframeArtwork(p: Production, shot: ProductionShot, sourceId: string): { name: string; dataUrl: string } | null {
+    if (sourceId === TWEEN_KEY_IMGGEN) {
+      const g = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+      const dataUrl = g?.path ? fileDataUrl(p, g.path) : null;
+      return dataUrl ? { name: "Image-gen frame", dataUrl } : null;
+    }
+    if (sourceId === TWEEN_KEY_EDITGEN) {
+      const g = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
+      const dataUrl = g?.path ? fileDataUrl(p, g.path) : null;
+      return dataUrl ? { name: "Edit frame", dataUrl } : null;
+    }
     const pool = [
       ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
       ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
       ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
     ];
-    const ref = pool.find((r) => r.id === refId);
+    const ref = pool.find((r) => r.id === sourceId);
     return ref?.artwork ? { name: ref.name, dataUrl: ref.artwork } : null;
   }
 
@@ -2059,9 +2156,9 @@ function registerIpc() {
       if (!block) throw new Error("Action block not found — reconnect the keyframes and try again.");
       const prompt = block.prompt.trim();
       if (!prompt) throw new Error("Describe the action first (e.g. \"she turns toward the window, coat trailing\").");
-      const start = tweenKeyframeArtwork(p, block.startRefId);
-      const end = tweenKeyframeArtwork(p, block.endRefId);
-      if (!start || !end) throw new Error("Both keyframes need images — pick references with artwork.");
+      const start = tweenKeyframeArtwork(p, shot, block.startRefId);
+      const end = tweenKeyframeArtwork(p, shot, block.endRefId);
+      if (!start || !end) throw new Error("Both keyframes need images — pick references with artwork or generate a frame first.");
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
@@ -2069,7 +2166,7 @@ function registerIpc() {
         prompt,
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await openart.generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
+      const { rel } = await media().generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
       recordTweenBlockGen(block, rel, prompt, clean.model);
       emit(`Shot ${shot.number}: in-between ready — pick it in the block's dropdown to preview.`, "done");
     })
@@ -2128,6 +2225,24 @@ function registerIpc() {
     })
   );
 
+  // Step 3 in-betweener node: undo a stitch — drop the continuous clip and,
+  // when the tween feeds the output, unbind the feed. The per-block clips and
+  // the timeline stay intact, so the user can view/edit and re-stitch.
+  handle("production:unstitchTween", (_e, id: string, shotId: string): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const { changed, outputRel } = unstitchTween(shot);
+    if (!changed) throw new Error("This shot isn't stitched — nothing to revert.");
+    if (outputRel) {
+      try { fs.unlinkSync(assetPath(p, outputRel)); } catch { /* old stitch already gone */ }
+    }
+    productions.saveProduction(p);
+    productionEmit(id, `Shot ${shot.number}: stitch undone — back to the individual block clips.`, "done");
+    return p;
+  });
+
   // Step 3 node graph: AI-edit one image for the edit-image node. The source
   // image is the node's source pipe — the image node's selected generation,
   // else a reference's artwork — falling back to the shot's current frame.
@@ -2141,19 +2256,16 @@ function registerIpc() {
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
-      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
-      if (!gen) throw new Error("OpenArt MCP isn't connected, so frames can't be edited in-app.");
+      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${media().displayName} MCP isn't connected, so frames can't be edited in-app.`);
       // Source: image-node pipe > reference pipe > the shot's current frame.
       let dataUrl: string | undefined;
       let sourceName = `Shot ${shot.number} frame`;
       if (shot.graphEditImageSource) {
         const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
         if (src) {
-          const buf = fs.readFileSync(assetPath(p, src));
-          const ext = (path.extname(src).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-          const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
-          dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
-          sourceName = "Piped frame";
+          dataUrl = fileDataUrl(p, src) ?? undefined;
+          if (dataUrl) sourceName = "Piped frame";
         }
       }
       if (!dataUrl && shot.graphEditSourceRefId) {
@@ -2169,16 +2281,13 @@ function registerIpc() {
         }
       }
       if (!dataUrl && shot.artwork) {
-        const buf = fs.readFileSync(assetPath(p, shot.artwork));
-        const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-        const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
-        dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+        dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
       }
       if (!dataUrl) throw new Error("No source image — pipe a frame or reference into the edit node, or generate a frame first.");
       // Resolve @[name] tags in the edit text against the production's artwork,
       // so the references cited in the edit-prompt node are uploaded alongside
       // the source. The source occupies @image1 (token 0), so tags start at 1.
-      const { resolved: editText, extras } = openart.resolvePromptRefs(p, text, 1);
+      const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
       emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}${extras.length ? ` (+${extras.length} reference${extras.length === 1 ? "" : "s"})` : ""}…`);
       const png = await gen(
         `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
@@ -2187,7 +2296,7 @@ function registerIpc() {
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphEditGen(shot, jpegRel, text, modelId ?? "auto");
-      if (shot.graphOutputSource === "editgen") shot.artwork = jpegRel;
+      syncBoardOutputToPipe(shot);
       emit(`Shot ${shot.number}: node edit ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -2202,7 +2311,7 @@ function registerIpc() {
     const rel = typeof opts?.path === "string" ? opts.path.trim() : "";
     if (!rel) throw new Error("No output selected — generate something first.");
     if (opts?.kind === "video") applyVideoOutput(shot, rel);
-    else shot.artwork = rel;
+    else selectBoardFrame(shot, rel);
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: node output applied (${opts?.kind === "video" ? "video" : "frame"}).`);
     return p;
@@ -2268,19 +2377,27 @@ function registerIpc() {
   // repeated lookups are instant. Null when the form can't be read — the
   // caller falls back to a generic set.
   handle("production:videoModelOptions", async (_e, modelId: string, withImage?: boolean): Promise<VideoModelOptions | null> => {
-    return openart.videoModelOptions(String(modelId ?? ""), withImage === true);
+    return media().videoModelOptions(String(modelId ?? ""), withImage === true);
   });
 
-  // Step 3 in-betweener: which video models declare a dedicated end-frame
-  // slot. The tween node/modal filter their model lists to these (plus Auto);
-  // an empty result means nothing is proven, so the renderer falls back to
-  // every video model instead of an empty dropdown.
+  // Step 3 in-betweener: which video models accept a dedicated end-frame
+  // slot. The tween node/modal offer ONLY these — the submit path must always
+  // ride the start/end roles. Proven ids are unioned with the user's manual
+  // allowlist (Settings → Media generation) so a provider whose probe can't
+  // see the role still lists the models the user knows work.
   handle("production:videoEndFrameModels", async (): Promise<string[]> => {
+    let proven: string[] = [];
     try {
-      return await openart.videoEndFrameModels();
+      proven = await media().videoEndFrameModels();
     } catch {
-      return [];
+      proven = [];
     }
+    const manual = settings.getEndFrameModels();
+    const out = [...proven];
+    for (const id of manual) {
+      if (!out.includes(id)) out.push(id);
+    }
+    return out;
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a
@@ -2295,8 +2412,8 @@ function registerIpc() {
       const text = typeof prompt === "string" ? prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof model === "string" && model.trim() && model !== "auto" ? model.trim() : undefined;
-      const gen = openart.imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
-      if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.");
+      const gen = media().imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.`);
       const buf = fs.readFileSync(assetPath(p, shot.artwork));
       const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
       const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
@@ -2305,18 +2422,14 @@ function registerIpc() {
       // Resolve @[name] tags in the edit text against the production's artwork
       // so the cited references are uploaded alongside the frame. The frame
       // occupies @image1 (token 0), so tags start at 1.
-      const { resolved: editText, extras } = openart.resolvePromptRefs(p, text, 1);
+      const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
       const png = await gen(
         `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
         [{ name: "Current frame", dataUrl }, ...extras],
         shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordGraphImageGen(shot, jpegRel, text, modelId ?? "auto");
-      // The storyboard frame comes from the output pipe: hook the image node
-      // in (auto-apply when unpiped or already the feed; never displace a
-      // deliberate videogen/ref pipe).
-      hookImageGenToOutput(shot);
+      recordBoardEdit(shot, jpegRel, text, modelId ?? "auto");
       productionEmit(id, `Shot ${shot.number}: frame edited.`);
     }, { needsApiKey: false })
   );
@@ -2514,8 +2627,8 @@ function registerIpc() {
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
       const aspectRatio: ReferenceImageGenOptions["aspectRatio"] = opts?.aspectRatio === "1:1" || opts?.aspectRatio === "4:3" ? opts.aspectRatio : "16:9";
-      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), aspectRatio);
-      if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so references can't be generated in-app.");
+      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), aspectRatio);
+      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so references can't be generated in-app.`);
 
       // Editing: the source reference's current image is uploaded as the
       // visual reference (occupies @image1); @[name] tags in the edit text add
@@ -2531,11 +2644,11 @@ function registerIpc() {
       let promptText: string;
       let refs: { name: string; dataUrl: string }[];
       if (sourceRef) {
-        const { resolved, extras } = openart.resolvePromptRefs(p, text, 1);
+        const { resolved, extras } = resolvePromptRefs(p, text, 1);
         promptText = `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${resolved.slice(0, 1200)}`;
         refs = [{ name: sourceRef.name, dataUrl: sourceDataUrl! }, ...extras];
       } else {
-        const { resolved, extras } = openart.resolvePromptRefs(p, text, 0);
+        const { resolved, extras } = resolvePromptRefs(p, text, 0);
         promptText = resolved;
         refs = extras;
       }
@@ -2596,8 +2709,8 @@ function registerIpc() {
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
       // Character sheets are always 16:9, whatever the view layout.
-      const gen = openart.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
-      if (!gen) throw new Error("OpenArt MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.");
+      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
+      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.`);
 
       const promptText = characterSheetPrompt(description, view);
       emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}…`);
@@ -2786,7 +2899,7 @@ function registerIpc() {
   handle("ledger:exportTemplate", async (): Promise<string | null> => {
     let choices: OpenArtModelChoice[] = [];
     try {
-      choices = await openart.listModelChoices();
+      choices = await media().listModelChoices();
     } catch {
       choices = [];
     }
@@ -2798,7 +2911,7 @@ function registerIpc() {
     // apply when a form can't be introspected).
     const videoOpts: Record<string, { resolutions: string[]; durations: number[] }> = {};
     for (const m of videoModels) {
-      const o = await openart.videoModelOptions(m.id, true);
+      const o = await media().videoModelOptions(m.id, true);
       if (o) videoOpts[m.id] = o;
     }
     const rules = ledger.buildPriceTemplate(imageModels, videoModels, (id) => videoOpts[id] ?? null);

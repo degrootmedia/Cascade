@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ExpensePriceRule, ModelInfo, OpenArtModelChoice, SettingsView } from "../../../shared/ipc.js";
+import type { ExpensePriceRule, MediaProviderInfo, ModelInfo, OpenArtModelChoice, SettingsView } from "../../../shared/ipc.js";
 import { API_PROVIDERS } from "../../../shared/providers.js";
 import { McpSection } from "./McpSection.js";
 import { applyAccent } from "../theme.js";
@@ -118,7 +118,7 @@ function ExpensePricingSection() {
       setNote(
         file
           ? `Template saved to ${file} — fill in the prices, then Import CSV.`
-          : "No models available to build a template (is OpenArt connected?)."
+          : "No models available to build a template (is the media provider connected?)."
       );
     } catch (e) {
       setError(String(e));
@@ -223,6 +223,80 @@ function ExpensePricingSection() {
           {note && <span className="hint" title={note}>{note.length > 90 ? `${note.slice(0, 90)}…` : note}</span>}
         </div>
       </div>
+      {error && <p className="error-text">{error}</p>}
+    </>
+  );
+}
+
+/** Settings → Media generation: which MCP vendor serves image/video
+ *  generation (global for all productions), plus the manual end-frame model
+ *  allowlist for the in-betweener (merged with the providers' live probe).
+ *  Model ids from the other vendor are treated as unknown until the user
+ *  picks explicitly. */
+function MediaProviderSection() {
+  const [providers, setProviders] = useState<MediaProviderInfo[]>([]);
+  const [active, setActive] = useState<string>("openart");
+  const [error, setError] = useState<string | null>(null);
+  /** Manual end-frame allowlist, edited one id per line. */
+  const [endFrameText, setEndFrameText] = useState("");
+  const [endFrameSaved, setEndFrameSaved] = useState(false);
+
+  useEffect(() => {
+    void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
+    void window.cascade.getMediaProvider().then(setActive).catch(() => {});
+    void window.cascade.getEndFrameModels().then((ids) => setEndFrameText(ids.join("\n"))).catch(() => {});
+  }, []);
+
+  const saveEndFrame = async () => {
+    setEndFrameSaved(false);
+    try {
+      const ids = endFrameText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      await window.cascade.setEndFrameModels(ids);
+      setEndFrameSaved(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const change = async (id: string) => {
+    setActive(id);
+    setError(null);
+    try {
+      await window.cascade.setMediaProvider(id as MediaProviderInfo["id"]);
+      // ProductionWorkspace listens for this to re-read the provider and
+      // repopulate its model dropdowns (same string there — keep in sync).
+      window.dispatchEvent(new Event("cascade:media-provider-changed"));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <>
+      <label>Media generation</label>
+      {providers.map((p) => (
+        <div className="row" key={p.id}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <input type="radio" name="media-provider" checked={active === p.id} onChange={() => void change(p.id)} />
+            {p.displayName}
+          </label>
+          <span className="hint">{p.available ? "connected" : "not connected — add its MCP server below"}</span>
+        </div>
+      ))}
+      <p className="hint">Which service generates storyboard frames, clips, and reference images. Applies to every production.</p>
+      <label style={{ marginTop: 8 }}>In-betweener end-frame models</label>
+      <textarea
+        rows={3}
+        value={endFrameText}
+        onChange={(e) => { setEndFrameText(e.target.value); setEndFrameSaved(false); }}
+        placeholder={"One video model id per line, e.g.\nseedance_2_5"}
+        title="Video models that accept a start AND end frame. Merged with the live capability probe — anything listed here becomes selectable in the in-betweener node."
+      />
+      <div className="row">
+        <button onClick={() => void saveEndFrame()}>Save end-frame models</button>
+        {endFrameSaved && <span className="hint">saved</span>}
+      </div>
+      <p className="hint">The in-betweener only offers video models with a dedicated end-frame slot (probed live, or listed above).</p>
       {error && <p className="error-text">{error}</p>}
     </>
   );
@@ -538,6 +612,7 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
 
         {error && <p className="error-text">{error}</p>}
 
+        <MediaProviderSection />
         <McpSection />
           </>
         )}

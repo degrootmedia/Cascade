@@ -15,14 +15,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { McpManager } from "./mcp.js";
-import { assetPath, refToken, refArtworkDataUrl, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { assetPath, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { citePrompt, resolvePromptRefs } from "./providers/refs.js";
+import type { MediaProvider, ProviderEmit } from "./providers/types.js";
 import { uploadDataUrlReference } from "./openart-upload.js";
 import {
   IMAGE_URI_EXT_RX,
   IMAGE_URL_RX,
   parseJsonLooseArray,
   parseJsonLooseObject,
-  refTagMatches,
   VIDEO_URI_EXT_RX,
   VIDEO_URL_RX,
 } from "../shared/prompt-grammar.js";
@@ -33,7 +34,6 @@ import type {
   OpenArtModelChoice,
   PendingImageGen,
   Production,
-  ProductionEvent,
   ProductionShot,
   VideoGenOptions,
   VideoModelOptions,
@@ -45,7 +45,7 @@ const SERVER = "openart";
 const rawToolName = (n: string) => n.replace(/^openart__/, "");
 
 /** The log-line callback generation flows emit through (mirrors productionEmit). */
-export type OpenArtEmit = (m: string, l?: ProductionEvent["level"]) => void;
+export type OpenArtEmit = ProviderEmit;
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -178,7 +178,22 @@ export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<s
   return Object.keys(out).length ? out : null;
 }
 
-export class OpenArtClient {
+/** Extract the first signed number from a duration label ("5s"→5, "5 sec"→5,
+ *  "-1"→-1, "auto"→NaN). Preserves the sign so OpenArt's -1 "auto/random"
+ *  sentinel is never misread as a positive 1s length. */
+const durationNumber = (v: unknown): number => {
+  const m = String(v).match(/-?\d+(?:\.\d+)?/);
+  return m ? Number(m[0]) : NaN;
+};
+
+export class OpenArtClient implements MediaProvider {
+  readonly id = "openart" as const;
+  readonly displayName = "OpenArt";
+
+  /** True when the connected MCP surface exposes OpenArt image generation. */
+  isAvailable(): boolean {
+    return this.findTool(/^openart_.*generate.*image$/i) !== null;
+  }
   private readonly videoOptionsCache = new Map<string, { o: VideoModelOptions | null; at: number }>();
   private readonly VIDEO_OPTIONS_NULL_TTL_MS = 2 * 60_000;
 
@@ -213,7 +228,7 @@ export class OpenArtClient {
 
   // ---- model discovery ------------------------------------------------------
 
-  /** Parse the OpenArt model-list reply into dropdown choices (Auto prepended). */
+  /** Parse the OpenArt model-list reply into dropdown choices. */
   private parseOpenArtModels(raw: string): Array<Record<string, unknown>> {
     const arr = parseJsonLooseArray(raw);
     if (arr) {
@@ -237,11 +252,9 @@ export class OpenArtClient {
     return [];
   }
 
-  /** Shape the OpenArt model list into dropdown choices, prepending "Auto". */
+  /** Shape the OpenArt model list into dropdown choices. */
   private shapeModelChoices(raw: string): OpenArtModelChoice[] {
-    const out: OpenArtModelChoice[] = [
-      { id: "auto", displayName: "Auto", description: "Cascade picks the best model for each run.", imageInput: false, videoInput: false, cost: null },
-    ];
+    const out: OpenArtModelChoice[] = [];
     for (const m of this.parseOpenArtModels(raw)) {
       const id = String(m.model ?? m.id ?? m.model_id ?? m.name ?? "").trim();
       if (!id) continue;
@@ -277,17 +290,16 @@ export class OpenArtClient {
     return typeof credits === "number" && Number.isFinite(credits) ? Math.round(credits) : null;
   }
 
-  /** Turn "auto" (or any OpenArt model id) into the id to actually call. */
+  /** Turn a stored choice into the id to actually call. "auto" (or empty) is
+   *  legacy from the removed synthetic pick — resolve to the first eligible
+   *  model. A foreign-provider id (`higgsfield:…`, left over from a provider
+   *  switch) is treated the same — never submitted to the OpenArt server. */
   private resolveOpenArtModel(choice: string, refsPresent: boolean, models: OpenArtModelChoice[]): string {
-    if (choice && choice !== "auto") return choice;
-    const eligible = models.slice(1); // everything but the synthetic Auto
-    if (!eligible.length) return "";
-    // This is the IMAGE tool, so prefer a model that accepts image input when
-    // one is available (even without refs, image-capable models are the right
-    // default for storyboards). Falls back to the first listed otherwise.
-    const withInput = eligible.filter((m) => m.imageInput);
-    const pool = withInput.length ? withInput : eligible;
-    return pool[0]?.id ?? eligible[0]?.id ?? "";
+    void refsPresent;
+    if (choice && choice !== "auto" && !choice.startsWith("higgsfield:")) return choice;
+    const withInput = models.filter((m) => m.imageInput);
+    const pool = withInput.length ? withInput : models;
+    return pool[0]?.id ?? "";
   }
 
   // ---- video-options cache --------------------------------------------------
@@ -314,11 +326,13 @@ export class OpenArtClient {
     return props && typeof props === "object" ? (props as Record<string, unknown>) : null;
   }
 
-/** Pull the resolution/duration options out of a model form's props map. */
+  /** Pull the resolution/duration options out of a model form's props map. */
   private extractVideoOptions(props: Record<string, unknown>): VideoModelOptions {
     const out: VideoModelOptions = { resolutions: [], durations: [] };
     for (const key of Object.keys(props)) {
-      const p = props[key] as { type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown } | undefined;
+      const p = props[key] as {
+        type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown; oneOf?: unknown[]; anyOf?: unknown[];
+      } | undefined;
       if (!p) continue;
       if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
         for (const v of p.enum) {
@@ -327,21 +341,46 @@ export class OpenArtClient {
         }
       }
       if (/duration|length|seconds|clip|frames|time/i.test(key)) {
+        const nums = new Set<number>();
         if (Array.isArray(p.enum)) {
           for (const v of p.enum) {
-            const n = Number(String(v).replace(/[^0-9.]/g, ""));
-            if (Number.isFinite(n) && n > 0 && n <= 120) out.durations.push(Math.round(n));
+            const n = durationNumber(v);
+            if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
           }
-        } else if (p.type === "integer" || p.type === "number") {
-          const min = Number(p.minimum) > 0 ? Number(p.minimum) : 1;
-          const max = Number(p.maximum) > 0 ? Number(p.maximum) : min + 15;
-          for (let n = Math.ceil(min); n <= Math.floor(max) && n <= 120; n++) out.durations.push(n);
         }
+        // oneOf/anyOf const choices (e.g. [{const:-1,"Auto"},{const:5},{const:8}])
+        // — the sentinel const (-1/0/auto) is filtered out by the n > 0 check.
+        for (const c of [...(p.oneOf ?? []), ...(p.anyOf ?? [])]) {
+          const cand = (c as { const?: unknown } | null | undefined)?.const;
+          if (cand === undefined) continue;
+          const n = durationNumber(cand);
+          if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
+        }
+        // Numeric bounds as a range (integer/number, or type-less min/max).
+        if ((p.minimum !== undefined || p.maximum !== undefined) &&
+            (p.type === undefined || p.type === "integer" || p.type === "number")) {
+          const min = Number(p.minimum) > 0 ? Math.ceil(Number(p.minimum)) : 1;
+          const max = Number(p.maximum) > 0 ? Math.floor(Number(p.maximum)) : min + 15;
+          for (let n = min; n <= max && n <= 120; n++) nums.add(n);
+        }
+        for (const n of nums) out.durations.push(n);
       }
     }
     out.resolutions = Array.from(new Set(out.resolutions));
     out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
     return out;
+  }
+
+  /** Human-readable summary of accepted clip lengths ("4–15s" for a
+   *  contiguous range, "5, 10s" for discrete picks) for validation errors. */
+  private static describeDurations(durations: number[]): string {
+    const sorted = [...durations].sort((a, b) => a - b);
+    let contiguous = sorted.length > 2;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] !== sorted[i - 1] + 1) { contiguous = false; break; }
+    }
+    if (contiguous) return `${sorted[0]}–${sorted[sorted.length - 1]}s`;
+    return `${sorted.join(", ")}s`;
   }
 
   /** Resolve a video model's live form props (first image2video or
@@ -395,8 +434,11 @@ export class OpenArtClient {
   }
 
   /** The resolution / length options a video model accepts (from its live form
-   *  schema). Null when the model form can't be read. Cached per model+mode. */
+   *  schema). Null when the model form can't be read — including foreign
+   *  (`higgsfield:…`) ids, which this vendor must never introspect. Cached
+   *  per model+mode. */
   videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
+    if (modelId.startsWith("higgsfield:")) return Promise.resolve(null);
     return this.resolveVideoOptions(modelId, withImage);
   }
 
@@ -445,9 +487,9 @@ export class OpenArtClient {
   }
 
   /** Ids of the video-capable models whose forms declare a dedicated
-   *  end-frame slot. Empty when none is proven (the caller then falls back to
-   *  the full video list — those models still receive both frames via the
-   *  array fallback). Capability lookups run concurrently off the warm cache. */
+   *  end-frame slot. Empty when none is proven — the caller unions this with
+   *  the user's manual allowlist before the tween dropdown offers anything.
+   *  Capability lookups run concurrently off the warm cache. */
   async videoEndFrameModels(): Promise<string[]> {
     let models: OpenArtModelChoice[] = [];
     try {
@@ -530,28 +572,46 @@ export class OpenArtClient {
   }
 
   /** Map the chosen duration onto whatever length param the video model's
-   *  schema declares (integer seconds, or an enum of second-ish labels). */
+   *  schema declares. Tries, in order: an exact/positive enum label, an
+   *  exact-positive numeric match (label variants like "2s"/"2 sec" → 2), a
+   *  bare integer/number, a numeric field with min/max bounds (clamped), a
+   *  free-form string (the "Ns" format OpenArt forms use), then an
+   *  exact-positive oneOf/anyOf const. Sentinel values (-1/0/auto — OpenArt's
+   *  "let the model pick" length) are NEVER chosen, and a non-exact request
+   *  is never silently coerced: both produced a wrong-length clip (5s default
+   *  when the field was dropped, and an auto-length clip when a -1 sentinel
+   *  won a nearest-pick tie). The caller's validation (extractVideoOptions)
+   *  rejects lengths the form can't do before this runs. */
   private videoDurationAssign(durationSec: number, props: Record<string, unknown>): Record<string, unknown> | null {
+    const want = Math.round(durationSec);
+    const wantStr = String(want);
+    const exactPositive = (v: unknown): boolean => {
+      const n = durationNumber(v);
+      return Number.isFinite(n) && n > 0 && Math.round(n) === want;
+    };
     for (const key of Object.keys(props)) {
-      const p = props[key] as { type?: string; enum?: unknown[] } | undefined;
+      const p = props[key] as {
+        type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown;
+        oneOf?: unknown[]; anyOf?: unknown[];
+      } | undefined;
       if (!p || !/duration|length|seconds|clip|frames|time/i.test(key)) continue;
-      if (p.type === "integer" || p.type === "number") return { [key]: Math.round(durationSec) };
-      if (Array.isArray(p.enum)) {
-        const want = String(durationSec);
-        const exact = p.enum.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+      if (Array.isArray(p.enum) && p.enum.length) {
+        const exact = p.enum.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === wantStr);
         if (exact !== undefined) return { [key]: exact };
-        let best: unknown;
-        let bestDiff = Infinity;
-        for (const v of p.enum) {
-          const n = Number(String(v).replace(/[^0-9.]/g, ""));
-          if (Number.isFinite(n)) {
-            const diff = Math.abs(n - durationSec);
-            if (diff < bestDiff) { bestDiff = diff; best = v; }
-          }
-        }
-        if (best !== undefined) return { [key]: best };
-        continue;
+        const num = p.enum.find(exactPositive);
+        if (num !== undefined) return { [key]: num };
       }
+      if (p.type === "integer" || p.type === "number") return { [key]: want };
+      if ((p.minimum !== undefined || p.maximum !== undefined) &&
+          (p.type === undefined || p.type === "integer" || p.type === "number")) {
+        const min = Number(p.minimum) > 0 ? Number(p.minimum) : 1;
+        const max = Number(p.maximum) > 0 ? Number(p.maximum) : min + 15;
+        return { [key]: Math.max(min, Math.min(max, want)) };
+      }
+      if (p.type === "string") return { [key]: `${want}s` };
+      const union = [...(p.oneOf ?? []), ...(p.anyOf ?? [])] as Array<{ const?: unknown } | null | undefined>;
+      const exactConst = union.find((c) => c && exactPositive(c.const));
+      if (exactConst && exactConst.const !== undefined) return { [key]: exactConst.const };
     }
     return null;
   }
@@ -634,7 +694,7 @@ private videoRefsAssign = videoRefsAssign;
     const model = this.resolveOpenArtModel(cfg.model, refs.length > 0, models);
     if (model) args.model = model;
     // Route into the production's own OpenArt project when one is resolved, so
-    // every frame for a production lands in a project named after its folder.
+    // every frame for a production lands in a project named after the production.
     if (projectId) args.projectId = projectId;
     return args;
   }
@@ -879,7 +939,7 @@ private videoRefsAssign = videoRefsAssign;
 
   /**
    * Resolve the OpenArt project a production's frames should land in: the
-   * project named after the production's folder. Reuses an existing project
+   * project named after the production. Reuses an existing project
    * with that name (only ones Cascade can generate into), or creates it.
    * Returns the project id, or null when OpenArt's project tools aren't
    * available / an error occurs — generation then falls back to the account
@@ -890,13 +950,13 @@ private videoRefsAssign = videoRefsAssign;
   async resolveProject(p: Production, onNotice?: (msg: string) => void): Promise<string | null> {
     const listRaw = this.findTool(/^openart_project_list$/);
     const createRaw = this.findTool(/^openart_project_create$/);
-    const folderName = (path.basename(p.meta.folder) || p.meta.name).trim();
-    if (!folderName) return null;
+    const projectName = (p.meta.name || "").trim();
+    if (!projectName) return null;
     if (!listRaw) {
-      onNotice?.(`No OpenArt project tool is connected — frames will land in the account's default project instead of "${folderName}".`);
+      onNotice?.(`No OpenArt project tool is connected — frames will land in the account's default project instead of "${projectName}".`);
       return null;
     }
-    const target = folderName.toLowerCase();
+    const target = projectName.toLowerCase();
     try {
       const listText = await this.mcp.callRaw(SERVER, listRaw, {});
       const existing = this.parseOpenArtProjects(listText);
@@ -910,50 +970,23 @@ private videoRefsAssign = videoRefsAssign;
       const match = byName.find((pr) => pr.canGenerate) ?? byName[0];
       if (match && typeof match.id === "string") return match.id;
       if (!createRaw) {
-        onNotice?.(`No OpenArt project named "${folderName}" exists yet and the create tool isn't connected — generating into the account's default project.`);
+        onNotice?.(`No OpenArt project named "${projectName}" exists yet and the create tool isn't connected — generating into the account's default project.`);
         return null;
       }
-      const createdText = await this.mcp.callRaw(SERVER, createRaw, { name: folderName });
+      const createdText = await this.mcp.callRaw(SERVER, createRaw, { name: projectName });
       const created = this.parseOpenArtProjects(createdText)[0];
       const id = created && typeof created.id === "string" ? created.id : null;
       if (!id) {
-        onNotice?.(`Couldn't read the id of the OpenArt project created for "${folderName}" — generating into the account's default project instead.`);
+        onNotice?.(`Couldn't read the id of the OpenArt project created for "${projectName}" — generating into the account's default project instead.`);
       }
       return id;
     } catch (e) {
-      onNotice?.(`Couldn't resolve the OpenArt project "${folderName}" (${e instanceof Error ? e.message : String(e)}) — generating into the account's default project.`);
+      onNotice?.(`Couldn't resolve the OpenArt project "${projectName}" (${e instanceof Error ? e.message : String(e)}) — generating into the account's default project.`);
       return null;
     }
   }
 
   // ---- generation -----------------------------------------------------------
-
-  /**
-   * Resolve @[name] tags in a prompt against the production's artwork
-   * references. Returns the prompt with tags replaced by portable tokens
-   * (@imageN) plus the referenced images, ready to upload alongside the
-   * shot's frame. `startToken` is the token index to begin at — the shot's
-   * own frame always occupies @image1.
-   */
-  resolvePromptRefs(p: Production, prompt: string, startToken: number): { resolved: string; extras: { name: string; dataUrl: string }[] } {
-    const candidates = [
-      ...p.characters.map((c) => ({ name: c.name, artwork: refArtworkDataUrl(p, c) })),
-      ...p.products.map((pr) => ({ name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-      ...(p.references ?? []).map((r) => ({ name: r.name, artwork: refArtworkDataUrl(p, r) })),
-    ].filter((r): r is { name: string; artwork: string } => Boolean(r.name && r.artwork));
-    const extras: { name: string; dataUrl: string }[] = [];
-    const nameToken = new Map<string, string>();
-    let resolved = prompt;
-    let token = startToken;
-for (const { tag, name } of refTagMatches(prompt)) {
-      const c = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
-      if (!c) continue;
-      if (!extras.some((e) => e.name === c.name)) extras.push({ name: c.name, dataUrl: c.artwork });
-      if (!nameToken.has(c.name)) nameToken.set(c.name, refToken(token++));
-      resolved = resolved.replace(tag, nameToken.get(c.name)!);
-    }
-    return { resolved, extras };
-  }
 
   /**
    * Resolve the Step 3 image generator. First (and only in-app) choice is the
@@ -962,7 +995,7 @@ for (const { tag, name } of refTagMatches(prompt)) {
    * prompts for manual generation + import. `modelOverride` forces a specific
    * OpenArt model id (per-frame edit runs); "auto"/undefined uses the config.
    * `onNotice` reports a project-resolution fallback (frames landing in the
-   * account default project instead of the folder-named one) to the caller's
+   * account default project instead of the production-named one) to the caller's
    * log so it's never silent. `aspectRatio` selects the generated image's
    * shape (16:9 by default; reference generation passes the modal's choice).
    */
@@ -970,7 +1003,7 @@ for (const { tag, name } of refTagMatches(prompt)) {
     const toolName = this.findTool(/^openart_.*generate.*image$/i);
     if (!toolName) return null;
 
-// Resolved lazily on the first shot (cache the folder-named project id for
+// Resolved lazily on the first shot (cache the production-named project id for
     // the rest of the run); null when the lookup/create fails.
     let projectId: string | null | undefined;
 
@@ -993,25 +1026,19 @@ for (const { tag, name } of refTagMatches(prompt)) {
 
       // Upload reference art (deduped) so image-capable models can use it.
       // References are only meaningful under image2image (text2image exposes no
-      // reference field), so their presence picks the mode below.
-      // Each uploaded reference carries a unique string id (OpenArt's
-      // visualReference id, falling back to its URL). The prompt already cites
-      // refs by portable token (@image1, …); every token occurrence is
-      // swapped for that reference's actual OpenArt id before MCP submission.
+      // reference field), so their presence picks the mode below. Binding is
+      // positional (probed live: visualReferences + "reference image N" prose
+      // with no ids) — citations are anchored by citePrompt below.
       const uploaded: Record<string, unknown>[] = [];
-      const tokenToId: { token: string; id: string }[] = [];
+      const submitted: (string | null)[] = [];
       for (const [i, r] of refs.entries()) {
         try {
           const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name);
           uploaded.push(vr);
-          const id = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim();
-          if (id) tokenToId.push({ token: refToken(i), id });
+          submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
         } catch { /* non-fatal: ref falls back to text-only */ }
       }
-      let fullPrompt = prompt;
-      for (const { token, id } of tokenToId) {
-        fullPrompt = fullPrompt.split(token).join(id);
-      }
+      const fullPrompt = citePrompt(prompt, refs, submitted);
       const hasRefs = refs.length > 0;
       const mode = hasRefs ? "image2image" : "text2image";
 
@@ -1139,26 +1166,24 @@ text.match(IMAGE_URL_RX)?.[0] ??
       }
     }
     refs.push(...(extraRefs ?? []));
-    const { resolved, extras } = this.resolvePromptRefs(p, opts.prompt, refs.length);
+    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length);
     refs.push(...extras);
 
+    // Uploads ride the same positional binding as images (probed live); the
+    // sign request uses purpose "create-video" — using the image purpose can
+    // make OpenArt reject the upload and silently drop the reference.
     const uploaded: Record<string, unknown>[] = [];
-    const tokenToId: { token: string; id: string }[] = [];
+    const submitted: (string | null)[] = [];
     for (const [i, r] of refs.entries()) {
       try {
-        // The frame + prompt references are uploaded for a *video* job, so the
-        // sign request uses purpose "create-video" — using the image purpose
-        // can make OpenArt reject the upload and silently drop the reference.
         const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name, "create-video");
         uploaded.push(vr);
-        const id = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim();
-        if (id) tokenToId.push({ token: refToken(i), id });
+        submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
       } catch {
         emit(`Reference "${r.name}" couldn't be uploaded — continuing without it.`, "error");
       }
     }
-    let fullPrompt = resolved;
-    for (const { token, id } of tokenToId) fullPrompt = fullPrompt.split(token).join(id);
+    const fullPrompt = citePrompt(resolved, refs, submitted);
 
     // Resolve the model id ("auto" → first video-capable model), then discover
     // the mode the model's form accepts: image-to-video when references are
@@ -1167,7 +1192,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
     // In-betweening ("auto" + an end keyframe) prefers a model with a
     // dedicated end-frame slot; anything else falls back to the first video
     // model (both frames still ride the array fallback).
-    let modelId = opts.model && opts.model !== "auto" ? opts.model : "";
+    let modelId = opts.model && opts.model !== "auto" && !opts.model.startsWith("higgsfield:") ? opts.model : "";
     if (!modelId) {
       const video = models.filter((m) => m.videoInput);
       if (frameRefs?.end && video.length > 1) {
@@ -1181,21 +1206,75 @@ text.match(IMAGE_URL_RX)?.[0] ??
       : ["text2video", "text_to_video", "video"];
     let mode = modeCandidates[0];
     let formProps: Record<string, unknown> | null = null;
+    let formRawReply = "";
     if (modelId) {
       const formRaw = this.findTool(/^openart_model_form_get$/);
       if (formRaw) {
         for (const m of modeCandidates) {
           try {
-            formProps = this.parseModelFormProperties(await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode: m }));
+            const raw = await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode: m });
+            formProps = this.parseModelFormProperties(raw);
             if (formProps) { mode = m; break; }
+            if (!formRawReply) formRawReply = String(raw ?? "");
           } catch { /* try the next mode spelling */ }
         }
       }
     }
     const projectId = await this.resolveProject(p, (m) => emit(m)).catch(() => null);
 
+    // Fail loudly when the model's live form proves it can't do the requested
+    // length. Silently coercing here (nearest-enum pick in videoDurationAssign,
+    // or omitting the field so the service falls back to its default) once
+    // turned a 2s tween block into a 5s clip. Unknown options (unreadable
+    // form, or no duration field at all) still pass through unchecked.
+    if (formProps && Number.isFinite(opts.durationSec)) {
+      const supported = this.extractVideoOptions(formProps).durations;
+      const want = Math.round(opts.durationSec);
+      if (supported.length && !supported.includes(want)) {
+        throw new Error(
+          `"${modelId || "the video model"}" doesn't support a ${want}s clip (supports ${OpenArtClient.describeDurations(supported)}) — retime the block or pick another model.`
+        );
+      }
+    }
+
     const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps);
-    emit(`Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}…`);
+    // Diagnostics: surface exactly what reaches OpenArt so a silently-ignored
+    // length (the recurring "asked 2s, got the 5s default" bug) is visible in
+    // the job log instead of a mystery. The params carry no secrets.
+    const paramsObj = (args.params as Record<string, unknown>) ?? {};
+    const durationKeys = Object.keys(paramsObj).filter((k) => /duration|length|seconds|clip|frames|time/i.test(k));
+    const formKeys = formProps ? Object.keys(formProps) : [];
+    const formDurationish = formKeys.filter((k) => /duration|length|seconds|clip|frames|time|time_?span|video/i.test(k));
+    const formReplyInfo = formProps
+      ? ""
+      : formRawReply
+        ? ` form reply (no props parsed): ${formRawReply.replace(/\s+/g, " ").slice(0, 600)}`
+        : " no model form was returned";
+    // Compact schema dump for the video-ish fields (types/enum/min/max only) so
+    // a mismatched duration/resolution shape is visible in the job log.
+    const schemaDump = formProps
+      ? Object.entries(formProps)
+          .filter(([k]) => /duration|length|seconds|resolution|quality|definition|size|clip|frames|time/i.test(k))
+          .map(([k, v]) => {
+            const p = (v ?? {}) as { type?: unknown; enum?: unknown; minimum?: unknown; maximum?: unknown; default?: unknown; oneOf?: unknown; anyOf?: unknown };
+            const parts = [`"${k}"`];
+            if (p.type !== undefined) parts.push(`type=${String(p.type)}`);
+            if (Array.isArray(p.enum)) parts.push(`enum=[${p.enum.map((e) => JSON.stringify(e)).join(",")}]`);
+            if (p.minimum !== undefined) parts.push(`min=${String(p.minimum)}`);
+            if (p.maximum !== undefined) parts.push(`max=${String(p.maximum)}`);
+            if (p.default !== undefined) parts.push(`default=${JSON.stringify(p.default)}`);
+            if (Array.isArray(p.oneOf)) parts.push(`oneOf=${JSON.stringify(p.oneOf).slice(0, 220)}`);
+            if (Array.isArray(p.anyOf)) parts.push(`anyOf=${JSON.stringify(p.anyOf).slice(0, 220)}`);
+            return parts.join(" ");
+          })
+          .join(" | ")
+      : "";
+    emit(
+      `Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}… ` +
+      (durationKeys.length
+        ? `params ${durationKeys.map((k) => `${k}=${JSON.stringify(paramsObj[k])}`).join(", ")}`
+        : `⚠ no duration/length param was set (OpenArt may default to 5s). Model form fields: [${formKeys.join(", ")}]${formDurationish.length ? ` — duration-ish: [${formDurationish.join(", ")}]` : ""}${schemaDump ? ` — ${schemaDump}` : ""}${formReplyInfo}`)
+    );
     const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
 
     const done = await (async (): Promise<{ buf: Buffer; ext: string }> => {

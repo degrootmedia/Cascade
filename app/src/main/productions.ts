@@ -229,11 +229,35 @@ function migrateGraphPipes(shot: ProductionShot): boolean {
   return true;
 }
 
-export function newProduction(name: string, folder: string): ProductionFile {
+/** Make a production name safe as a single folder segment (Windows + POSIX).
+ *  Strips illegal characters and trailing dots/spaces; falls back to
+ *  "Untitled production" when nothing usable remains. */
+export function sanitizeProductionFolderName(name: string): string {
+  const cleaned = name
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return "Untitled production";
+  return cleaned.slice(0, 100);
+}
+
+export function newProduction(name: string, parentFolder: string): ProductionFile {
   const now = new Date().toISOString();
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  // The picker chooses a parent directory; the production lives in a
+  // subfolder named after the production so the disk layout mirrors the
+  // production name. An empty name keeps the legacy behavior (the picked
+  // folder itself is the production folder).
+  let folder = parentFolder;
+  let prodName = trimmed || path.basename(parentFolder) || "Untitled production";
+  if (trimmed) {
+    folder = path.join(parentFolder, sanitizeProductionFolderName(trimmed));
+    prodName = trimmed;
+  }
   const meta: ProductionMeta = {
     id: store.newId(),
-    name: name.trim() || path.basename(folder) || "Untitled production",
+    name: prodName,
     folder,
     createdAt: now,
     updatedAt: now,
@@ -259,6 +283,69 @@ export function newProduction(name: string, folder: string): ProductionFile {
   for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
+    } catch {
+      /* non-fatal: user may add it later */
+    }
+  }
+  saveProduction(p);
+  return p;
+}
+
+/**
+ * Re-register an existing production folder (e.g. after moving to a new PC
+ * or wiping app data, the userData/productions/ JSON is gone but the folder
+ * with boards/, script.md, … survives). The folder ITSELF becomes the
+ * production folder — unlike newProduction, no subfolder is created. Missing
+ * asset dirs are scaffolded non-destructively; existing files are never
+ * touched. Pipeline state starts fresh (the old JSON is gone), so the user
+ * re-ingests the script from Step 1. Re-importing an already-registered
+ * folder returns the existing document instead of a duplicate.
+ */
+export function importProduction(folder: string): ProductionFile {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(folder);
+  } catch {
+    throw new Error(`That folder doesn't exist: ${folder}`);
+  }
+  if (!stat.isDirectory()) throw new Error(`Not a folder: ${folder}`);
+  const resolved = path.resolve(folder);
+  const existing = store.list().find((p) => {
+    try {
+      return path.resolve(p.meta.folder) === resolved;
+    } catch {
+      return false;
+    }
+  });
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const p: ProductionFile = {
+    meta: {
+      id: store.newId(),
+      name: path.basename(resolved) || "Untitled production",
+      folder: resolved,
+      createdAt: now,
+      updatedAt: now,
+      stepDone: 0,
+      shotCount: 0,
+    },
+    currentStep: 1,
+    visualStyle: "",
+    styles: [],
+    brand: { colors: [], font: "" },
+    scenes: [],
+    characters: [],
+    products: [],
+    references: [],
+    openArt: { model: "auto", resolution: "1k" },
+    status: {},
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+    assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
+  };
+  // Scaffold only what's missing — never delete or overwrite.
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
+    try {
+      fs.mkdirSync(path.join(resolved, d), { recursive: true });
     } catch {
       /* non-fatal: user may add it later */
     }

@@ -172,3 +172,44 @@ export function reorderShot(
 export function newShot(number: string, audio = "", visual = ""): ProductionShot {
   return { id: crypto.randomUUID(), number, audio, visual };
 }
+
+/**
+ * A blank starting skeleton for productions with no script to ingest: one
+ * scene with five empty shots numbered on the 100-grid, ready for manual
+ * editing (or a later re-ingestion).
+ */
+export function blankScenes(): ProductionScene[] {
+  const shots: ProductionShot[] = [];
+  let number = FIRST_NUMBER;
+  for (let i = 0; i < 5; i++) {
+    shots.push(newShot(number));
+    number = nextNumber(number);
+  }
+  return [{ number: 1, title: "Scene 1", shots }];
+}
+
+/** Re-derive every scene ordinal 1..N in order. Scene numbers are display-only. */
+function renumberSceneOrdinals(scenes: ProductionScene[]): void {
+  scenes.forEach((s, i) => { s.number = i + 1; });
+}
+
+/**
+ * Insert an empty scene after `afterSceneNumber` (0 = before the first scene,
+ * null = at the end), then renumber every later scene ordinal 1..N. Shot
+ * numbers are untouched. Returns the new scene.
+ */
+export function insertScene(
+  scenes: ProductionScene[],
+  afterSceneNumber: number | null
+): ProductionScene {
+  const scene: ProductionScene = { number: 0, title: "New Scene", shots: [] };
+  if (afterSceneNumber === null) scenes.push(scene);
+  else if (afterSceneNumber === 0) scenes.unshift(scene);
+  else {
+    const at = scenes.findIndex((s) => s.number === afterSceneNumber);
+    if (at === -1) throw new Error(`Scene ${afterSceneNumber} not found`);
+    scenes.splice(at + 1, 0, scene);
+  }
+  renumberSceneOrdinals(scenes);
+  return scene;
+}

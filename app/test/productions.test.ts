@@ -5,12 +5,14 @@
  * the merge copies only renderer-editable fields and never clobbers concurrent
  * state that the renderer doesn't send.
  */
-import { describe, it, expect, vi } from "vitest";
-import type { Production } from "../src/shared/ipc.js";
+import { afterAll, describe, it, expect, vi } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
-  return { dataDir: `${base}/cascade-productions-${process.pid}-${Date.now()}` };
+  return { dataDir: `${base}/opencode/cascade-productions-${process.pid}-${Date.now()}` };
 });
 
 vi.mock("electron", () => ({ app: { getPath: () => dataDir } }));
@@ -23,7 +25,11 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState } from "../src/main/productions.js";
+import { applyRendererState, importProduction, loadProduction, saveProduction } from "../src/main/productions.js";
+import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
+import { boardFrameHistory } from "../src/shared/board-frames.js";
+
+afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
 function baseProduction(overrides: Partial<Production> = {}): Production {
   return {
@@ -200,5 +206,133 @@ describe("applyRendererState", () => {
     const shot = merged.scenes[0].shots[0];
     expect(shot.artwork).toBe("boards/0100/shot-0100-edit.jpg");
     expect(shot.videoPath).toBeUndefined();
+  });
+});
+
+describe("board frame selection persistence", () => {
+  it.each(["image", "edit", "legacy", "current"] as const)("preserves a %s selection through renderer state and repeated disk save/load", (kind) => {
+    const images = [0, 1, 2].map((i) => ({
+      path: `boards/0100/image-${i}.jpg`, prompt: `image ${i}`, model: "image-model", at: `2026-09-0${3 - i}T00:00:00.000Z`,
+    }));
+    const edits = [0, 1, 2].map((i) => ({
+      path: `boards/0100/edit-${i}.jpg`, prompt: `edit ${i}`, model: "edit-model", at: `2026-09-0${6 - i}T00:00:00.000Z`,
+    }));
+    const shot: ProductionShot = {
+      id: "shot1", number: "0100", audio: "", visual: "Hero walks",
+      artwork: "boards/0100/current.jpg", artworkHistory: ["boards/0100/legacy.jpg", "boards/0100/older.jpg"],
+      graphImageGens: images, graphImageGenIndex: 0,
+      graphEditGens: edits, graphEditGenIndex: 1,
+      graphOutputSource: "videogen", videoPath: "videos/clip.mp4", graphImageToVideo: true,
+      graphVideoGens: [{ path: "videos/clip.mp4", prompt: "motion", model: "video-model", at: "" }],
+      graphVideoGenIndex: 0,
+      // Deliberately omit graphMigrated: an explicit selection must also survive legacy migration.
+    };
+    const incoming = baseProduction({
+      meta: { ...baseProduction().meta, id: `selection-${kind}`, folder: path.join(dataDir, "assets") },
+      scenes: [{ number: 1, title: "S1", shots: [shot] }],
+    });
+    const rel = kind === "image" ? images[2].path : kind === "edit" ? edits[2].path
+      : kind === "legacy" ? "boards/0100/legacy.jpg" : shot.artwork!;
+    selectBoardFrame(shot, rel);
+    const selected = structuredClone(shot);
+    const history = boardFrameHistory(shot);
+    // A stale artwork mirror cannot replace the newly selected node output.
+    shot.artwork = "boards/0100/current.jpg";
+    shot.videoPath = "videos/clip.mp4";
+    const fresh = baseProduction({ meta: { ...incoming.meta } });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots[0].artwork).toBe(rel);
+    expect(merged.scenes[0].shots[0].videoPath).toBeUndefined();
+    saveProduction(merged);
+
+    for (let i = 0; i < 2; i++) {
+      const loaded = loadProduction(incoming.meta.id);
+      expect(loaded).not.toBeNull();
+      const restored = loaded!.scenes[0].shots[0];
+      expect(restored.artwork).toBe(rel);
+      expect(restored.videoPath).toBeUndefined();
+      expect(restored.graphOutputSource).toBe(kind === "edit" ? "editgen" : "imagegen");
+      expect(restored.graphImageGenIndex).toBe(selected.graphImageGenIndex);
+      expect(restored.graphEditGenIndex).toBe(selected.graphEditGenIndex);
+      expect(restored.graphImageGens).toEqual(selected.graphImageGens);
+      expect(restored.graphEditGens).toEqual(selected.graphEditGens);
+      expect(restored.graphVideoGens).toEqual(selected.graphVideoGens);
+      expect(restored.graphImageToVideo).toBe(true);
+      expect(boardFrameHistory(restored)).toEqual(history);
+      expect(syncBoardOutputToPipe(restored)).toBe(false);
+      saveProduction(loaded!);
+    }
+  });
+
+  it("persists a classic edit and re-edit with the correct source fallback and complete node history", () => {
+    const shot: ProductionShot = {
+      id: "shot1", number: "0100", audio: "", visual: "Hero walks",
+      artwork: "boards/0100/image-1.jpg", graphImageGenIndex: 0, graphImageToVideo: true,
+      graphImageGens: [0, 1].map((i) => ({ path: `boards/0100/image-${i}.jpg`, prompt: `image ${i}`, model: "image-model", at: "" })),
+    };
+    const incoming = baseProduction({
+      meta: { ...baseProduction().meta, id: "classic-edit", folder: path.join(dataDir, "assets") },
+      scenes: [{ number: 1, title: "S1", shots: [shot] }],
+    });
+    const images = structuredClone(shot.graphImageGens);
+    for (const [rel, prompt, imageSource] of [
+      ["boards/0100/edit-1.jpg", "make it night", true],
+      ["boards/0100/edit-2.jpg", "add rain", undefined],
+    ] as const) {
+      recordBoardEdit(incoming.scenes[0].shots[0], rel, prompt, "edit-model");
+      const selected = structuredClone(incoming.scenes[0].shots[0]);
+      const merged = applyRendererState(baseProduction({ meta: { ...incoming.meta } }), incoming);
+      saveProduction(merged);
+      const loaded = loadProduction(incoming.meta.id)!;
+      const restored = loaded.scenes[0].shots[0];
+      expect(restored.artwork).toBe(rel);
+      expect(restored.graphOutputSource).toBe("editgen");
+      expect(restored.graphEditGenIndex).toBe(0);
+      expect(restored.graphImageGenIndex).toBe(1);
+      expect(restored.graphEditImageSource).toBe(imageSource);
+      expect(restored.graphEditSourceRefId).toBeUndefined();
+      expect(restored.graphEditPrompt).toBe(prompt);
+      expect(restored.graphEditGens).toEqual(selected.graphEditGens);
+      expect(restored.graphImageGens).toEqual(images);
+      expect(restored.artworkHistory).toEqual(selected.artworkHistory);
+      expect(restored.graphImageToVideo).toBe(true);
+      incoming.scenes = loaded.scenes;
+    }
+    expect(incoming.scenes[0].shots[0].graphEditGens).toHaveLength(2);
+    expect(boardFrameHistory(incoming.scenes[0].shots[0])).toEqual([
+      "boards/0100/edit-1.jpg", "boards/0100/image-0.jpg", "boards/0100/image-1.jpg",
+    ]);
+  });
+});
+
+describe("importProduction", () => {
+  it("adopts the folder itself, names the doc after it, and preserves existing files", () => {
+    const folder = path.join(dataDir, "external", "My Film");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "kept.jpg"), Buffer.from("existing-bytes"));
+    fs.writeFileSync(path.join(folder, "script.md"), "# My Film\n", "utf8");
+
+    const p = importProduction(folder);
+    // The folder itself is the production folder — no subfolder is created.
+    expect(p.meta.folder).toBe(path.resolve(folder));
+    expect(p.meta.name).toBe("My Film");
+    expect(p.scenes).toEqual([]);
+    // Scaffolded dirs exist, pre-existing files untouched.
+    expect(fs.existsSync(path.join(folder, "voiceover"))).toBe(true);
+    expect(fs.readFileSync(path.join(folder, "boards", "kept.jpg"), "utf8")).toBe("existing-bytes");
+    expect(fs.readFileSync(path.join(folder, "script.md"), "utf8")).toBe("# My Film\n");
+    expect(loadProduction(p.meta.id)?.meta.folder).toBe(path.resolve(folder));
+  });
+
+  it("returns the existing document when the folder is already registered", () => {
+    const folder = path.join(dataDir, "external", "Dupe Film");
+    fs.mkdirSync(folder, { recursive: true });
+    const first = importProduction(folder);
+    const second = importProduction(folder);
+    expect(second.meta.id).toBe(first.meta.id);
+  });
+
+  it("throws for a folder that doesn't exist", () => {
+    expect(() => importProduction(path.join(dataDir, "external", "no-such-folder"))).toThrow(/doesn't exist/);
   });
 });

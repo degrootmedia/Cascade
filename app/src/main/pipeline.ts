@@ -14,7 +14,7 @@ void import("electron")
     nativeImage = m.nativeImage;
   })
   .catch(() => {});
-import { GabClient } from "@core";
+import { ChatClient } from "@core";
 import {
   escapeRegExp,
   insertBrandParagraph,
@@ -26,6 +26,7 @@ import {
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
+import { isTweenGenKeyframe } from "../shared/ipc.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, TweenBlock } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
@@ -242,7 +243,7 @@ export async function refineStylePrompt(
   model: string,
   baseUrl?: string
 ): Promise<string> {
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -285,7 +286,7 @@ export async function refineCharacterDescription(
   model: string,
   baseUrl?: string
 ): Promise<string> {
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -329,7 +330,7 @@ export async function generateStyleSet(
   maxStyles = 5,
   baseUrl?: string
 ): Promise<{ name: string; prompt: string }[]> {
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -381,7 +382,7 @@ export async function stylePromptFromImage(
   model: string,
   baseUrl?: string
 ): Promise<{ name: string; prompt: string }> {
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -521,7 +522,7 @@ export async function generateMagicPrompts(
     'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.';
 
   emit(`Generating Magic Prompts for ${shots.length} shot(s) (model: ${model})…`);
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -580,10 +581,10 @@ export async function generateMagicPrompts(
  * shot, then user-added per-shot references, then the shot's own visual.
  * The global brand palette + font (Step 2) is appended to every frame.
  */
-/** Stable portable token for the Nth reference of a shot (0-based). Used in
- *  prompts both ways: sent to OpenArt it gets swapped for the uploaded
- *  reference's unique id; exported for manual generation it stays literal
- *  ("@image1") next to the listed reference files. */
+/** Stable portable token for the Nth reference of a shot (0-based). The
+ *  in-app generators resolve it to "name (reference image N)" — positional
+ *  binding, probed live on both vendors — while exported prompts keep the
+ *  literal token next to the listed reference files. */
 export function refToken(index: number): string {
   return `@image${index + 1}`;
 }
@@ -651,10 +652,10 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
   // explicitly attached character/product refs). Artwork-bearing refs are
-  // cited by a human-friendly tag (@[name]) so each direction is bound
-  // to one specific image — the OpenArt path swaps the token for the uploaded
-  // reference's unique id; exports keep the literal token next to a numbered
-  // reference list.
+   // cited by a human-friendly tag (@[name]) so each direction is bound
+   // to one specific image — transport resolves the tag to an @imageN token,
+   // which each provider's citePrompt anchors to the submitted position;
+   // exports keep the literal token next to a numbered reference list.
   const consistency: string[] = [];
    const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
   if (brand) consistency.push(`Brand identity: ${brand}`);
@@ -780,9 +781,9 @@ export function effectivePromptContent(p: Production, shot: ProductionShot): str
 }
 
 /**
- * The prompt OpenArt ultimately receives for a shot. Human tags are converted
- * to portable tokens here; the OpenArt adapter converts those tokens to the
- * uploaded visualReference ids before calling MCP.
+ * The prompt the active provider ultimately receives for a shot. Human tags
+ * are converted to portable tokens here; the provider's citePrompt anchors
+ * each token to the submitted reference position before calling MCP.
  */
 export function openArtPrompt(p: Production, shot: ProductionShot): string {
   const base = resolveReferenceTags(p, shot, stripReferenceClause(effectivePrompt(p, shot)));
@@ -1087,12 +1088,40 @@ export const BOARD_HISTORY_CAP = 5;
  * history (newest first, capped at BOARD_HISTORY_CAP, deduped).
  */
 export function recordBoardArtwork(shot: ProductionShot, rel: string): void {
-  if (shot.artwork && shot.artwork !== rel) {
+  if (shot.artwork || shot.artworkHistory) {
     shot.artworkHistory = [shot.artwork, ...(shot.artworkHistory ?? [])]
-      .filter((v, i, a) => a.indexOf(v) === i)
+      .filter((v, i, a): v is string => !!v && v !== rel && a.indexOf(v) === i)
       .slice(0, BOARD_HISTORY_CAP);
   }
   shot.artwork = rel;
+}
+
+/** Select a still by identity and route its owning node to the board output. */
+export function selectBoardFrame(shot: ProductionShot, rel: string): void {
+  const editIndex = shot.graphEditGens?.findIndex((g) => g.path === rel) ?? -1;
+  const imageIndex = shot.graphImageGens?.findIndex((g) => g.path === rel) ?? -1;
+  if (!rel || (editIndex < 0 && imageIndex < 0 && shot.artwork !== rel && !shot.artworkHistory?.includes(rel))) {
+    throw new Error(`Cannot select board frame "${rel}": it is not in this shot's image/edit generations or artwork history.`);
+  }
+  if (editIndex >= 0) {
+    shot.graphEditGenIndex = editIndex;
+    shot.graphOutputSource = "editgen";
+  } else {
+    if (imageIndex >= 0) {
+      shot.graphImageGenIndex = imageIndex;
+    } else {
+      // Append legacy stills without shifting existing generations or fabricating metadata.
+      const gens = shot.graphImageGens ??= [];
+      gens.push({ path: rel, prompt: "", model: "", at: "" });
+      shot.graphImageGenIndex = gens.length - 1;
+    }
+    shot.graphOutputSource = "imagegen";
+  }
+  // This shot now has an explicit node selection; the old migration must not reset it.
+  shot.graphMigrated = true;
+  shot.graphOutputRefId = undefined;
+  shot.videoPath = undefined;
+  recordBoardArtwork(shot, rel);
 }
 
 /**
@@ -1223,6 +1252,24 @@ export function recordGraphEditGen(shot: ProductionShot, rel: string, prompt: st
   shot.graphEditGenIndex = 0;
 }
 
+/** Classic edits use the current board, not the edit node's previous source pipe. */
+export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  const imageIndex = shot.artwork && !shot.graphEditGens?.some((g) => g.path === shot.artwork)
+    ? shot.graphImageGens?.findIndex((g) => g.path === shot.artwork) ?? -1
+    : -1;
+  shot.graphEditImageSource = undefined;
+  shot.graphEditSourceRefId = undefined;
+  if (imageIndex >= 0) {
+    shot.graphImageGenIndex = imageIndex;
+    shot.graphEditImageSource = true;
+  } else if (shot.graphOutputSource === "ref") {
+    shot.graphEditSourceRefId = shot.graphOutputRefId;
+  }
+  recordGraphEditGen(shot, rel, prompt, model);
+  shot.graphEditPrompt = prompt;
+  selectBoardFrame(shot, rel);
+}
+
 // ---- in-betweener ----------------------------------------------------------
 
 /** Keyframe sockets on the tween node: at least 2, at most 5. */
@@ -1305,12 +1352,37 @@ export function tweenSelectedClips(blocks: TweenBlock[] = []): { blockId: string
   });
 }
 
+/** Undo a stitch: drop the continuous clip (`graphTweenOutput` + the re-encode
+ *  flag) and, when the tween was piped to the output, unbind the feed so the
+ *  shot falls back to its individual block clips. Returns whether anything
+ *  changed and the removed output path (the caller deletes the file). The
+ *  per-block clips and timeline edits are untouched — the user can retime,
+ *  re-generate, and stitch again. */
+export function unstitchTween(shot: ProductionShot): { changed: boolean; outputRel?: string } {
+  const outputRel = shot.graphTweenOutput;
+  const piped = shot.graphOutputSource === "tween";
+  if (!outputRel && !piped) return { changed: false };
+  if (piped) {
+    shot.graphOutputSource = undefined;
+    shot.videoPath = undefined;
+  }
+  delete shot.graphTweenOutput;
+  delete shot.graphTweenReencoded;
+  return { changed: true, outputRel };
+}
+
 /** Reconcile a shot's tween state against the production's live references:
- *  drop keyframe ids with no image (deleted refs), cap at TWEEN_MAX_REFS, then
- *  re-derive the blocks (prompts, timing, and history survive via the pair-key
- *  match). Returns true when anything changed. This is the write-side guard so
- *  a stale renderer save or a deleted reference can never leave phantom
- *  blocks behind — generate/stitch call it on every run. */
+ *  drop keyframe ids with no image (deleted refs), dedupe (a repeated id
+ *  would derive duplicate pairs sharing one history), cap at TWEEN_MAX_REFS,
+ *  then re-derive the blocks (prompts, timing, and history survive via the
+ *  pair-key match). Generation-node keyframes
+ *  (`TWEEN_KEY_IMGGEN`/`TWEEN_KEY_EDITGEN`) are kept unconditionally — they
+ *  refer to nodes that can produce output at any time, so a pre-generation
+ *  wiring must not be silently dropped; the generate handler reports a clear
+ *  error if one resolves to nothing. Returns true when anything changed. This
+ *  is the write-side guard so a stale renderer save or a deleted reference
+ *  can never leave phantom blocks behind — generate/stitch call it on every
+ *  run. */
 export function syncTweenBlocks(p: Production, shot: ProductionShot): boolean {
   if (!shot.graphTweenRefIds?.length && !shot.graphTweenBlocks?.length && !shot.graphTweenOutput) return false;
   const before = JSON.stringify([shot.graphTweenRefIds, shot.graphTweenBlocks]);
@@ -1318,9 +1390,12 @@ export function syncTweenBlocks(p: Production, shot: ProductionShot): boolean {
   for (const c of p.characters ?? []) if (c.id && refArtworkDataUrl(p, c)) live.add(c.id);
   for (const pr of p.products ?? []) if (pr.id && refArtworkDataUrl(p, pr)) live.add(pr.id);
   for (const r of p.references ?? []) if (r.id && refArtworkDataUrl(p, r)) live.add(r.id);
-  const ids = (Array.isArray(shot.graphTweenRefIds) ? shot.graphTweenRefIds : [])
-    .filter((id) => typeof id === "string" && live.has(id))
-    .slice(0, TWEEN_MAX_REFS);
+  // Set dedupes preserving first-occurrence order (wiring order is unique by
+  // construction — this only repairs already-corrupt states).
+  const ids = [...new Set(
+    (Array.isArray(shot.graphTweenRefIds) ? shot.graphTweenRefIds : [])
+      .filter((id) => typeof id === "string" && (isTweenGenKeyframe(id) || live.has(id)))
+  )].slice(0, TWEEN_MAX_REFS);
   shot.graphTweenRefIds = ids;
   shot.graphTweenBlocks = deriveTweenBlocks(ids, Array.isArray(shot.graphTweenBlocks) ? shot.graphTweenBlocks : []);
   return JSON.stringify([shot.graphTweenRefIds, shot.graphTweenBlocks]) !== before;
@@ -1358,11 +1433,36 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
   if (cur) recordBoardArtwork(shot, cur.path);
 }
 
-/** Auto-hook a classic video generation into the node graph: when nothing is
- *  piped into the output yet, bind the video node as the feed. */
+/** Bind a classic video generation as the output feed. Generating a video is
+ *  an explicit user action — the clip must stay the shot's output (the
+ *  storyboard mirrors it and the animatic plays it), so it always takes over
+ *  the pipe; the displaced still lives on in its node's history. */
 export function hookVideoGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
   shot.graphOutputSource = "videogen";
+  shot.graphOutputRefId = undefined;
+}
+
+/** Re-anchor a generation node's selected index after a finished job's rebase
+ *  copied a changed generation array over a concurrent selection change
+ *  (storyboard Make Primary / node cycling happen mid-job; the FIFO only
+ *  serializes jobs, not renderer saves). When the job didn't change the array
+ *  at its start snapshot but the on-disk index moved, the fresh selection was
+ *  a user action — re-point the copied index at that same path in the new
+ *  array. Otherwise the job's own selection stands. */
+export function rebaseGenIndex(
+  prevArr: GraphGenItem[] | undefined,
+  prevIdx: number | undefined,
+  freshArr: GraphGenItem[] | undefined,
+  freshIdx: number | undefined,
+  nextArr: GraphGenItem[] | undefined,
+  nextIdx: number | undefined
+): number | undefined {
+  if (!nextArr?.length) return nextIdx;
+  const arraysUnchanged = JSON.stringify(prevArr ?? []) === JSON.stringify(freshArr ?? []);
+  if (!arraysUnchanged || freshIdx === prevIdx) return nextIdx;
+  const path = freshArr?.[freshIdx ?? -1]?.path;
+  const at = path ? nextArr.findIndex((g) => g.path === path) : -1;
+  return at >= 0 ? at : nextIdx;
 }
 
 /** The node-graph output pipe is the source of truth for the shot's primary
@@ -1381,8 +1481,10 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
     case "editgen": {
       const sel = shot.graphOutputSource === "imagegen" ? imgSel : editSel;
       if (sel?.path) {
-        if (shot.artwork !== sel.path) { shot.artwork = sel.path; shot.videoPath = undefined; return true; }
-        return false;
+        let changed = false;
+        if (shot.artwork !== sel.path) { recordBoardArtwork(shot, sel.path); changed = true; }
+        if (shot.videoPath !== undefined) { shot.videoPath = undefined; changed = true; }
+        return changed;
       }
       // Node piped but empty — the storyboard frame goes blank until a
       // generation is piped back in (matches the output node's preview).
@@ -1467,7 +1569,7 @@ export async function generateBoards(
   p: Production,
   generate: ImageGenFn,
   emit: EmitFn,
-  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number } = {}
+  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number; providerName?: string } = {}
 ): Promise<Production> {
   const max = Math.max(1, Math.min(opts.maxShots ?? 50, 200));
   const all = p.scenes.flatMap((s) => s.shots);
@@ -1518,7 +1620,7 @@ export async function generateBoards(
       : `Step 3 complete — ${done} storyboard frame(s) in ${p.assets.boardsDir}/.`,
     done ? "done" : "error"
   );
-  if (!done && failed) throw new Error(`Every board generation failed (${failed}). Check the OpenArt connection and try again.`);
+  if (!done && failed) throw new Error(`Every board generation failed (${failed}). Check the ${opts.providerName ?? "media provider"} connection and try again.`);
   return p;
 }
 
@@ -1705,7 +1807,7 @@ export async function planAnimatic(
   const shots = p.scenes.flatMap((s) => s.shots);
   if (!shots.length) throw new Error("No shots yet — run Step 1 first.");
   emit(`Timing ${shots.length} shot(s) (model: ${model})…`);
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
     [
@@ -1799,7 +1901,7 @@ export async function ingestScript(
   }
 
   emit(`Breaking into scenes and shots (model: ${model})…`);
-  const gab = new GabClient(apiKey, baseUrl);
+  const gab = new ChatClient(apiKey, baseUrl);
   const { text: reply } = await gab.completeOnce(model, [systemMessage(), breakdownPrompt(scriptText)], 8000);
   const parsed = parseBreakdownJson(reply);
   const scenes = normalizeScenes(parsed);

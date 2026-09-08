@@ -26,7 +26,8 @@ import {
   type FinalConnectionState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { GraphGenItem, GraphLayout, OpenArtModelChoice, Production, ProductionShot, ProductionStyle, TweenBlock, VideoModelOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, type GraphGenItem, type GraphLayout, type OpenArtModelChoice, type Production, type ProductionShot, type ProductionStyle, type TweenBlock, type VideoModelOptions } from "../../../shared/ipc.js";
+import { closestResolution } from "./resolution.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, parsePromptBoxes, refTagNames, removeRefTag, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
@@ -146,6 +147,9 @@ interface ImageGenData extends Record<string, unknown> {
   /** Every stored generation (newest first) as media URLs. */
   items: { url: string; prompt: string }[];
   selected: number;
+  /** True while this shot's image generation runs (lifted to the workspace so
+   *  the "Generating…" label survives closing/reopening the graph). */
+  busy: boolean;
   onGenerate: (model: string, resolution: string) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -157,6 +161,8 @@ interface VideoGenData extends Record<string, unknown> {
   items: { url: string; prompt: string }[];
   selected: number;
   hasImageSource: boolean;
+  /** Lifted in-flight flag (see ImageGenData.busy). */
+  busy: boolean;
   onGenerate: (model: string, resolution: string, durationSec: number) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -165,25 +171,40 @@ interface VideoGenData extends Record<string, unknown> {
 type VideoGenFlowNode = Node<VideoGenData, "videogen">;
 
 interface TweenData extends Record<string, unknown> {
-  models: OpenArtModelChoice[];
-  /** Ordered keyframe ref ids wired into the node's sockets (2–5). */
+  /** Ordered keyframe source ids wired into the node's sockets (2–5): bare
+   *  reference ids or the image/edit node sentinels. */
   refIds: string[];
   /** Keyframe display for socket labels (id/name/artwork). */
   keyframes: { id: string; name: string; artwork: string }[];
-  /** Persisted model/resolution — shared with the timeline modal. */
-  savedModel: string;
-  savedResolution: string;
   blockCount: number;
   /** Blocks with a selected clip. */
   readyBlocks: number;
   stitched: boolean;
   reencoded: boolean;
   onOpenTimeline: () => void;
-  onModelOptions: (model: string, withImage: boolean) => Promise<VideoModelOptions | null>;
-  onModelChange: (model: string) => void;
-  onResolutionChange: (resolution: string) => void;
 }
 type TweenFlowNode = Node<TweenData, "tween">;
+
+/** Keyframe display entries for the in-betweener node + timeline: a reference
+ *  id shows the reference's artwork; a generation-node sentinel shows that
+ *  node's selected output (the image node's selected frame, or the edit node's
+ *  selected edit). A source with nothing resolvable yet contributes no entry
+ *  (the socket stays blank, like a wired-but-artwork-less reference). */
+function tweenKeyframesFor(shot: ProductionShot, prodId: string, ids: string[], byRefId: Map<string, GraphRef>): { id: string; name: string; artwork: string }[] {
+  return ids.flatMap((id) => {
+    if (id === TWEEN_KEY_IMGGEN) {
+      const g = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+      return g?.path ? [{ id, name: "Image-gen frame", artwork: graphMediaUrl(prodId, g.path) }] : [];
+    }
+    if (id === TWEEN_KEY_EDITGEN) {
+      const g = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
+      return g?.path ? [{ id, name: "Edit frame", artwork: graphMediaUrl(prodId, g.path) }] : [];
+    }
+    const r = byRefId.get(id);
+    return r && r.artwork ? [{ id, name: r.name, artwork: r.artwork }] : [];
+  });
+}
+
 
 interface EditGenData extends Record<string, unknown> {
   models: OpenArtModelChoice[];
@@ -193,6 +214,8 @@ interface EditGenData extends Record<string, unknown> {
   selected: number;
   /** Where the source image comes from (drives the hint + the onGenerate path). */
   sourceHint: string;
+  /** Lifted in-flight flag (see ImageGenData.busy). */
+  busy: boolean;
   onGenerate: (model: string, resolution: string) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -510,10 +533,12 @@ const OutputNodeView = memo(function OutputNodeView({ data }: NodeProps<OutputFl
 const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<ImageGenFlowNode>) {
   const [model, setModel] = useState(data.defaultModel);
   const [resolution, setResolution] = useState(data.defaultResolution);
-  const [busy, setBusy] = useState(false);
+  const busy = data.busy === true;
+  // The selection is always explicit: when the saved default is legacy "auto"
+  // (or gone from the list), the first listed model is the effective pick.
+  const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
   const run = async () => {
-    setBusy(true);
-    try { await data.onGenerate(model, resolution); } finally { setBusy(false); }
+    await data.onGenerate(effModel, resolution);
   };
   return (
     <div className="prod-graph-node prod-graph-gen">
@@ -521,8 +546,7 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
       <Handle type="source" position={Position.Right} title="Frame out — pipe into the video node or the output" />
       <div className="prod-graph-node-title">Image generation</div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={model} onChange={(e) => setModel(e.target.value)} title="OpenArt image model">
-          <option value="auto">Auto</option>
+        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => setModel(e.target.value)} title="Image model">
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
       </div>
@@ -565,10 +589,10 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
 });
 
 const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<VideoGenFlowNode>) {
-  const [model, setModel] = useState(data.models[0]?.id ?? "auto");
+  const [model, setModel] = useState(data.models[0]?.id ?? "");
   const [resolution, setResolution] = useState("1080p");
   const [durationSec, setDurationSec] = useState(5);
-  const [busy, setBusy] = useState(false);
+  const busy = data.busy === true;
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
   // Per-model resolution / length choices, fetched like the video panel. The
   // node ALWAYS animates a source frame (the piped frame or the shot's own),
@@ -576,20 +600,21 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<Vide
   useEffect(() => {
     let live = true;
     setOpts(null);
-    if (model && model !== "auto") void data.onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+    if (model) void data.onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
     return () => { live = false; };
   }, [model]);
   // Keep the current selection valid when the model's options arrive.
   const durations = opts?.durations?.length ? opts.durations : [5, 10, 15, 20];
   const resolutions = opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"];
   useEffect(() => {
-    if (resolutions.length && !resolutions.includes(resolution)) setResolution(resolutions[0]);
+    if (!opts) return;
+    if (resolutions.length && !resolutions.includes(resolution)) setResolution(closestResolution(resolution, resolutions));
     if (durations.length && !durations.includes(durationSec)) setDurationSec(durations[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts]);
+  const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
   const run = async () => {
-    setBusy(true);
-    try { await data.onGenerate(model, resolution, durationSec); } finally { setBusy(false); }
+    await data.onGenerate(effModel, resolution, durationSec);
   };
   return (
     <div className="prod-graph-node prod-graph-gen prod-graph-videogen">
@@ -600,8 +625,13 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<Vide
       <Handle type="source" position={Position.Right} title="Clip out — pipe into the output" />
       <div className="prod-graph-node-title">Video generation</div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={model} onChange={(e) => setModel(e.target.value)} title="OpenArt video model">
-          <option value="auto">Auto</option>
+        <select
+          className="prod-openart-select nodrag"
+          value={data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "")}
+          onChange={(e) => setModel(e.target.value)}
+          title="Video model"
+          disabled={data.models.length === 0}
+        >
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
       </div>
@@ -645,29 +675,11 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<Vide
   );
 });
 
-/** In-betweener node: 5 fixed keyframe sockets (2 minimum to work), a video
- *  model selector shared with the timeline modal, and the button that opens
- *  the timeline. Per-block prompts, generations, and stitching all live in
- *  the timeline modal — this node only owns the keyframe wiring. */
+/** In-betweener node: 5 fixed keyframe sockets (2 minimum to work) and the
+ *  button that opens the timeline. The video model + resolution live in the
+ *  timeline modal — this node only owns the keyframe wiring. */
 const TWEEN_SOCKET_TOPS = [18, 34, 50, 66, 82];
 const TweenNodeView = memo(function TweenNodeView({ data }: NodeProps<TweenFlowNode>) {
-  const [model, setModel] = useState(data.savedModel || "auto");
-  const [resolution, setResolution] = useState(data.savedResolution || "1080p");
-  const [opts, setOpts] = useState<VideoModelOptions | null>(null);
-  useEffect(() => {
-    let live = true;
-    setOpts(null);
-    if (model && model !== "auto") void data.onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
-    return () => { live = false; };
-  }, [model]);
-  const resolutions = opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"];
-  useEffect(() => {
-    if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(resolutions[0]);
-      data.onResolutionChange(resolutions[0]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opts]);
   const keyById = new Map(data.keyframes.map((k) => [k.id, k]));
   return (
     <div className="prod-graph-node prod-graph-gen prod-graph-tween">
@@ -676,34 +688,13 @@ const TweenNodeView = memo(function TweenNodeView({ data }: NodeProps<TweenFlowN
         const wired = data.refIds[i] ? keyById.get(data.refIds[i]) : undefined;
         return (
           <Fragment key={id}>
-            <Handle id={id} type="target" position={Position.Left} className="socket-ref" style={{ top: `${top}%` }} title={wired ? `Keyframe ${i + 1}: ${wired.name}` : `Keyframe ${i + 1} — pipe a reference in`} />
+            <Handle id={id} type="target" position={Position.Left} className="socket-ref" style={{ top: `${top}%` }} title={wired ? `Keyframe ${i + 1}: ${wired.name}` : `Keyframe ${i + 1} — pipe a reference or generated frame in`} />
             <span className="prod-graph-socket-label ref" style={{ top: `${top}%` }}>Keyframe {i + 1}</span>
           </Fragment>
         );
       })}
       <Handle type="source" position={Position.Right} title="Continuous shot out — pipe into the output" />
       <div className="prod-graph-node-title">In-betweener</div>
-      <div className="prod-graph-gen-controls">
-        <select
-          className="prod-openart-select nodrag"
-          value={model}
-          onChange={(e) => { setModel(e.target.value); data.onModelChange(e.target.value); }}
-          title="OpenArt video model"
-        >
-          <option value="auto">Auto</option>
-          {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
-        </select>
-      </div>
-      <div className="prod-graph-gen-controls">
-        <select
-          className="prod-openart-select nodrag"
-          value={resolution}
-          onChange={(e) => { setResolution(e.target.value); data.onResolutionChange(e.target.value); }}
-          title="Resolution"
-        >
-          {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
-        </select>
-      </div>
       <span className="prod-graph-gen-hint">
         {data.refIds.length < 2
           ? `Keyframes ${data.refIds.length}/5 — need at least 2`
@@ -719,12 +710,12 @@ const TweenNodeView = memo(function TweenNodeView({ data }: NodeProps<TweenFlowN
 });
 
 const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGenFlowNode>) {
-  const [model, setModel] = useState(data.models[0]?.id ?? "auto");
+  const [model, setModel] = useState(data.models[0]?.id ?? "");
   const [resolution, setResolution] = useState(data.defaultResolution);
-  const [busy, setBusy] = useState(false);
+  const busy = data.busy === true;
+  const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
   const run = async () => {
-    setBusy(true);
-    try { await data.onGenerate(model, resolution); } finally { setBusy(false); }
+    await data.onGenerate(effModel, resolution);
   };
   const sockets: { id: string; kind: "ref"; label: string; top: number }[] = [
     { id: "in-prompt", kind: "ref", label: "Prompt", top: 33 },
@@ -748,8 +739,7 @@ const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGe
       <Handle type="source" position={Position.Right} title="Edit out — pipe into the output" />
       <div className="prod-graph-node-title">Edit image</div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={model} onChange={(e) => setModel(e.target.value)} title="Image model that accepts a reference image">
-          <option value="auto">Auto</option>
+        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => setModel(e.target.value)} title="Image model that accepts a reference image">
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
       </div>
@@ -1180,7 +1170,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, imageGenBusy = false, videoGenBusy = false, editGenBusy = false, busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -1209,9 +1199,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Image/video-capable OpenArt models for the generation nodes. */
   imageModels: OpenArtModelChoice[];
   videoModels: OpenArtModelChoice[];
-  /** Ids of the video models proven (live form schema) to accept a dedicated
-   *  end-frame slot — the tween node/modal filter to these. Null/empty means
-   *  nothing is proven yet, so the full video list is shown. */
+  /** Ids of the video models that accept a dedicated end-frame slot (live
+   *  probe ∪ the user's manual allowlist) — the tween node/modal offer ONLY
+   *  these. Null means the probe is still pending, so the full video list
+   *  shows until it resolves. */
   endFrameModelIds?: string[] | null;
   /** Defaults from the production's OpenArt config for the image node. */
   defaultImageModel: string;
@@ -1222,10 +1213,23 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onRunVideoGen: (model: string, resolution: string, durationSec: number) => Promise<void>;
   /** Run the edit-image node (prompt = the edit-prompt node). */
   onRunEditGen: (model: string, resolution: string) => Promise<void>;
-  /** Generate one in-betweener action block's clip (prompt = the block's). */
-  onRunTweenBlock?: (blockId: string) => Promise<void>;
+  /** Generate one in-betweener action block's clip (prompt = the block's;
+   *  durationSec = the block's displayed length, so the submit never races a
+   *  pending retime save). */
+  onRunTweenBlock?: (blockId: string, durationSec: number) => Promise<void>;
   /** Stitch every action block's selected clip into the continuous shot. */
   onStitchTween?: () => Promise<void>;
+  /** Undo a stitch — back to the individual block clips (toggle on Stitch). */
+  onUnstitchTween?: () => Promise<void>;
+  /** Lifted in-flight flags so "Generating…" survives the modal unmounting
+   *  (the workspace owns them per shot). */
+  imageGenBusy?: boolean;
+  videoGenBusy?: boolean;
+  editGenBusy?: boolean;
+  /** The in-betweener block currently generating (workspace-owned). */
+  busyTweenBlock?: string | null;
+  /** True while a stitch/unstitch runs (workspace-owned). */
+  tweenStitching?: boolean;
   /** Select a generation node's stored output by index. */
   onSelectGraphGen: (kind: "image" | "video" | "edit", index: number) => void;
   /** Cycle a generation node's stored outputs. */
@@ -1270,8 +1274,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [lightbox, setLightbox] = useState<{ name: string; artwork: string } | null>(null);
   /** In-betweener timeline window (stacked above the graph). */
   const [tweenOpen, setTweenOpen] = useState(false);
-  const [busyBlock, setBusyBlock] = useState<string | null>(null);
-  const [stitching, setStitching] = useState(false);
+  /** In-flight tween state is workspace-owned (see props) so the timeline's
+   *  "Generating…"/"Stitching…" labels survive closing and reopening. */
+  const busyBlock = busyTweenBlock ?? null;
+  const stitching = tweenStitching === true;
   const hintTimer = useRef<number | null>(null);
   /** React Flow instance (captured on init) — used to map drop coordinates. */
   const flowRef = useRef<{ screenToFlowPosition: (p: { x: number; y: number }) => { x: number; y: number } } | null>(null);
@@ -1497,8 +1503,6 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onRunVideoGen: (model: string, resolution: string, durationSec: number) => cb.current.onRunVideoGen(model, resolution, durationSec),
     onRunEditGen: (model: string, resolution: string) => cb.current.onRunEditGen(model, resolution),
     onOpenTweenTimeline: () => cb.current.onOpenTweenTimeline(),
-    onTweenModelChange: (model: string) => cb.current.onGraphField({ graphTweenModel: model }),
-    onTweenResolutionChange: (resolution: string) => cb.current.onGraphField({ graphTweenResolution: resolution }),
     onSelectImageGen: (index: number) => cb.current.onSelectGraphGen("image", index),
     onSelectVideoGen: (index: number) => cb.current.onSelectGraphGen("video", index),
     onSelectEditGen: (index: number) => cb.current.onSelectGraphGen("edit", index),
@@ -1605,26 +1609,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       type: "tween",
       position: pos,
       data: {
-        models: filterTweenModels(videoModels, endFrameModelIds, shot.graphTweenModel ?? "auto"),
         refIds,
-        keyframes: refIds.flatMap((id) => {
-          const r = byId.get(id);
-          return r && r.artwork ? [{ id, name: r.name, artwork: r.artwork }] : [];
-        }),
-        savedModel: shot.graphTweenModel ?? "auto",
-        savedResolution: shot.graphTweenResolution ?? "1080p",
+        keyframes: tweenKeyframesFor(shot, prod.meta.id, refIds, byId),
         blockCount: displayBlocks.length,
         readyBlocks: ready,
         stitched: !!shot.graphTweenOutput,
         reencoded: shot.graphTweenReencoded === true,
         onOpenTimeline: stable.onOpenTweenTimeline,
-        onModelOptions: stable.onModelOptions,
-        onModelChange: stable.onTweenModelChange,
-        onResolutionChange: stable.onTweenResolutionChange,
       },
       deletable: true,
     };
-  }, [shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, videoModels, endFrameModelIds, references, stable]);
+  }, [shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphImageGens, shot.graphImageGenIndex, shot.graphEditGens, shot.graphEditGenIndex, references, stable]);
 
   /** Build a draggable-tool node pair (video: videogen+videoprompt, edit:
    *  editgen+editprompt) at the given positions. Shared by buildDerived (which
@@ -1641,6 +1636,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             items: (shot.graphVideoGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
             selected: shot.graphVideoGenIndex ?? 0,
             hasImageSource: shot.graphImageToVideo === true,
+            busy: videoGenBusy === true,
             onGenerate: stable.onRunVideoGen,
             onSelect: stable.onSelectVideoGen,
             onCycle: stable.onCycleVideoGen,
@@ -1672,6 +1668,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             : shot.graphEditSourceRefId
               ? (references.find((r) => r.id === shot.graphEditSourceRefId)?.name ?? "reference")
               : "shot frame",
+          busy: editGenBusy === true,
           onGenerate: stable.onRunEditGen,
           onSelect: stable.onSelectEditGen,
           onCycle: stable.onCycleEditGen,
@@ -1686,7 +1683,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: true,
       },
     ];
-  }, [videoModels, imageModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphEditImageSource, shot.graphEditSourceRefId, videoPromptValue, editPromptValue, taggedVideo, taggedEdit, stable, references, prod.meta.id, prod.openArt?.resolution]);
+  }, [videoModels, imageModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphEditImageSource, shot.graphEditSourceRefId, videoPromptValue, editPromptValue, taggedVideo, taggedEdit, stable, references, prod.meta.id, prod.openArt?.resolution, videoGenBusy, editGenBusy]);
 
   /** Place a tool dragged from the right panel at the drop point. Video/edit
    *  land as gen+prompt pairs; the in-betweener lands as a single node. */
@@ -1707,7 +1704,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     setNodes(next);
     setPlacedTools((prev) => { const n = new Set(prev); for (const node of pair) n.add(node.id); return n; });
     saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
-    showHint(kind === "video" ? "Video generation node added — connect a frame or reference in, then generate." : kind === "edit" ? "Edit-image node added — connect a source and an edit prompt, then edit." : "In-betweener added — pipe 2–5 references into its keyframe sockets, then open the timeline.");
+    showHint(kind === "video" ? "Video generation node added — connect a frame or reference in, then generate." : kind === "edit" ? "Edit-image node added — connect a source and an edit prompt, then edit." : "In-betweener added — pipe 2–5 keyframes (references or generated frames) into its sockets, then open the timeline.");
   }, [hasVideoTool, hasEditTool, hasTweenTool, showHint, toolPair, tweenNode]);
 
   /** Remove a placed-but-unused tool pair from the canvas (returns it to the
@@ -1715,6 +1712,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const removeTool = useCallback((kind: "video" | "edit" | "tween") => {
     const ids = kind === "video" ? ["videogen", "videoprompt"] : kind === "edit" ? ["editgen", "editprompt"] : ["tween"];
     if (kind === "video" ? videoGenActive : kind === "edit" ? editGenActive : tweenActive) return;
+    // An edit node removed while wired (pre-generation) into a tween keyframe
+    // must drop that keyframe, or the timeline would keep a phantom source.
+    if (kind === "edit") {
+      cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_EDITGEN));
+    }
     setPlacedTools((prev) => { const n = new Set(prev); for (const id of ids) n.delete(id); return n; });
     const next = nodesRef.current.filter((n) => !ids.includes(n.id));
     nodesRef.current = next;
@@ -1819,6 +1821,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           defaultResolution: prod.openArt?.resolution ?? "1k",
           items: (shot.graphImageGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: shot.graphImageGenIndex ?? 0,
+          busy: imageGenBusy === true,
           onGenerate: stable.onRunImageGen,
           onSelect: stable.onSelectImageGen,
           onCycle: stable.onCycleImageGen,
@@ -1829,7 +1832,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(hasEditTool ? toolPair("edit", ORIGIN, ORIGIN).map((n) => build(n)) : []),
       ...(hasTweenTool ? [build(tweenNode(ORIGIN))] : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode]);
+  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode, imageGenBusy, videoGenBusy, editGenBusy]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -1857,16 +1860,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       let equal = true;
       if (d.type !== old.type) equal = false;
       else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.magicActive as boolean) === (b.magicActive as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
-      else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean) && (a.savedModel as string) === (b.savedModel as string) && (a.savedResolution as string) === (b.savedResolution as string) && ((a.models as { id: string }[]).map((m) => m.id).join("|") === (b.models as { id: string }[]).map((m) => m.id).join("|"));
-      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
+      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
+      else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && (a.keyframes as unknown[]).length === (b.keyframes as unknown[]).length && (a.keyframes as { artwork: string }[]).every((k, i) => k.artwork === (b.keyframes as { artwork: string }[])[i]?.artwork) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean);
+      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
       else if (d.type === "videoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "editprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "style") equal = (a.value as string) === (b.value as string);
       else if (d.type === "brand") equal = (a.include as boolean) === (b.include as boolean);
       else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.missing as boolean) === (b.missing as boolean);
       else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
-      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length;
+      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
       if (equal) return old;
       changed = true;
       return { ...d, position: old.position, selected: old.selected, measured: old.measured };
@@ -1948,9 +1951,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(shot.graphOutputSource === "imagegen" ? [{ id: "e-img-out", source: "imagegen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "videogen" ? [{ id: "e-vid-out", source: "videogen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "tween" ? [{ id: "e-tween-out", source: "tween", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
-      ...((shot.graphTweenRefIds ?? []).flatMap((refId, i) => {
-        if (!references.some((r) => r.id === refId)) return [];
-        return [{ id: `e-tween-${i}`, source: `ref:${refId}`, target: "tween", targetHandle: `in-tween-${i}`, style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }];
+      ...((shot.graphTweenRefIds ?? []).flatMap((srcId, i) => {
+        // A keyframe source maps to its canvas node: a reference node
+        // (`ref:<id>`), or a generation node's output handle (imagegen/editgen).
+        // Only draw the edge when that source node is on the canvas.
+        const nodeId = srcId === TWEEN_KEY_IMGGEN ? "imagegen" : srcId === TWEEN_KEY_EDITGEN ? "editgen" : `ref:${srcId}`;
+        const onCanvas = srcId === TWEEN_KEY_IMGGEN ? true : srcId === TWEEN_KEY_EDITGEN ? hasEditTool : references.some((r) => r.id === srcId);
+        if (!onCanvas) return [];
+        return [{ id: `e-tween-${i}`, source: nodeId, target: "tween", targetHandle: `in-tween-${i}`, style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }];
       })),
       ...(shot.graphOutputSource === "editgen" ? [{ id: "e-edit-out", source: "editgen", target: "output", targetHandle: "in-out", deletable: false, reconnectable: false }] : []),
       ...(shot.graphOutputSource === "ref" && shot.graphOutputRefId && references.some((r) => r.id === shot.graphOutputRefId) ? [{ id: "e-ref-out", source: `ref:${shot.graphOutputRefId}`, target: "output", targetHandle: "in-out", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
@@ -2001,6 +2009,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     if (toolKindRemoved.has("edit")) {
       setPlacedTools((prev) => { const n = new Set(prev); n.delete("editgen"); n.delete("editprompt"); return n; });
+      // An edit node deleted while wired (pre-generation) into a tween
+      // keyframe must drop that keyframe, or the timeline keeps a phantom source.
+      cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_EDITGEN));
     }
     if (toolKindRemoved.has("tween")) {
       setPlacedTools((prev) => { const n = new Set(prev); n.delete("tween"); return n; });
@@ -2090,28 +2101,39 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   const onConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
+    /** Wire `sourceKeyId` into the tween keyframe socket `in-tween-<slot>`
+     *  (replacing its old socket when already wired). */
+    const wireTweenKeyframe = (sourceKeyId: string): boolean => {
+      if (conn.target !== "tween") return false;
+      const slot = /^in-tween-(\d+)$/.exec(conn.targetHandle ?? "")?.[1];
+      if (slot === undefined) return false;
+      const at = Math.max(0, Math.min(4, Number(slot)));
+      const ids = (cb.current.graphTweenRefIds ?? []).filter((id) => id !== sourceKeyId);
+      ids.splice(Math.min(at, ids.length), 0, sourceKeyId);
+      cb.current.onTweenRefs(ids.slice(0, 5));
+      return true;
+    };
     // Generation pipes: the image node's output feeds the video/edit image
     // inputs and/or the output (both can coexist); the video/edit nodes feed
     // the output; a reference can feed the output or the edit node's source.
-    if (conn.source === "imagegen" && conn.target === "videogen") { cb.current.onPipeImageToVideo(); return; }
-    if (conn.source === "imagegen" && conn.target === "output") { cb.current.onPipeImageToOutput(); return; }
-    if (conn.source === "imagegen" && conn.target === "editgen" && conn.targetHandle === "in-image") { cb.current.onGraphField({ graphEditImageSource: true, graphEditSourceRefId: undefined }); return; }
-    if (conn.source === "videogen" && conn.target === "output") { cb.current.onPipeVideoToOutput(); return; }
-    if (conn.source === "tween" && conn.target === "output") { cb.current.onPipeTweenToOutput(); return; }
-    if (conn.source === "editgen" && conn.target === "output") { cb.current.onPipeEditToOutput(); return; }
+    if (conn.source === "imagegen") {
+      if (conn.target === "videogen") { cb.current.onPipeImageToVideo(); return; }
+      if (conn.target === "output") { cb.current.onPipeImageToOutput(); return; }
+      if (conn.target === "editgen" && conn.targetHandle === "in-image") { cb.current.onGraphField({ graphEditImageSource: true, graphEditSourceRefId: undefined }); return; }
+      if (wireTweenKeyframe(TWEEN_KEY_IMGGEN)) return;
+    }
+    if (conn.source === "videogen") { if (conn.target === "output") { cb.current.onPipeVideoToOutput(); return; } }
+    if (conn.source === "tween") { if (conn.target === "output") { cb.current.onPipeTweenToOutput(); return; } }
+    if (conn.source === "editgen") {
+      if (conn.target === "output") { cb.current.onPipeEditToOutput(); return; }
+      if (wireTweenKeyframe(TWEEN_KEY_EDITGEN)) return;
+    }
     const refId = /^ref:(.+)$/.exec(conn.source)?.[1];
     if (refId) {
       if (conn.target === "output") { cb.current.onPipeRefToOutput(refId); return; }
       // In-betweener keyframe sockets: `in-tween-<slot>` sets that position in
       // the ordered keyframe list (moving the ref when already wired).
-      const slot = conn.target === "tween" ? /^in-tween-(\d+)$/.exec(conn.targetHandle ?? "")?.[1] : undefined;
-      if (slot !== undefined) {
-        const at = Math.max(0, Math.min(4, Number(slot)));
-        const ids = (cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId);
-        ids.splice(Math.min(at, ids.length), 0, refId);
-        cb.current.onTweenRefs(ids.slice(0, 5));
-        return;
-      }
+      if (wireTweenKeyframe(refId)) return;
       if (conn.target === "editgen" && conn.targetHandle === "in-image") {
         cb.current.onGraphField({ graphEditSourceRefId: refId, graphEditImageSource: undefined });
         return;
@@ -2168,6 +2190,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  videoprompt, editprompt) each accept Style / Reference / Brand exactly alike. */
   const isValidConnection = useCallback((c: Connection | Edge) => {
     const source = c.source ?? "";
+    /** Shared tween keyframe-socket rule: a valid socket index (0–4) and room
+     *  on the timeline (a source already wired may re-plug its own socket). */
+    const tweenSlotOk = (keyId: string): boolean => {
+      const m = /^in-tween-(\d+)$/.exec(c.targetHandle ?? "");
+      if (!m || Number(m[1]) > 4) return false;
+      const ids = shot.graphTweenRefIds ?? [];
+      return ids.includes(keyId) || ids.length < 5;
+    };
     if (source === "videoprompt") return c.target === "videogen" && c.targetHandle === "in-prompt";
     if (source === "editprompt") return c.target === "editgen" && c.targetHandle === "in-prompt";
     if (source === "composer") return c.target === "imagegen" && c.targetHandle === "in-prompt";
@@ -2175,11 +2205,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (c.target === "videogen") return c.targetHandle === "in-image";
       if (c.target === "editgen") return c.targetHandle === "in-image";
       if (c.target === "output") return c.targetHandle === "in-out";
+      if (c.target === "tween") return tweenSlotOk(TWEEN_KEY_IMGGEN);
       return false;
     }
     if (source === "videogen") return c.target === "output" && c.targetHandle === "in-out";
     if (source === "tween") return c.target === "output" && c.targetHandle === "in-out";
-    if (source === "editgen") return c.target === "output" && c.targetHandle === "in-out";
+    if (source === "editgen") {
+      if (c.target === "output") return c.targetHandle === "in-out";
+      if (c.target === "tween") return tweenSlotOk(TWEEN_KEY_EDITGEN);
+      return false;
+    }
     const refId = /^ref:(.+)$/.exec(source)?.[1];
     if (refId) {
       const ref = references.find((r) => r.id === refId);
@@ -2506,26 +2541,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           shotNumber={shot.number}
           refIds={shot.graphTweenRefIds ?? []}
           blocks={shot.graphTweenBlocks ?? []}
-          keyframes={(shot.graphTweenRefIds ?? []).flatMap((id) => {
-            const r = references.find((x) => x.id === id);
-            return r && r.artwork ? [{ id, name: r.name, artwork: r.artwork }] : [];
-          })}
+          keyframes={tweenKeyframesFor(shot, prod.meta.id, shot.graphTweenRefIds ?? [], new Map(references.map((r) => [r.id, r])))}
           model={shot.graphTweenModel ?? "auto"}
           resolution={shot.graphTweenResolution ?? "1080p"}
-          videoModels={filterTweenModels(videoModels, endFrameModelIds, shot.graphTweenModel ?? "auto")}
+          videoModels={filterTweenModels(videoModels, endFrameModelIds)}
           onModelOptions={stable.onModelOptions}
           onModelChange={(m) => onGraphField({ graphTweenModel: m })}
           onResolutionChange={(r) => onGraphField({ graphTweenResolution: r })}
           onBlocksChange={(b: TweenBlock[]) => onGraphField({ graphTweenBlocks: b })}
-          onRunBlock={(blockId: string) => {
-            setBusyBlock(blockId);
-            return onRunTweenBlock(blockId).finally(() => setBusyBlock((cur) => (cur === blockId ? null : cur)));
-          }}
+          onRunBlock={(blockId: string, durationSec: number) => onRunTweenBlock(blockId, durationSec)}
           busyBlock={busyBlock}
-          onStitch={() => {
-            setStitching(true);
-            return onStitchTween().finally(() => setStitching(false));
-          }}
+          onStitch={() => onStitchTween()}
+          onUnstitch={() => onUnstitchTween()}
           stitching={stitching}
           stitched={!!shot.graphTweenOutput}
           reencoded={shot.graphTweenReencoded === true}

@@ -4,10 +4,11 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Production, ProductionMeta, ProductionShot, OpenArtModelChoice, SuggestedReference, ReferenceCategory, CustomRef, VideoGenOptions, VideoModelOptions, GraphLayout, ReferenceImageGenOptions, CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
+import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
@@ -58,6 +59,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [newName, setNewName] = useState("");
   const [newFolder, setNewFolder] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   // step 1 form
   const [gdocUrl, setGdocUrl] = useState("");
   const [source, setSource] = useState<string | null>(null);
@@ -75,7 +77,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [showBoardText, setShowBoardText] = useState(true);
   /** Shot ids currently regenerating (a Set so several frames can run in parallel). */
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
-  /** Shot ids whose pending OpenArt job is being rechecked. */
+  /** Shot ids whose pending generation job is being rechecked. */
   const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
@@ -106,8 +108,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const boardDragRef = useRef<string | null>(null);
   const [magicBusy, setMagicBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
-  const [openArtOk, setOpenArtOk] = useState<boolean | null>(null);
-  const [openArtModels, setOpenArtModels] = useState<OpenArtModelChoice[]>([]);
+  const [mediaOk, setMediaOk] = useState<boolean | null>(null);
+  const [mediaModels, setMediaModels] = useState<OpenArtModelChoice[]>([]);
+  /** Active media provider display name (global setting). */
+  const [mediaProviderName, setMediaProviderName] = useState<string>("OpenArt");
+  /** Active media provider id — tracked so model lists refetch when the
+   *  provider is switched in Settings while the workspace is open. */
+  const [mediaProviderId, setMediaProviderId] = useState<string>("openart");
   const [voUrl, setVoUrl] = useState<string | null>(null);
   const [voDuration, setVoDuration] = useState<number | null>(null);
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
@@ -124,6 +131,17 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // the background (videoBusyIds tracks in-flight shots for button spinners).
   const [videoShotId, setVideoShotId] = useState<string | null>(null);
   const [videoBusyIds, setVideoBusyIds] = useState<string[]>([]);
+  // Step 3 node graph generations also run in the background: the graph modal
+  // (and its node views) unmount when the user moves elsewhere, so in-flight
+  // state lives here — keyed per shot — so reopening the graph still shows
+  // "Generating…". Sets survive step switches and shot switches.
+  const [nodeImageBusyIds, setNodeImageBusyIds] = useState<Set<string>>(new Set());
+  const [nodeVideoBusyIds, setNodeVideoBusyIds] = useState<Set<string>>(new Set());
+  const [nodeEditBusyIds, setNodeEditBusyIds] = useState<Set<string>>(new Set());
+  /** In-betweener block currently generating, keyed by shot id → block id. */
+  const [tweenBusyByShot, setTweenBusyByShot] = useState<Record<string, string>>({});
+  /** Shot ids with a stitch/unstitch in flight. */
+  const [tweenStitchingIds, setTweenStitchingIds] = useState<Set<string>>(new Set());
   // Step 3 storyboard-PDF export dialog (layout + version + logo options).
   const [pdfOpen, setPdfOpen] = useState(false);
   // Step 2 reference-image generation/edit modal. `refId` preselects edit mode
@@ -189,20 +207,42 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
 
   // Step 2 (reference-image generation) + Step 3 (in-app board generation):
-  // is the OpenArt MCP server connected, and which models does it expose?
+  // is the active media provider connected, and which models does it expose?
+  // Settings can switch the active media provider at any moment (Settings →
+  // Media generation dispatches "cascade:media-provider-changed" — same string
+  // in SettingsPanel). Re-read it so the refetch below runs with the new
+  // vendor's models.
+  useEffect(() => {
+    const onChange = () => {
+      void window.cascade.getMediaProvider().then(setMediaProviderId);
+    };
+    window.addEventListener("cascade:media-provider-changed", onChange);
+    return () => window.removeEventListener("cascade:media-provider-changed", onChange);
+  }, []);
+
   useEffect(() => {
     if (prod?.currentStep !== 2 && prod?.currentStep !== 3) return;
     let live = true;
-    if (prod.currentStep === 3) {
-      window.cascade.getMcpStatus()
-        .then((st) => { if (live) setOpenArtOk(st.some((s) => s.name === "openart" && s.status === "connected")); })
-        .catch(() => { if (live) setOpenArtOk(null); });
-    }
+    const step = prod.currentStep;
+    window.cascade.getMediaProvider()
+      .then((id) => {
+        if (!live) return;
+        setMediaProviderId(id);
+        return window.cascade.listMediaProviders().then((ps) => {
+          if (!live) return;
+          const active = ps.find((p) => p.id === id) ?? ps[0];
+          if (active) {
+            setMediaProviderName(active.displayName);
+            if (step === 3) setMediaOk(active.available);
+          }
+        });
+      })
+      .catch(() => { if (live) setMediaOk(null); });
     window.cascade.listOpenArtModels()
-      .then((m) => { if (live) setOpenArtModels(m); })
-      .catch(() => { if (live) setOpenArtModels([]); });
+      .then((m) => { if (live) setMediaModels(m); })
+      .catch(() => { if (live) setMediaModels([]); });
     return () => { live = false; };
-  }, [prod?.meta.id, prod?.currentStep]);
+  }, [prod?.meta.id, prod?.currentStep, mediaProviderId]);
 
   // Step 4: fetch the imported music file as a streamable cascade-media:// URL
   // (served from disk by main — no base64 / data-URL size limits). Falls back
@@ -311,6 +351,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   async function create() {
     if (!newFolder) { setErr("Choose a production folder first."); return; }
+    if (!newName.trim()) { setErr("Enter a production name first."); return; }
     setCreating(true); setErr(null);
     try {
       const p = await window.cascade.createProduction(newName, newFolder);
@@ -321,6 +362,22 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function importExisting() {
+    const dir = await window.cascade.pickProductionFolder();
+    if (!dir) return;
+    setImporting(true); setErr(null);
+    try {
+      const p = await window.cascade.importProduction(dir);
+      setProd(p);
+      setNewName(""); setNewFolder(null);
+      await refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -430,7 +487,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
   }
 
-  /** Step 2: generate or AI-edit a reference image via OpenArt. The modal
+  /** Step 2: generate or AI-edit a reference image via the media provider. The modal
    *  stays open (and shows errors) until the call succeeds. */
   async function runRefGen(opts: ReferenceImageGenOptions) {
     if (!prod) return;
@@ -439,7 +496,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setProd(next);
     void refreshList();
   }
-  /** Step 2: generate a character-sheet reference via OpenArt (the character
+  /** Step 2: generate a character-sheet reference via the media provider (the character
    *  is created/updated with the finished sheet). */
   async function runCharacterGen(opts: CharacterSheetGenOptions) {
     if (!prod) return;
@@ -701,10 +758,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     return () => window.removeEventListener("paste", onPaste);
   }, [graphShotId, prod?.references, prod?.meta.id]);
 
-  // In-betweener: which video models declare a dedicated end-frame slot (live
-  // form schemas, warmed when the OpenArt models were listed, so this is
-  // usually instant). Null = not loaded yet → the tween lists show every
-  // video model until it resolves.
+  // In-betweener: which video models accept a dedicated end frame (live
+  // capability data, warmed when the media models were listed, so this is
+  // usually instant), unioned with the user's manual allowlist in main.
+  // Null = not loaded yet → the tween lists show every video model until it
+  // resolves; once resolved the lists are strictly limited to these ids.
   const [endFrameModelIds, setEndFrameModelIds] = useState<string[] | null>(null);
   useEffect(() => {
     if (!graphShotId) return;
@@ -748,6 +806,22 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setBusy(true); setErr(null);
     try {
       const next = await window.cascade.ingestScript(prod.meta.id, src.trim());
+      setProd(next);
+      setSource(next.scriptSource ?? null);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Step 1: skip ingestion entirely — seed one scene with five blank shots. */
+  async function startBlank() {
+    if (!prod) return;
+    setBusy(true); setErr(null);
+    try {
+      const next = await window.cascade.startBlank(prod.meta.id);
       setProd(next);
       setSource(next.scriptSource ?? null);
       void refreshList();
@@ -820,7 +894,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 3: reclaim a shot's frame from an OpenArt job that outlived the
+  /** Step 3: reclaim a shot's frame from a vendor job that outlived the
    *  generating call (the wait timed out or the download failed). The job keeps
    *  rendering server-side, so rechecking polls it again and downloads the
    *  finished frame when ready. */
@@ -1339,8 +1413,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Step 3 node graph: merge shot-level graph fields (video prompt text,
    *  cycle index, pipes). */
   function saveGraphShotFields(shotId: string, patch: Partial<ProductionShot>) {
-    if (!prod) return;
-    saveField({ scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) });
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({ scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) });
   }
 
   /** Step 3 node graph: make a generation node's selected output the shot's
@@ -1381,9 +1456,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       graphOutputSource: "imagegen",
       graphOutputRefId: undefined,
       videoPath: undefined,
-      ...(path ? {} : { artwork: undefined }),
+      artwork: path,
     });
-    if (path) void applyGraphOutput(shotId, "image", path);
   }
 
   /** Step 3 node graph: pipe a reference node into the output — binds it as
@@ -1432,9 +1506,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
+    // The image node's output also feeds any in-betweener keyframe wired to it.
+    const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_IMGGEN);
     saveGraphShotFields(shotId, {
       graphImageToVideo: undefined,
       graphEditImageSource: undefined,
+      ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
       ...(shot.graphOutputSource === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
     });
   }
@@ -1483,27 +1560,78 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 3 in-betweener: generate one action block's clip (prompt = the
-   *  block's; keyframes resolved main-side). */
-  async function runTweenBlock(shotId: string, blockId: string) {
+   *  block's; keyframes resolved main-side). The node's selected model +
+   *  resolution ride the call — the tween dropdown only offers end-frame
+   *  models, and a legacy "auto" (or a dropped id) resolves to the first
+   *  listed one so the submission is always explicit. durationSec is the
+   *  block's displayed length (it can be newer than the last save after a
+   *  keyframe drag); main clamps it to the 1–15s grid as a backstop. */
+  async function runTweenBlock(shotId: string, blockId: string, durationSec?: number) {
     if (!prod) return;
+    if (tweenBusyByShot[shotId]) return;
+    setTweenBusyByShot((prev) => ({ ...prev, [shotId]: blockId }));
     setErr(null);
     try {
-      const next = await window.cascade.generateTweenBlock(prod.meta.id, shotId, blockId, {});
+      const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      const list = filterTweenModels(mediaModels.filter((m) => m.videoInput), endFrameModelIds);
+      const saved = shot?.graphTweenModel;
+      const model = saved && list.some((m) => m.id === saved) ? saved : (list[0]?.id ?? "");
+      const next = await window.cascade.generateTweenBlock(prod.meta.id, shotId, blockId, {
+        model: model || undefined,
+        resolution: shot?.graphTweenResolution,
+        ...(Number(durationSec) > 0 ? { durationSec: Number(durationSec) } : {}),
+      });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setTweenBusyByShot((prev) => {
+        if (prev[shotId] !== blockId) return prev;
+        const next = { ...prev };
+        delete next[shotId];
+        return next;
+      });
+    }
   }
 
   /** Step 3 in-betweener: stitch every block's selected clip into the
    *  continuous shot (and apply it when the tween feeds the output). */
   async function stitchTweenShot(shotId: string) {
-    if (!prod) return;
+    if (!prod || tweenStitchingIds.has(shotId)) return;
+    setTweenStitchingIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
       const next = await window.cascade.stitchTween(prod.meta.id, shotId);
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setTweenStitchingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
+  }
+
+  /** Step 3 in-betweener: undo the stitch — back to the individual block
+   *  clips so the timeline can be viewed/edited and re-stitched. */
+  async function unstitchTweenShot(shotId: string) {
+    if (!prod || tweenStitchingIds.has(shotId)) return;
+    setTweenStitchingIds((prev) => new Set(prev).add(shotId));
+    setErr(null);
+    try {
+      const next = await window.cascade.unstitchTween(prod.meta.id, shotId);
+      setProd(next);
+      bustOne(shotId);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setTweenStitchingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
   }
 
   /** Step 3 node graph: pipe the edit-image node's output into the output —
@@ -1519,9 +1647,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       graphOutputSource: "editgen",
       graphOutputRefId: undefined,
       videoPath: undefined,
-      ...(path ? {} : { artwork: undefined }),
+      artwork: path,
     });
-    if (path) void applyGraphOutput(shotId, "image", path);
   }
 
   /** Step 3 node graph: unbind the edit-image node's output feed (the edited
@@ -1531,7 +1658,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (shot.graphOutputSource === "editgen") saveGraphShotFields(shotId, { graphOutputSource: undefined, artwork: undefined });
+    // The edit node's output also feeds any in-betweener keyframe wired to it.
+    const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_EDITGEN);
+    saveGraphShotFields(shotId, {
+      ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
+      ...(shot.graphOutputSource === "editgen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
+    });
   }
 
   /** Step 3 node graph: unbind whatever currently feeds the output — the
@@ -1547,19 +1679,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Step 3 node graph: run the image generation node (prompt = the
    *  composer's text; result stored on the node, applied when piped). */
   async function runImageGenNode(shotId: string, model: string, resolution: string) {
-    if (!prod) return;
+    if (!prod || nodeImageBusyIds.has(shotId)) return;
+    setNodeImageBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
       const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setNodeImageBusyIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
   }
 
   /** Step 3 node graph: run the video generation node (prompt = the
    *  video-prompt node; source = piped frame or the shot's frame). */
   async function runVideoGenNode(shotId: string, model: string, resolution: string, durationSec: number) {
-    if (!prod) return;
+    if (!prod || nodeVideoBusyIds.has(shotId)) return;
+    setNodeVideoBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
@@ -1568,12 +1709,20 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setNodeVideoBusyIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
   }
 
   /** Step 3 node graph: AI-edit an image for the edit-image node (prompt = the
    *  edit-prompt node; source = piped frame/ref or the shot's frame). */
   async function runEditGenNode(shotId: string, model: string, resolution: string) {
-    if (!prod) return;
+    if (!prod || nodeEditBusyIds.has(shotId)) return;
+    setNodeEditBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
@@ -1581,19 +1730,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setNodeEditBusyIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
   }
 
   /** Step 3 node graph: select a generation node's stored output by index;
    *  the piped node's selection becomes the shot's primary output. */
   function selectGraphGen(shotId: string, kind: "image" | "video" | "edit", index: number) {
     if (!prod) return;
-    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
     const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : shot.graphEditGens;
     if (!items || !items[index]) return;
-    saveGraphShotFields(shotId, kind === "image" ? { graphImageGenIndex: index } : kind === "video" ? { graphVideoGenIndex: index } : { graphEditGenIndex: index });
     const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : kind === "video" ? shot.graphOutputSource === "videogen" : shot.graphOutputSource === "editgen";
-    if (bound) void applyGraphOutput(shotId, kind === "video" ? "video" : "image", items[index].path);
+    saveGraphShotFields(shotId, {
+      ...(kind === "image" ? { graphImageGenIndex: index } : kind === "video" ? { graphVideoGenIndex: index } : { graphEditGenIndex: index }),
+      ...(bound ? kind === "video" ? { videoPath: items[index].path } : { artwork: items[index].path, videoPath: undefined } : {}),
+    });
   }
 
   /** Step 3 node graph: cycle a generation node's stored outputs; the piped
@@ -1700,11 +1858,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3: promote a browsed history frame back to primary for one shot.
    *  The current frame swaps into the history (nothing is deleted). */
-  async function promoteHistory(shotId: string, index: number) {
+  async function promoteHistory(shotId: string, framePath: string) {
     if (!prod) return;
     setErr(null);
     try {
-      const next = await window.cascade.promoteBoardHistory(prod.meta.id, shotId, index);
+      const next = await window.cascade.promoteBoardHistory(prod.meta.id, shotId, framePath);
+      prodRef.current = next;
       setProd(next);
       bustOne(shotId);
       void refreshList();
@@ -1737,6 +1896,29 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     boardDragRef.current = null;
   }
 
+  /** Step 3: insert a blank shot between two board cards (or at the very end
+   *  after the last one). Uses the same main-side numbering as Step 1. */
+  function insertBlankShot(flat: { sc: Production["scenes"][number]; shot: ProductionShot }[], i: number) {
+    if (!prod) return;
+    const next = flat[i + 1];
+    if (next) {
+      const idx = next.sc.shots.findIndex((s) => s.id === next.shot.id);
+      apply(window.cascade.insertShot(prod.meta.id, next.sc.number, Math.max(0, idx)));
+    } else {
+      const last = prod.scenes[prod.scenes.length - 1];
+      if (!last) return;
+      apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length));
+    }
+  }
+
+  /** Step 3: append a blank shot to the end of the last scene. */
+  function appendBlankShot() {
+    if (!prod) return;
+    const last = prod.scenes[prod.scenes.length - 1];
+    if (!last) return;
+    apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length));
+  }
+
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
    *  preview (speaker button on its timeline block). Affects only the shot's
    *  video track — the production-wide VO and music keep their sliders. */
@@ -1764,9 +1946,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               onChange={(e) => setNewName(e.target.value)}
             />
             <button onClick={() => void pickFolder()}>{newFolder ? "Change folder…" : "Choose folder…"}</button>
-            {newFolder && <span className="prod-folder-hint" title={newFolder}>{newFolder}</span>}
-            <button className="primary" disabled={creating || !newFolder} onClick={() => void create()}>
+            {newFolder && (
+              <span
+                className="prod-folder-hint"
+                title={newName.trim() ? `${newFolder.replace(/[\\/]+$/, "")}/${newName.trim()}` : newFolder}
+              >
+                {newName.trim() ? `${newFolder.replace(/[\\/]+$/, "")}/${newName.trim()}` : newFolder}
+              </span>
+            )}
+            <button className="primary" disabled={creating || importing || !newFolder || !newName.trim()} onClick={() => void create()}>
               {creating ? "Creating…" : "Create"}
+            </button>
+            <button disabled={creating || importing} onClick={() => void importExisting()} title="Re-register a production folder that's already on disk (its files are adopted as-is)">
+              {importing ? "Importing…" : "Import existing…"}
             </button>
           </div>
           {err && <p className="error-text">{err}</p>}
@@ -1794,7 +1986,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
-  const imageModels = openArtModels.filter((m) => m.imageInput);
+  const imageModels = mediaModels.filter((m) => m.imageInput);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
@@ -1870,6 +2062,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               >
                 {busy ? "Working…" : prod.scenes.length ? "Re-ingest" : "Ingest script"}
               </button>
+              {!prod.scenes.length && (
+                <button disabled={busy} title="No script to ingest? Start from one scene with five blank shots." onClick={() => void startBlank()}>
+                  Start blank
+                </button>
+              )}
               {source && <span className="hint">Source: {source}</span>}
             </div>
             {err && <p className="error-text">{err}</p>}
@@ -1992,7 +2189,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               <CharacterBuilderSection
                 prodId={prod.meta.id}
                 characters={prod.characters}
-                models={openArtModels}
+                models={mediaModels}
                 onGenerate={runCharacterGen}
               />
             </DesignSection>
@@ -2038,7 +2235,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             {refGen && (
               <RefGenModal
                 prodId={prod.meta.id}
-                models={openArtModels}
+                models={mediaModels}
                 categories={prod.referenceCategories ?? []}
                 references={prod.references ?? []}
                 promptRefs={allPromptRefs(prod)}
@@ -2083,20 +2280,20 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             <p className="hint">
               One frame per shot — the master style and character keys from Step 2 are baked into every prompt.
               Frames are saved to <code>{prod.assets.boardsDir}/</code> in the production folder.
-              {openArtOk === true && " In-app generation uses the connected OpenArt MCP server."}
-              {openArtOk === false && (
-                <> OpenArt MCP isn't connected, so use <strong>Export prompts</strong> to generate frames externally.</>
+              {mediaOk === true && ` In-app generation uses the connected ${mediaProviderName} MCP server.`}
+              {mediaOk === false && (
+                <> {mediaProviderName} MCP isn't connected, so use <strong>Export prompts</strong> to generate frames externally.</>
               )}
             </p>
             <div className="prod-boards-controls">
               <label className="prod-openart-label">Model
                 <select
                   className="prod-openart-select"
-                   value={imageModels.some((m) => m.id === prod.openArt?.model) ? prod.openArt?.model : "auto"}
+                   value={imageModels.some((m) => m.id === prod.openArt?.model) ? prod.openArt?.model : (imageModels[0]?.id ?? "")}
                   onChange={(e) => saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" } })}
-                  title="OpenArt model for in-app generation (Auto lets Cascade choose)"
+                  title="Model for in-app generation"
+                  disabled={imageModels.length === 0}
                 >
-                  <option value="auto">Auto</option>
                   {imageModels.map((m) => (
                     <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
                   ))}
@@ -2106,7 +2303,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <select
                   className="prod-openart-select"
                   value={prod.openArt?.resolution ?? "1k"}
-                  onChange={(e) => saveField({ openArt: { model: prod.openArt?.model ?? "auto", resolution: e.target.value as "1k" | "2k" | "4k" } })}
+                  onChange={(e) => saveField({ openArt: { model: prod.openArt?.model ?? imageModels[0]?.id ?? "", resolution: e.target.value as "1k" | "2k" | "4k" } })}
                   title="Output resolution for image generation"
                 >
                   <option value="1k">1k</option>
@@ -2156,14 +2353,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   boardDragRef.current = null;
                 }}
               >
-                {prod.scenes.flatMap((sc) => sc.shots).map((shot) => (
+                {prod.scenes.flatMap((sc) => sc.shots.map((shot) => ({ sc, shot }))).map(({ shot }, i, flat) => (
                   <BoardCard
                     key={shot.id}
                     prod={prod}
                     shot={shot}
                     bust={boardBustFor(shot.id)}
-                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id)}
-                    videoBusy={videoBusyIds.includes(shot.id)}
+                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyIds.has(shot.id) || nodeEditBusyIds.has(shot.id)}
+                    videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyIds.has(shot.id) || tweenBusyByShot[shot.id] !== undefined || tweenStitchingIds.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
                     onRegenerate={() => void regenBoard(shot.id)}
@@ -2176,7 +2373,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     onPromptFocus={focusPrompt}
                     selected={promptShotId === shot.id}
                     onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
-                    onPromoteHistory={(index) => void promoteHistory(shot.id, index)}
+                    onPromoteHistory={(framePath) => void promoteHistory(shot.id, framePath)}
                     draggable
                     isDragging={boardDragId === shot.id}
                     isReorderTarget={boardDropTarget === shot.id}
@@ -2206,8 +2403,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                       if (!src || src === targetId) return;
                       reorderShot(src, targetId);
                     }}
+                    onInsertAfter={() => insertBlankShot(flat, i)}
                   />
                 ))}
+                <button
+                  className="prod-board-add"
+                  title="Add a blank shot at the end"
+                  onClick={appendBlankShot}
+                ><PlusIcon size={16} /></button>
                 {boardDragId && (
                   <div
                     className={"prod-board prod-board-end-zone" + (boardDropTarget === "__end__" ? " drop-target" : "")}
@@ -2283,15 +2486,21 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onDropFile={(file) => { if (graphShotId) void addFileReference(graphShotId, file); }}
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
                   imageModels={imageModels}
-                  videoModels={openArtModels.filter((m) => m.videoInput)}
+                  videoModels={mediaModels.filter((m) => m.videoInput)}
                   endFrameModelIds={endFrameModelIds}
-                  defaultImageModel={prod.openArt?.model ?? "auto"}
+                  defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
                   onRunEditGen={(model, resolution) => graphShotId ? runEditGenNode(graphShotId, model, resolution) : Promise.resolve()}
-                  onRunTweenBlock={(blockId) => graphShotId ? runTweenBlock(graphShotId, blockId) : Promise.resolve()}
+                  onRunTweenBlock={(blockId, durationSec) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
+                  onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
+                  imageGenBusy={graphShotId ? nodeImageBusyIds.has(graphShotId) : false}
+                  videoGenBusy={graphShotId ? nodeVideoBusyIds.has(graphShotId) : false}
+                  editGenBusy={graphShotId ? nodeEditBusyIds.has(graphShotId) : false}
+                  busyTweenBlock={graphShotId ? tweenBusyByShot[graphShotId] ?? null : null}
+                  tweenStitching={graphShotId ? tweenStitchingIds.has(graphShotId) : false}
                   onSelectGraphGen={(kind, index) => { if (graphShotId) selectGraphGen(graphShotId, kind, index); }}
                   onCycleGraphGen={(kind, dir) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir); }}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
@@ -2318,7 +2527,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               return es ? (
                 <EditBoardModal
                   shotNumber={es.number}
-                  models={openArtModels}
+                  models={mediaModels}
                   prompt={es.graphEditPrompt ?? ""}
                   onPromptChange={(text) => saveGraphShotFields(es.id, { graphEditPrompt: text })}
                   onSubmit={(model, prompt) => {
@@ -2336,7 +2545,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <VideoGenModal
                   shot={vs}
                   prod={prod}
-                  models={openArtModels}
+                  models={mediaModels}
                   prompt={vs.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT}
                   onPromptChange={(text) => saveGraphShotFields(vs.id, { graphVideoPrompt: text })}
                   onClose={() => setVideoShotId(null)}

@@ -134,6 +134,46 @@ describe("OpenArtClient.listModelChoices", () => {
     expect(choices).toHaveLength(1);
     expect(choices[0].id).toBe("m1");
   });
+
+  it("classifies image-only models as non-video even when the description mentions video", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () =>
+        JSON.stringify([
+          {
+            model: "wan-2-7-text-to-image",
+            displayName: "Wan 2.7 Image",
+            media: ["image"],
+            modes: ["text-to-image"],
+            description: "Create stunning images and videos from a text prompt.",
+          },
+          {
+            model: "grok-imagine-2-0",
+            displayName: "Grok Imagine Image 2.0",
+            media: ["image"],
+            modes: [],
+            description: "Photorealistic images and short video clips.",
+          },
+          { model: "veo-3-1", displayName: "Veo 3.1", media: ["image"], modes: ["video"], description: "Generates video." },
+        ]),
+    });
+    const choices = await new OpenArtClient(mcp).listModelChoices();
+    expect(choices.find((c) => c.id === "wan-2-7-text-to-image")).toMatchObject({ imageInput: true, videoInput: false });
+    expect(choices.find((c) => c.id === "grok-imagine-2-0")).toMatchObject({ imageInput: true, videoInput: false });
+    expect(choices.find((c) => c.id === "veo-3-1")).toMatchObject({ imageInput: true, videoInput: true });
+  });
+
+  it("falls back to the description only when structured fields carry no modality signal", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () =>
+        JSON.stringify([
+          { model: "mystery-img", displayName: "Mystery", description: "A great image model." },
+          { model: "mystery-vid", displayName: "Mystery Vid", description: "A great video model." },
+        ]),
+    });
+    const choices = await new OpenArtClient(mcp).listModelChoices();
+    expect(choices.find((c) => c.id === "mystery-img")).toMatchObject({ imageInput: true, videoInput: false });
+    expect(choices.find((c) => c.id === "mystery-vid")).toMatchObject({ imageInput: false, videoInput: true });
+  });
 });
 
 describe("OpenArtClient.getCredits", () => {

@@ -49,8 +49,42 @@ interface SettingsFile {
    * the union is what the tween node's dropdown offers.
    */
   endFrameModels: string[];
+  /**
+   * Media model ids the user hides from the generation model dropdowns
+   * (Settings → Models & expenses toggles). Filtered main-side so every
+   * dropdown — boards, video modal, node graph, tween, references — excludes
+   * them without the renderer knowing the list.
+   */
+  hiddenMediaModels: string[];
+  /**
+   * Manual per-model kind assignments from the Models & expenses
+   * drag-and-drop (model id → "image" | "video"). Applied main-side to the
+   * model choices so every generation dropdown respects the user's
+   * classification over the provider's auto-detected flags.
+   */
+  modelKindOverrides: Record<string, "image" | "video">;
+  /**
+   * Per-generation-dropdown remembered last choices (see MediaDefaultCtx in
+   * shared/ipc.ts): each model dropdown starts where the user last left it,
+   * globally across productions. Written by every dropdown's onChange.
+   */
+  mediaDefaults: Record<string, MediaDefaultChoice>;
+  /**
+   * The user's preferred media model arrangement (Settings → Models &
+   * expenses drag-to-reorder). Sorted into every generation dropdown
+   * main-side; models missing from the list keep discovery order after it.
+   */
+  mediaModelOrder: string[];
   /** Last main-window bounds + maximized flag, restored on launch. */
   windowState: WindowState | null;
+}
+
+/** A dropdown context's remembered last choice (see shared/ipc.ts). */
+interface MediaDefaultChoice {
+  model?: string;
+  resolution?: string;
+  durationSec?: number;
+  aspectRatio?: string;
 }
 
 /** Persisted main-window geometry. x/y are null when never positioned. */
@@ -76,6 +110,10 @@ const DEFAULTS: SettingsFile = {
   externalEditor: null,
   encrypted3daiApiKey: null,
   endFrameModels: [],
+  hiddenMediaModels: [],
+  modelKindOverrides: {},
+  mediaDefaults: {},
+  mediaModelOrder: [],
   windowState: null,
 };
 const MAX_RECENT_WORKSPACES = 10;
@@ -310,6 +348,85 @@ export function setEndFrameModels(ids: string[]): void {
     clean.push(id);
   }
   load().endFrameModels = clean.slice(0, 200);
+  save();
+}
+
+/** Media model ids hidden from the generation dropdowns (see hiddenMediaModels). */
+export function getHiddenMediaModels(): string[] {
+  return load().hiddenMediaModels ?? [];
+}
+
+export function setHiddenMediaModels(ids: string[]): void {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    if (typeof raw !== "string") continue;
+    const id = raw.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    clean.push(id);
+  }
+  load().hiddenMediaModels = clean.slice(0, 500);
+  save();
+}
+
+/** Manual model kind assignments (see modelKindOverrides). */
+export function getModelKindOverrides(): Record<string, "image" | "video"> {
+  return load().modelKindOverrides ?? {};
+}
+
+export function setModelKindOverrides(overrides: Record<string, unknown>): void {
+  const clean: Record<string, "image" | "video"> = {};
+  for (const [rawId, rawKind] of Object.entries(overrides ?? {})) {
+    const id = String(rawId ?? "").trim();
+    if (!id) continue;
+    if (rawKind !== "image" && rawKind !== "video") continue;
+    if (Object.keys(clean).length >= 500) break;
+    clean[id] = rawKind;
+  }
+  load().modelKindOverrides = clean;
+  save();
+}
+
+/** The dropdowns' remembered last choices (see mediaDefaults). */
+export function getMediaDefaults(): Record<string, MediaDefaultChoice> {
+  return load().mediaDefaults ?? {};
+}
+
+const MEDIA_DEFAULT_CTXS = new Set(["image", "video", "edit", "reference", "character", "tween"]);
+
+/** Merge a patch into one dropdown context's remembered choice. Only the six
+ *  known contexts are accepted; unknown fields are dropped so a hand-edited
+ *  settings.json can't smuggle junk into the renderer. */
+export function setMediaDefault(ctx: string, patch: MediaDefaultChoice): void {
+  if (!MEDIA_DEFAULT_CTXS.has(ctx) || typeof patch !== "object" || patch === null) return;
+  const s = load();
+  const cur = s.mediaDefaults?.[ctx] ?? {};
+  const next: MediaDefaultChoice = { ...cur };
+  if (typeof patch.model === "string") next.model = patch.model;
+  if (typeof patch.resolution === "string") next.resolution = patch.resolution;
+  if (typeof patch.durationSec === "number" && Number.isFinite(patch.durationSec)) next.durationSec = patch.durationSec;
+  if (typeof patch.aspectRatio === "string") next.aspectRatio = patch.aspectRatio;
+  s.mediaDefaults = { ...(s.mediaDefaults ?? {}), [ctx]: next };
+  save();
+}
+
+/** The user's saved media model arrangement (see mediaModelOrder). */
+export function getMediaModelOrder(): string[] {
+  return load().mediaModelOrder ?? [];
+}
+
+export function setMediaModelOrder(ids: string[]): void {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    if (typeof raw !== "string") continue;
+    const id = raw.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    clean.push(id);
+  }
+  load().mediaModelOrder = clean.slice(0, 500);
   save();
 }
 

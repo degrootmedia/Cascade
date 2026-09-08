@@ -154,6 +154,7 @@ export type AgentEvent =
   | { type: "turn-done"; usage: Usage }
   | { type: "agent-done"; finalText: string; totalCredits: number }
   | { type: "group-enabled"; group: string }
+  | { type: "notice"; text: string }
   | { type: "error"; message: string };
 
 /** Rich tool result: text goes to the model; images (data URLs) go to the UI. */
@@ -174,7 +175,22 @@ export interface AgentTool {
 export interface SkillMeta {
   name: string;
   description: string;
+  /** Namespace the skill lives under ("spec", "oracle", "code", …). Flat
+   *  skills have none. Grouped into sections in the system prompt so the
+   *  model knows how to treat each kind (follow closely vs. adapt vs. use
+   *  on demand). */
+  namespace?: string;
+  /** How the model should treat the skill. Sequential skills produce
+   *  artifacts and are followed closely; advisory skills adapt to context;
+   *  utility skills are reached for on demand. Defaults to "utility". */
+  kind?: "sequential" | "advisory" | "utility";
+  /** Trigger phrases — surfaced as routing hints (not enforced) so the
+   *  model knows which skill matches a user request. */
+  triggers?: string[];
 }
+
+/** The mutating tools the agent may not call while plan mode is on. */
+export const PLAN_GATED_TOOLS = ["write_file", "edit_file", "run_command"];
 
 export interface AgentConfig {
   apiKey: string;
@@ -191,6 +207,12 @@ export interface AgentConfig {
   maxIterations?: number;
   /** Pure chat: no tools, no workspace, minimal prompt — web-chat-like. */
   pureChat?: boolean;
+  /**
+   * Plan mode: the agent researches and writes a written plan, but cannot
+   * mutate the workspace (write/edit/run_command are gated) until the user
+   * reviews and approves the plan. Enforced in the loop, not just prompted.
+   */
+  planMode?: boolean;
   /** Agent persona prompt injected before the Cascade base prompt. */
   agentPrompt?: string;
   /** Skills advertised in the system prompt; content is fetched via a read_skill tool. */

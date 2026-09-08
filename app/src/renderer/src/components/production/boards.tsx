@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
+import { isImageModel, isVideoModel } from "../../../../shared/ipc.js";
+import { getMediaDefault, rememberMediaDefault } from "./media-defaults.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
@@ -420,10 +422,13 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
   onClose: () => void;
   onSubmit: (opts: VideoGenOptions) => void;
 }) {
-  const videoModels = models.filter((m) => m.videoInput);
-  const [model, setModel] = useState(videoModels[0]?.id ?? "");
-  const [resolution, setResolution] = useState("1080p");
-  const [durationSec, setDurationSec] = useState(5);
+  const videoModels = models.filter(isVideoModel);
+  // Start where the user last left this dropdown (remembered globally, so
+  // model + resolution + length carry across shots and productions).
+  const remembered = getMediaDefault("video");
+  const [model, setModel] = useState(() => remembered?.model ?? videoModels[0]?.id ?? "");
+  const [resolution, setResolution] = useState(() => remembered?.resolution ?? "1080p");
+  const [durationSec, setDurationSec] = useState(() => remembered?.durationSec ?? 5);
   const fallback = "Animate this reference image with smooth, cinematic motion.";
   const external = externalPrompt ?? shot.graphVideoPrompt ?? fallback;
   const [prompt, setPrompt] = useState(external);
@@ -503,7 +508,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         <select
           className="prod-openart-select"
           value={videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? "")}
-          onChange={(e) => setModel(e.target.value)}
+          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("video", { model: e.target.value }); }}
           title="Video model"
           disabled={videoModels.length === 0}
         >
@@ -516,12 +521,12 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         {videoModels.length === 0 && <p className="hint">No video models reported — connect the media MCP server.</p>}
         <div className="prod-video-row">
           <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => setResolution(e.target.value)}>
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("video", { resolution: e.target.value }); }}>
               {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
           <label className="prod-label">Length
-            <select className="prod-openart-select" value={durationSec} onChange={(e) => setDurationSec(Number(e.target.value))}>
+            <select className="prod-openart-select" value={durationSec} onChange={(e) => { setDurationSec(Number(e.target.value)); rememberMediaDefault("video", { durationSec: Number(e.target.value) }); }}>
               {durations.map((s) => <option key={s} value={s}>{s}s</option>)}
             </select>
           </label>
@@ -569,8 +574,8 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
   onSubmit: (model: string, prompt: string) => void;
   onClose: () => void;
 }) {
-  const imageModels = models.filter((m) => m.imageInput);
-  const [model, setModel] = useState(imageModels[0]?.id ?? "");
+  const imageModels = models.filter(isImageModel);
+  const [model, setModel] = useState(() => getMediaDefault("edit")?.model ?? imageModels[0]?.id ?? "");
   const external = externalPrompt ?? "";
   const [prompt, setPrompt] = useState(external);
   const [focused, setFocused] = useState(false);
@@ -600,7 +605,7 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
         <select
           className="prod-openart-select"
           value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
-          onChange={(e) => setModel(e.target.value)}
+          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("edit", { model: e.target.value }); }}
           title="Image model that accepts a reference image"
           disabled={imageModels.length === 0}
         >

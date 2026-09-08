@@ -2567,6 +2567,11 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   max-height: 85vh;
   overflow-y: auto;
 }
+.modal.settings {
+  /* Wider than the default modal so the Models & expenses model names and
+     ladder hints stay legible. */
+  width: min(760px, 94vw);
+}
 .modal h3 { margin-top: 0; }
 .approval-detail {
   background: var(--bg);
@@ -2636,11 +2641,67 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- expense pricing rules (Settings) ---------- */
 .expense-pricing { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.expense-provider-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 4px;
+  margin: 16px 0 0;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+.expense-provider-title:first-child { margin-top: 4px; }
+.expense-chevron { font-size: 0.7rem; opacity: 0.8; }
+.expense-group-title {
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-top: 12px;
+}
+.expense-group { border-radius: 8px; }
+.expense-group.expense-drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.expense-rule[draggable="true"] { cursor: grab; }
+.expense-rule.expense-dragging { opacity: 0.4; }
+.expense-divider { border: none; border-top: 1px solid var(--border); margin: 14px 0 4px; }
+.expense-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+.expense-hidden-tag {
+  margin-left: 6px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--danger);
+  opacity: 0.85;
+}
 .expense-rule {
   display: grid;
-  grid-template-columns: 90px 1.4fr 1fr 110px 110px 24px;
+  grid-template-columns: 16px 48px 1.6fr 90px 90px 1.3fr;
   gap: 6px;
   align-items: center;
+}
+.expense-grip { display: inline-flex; justify-content: center; opacity: 0.55; }
+.expense-reorder-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 .expense-rule-head span { font-size: 0.74rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
 .expense-rule select, .expense-rule input {
@@ -2660,6 +2721,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--text);
   cursor: pointer;
 }
+.expense-pricing-actions button.expense-eye { display: inline-flex; align-items: center; gap: 6px; }
 .expense-pricing-actions button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
 
 /* ---------- MCP section ---------- */
@@ -2687,7 +2749,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- model picker ---------- */
 .composer-footer { display: flex; align-items: center; padding: 0 10% 12px; }
-.undo {
+.undo,
+.plan-mode {
   background: none;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -2697,8 +2760,11 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.85rem;
   margin-right: 8px;
 }
-.undo:hover:not(:disabled) { border-color: var(--border); background: var(--bg-panel); color: var(--text); }
-.undo:disabled { opacity: 0.4; cursor: default; }
+.undo:hover:not(:disabled),
+.plan-mode:hover:not(:disabled) { border-color: var(--border); background: var(--bg-panel); color: var(--text); }
+.undo:disabled,
+.plan-mode:disabled { opacity: 0.4; cursor: default; }
+.plan-mode.on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .model-picker { position: relative; }
 .model-button {
   display: flex;

@@ -6,6 +6,8 @@ import attachFileUrl from "../assets/icons/attach-file.svg";
 import dragHandleUrl from "../assets/icons/drag-handle.svg";
 import editUrl from "../assets/icons/Edit.svg";
 import expensesUrl from "../assets/icons/expenses.svg";
+import eyeOffUrl from "../assets/icons/eye-off.svg";
+import eyeUrl from "../assets/icons/eye.svg";
 import filmStripUrl from "../assets/icons/film-strip.svg";
 import imageUrl from "../assets/icons/Image.svg";
 import importUrl from "../assets/icons/import.svg";
@@ -74,6 +76,10 @@ export const InbetweenIcon = (p: IconProps) => <Icon src={inbetweenUrl} {...p} /
 export const FilmStripIcon = (p: IconProps) => <Icon src={filmStripUrl} {...p} />;
 /** Wallet/receipt — expenses ledger. */
 export const ExpensesIcon = (p: IconProps) => <Icon src={expensesUrl} {...p} />;
+/** Open blue eye — show the models hidden from the dropdowns. */
+export const EyeIcon = (p: IconProps) => <Icon src={eyeUrl} {...p} />;
+/** Crossed-out gray eye — conceal them (visual only). */
+export const EyeOffIcon = (p: IconProps) => <Icon src={eyeOffUrl} {...p} />;
 /** Red pencil — edit. */
 export const EditIcon = (p: IconProps) => <Icon src={editUrl} {...p} />;
 /** Blue paperclip — attach a file. */

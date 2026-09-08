@@ -67,6 +67,18 @@
         "to": "skills/magic-prompt.md"
       },
       {
+        "from": "skills/spec",
+        "to": "skills/spec"
+      },
+      {
+        "from": "skills/oracle",
+        "to": "skills/oracle"
+      },
+      {
+        "from": "skills/code",
+        "to": "skills/code"
+      },
+      {
         "from": "src/main/magic-prompt.md",
         "to": "magic-prompt.md"
       }

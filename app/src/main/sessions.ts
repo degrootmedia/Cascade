@@ -26,6 +26,8 @@ export interface SessionFile {
   display: DisplayItem[];
   /** Reference images the user picked for OpenArt (uploaded) — persisted with the chat. */
   mentionImages: string[];
+  /** Plan mode: research + written plan first, mutations gated until approval. */
+  planMode: boolean;
 }
 
 const store = createStore<SessionFile>({
@@ -66,6 +68,9 @@ export function saveSession(s: SessionFile): void {
     // Back-fill legacy sessions: pure chat unless a workspace was bound.
     (s as SessionFile).pureChat = !s.workspace;
   }
+  if (typeof (s as { planMode?: unknown }).planMode !== "boolean") {
+    (s as SessionFile).planMode = false;
+  }
   store.save(s);
 }
 
@@ -82,6 +87,7 @@ export function newSessionFile(workspace: string | null = null, agentId: string 
     history: [],
     display: [],
     mentionImages: [],
+    planMode: false,
   };
 }
 

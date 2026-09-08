@@ -20,6 +20,8 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Agent core | `core/src/` | The streaming agent loop (tool-calling, approval gating, undo journal, compaction). The deep, tested module. |
 | LLM provider registry | `app/src/shared/providers.ts` | The abstraction over OpenAI-compatible chat vendors (Gab, Cheaper Inference, OpenAI, …): each provider is one `ApiProvider` entry (base URL, default model, optional `balance` endpoint). Cost semantics are **derived, not hardcoded** — `detectCost` classifies a raw `/models` entry from its own fields (`credit_cost` → per-message credits, `pricing.*_per_million` → per-token USD, else unknown) and `assignCostTiers` ranks the list cheapest→priciest for providers that can't price a single message. `normalizeModelList` + `extractModelList` keep the `models:list` IPC provider-agnostic. Adding a provider = one registry entry, never UI code. |
 | ChatClient | `core/src/chat.ts` | The provider-agnostic OpenAI-compatible streaming client (`complete`/`completeOnce`/`balance`) every LLM call rides on; takes `apiKey` + `baseUrl` so the registry supplies the vendor. Background jobs (compaction, chat titles) use `AgentConfig.helperModel` — the cheapest discovered model, cached per provider in settings — never a hardcoded model id. |
+| Harness skills | `app/src/main/skills.ts` | The chat-side skill system: markdown instruction files the agent pulls in on demand via `read_skill`. Flat files or namespaced directories (`skills/spec/research.md` → `spec:research`); optional frontmatter (`kind: sequential|advisory|utility`, `triggers`, `namespace`) parsed by `parseFrontmatter`; advertised grouped-by-kind in the system prompt (`prompts.skillsPrompt`) so the model knows how to treat each. Bundled harness skills in `app/skills/` (`spec:` RPI, `oracle:` advisory, `code:` utilities) are seeded into `userData/skills/` on startup (`seedSkills`). |
+| Plan mode | `core/src/planmode.ts` + `app/src/shared/commands.ts` | The Research→Plan→Implement gate: `AgentConfig.planMode` turns on a system-prompt directive and `planGate` blocks `write_file`/`edit_file`/`run_command` in the loop until the plan is approved. Toggled per chat (persisted on the session), surfaced via a composer chip and `/plan-mode on|off`; `/research /plan /implement /finish /architect /challenge /review /commit` expand to skill instructions (`expandCommand`). |
 | OpenArtClient | `app/src/main/openart.ts` | The whole OpenArt integration: model discovery, live form-schema introspection, per-model option assignment, async image/video generation + polling, project resolution, video-options cache. Takes the `McpManager` as its constructor seam — that interface IS the test surface. Implements `MediaProvider` (foreign `higgsfield:…` model ids resolve to the house default). |
 | MediaProvider | `app/src/main/providers/` | The abstraction over MCP image/video vendors: the `MediaProvider` interface (`types.ts`), the global registry (`registry.ts`), vendor-neutral `resolvePromptRefs` + `citePrompt` (`refs.ts` — both vendors bind references positionally from the submitted array, probed live on each), and the `HiggsfieldProvider` adapter (`higgsfield.ts` — catalog-driven, `sync:true` polling, S3-upload reference path, no project concept). index.ts resolves the active vendor per call from the global settings selection. Model ids are namespaced (`higgsfield:<id>`) where they leave the provider. |
 | MCP manager | `app/src/main/mcp.ts` | Connecting/owning MCP servers; namespaced tools; the `callRaw*` host-side call surface the media providers use. |
@@ -36,6 +38,19 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 
 ## Core domain terms
 
+- **Harness** — the chat-side methodology that teaches the agent how the user
+  works: a set of skills, workflows, and gates (in the spirit of Martin Richards'
+  "Building Your Own Agent Harness"). Built around a Research → Plan → Implement
+  loop where the agent researches the workspace (`spec:research`), writes a plan
+  (`spec:plan`), implements it test-first (`spec:implement`), and validates it
+  (`spec:finish`) — backed by `oracle:` advisory and `code:` utility skills.
+  **Plan mode** (`AgentConfig.planMode` + `core/src/planmode.ts` `planGate`) is
+  the enforced gate: while on, the agent cannot write/edit files or run commands
+  until the user approves the written plan. Slash commands (`/research`, `/plan`,
+  `/implement`, `/finish`, `/challenge`, `/architect`, `/review`, `/commit`,
+  `/plan-mode on|off`) expand in `app/src/shared/commands.ts` (`expandCommand`).
+  The harness is designed to be **engineered** the same way as the software it
+  produces — add skills for how you write code, test, and think about design.
 - **Production** — one project folder with a 5-step pipeline state machine
   (`Production` in `shared/ipc.ts`). Owns scenes, styles, references, brand, assets.
 - **Shot** — the smallest Audio/Visual unit; stable `id`, derived 4-digit `number`.
@@ -54,10 +69,41 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 - **Style** — a named generation prompt (up to 5); `styles[0]` is the master.
 - **Brand** — palette swatches + optional font appended to every board prompt.
 - **Board** — a shot's generated frame (`artwork` on the shot, in `boardsDir`).
-- **Expense rule** — a pricing rule (kind + model + resolution + optional video
-  length → dollar price) the user configures in Settings; exact matches beat
-  wildcards, and generations matching none are priced at $0. Prices are stamped
-  at record time, so editing a rule never reprices history.
+- **Expense rule** — a pricing rule (kind + model → min/max dollar range) the
+  user configures in Settings → **Models & expenses**; one range per model, so
+  no per-resolution × per-length grid. The matcher (`matchPriceRule`)
+  interpolates between the range endpoints by the generation's resolution and
+  video length against the model's baked ladder (`resolutions[]` +
+  `durMin/durMax`, read from its live form options at edit time). Exact models
+  beat the wildcard, and generations matching none are priced at $0. Saving
+  rules **re-prices every existing generation** (`repriceAll`, manual rows
+  untouched) — history is recomputable from the rules, not frozen. The tab is
+  also the model registry: `listAllModelLadders` probes BOTH media vendors
+  (`providers/registry.ts`) and the UI auto-populates one price row per
+  discovered model, grouped into per-vendor sub-panels (OpenArt / Higgsfield),
+  plus a per-model hide toggle that writes
+  `settings.hiddenMediaModels` — filtered main-side in `production:openArtModels`
+  and `production:videoEndFrameModels` so every generation dropdown excludes
+  hidden models without renderer changes. Image vs video is classified from
+  the model's flags, which OpenArt derives from structured fields only
+  (`media`/`modes`/`output_type` — never the free-text description, which is
+  marketing copy that routinely mentions both modalities): a model is priced
+  as an IMAGE only when `imageInput && !videoInput`, and as VIDEO whenever
+  `videoInput`. The user can drag a row between the sections to override the
+  auto-detected kind (`settings.modelKindOverrides`, applied main-side in
+  `applyKindOverrides` so every dropdown follows it); dragging preserves the
+  row's price under the new kind, and dragging a row up or down its group
+  re-orders it (`settings.mediaModelOrder`, applied main-side in
+  `production:openArtModels` so every dropdown lists models in the saved
+  order; unknown models append in discovery order).
+- **Media defaults** — the generation dropdowns' remembered last choices
+  (`settings.mediaDefaults`, one entry per context: image / video / edit /
+  reference / character / tween). Every model dropdown seeds from its
+  context's remembered choice (validated against the current list; existing
+  per-shot/per-production persistence like `prod.openArt`,
+  `CharacterSheet.builder`, `shot.graphTweenModel` wins when set) and writes
+  back on change via the renderer's `production/media-defaults.ts` cache —
+  so each dropdown starts where the user last left it, globally.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes

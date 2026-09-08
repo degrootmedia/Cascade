@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, isImageModel, isVideoModel, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
@@ -20,6 +20,7 @@ import { BrandSwatchRow } from "./production/brand.js";
 import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
+import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -110,6 +111,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [importBusy, setImportBusy] = useState(false);
   const [mediaOk, setMediaOk] = useState<boolean | null>(null);
   const [mediaModels, setMediaModels] = useState<OpenArtModelChoice[]>([]);
+  /** The dropdowns' remembered last choices are async-loaded once — the
+   *  prod.openArt seed below waits for them so a fresh production starts at
+   *  the last chosen model, not whatever loaded first. */
+  const [mediaDefaultsReady, setMediaDefaultsReady] = useState(false);
   /** Active media provider display name (global setting). */
   const [mediaProviderName, setMediaProviderName] = useState<string>("OpenArt");
   /** Active media provider id — tracked so model lists refetch when the
@@ -206,15 +211,43 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // Keep the rename draft in sync when switching productions.
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
 
+  // Warm the dropdowns' remembered last choices once (media-defaults.ts).
+  useEffect(() => {
+    void primeMediaDefaults().then(() => setMediaDefaultsReady(true));
+  }, []);
+
+  // The Step-3 image dropdown starts at the user's last chosen model: a
+  // production without a saved model of its own (fresh, or its saved model
+  // no longer exists) inherits the remembered choice — so the dropdown and
+  // the Generate Storyboard button always agree.
+  const imageModelIdsKey = mediaModels.filter(isImageModel).map((m) => m.id).join(",");
+  useEffect(() => {
+    if (!mediaDefaultsReady || !prod || !imageModelIdsKey) return;
+    const ids = imageModelIdsKey.split(",");
+    if (prod.openArt?.model && ids.includes(prod.openArt.model)) return;
+    const model = rememberedModel("image", ids, prod.openArt?.model ?? "") || ids[0];
+    if (model === prod.openArt?.model) return;
+    saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k" } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prod?.meta.id, imageModelIdsKey, mediaDefaultsReady]);
+
   // Step 2 (reference-image generation) + Step 3 (in-app board generation):
   // is the active media provider connected, and which models does it expose?
   // Settings can switch the active media provider at any moment (Settings →
   // Media generation dispatches "cascade:media-provider-changed" — same string
   // in SettingsPanel). Re-read it so the refetch below runs with the new
-  // vendor's models.
+  // vendor's models. The event also carries hidden-model, kind-override, and
+  // drag-reorder changes — refetch the model list directly, since a same-id
+  // provider "change" wouldn't retrigger the effect below.
   useEffect(() => {
+    const refetchModels = () => {
+      void window.cascade.listOpenArtModels()
+        .then((m) => setMediaModels(m))
+        .catch(() => setMediaModels([]));
+    };
     const onChange = () => {
       void window.cascade.getMediaProvider().then(setMediaProviderId);
+      refetchModels();
     };
     window.addEventListener("cascade:media-provider-changed", onChange);
     return () => window.removeEventListener("cascade:media-provider-changed", onChange);
@@ -1986,7 +2019,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
-  const imageModels = mediaModels.filter((m) => m.imageInput);
+  const imageModels = mediaModels.filter(isImageModel);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
@@ -2290,7 +2323,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <select
                   className="prod-openart-select"
                    value={imageModels.some((m) => m.id === prod.openArt?.model) ? prod.openArt?.model : (imageModels[0]?.id ?? "")}
-                  onChange={(e) => saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" } })}
+                  onChange={(e) => {
+                    saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" } });
+                    rememberMediaDefault("image", { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" });
+                  }}
                   title="Model for in-app generation"
                   disabled={imageModels.length === 0}
                 >
@@ -2303,7 +2339,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <select
                   className="prod-openart-select"
                   value={prod.openArt?.resolution ?? "1k"}
-                  onChange={(e) => saveField({ openArt: { model: prod.openArt?.model ?? imageModels[0]?.id ?? "", resolution: e.target.value as "1k" | "2k" | "4k" } })}
+                  onChange={(e) => {
+                    saveField({ openArt: { model: prod.openArt?.model ?? imageModels[0]?.id ?? "", resolution: e.target.value as "1k" | "2k" | "4k" } });
+                    rememberMediaDefault("image", { resolution: e.target.value });
+                  }}
                   title="Output resolution for image generation"
                 >
                   <option value="1k">1k</option>
@@ -2486,7 +2525,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onDropFile={(file) => { if (graphShotId) void addFileReference(graphShotId, file); }}
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
                   imageModels={imageModels}
-                  videoModels={mediaModels.filter((m) => m.videoInput)}
+                  videoModels={mediaModels.filter(isVideoModel)}
                   endFrameModelIds={endFrameModelIds}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}

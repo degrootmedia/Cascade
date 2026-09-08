@@ -9,6 +9,7 @@
 import { ChatClient, friendlyApiError } from "./chat.js";
 import { TOOLS } from "./tools.js";
 import { systemPrompt, pureChatSystemPrompt } from "./prompts.js";
+import { planGate } from "./planmode.js";
 import { loadWorkspaceInstructions, resolveSafe, WorkspaceError } from "./workspace.js";
 import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
@@ -59,7 +60,8 @@ export class Agent {
             config.skills,
             config.workspaceRoot ? loadWorkspaceInstructions(config.workspaceRoot) : "",
             lazyNote,
-            config.agentPrompt
+            config.agentPrompt,
+            config.planMode
           ),
     });
   }
@@ -234,6 +236,17 @@ export class Agent {
     }
 
     onEvent({ type: "tool-start", call: { name: call.function.name, args } });
+
+    // Plan mode gates the mutating tools regardless of approval: the user must
+    // review and approve the written plan before the agent may change source
+    // files. Plan artifacts under .cascade/specs/ are still writable.
+    if (this.config.planMode) {
+      const gate = planGate(call.function.name, args, ws);
+      if (!gate.allowed) {
+        onEvent({ type: "tool-result", name: call.function.name, result: gate.message, isError: true });
+        return gate.message;
+      }
+    }
 
     const group = call.function.name.includes("__") ? call.function.name.split("__")[0] : null;
     const preApproved =

@@ -115,3 +115,7 @@ control chars ï¿½ only a byte-level scan found them.
   3. Encoding damage hides as logic bugs, not syntax errors ï¿½ a regex over
      prose (em dash separators) is exactly where it bites. Tests that match
      real server prose are the safety net.
+
+- Media-model capability flags must come from structured fields only (media/modes/output_type), never free-text descriptions. OpenArt descriptions routinely mention both modalities ('image and video'), so a /video/ match on the description blob misflags image models (e.g. 'Wan 2.7 Image', 'Grok Imagine Image 2.0') as video and pollutes every video dropdown plus the expense-image classification. Test with a fixture whose description mentions video but whose structured fields are image-only.
+
+- Structured-only model classification can DROP models whose structured fields carry no modality tokens (both flags false = invisible everywhere). Use structured fields to decide, but fall back to the description only when structured fields are completely silent — that fixes description false-positives without the recall regression.

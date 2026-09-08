@@ -208,6 +208,10 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   stitching: boolean;
   stitched: boolean;
   reencoded: boolean;
+  /** Media URL of the stitched continuous clip (null when unstitched). When a
+   *  stitch exists it is what the preview plays; unstitching returns the
+   *  preview to the individual block clips. */
+  stitchUrl: string | null;
   /** Pipe the stitched clip into the frame output node. */
   onPipeToOutput: () => void;
   piped: boolean;
@@ -217,7 +221,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
     prodId, shotNumber, refIds, blocks, keyframes, model, resolution, videoModels,
     onModelOptions, onModelChange, onResolutionChange, onBlocksChange,
     onRunBlock, busyBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
-    onPipeToOutput, piped, onClose,
+    stitchUrl, onPipeToOutput, piped, onClose,
   } = props;
 
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
@@ -410,7 +414,18 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
         </div>
 
         <div className="prod-tween-preview">
-          {focus
+          {stitched && stitchUrl ? (
+            <video
+              key={stitchUrl}
+              className="prod-tween-preview-video"
+              src={stitchUrl}
+              controls
+              loop
+              playsInline
+              preload="metadata"
+              title="Stitched continuous shot — undo the stitch to preview individual blocks"
+            />
+          ) : focus
             ? <BlockPreview prodId={prodId} block={focus} keyframes={keyframes} />
             : <div className="prod-tween-preview-empty">Wire 2–5 keyframes (references or generated frames) into the in-betweener node to start a timeline.</div>}
         </div>

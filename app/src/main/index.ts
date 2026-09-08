@@ -17,7 +17,7 @@ import { ingestScript, refineStylePrompt, refineCharacterDescription, generateSt
 import { McpManager } from "./mcp.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
-import { createProviders, resolveProviderId, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
@@ -25,12 +25,12 @@ import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
-import { loadSkills, makeReadSkillTool, ensureSkillsDir } from "./skills.js";
+import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, sortByModelOrder, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, OpenArtModelChoice, Model3dGenOptions } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -570,6 +570,7 @@ function ensureAgent(entry: LiveChat): Agent {
       workspaceRoot: workspace,
       agentPrompt: agentPrompt || undefined,
       skills: skillsList,
+      planMode: !!entry.session.planMode,
       extraTools,
       lazyTools,
       lazyGroupNotes,
@@ -722,6 +723,30 @@ function registerIpc() {
     });
   });
 
+  // Turn plan mode on/off for a chat. Persists per session and rebuilds that
+  // chat's agent so the gate + system-prompt directive take effect immediately.
+  handle("chat:setPlanMode", (_e, sessionId: string, on: boolean) => {
+    const entry = chats.get(sessionId);
+    if (!entry) return;
+    entry.session.planMode = !!on;
+    sessions.saveSession(entry.session);
+    entry.agent?.stop();
+    entry.agent = null; // rebuild with the new plan-mode flag next message
+    win?.webContents.send("agent:event", {
+      sessionId,
+      event: {
+        type: "notice",
+        text: entry.session.planMode
+          ? "Plan mode ON — Cascade will research and write a plan first; file edits and commands are gated until you approve it."
+          : "Plan mode OFF.",
+      },
+    });
+  });
+
+  handle("chat:getPlanMode", (_e, sessionId: string) => {
+    return chats.get(sessionId)?.session.planMode ?? false;
+  });
+
   // Undo the file changes made by a chat's most recent agent turn.
   handle("chat:undo", (_e, sessionId: string) => {
     const entry = chats.get(sessionId);
@@ -840,6 +865,32 @@ function registerIpc() {
 
   handle("settings:setEndFrameModels", (_e, ids: string[]) => {
     settings.setEndFrameModels(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
+  handle("settings:getHiddenMediaModels", () => settings.getHiddenMediaModels());
+
+  handle("settings:setHiddenMediaModels", (_e, ids: string[]) => {
+    settings.setHiddenMediaModels(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
+  handle("settings:getModelKindOverrides", () => settings.getModelKindOverrides());
+
+  handle("settings:setModelKindOverrides", (_e, overrides: Record<string, "image" | "video">) => {
+    settings.setModelKindOverrides(overrides ?? {});
+  });
+
+  // The generation dropdowns' remembered last choices (context → model +
+  // settings). Each dropdown seeds from its context and writes back on change.
+  handle("settings:getMediaDefaults", () => settings.getMediaDefaults());
+
+  handle("settings:setMediaDefault", (_e, ctx: string, patch: Record<string, unknown>) => {
+    settings.setMediaDefault(ctx, patch ?? {});
+  });
+
+  handle("settings:getMediaModelOrder", () => settings.getMediaModelOrder());
+
+  handle("settings:setMediaModelOrder", (_e, ids: string[]) => {
+    settings.setMediaModelOrder(Array.isArray(ids) ? ids.map(String) : []);
   });
 
   handle("settings:setModel", (_e, model: string) => {
@@ -1825,16 +1876,29 @@ function registerIpc() {
 
   // Step 3: image/video-capable models for the model dropdowns. Empty on
   // failure — the renderer shows the empty state instead of a synthetic pick.
+  // Models the user hides (Settings → Models & expenses) are filtered out here
+  // and manual kind assignments are applied, so every generation dropdown
+  // respects the list without renderer changes. The list is then sorted into
+  // the user's saved drag-to-reorder arrangement (same tab) — every dropdown
+  // follows it.
   handle("production:openArtModels", async () => {
     try {
-      const choices = await media().listModelChoices();
+      const hidden = new Set(settings.getHiddenMediaModels());
+      const choices = applyKindOverrides(await media().listModelChoices(), settings.getModelKindOverrides());
       // Prefetch the video models' resolution/length options in the background
       // so the video modal and node graph populate instantly on first open.
       media().prewarm?.(choices);
-      return choices;
+      const visible = hidden.size ? choices.filter((c) => !hidden.has(c.id)) : choices;
+      return sortByModelOrder(visible, settings.getMediaModelOrder(), (c) => c.id);
     } catch {
       return [];
     }
+  });
+
+  // Settings → Models & expenses: probe both vendors and bake every model's
+  // pricing ladder (resolution ladder + video length range).
+  handle("media:listAllModels", async (): Promise<MediaModelLadder[]> => {
+    return listAllModelLadders(providers, settings.getModelKindOverrides());
   });
 
   // Step 3: the signed-in OpenArt account's remaining credit balance (shown
@@ -2393,11 +2457,15 @@ function registerIpc() {
       proven = [];
     }
     const manual = settings.getEndFrameModels();
+    const hidden = new Set(settings.getHiddenMediaModels());
+    const kinds = settings.getModelKindOverrides();
     const out = [...proven];
     for (const id of manual) {
       if (!out.includes(id)) out.push(id);
     }
-    return out;
+    // Hidden models and models the user manually classified as image never
+    // land in a video dropdown.
+    return out.filter((id) => !hidden.has(id) && kinds[id] !== "image");
   });
 
   // Step 3 per-frame edit: send the shot's current frame to OpenArt as a
@@ -2865,6 +2933,9 @@ function registerIpc() {
   handle("ledger:setPriceRules", async (_e, rules: ExpensePriceRule[]): Promise<void> => {
     ledger.setPriceRules(rules);
   });
+  handle("ledger:reprice", async (): Promise<LedgerView> => {
+    return ledger.repriceAll();
+  });
   handle("ledger:addManual", async (_e, label: string, amount: number): Promise<LedgerView> => {
     return ledger.addManualEntry(label, amount);
   });
@@ -2892,39 +2963,12 @@ function registerIpc() {
     });
     const filePath = res.filePaths[0];
     if (res.canceled || !filePath) return null;
-    const rules = ledger.parsePriceRulesCsv(fs.readFileSync(filePath, "utf8"));
+    const rules = await ledger.applyModelOptions(
+      ledger.parsePriceRulesCsv(fs.readFileSync(filePath, "utf8")),
+      async (modelId) => (await media().videoModelOptions(modelId, true)) ?? null
+    );
     ledger.setPriceRules(rules);
     return { path: filePath, rules: ledger.getPriceRules() };
-  });
-  handle("ledger:exportTemplate", async (): Promise<string | null> => {
-    let choices: OpenArtModelChoice[] = [];
-    try {
-      choices = await media().listModelChoices();
-    } catch {
-      choices = [];
-    }
-    const imageModels = choices.filter((m) => m.imageInput).map((m) => ({ id: m.id }));
-    const videoModels = choices.filter((m) => m.videoInput).map((m) => ({ id: m.id }));
-    if (!imageModels.length && !videoModels.length) return null;
-
-    // Read each video model's live resolution/length options (fallback buckets
-    // apply when a form can't be introspected).
-    const videoOpts: Record<string, { resolutions: string[]; durations: number[] }> = {};
-    for (const m of videoModels) {
-      const o = await media().videoModelOptions(m.id, true);
-      if (o) videoOpts[m.id] = o;
-    }
-    const rules = ledger.buildPriceTemplate(imageModels, videoModels, (id) => videoOpts[id] ?? null);
-    if (!rules.length) return null;
-
-    const res = await dialog.showSaveDialog(win!, {
-      title: "Export price template",
-      defaultPath: path.join(app.getPath("documents"), "cascade-price-template.csv"),
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-    if (res.canceled || !res.filePath) return null;
-    ledger.writePriceRulesFile(res.filePath, rules);
-    return res.filePath;
   });
 
   handle("agents:getSessionAgent", (_e, sessionId: string) => {
@@ -3187,6 +3231,14 @@ app.whenReady().then(async () => {
   chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
   curId = s.id;
   mcp = new McpManager(path.join(app.getPath("userData"), "mcp.json"));
+  // Seed the bundled harness skills (spec/oracle/code) into the user skills
+  // folder the first time, so the RPI workflow works out of the box and the
+  // user can edit or delete them. In dev the bundled dir is app/skills; when
+  // packaged it's resources/skills (extraResources).
+  const bundledSkillsDir = app.isPackaged
+    ? path.join(process.resourcesPath, "skills")
+    : path.join(app.getAppPath(), "skills");
+  seedSkills(path.join(app.getPath("userData"), "skills"), bundledSkillsDir);
   registerMediaProtocol();
   registerIpc();
   createWindow();

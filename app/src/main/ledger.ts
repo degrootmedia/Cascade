@@ -6,9 +6,17 @@
  * (userData/expenses.csv) rewritten on every mutation, and the pure price-rule
  * matcher that turns a generation's metadata into a dollar amount.
  *
+ * Pricing is range-based: one rule per model holds a min→max dollar range and
+ * the model's baked option ladder (resolutions + video length range). The
+ * matcher interpolates between the range endpoints by how far the generation's
+ * resolution/length sit on that ladder, so a model needs exactly one rule
+ * instead of a cartesian grid of every resolution × length.
+ *
  * The OpenArt seam (OpenArtClient's onGeneration callback) feeds successful
  * generations in; the renderer edits pricing rules from Settings and adds
- * manual "purchased asset" rows from the Expenses page.
+ * manual "purchased asset" rows from the Expenses page. Saving rules re-prices
+ * every existing generation (manual rows untouched) — history is recomputable,
+ * not frozen.
  *
  * Persistence follows the settings singleton (single userData file, memo
  * cache) with the store's atomic temp+rename writes. Electron is a soft
@@ -26,9 +34,29 @@ export const FALLBACK_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"] as const;
  *  read (mirrors the renderer fallback in boards.tsx). */
 export const FALLBACK_VIDEO_DURATIONS = [5, 10, 15, 20] as const;
 
-/** Image resolution buckets offered for template pricing (mirrors the board
- *  config buckets in shared/ipc.ts). */
+/** Image resolution buckets offered for pricing (mirrors the board config
+ *  buckets in shared/ipc.ts). */
 export const IMAGE_RESOLUTIONS = ["1k", "2k", "4k"] as const;
+
+/** Global ordinal rank for common resolution labels — used to position a label
+ *  that sits outside a rule's baked ladder (e.g. a "240p" or "4K" generation
+ *  against a ["720p","1080p"] ladder). Lower = cheaper. */
+const RESOLUTION_RANKS: Record<string, number> = {
+  "144p": 0,
+  "240p": 1,
+  "360p": 2,
+  "480p": 3,
+  "540p": 4,
+  "720p": 5,
+  "1k": 6,
+  "1080p": 6,
+  "1440p": 7,
+  "2k": 7,
+  "4k": 8,
+  "8k": 9,
+};
+
+const rankKey = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 let userDataDir: string | null = null;
 let shell: typeof import("electron").shell | undefined;
@@ -73,9 +101,36 @@ function newId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Match the most specific pricing rule for a generation: exact fields beat
- *  "*" wildcards, and the first rule with the highest score wins. Generations
- *  matching no rule are priced at $0. Pure — unit-tested. */
+/** Position of a resolution label on a 0..1 scale inside a ladder: exact
+ *  ladder members interpolate by index, known labels outside the ladder place
+ *  by global rank, and unknown labels default to the midpoint. Pure. */
+export function resolutionScale(ladder: readonly string[], resolution: string): number {
+  const n = ladder.length;
+  if (!n) return 0.5;
+  const idx = ladder.indexOf(resolution);
+  if (idx >= 0) return n === 1 ? 0 : idx / (n - 1);
+  const rank = RESOLUTION_RANKS[rankKey(resolution)];
+  if (rank == null) return 0.5;
+  const known = ladder.map((r) => RESOLUTION_RANKS[rankKey(r)]).filter((x): x is number => x != null);
+  if (!known.length) return 0.5;
+  const minR = Math.min(...known);
+  const maxR = Math.max(...known);
+  if (maxR === minR) return 0.5;
+  return Math.max(0, Math.min(1, (rank - minR) / (maxR - minR)));
+}
+
+/** Position of a video length on a 0..1 scale inside a rule's duration range.
+ *  Images (no duration range) are pinned at 1 so they interpolate by
+ *  resolution only. Pure. */
+function durationScale(durMin: number | null, durMax: number | null, durationSec: number | undefined): number {
+  if (durMin == null || durMax == null || durationSec == null || durMax <= durMin) return 1;
+  return Math.max(0, Math.min(1, (durationSec - durMin) / (durMax - durMin)));
+}
+
+/** Price a generation against the rules: pick the most specific rule (exact
+ *  model beats "*"), then interpolate its min→max range by the generation's
+ *  resolution and video length. Generations matching no rule are priced at $0.
+ *  Pure — unit-tested. */
 export function matchPriceRule(rules: ExpensePriceRule[], meta: LedgerGenMeta): number {
   let best: ExpensePriceRule | null = null;
   let bestScore = -1;
@@ -86,21 +141,17 @@ export function matchPriceRule(rules: ExpensePriceRule[], meta: LedgerGenMeta): 
       if (r.model !== meta.model) continue;
       score += 4;
     }
-    if (r.resolution && r.resolution !== "*") {
-      if (r.resolution !== meta.resolution) continue;
-      score += 2;
-    }
-    if (r.kind === "video" && r.durationSec != null) {
-      if (r.durationSec !== meta.durationSec) continue;
-      score += 1;
-    }
     if (score > bestScore) {
       best = r;
       bestScore = score;
     }
   }
-  return best?.price ?? 0;
+  if (!best) return 0;
+  const t = resolutionScale(best.resolutions ?? [], meta.resolution) * durationScale(best.durMin, best.durMax, meta.durationSec);
+  return best.minPrice + t * (best.maxPrice - best.minPrice);
 }
+
+const clampPrice = (v: unknown, fallback: number): number => (Number.isFinite(v) ? Math.max(0, Number(v)) : fallback);
 
 function normalizeEntry(e: LedgerEntry): LedgerEntry | null {
   if (!e || typeof e !== "object" || typeof e.id !== "string") return null;
@@ -120,17 +171,63 @@ function normalizeEntry(e: LedgerEntry): LedgerEntry | null {
   };
 }
 
-function normalizeRule(r: ExpensePriceRule): ExpensePriceRule | null {
+/** Normalize one rule into the range shape. Legacy discrete rules (a single
+ *  `price` instead of min/max) collapse to a flat range. Videos missing a
+ *  duration range default to the fallback buckets; ladders not present default
+ *  to the kind's buckets. */
+function normalizeRule(r: unknown): ExpensePriceRule | null {
   if (!r || typeof r !== "object") return null;
-  const kind = r.kind === "video" ? "video" : "image";
+  const o = r as Record<string, unknown>;
+  const kind = o.kind === "video" ? "video" : o.kind === "image" ? "image" : null;
+  if (!kind) return null;
+  const hasRange = Number.isFinite(o.minPrice) || Number.isFinite(o.maxPrice);
+  let minPrice: number;
+  let maxPrice: number;
+  if (hasRange) {
+    minPrice = clampPrice(o.minPrice, 0);
+    maxPrice = clampPrice(o.maxPrice, 0);
+  } else if (Number.isFinite(o.price)) {
+    const p = Math.max(0, Number(o.price));
+    minPrice = p;
+    maxPrice = p;
+  } else {
+    minPrice = 0;
+    maxPrice = 0;
+  }
+  const resolutions = Array.isArray(o.resolutions) && o.resolutions.length
+    ? o.resolutions.map(String)
+    : [...(kind === "video" ? FALLBACK_VIDEO_RESOLUTIONS : IMAGE_RESOLUTIONS)];
+  const durMin = kind === "video" && Number.isFinite(o.durMin) ? Math.max(0, Number(o.durMin)) : null;
+  const durMax = kind === "video" && Number.isFinite(o.durMax) ? Math.max(0, Number(o.durMax)) : null;
   return {
-    id: String(r.id || newId()),
+    id: String(o.id || newId()),
     kind,
-    model: String(r.model ?? "").trim(),
-    resolution: String(r.resolution ?? "").trim(),
-    durationSec: kind === "video" && r.durationSec != null ? Math.max(0, Math.round(r.durationSec)) : null,
-    price: Number.isFinite(r.price) ? Math.max(0, r.price) : 0,
+    model: String(o.model ?? "").trim(),
+    minPrice,
+    maxPrice,
+    resolutions,
+    durMin,
+    durMax,
   };
+}
+
+/** Collapse every (kind, model) into one range rule (min = lowest minPrice,
+ *  max = highest maxPrice). Keeps the "one range per model" invariant on load
+ *  and doubles as the migration for legacy cartesian grids. */
+function migrateRules(rules: ExpensePriceRule[]): ExpensePriceRule[] {
+  const byKey = new Map<string, ExpensePriceRule>();
+  for (const r of rules) {
+    const key = `${r.kind}\u0000${r.model}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...r, resolutions: [...r.resolutions] });
+      continue;
+    }
+    existing.minPrice = Math.min(existing.minPrice, r.minPrice);
+    existing.maxPrice = Math.max(existing.maxPrice, r.maxPrice);
+    if (r.resolutions.length > existing.resolutions.length) existing.resolutions = [...r.resolutions];
+  }
+  return [...byKey.values()];
 }
 
 function load(): LedgerFile {
@@ -142,7 +239,9 @@ function load(): LedgerFile {
     // no ledger file yet — start empty
   }
   f.entries = Array.isArray(f.entries) ? f.entries.map(normalizeEntry).filter((x): x is LedgerEntry => x !== null) : [];
-  f.priceRules = Array.isArray(f.priceRules) ? f.priceRules.map(normalizeRule).filter((x): x is ExpensePriceRule => x !== null) : [];
+  f.priceRules = Array.isArray(f.priceRules)
+    ? migrateRules(f.priceRules.map(normalizeRule).filter((x): x is ExpensePriceRule => x !== null))
+    : [];
   f.updatedAt = typeof f.updatedAt === "string" ? f.updatedAt : "";
   cache = f;
   return cache;
@@ -186,8 +285,8 @@ function writeCsv(): void {
   fs.renameSync(tmp, target);
 }
 
-/** Record one successful AI generation. The price is stamped here — later
- *  rule edits only affect future generations (historical entries are fixed). */
+/** Record one successful AI generation. The price is derived from the current
+ *  rules at record time; later rule edits re-price it via repriceAll(). */
 export function recordGeneration(meta: LedgerGenMeta): void {
   const f = load();
   f.entries.unshift({
@@ -235,6 +334,36 @@ export function removeEntry(id: string): LedgerView {
   return view();
 }
 
+/** Re-run the current rules over every existing generation, overwriting each
+ *  entry's price. Manual rows keep their custom amounts. Pure on the persisted
+ *  data — unit-tested. */
+export function repriceAll(): LedgerView {
+  const f = load();
+  let changed = false;
+  for (const e of f.entries) {
+    if (e.kind === "manual") continue;
+    const price = matchPriceRule(f.priceRules, {
+      kind: e.kind,
+      model: e.model,
+      resolution: e.resolution,
+      durationSec: e.durationSec,
+      aspectRatio: e.aspectRatio,
+      at: e.at,
+      productionId: e.productionId,
+      shotId: e.shotId,
+    });
+    if (price !== e.price) {
+      e.price = price;
+      changed = true;
+    }
+  }
+  if (changed) {
+    f.updatedAt = new Date().toISOString();
+    save();
+  }
+  return view();
+}
+
 /** The renderer read model: newest-first entries plus the running total. */
 export function view(): LedgerView {
   const f = load();
@@ -253,30 +382,54 @@ export function getPriceRules(): ExpensePriceRule[] {
   return load().priceRules;
 }
 
+/** Persist pricing rules and immediately re-price every existing generation
+ *  against them (manual rows untouched). */
 export function setPriceRules(rules: ExpensePriceRule[]): void {
   const f = load();
-  f.priceRules = Array.isArray(rules) ? rules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null) : [];
+  f.priceRules = Array.isArray(rules)
+    ? migrateRules(rules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null))
+    : [];
   f.updatedAt = new Date().toISOString();
   save();
+  repriceAll();
+}
+
+/** Bake a model's live resolution/length options into its rule. Only video
+ *  rules get overridden — image ladders stay the fixed buckets. Used by the
+ *  import handler to re-derive ladders that the clean CSV format doesn't
+ *  carry. Pure on the rules (the resolver seam is the test surface). */
+export async function applyModelOptions(
+  rules: ExpensePriceRule[],
+  resolveOptions: (modelId: string) => Promise<{ resolutions: string[]; durations: number[] } | null>
+): Promise<ExpensePriceRule[]> {
+  const out: ExpensePriceRule[] = [];
+  for (const r of rules) {
+    let next = r;
+    if (r.kind === "video" && r.model && r.model !== "*") {
+      const o = await resolveOptions(r.model);
+      if (o && o.resolutions.length && o.durations.length) {
+        next = {
+          ...r,
+          resolutions: [...o.resolutions],
+          durMin: Math.min(...o.durations),
+          durMax: Math.max(...o.durations),
+        };
+      }
+    }
+    out.push(next);
+  }
+  return out;
 }
 
 /** Serialize price rules to CSV text. Header + one row per rule
- *  (`kind,model,resolution,duration_sec,price`); blank model/resolution mean
- *  "any", and blank duration means any video length. Pure — unit-tested. */
+ *  (`kind,model,min_price,max_price`). Pure — unit-tested. Ladders are not
+ *  carried; the import handler re-derives them from live model options. */
 export function priceRulesToCsv(rules: ExpensePriceRule[]): string {
   const esc = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
   const rows = rules.map((r) =>
-    [
-      r.kind,
-      r.model,
-      r.resolution,
-      r.kind === "video" && r.durationSec != null ? String(r.durationSec) : "",
-      r.price.toFixed(2),
-    ]
-      .map(esc)
-      .join(",")
+    [r.kind, r.model, r.minPrice.toFixed(2), r.maxPrice.toFixed(2)].map(esc).join(",")
   );
-  return ["kind,model,resolution,duration_sec,price", ...rows].join("\r\n") + "\r\n";
+  return ["kind,model,min_price,max_price", ...rows].join("\r\n") + "\r\n";
 }
 
 /** Split one CSV line into fields, honoring double-quoted fields ("" escapes
@@ -300,32 +453,36 @@ function splitCsvLine(line: string): string[] {
   return out;
 }
 
-/** Parse the price-rule CSV export format back into rules. Header + blank
- *  lines are skipped; malformed rows are dropped. Fresh ids are assigned
- *  (rules never carry identity across files). Pure — unit-tested. */
+/** Parse the price-rule CSV export format back into rules. Reads the current
+ *  format (`kind,model,min_price,max_price`) and the legacy cartesian format
+ *  (`kind,model,resolution,duration_sec,price`, collapsed to flat ranges).
+ *  Header + blank lines are skipped; malformed rows are dropped. Fresh ids are
+ *  assigned (rules never carry identity across files). Pure — unit-tested. */
 export function parsePriceRulesCsv(text: string): ExpensePriceRule[] {
+  const lines = String(text ?? "").split(/\r\n|\n/);
   const rules: ExpensePriceRule[] = [];
-  for (const rawLine of String(text ?? "").split(/\r\n|\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    const cells = splitCsvLine(line).map((c) => c.trim());
-    if (cells.length < 5) continue;
-    const [kindCell, modelCell, resCell, durCell, priceCell] = cells;
-    // Skip the header row.
-    if (kindCell.toLowerCase() === "kind" && modelCell.toLowerCase() === "model") continue;
+  let legacy = false;
+  for (const rawLine of lines) {
+    const cells = splitCsvLine(rawLine).map((c) => c.trim());
+    if (cells.length < 2) continue;
+    const [a, b] = cells;
+    if (a.toLowerCase() === "kind" && b.toLowerCase() === "model") {
+      legacy = cells.length >= 5 && cells[2].toLowerCase() === "resolution";
+      continue;
+    }
+    const kindCell = cells[0];
     const kind = kindCell === "video" ? "video" : kindCell === "image" ? "image" : null;
     if (!kind) continue;
-    const parsedDur = Number(durCell);
-    const durationSec = durCell === "" ? null : Number.isFinite(parsedDur) ? parsedDur : null;
-    const rule = normalizeRule({
-      id: newId(),
-      kind,
-      model: modelCell,
-      resolution: resCell,
-      durationSec: kind === "video" ? durationSec : null,
-      price: Number.isFinite(Number(priceCell)) ? Number(priceCell) : 0,
-    });
-    if (rule) rules.push(rule);
+    if (legacy) {
+      if (cells.length < 5) continue;
+      const price = Number.isFinite(Number(cells[4])) ? Number(cells[4]) : 0;
+      const rule = normalizeRule({ id: newId(), kind, model: cells[1], minPrice: price, maxPrice: price });
+      if (rule) rules.push(rule);
+    } else {
+      if (cells.length < 4) continue;
+      const rule = normalizeRule({ id: newId(), kind, model: cells[1], minPrice: Number(cells[2]), maxPrice: Number(cells[3]) });
+      if (rule) rules.push(rule);
+    }
   }
   return rules;
 }
@@ -338,39 +495,6 @@ export function writePriceRulesFile(filePath: string, rules: ExpensePriceRule[])
   const tmp = `${filePath}.${process.pid}.${Date.now().toString(36)}.tmp`;
   fs.writeFileSync(tmp, body, "utf8");
   fs.renameSync(tmp, filePath);
-}
-
-/** Build a full price-rule template: one row per (model × resolution) for
- *  image models, and one per (model × resolution × duration) for video models.
- *  Every price starts at 0 — the user fills in the dollar amounts. Pure —
- *  unit-tested. */
-export function buildPriceTemplate(
-  imageModels: { id: string }[],
-  videoModels: { id: string }[],
-  videoOptions: (modelId: string) => { resolutions: string[]; durations: number[] } | null,
-  overrides: { imageResolutions?: string[]; videoResolutions?: string[]; videoDurations?: number[] } = {}
-): ExpensePriceRule[] {
-  const imageRes = overrides.imageResolutions ?? [...IMAGE_RESOLUTIONS];
-  const videoRes = overrides.videoResolutions ?? [...FALLBACK_VIDEO_RESOLUTIONS];
-  const videoDur = overrides.videoDurations ?? [...FALLBACK_VIDEO_DURATIONS];
-
-  const rules: ExpensePriceRule[] = [];
-  for (const m of imageModels) {
-    for (const res of imageRes) {
-      rules.push({ id: newId(), kind: "image", model: m.id, resolution: res, durationSec: null, price: 0 });
-    }
-  }
-  for (const m of videoModels) {
-    const opts = videoOptions(m.id);
-    const resolutions = opts && opts.resolutions.length ? opts.resolutions : videoRes;
-    const durations = opts && opts.durations.length ? opts.durations : videoDur;
-    for (const res of resolutions) {
-      for (const dur of durations) {
-        rules.push({ id: newId(), kind: "video", model: m.id, resolution: res, durationSec: dur, price: 0 });
-      }
-    }
-  }
-  return rules;
 }
 
 /** Open the CSV text ledger in the OS file manager. */

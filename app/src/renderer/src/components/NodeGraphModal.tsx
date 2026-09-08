@@ -32,6 +32,7 @@ import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, pa
 import { TriplePrompt } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
+import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
 import { EditIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
@@ -531,7 +532,15 @@ const OutputNodeView = memo(function OutputNodeView({ data }: NodeProps<OutputFl
 });
 
 const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<ImageGenFlowNode>) {
-  const [model, setModel] = useState(data.defaultModel);
+  const [model, setModel] = useState(() => {
+    // The production's saved pick wins when it's real; the remembered last
+    // choice fills the gap (legacy "auto" or a stale id falls through —
+    // effModel below always lands on a listed model).
+    const saved = data.defaultModel && data.defaultModel !== "auto" && data.models.some((m) => m.id === data.defaultModel)
+      ? data.defaultModel
+      : null;
+    return saved ?? getMediaDefault("image")?.model ?? data.defaultModel;
+  });
   const [resolution, setResolution] = useState(data.defaultResolution);
   const busy = data.busy === true;
   // The selection is always explicit: when the saved default is legacy "auto"
@@ -546,12 +555,12 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
       <Handle type="source" position={Position.Right} title="Frame out — pipe into the video node or the output" />
       <div className="prod-graph-node-title">Image generation</div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => setModel(e.target.value)} title="Image model">
+        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => { setModel(e.target.value); rememberMediaDefault("image", { model: e.target.value }); }} title="Image model">
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
       </div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
+        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("image", { resolution: e.target.value }); }} title="Resolution">
           <option value="1k">1k</option>
           <option value="2k">2k</option>
           <option value="4k">4k</option>
@@ -589,9 +598,10 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data }: NodeProps<Imag
 });
 
 const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<VideoGenFlowNode>) {
-  const [model, setModel] = useState(data.models[0]?.id ?? "");
-  const [resolution, setResolution] = useState("1080p");
-  const [durationSec, setDurationSec] = useState(5);
+  const remembered = getMediaDefault("video");
+  const [model, setModel] = useState(remembered?.model ?? data.models[0]?.id ?? "");
+  const [resolution, setResolution] = useState(remembered?.resolution ?? "1080p");
+  const [durationSec, setDurationSec] = useState(remembered?.durationSec ?? 5);
   const busy = data.busy === true;
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
   // Per-model resolution / length choices, fetched like the video panel. The
@@ -628,7 +638,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<Vide
         <select
           className="prod-openart-select nodrag"
           value={data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "")}
-          onChange={(e) => setModel(e.target.value)}
+          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("video", { model: e.target.value }); }}
           title="Video model"
           disabled={data.models.length === 0}
         >
@@ -636,10 +646,10 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data }: NodeProps<Vide
         </select>
       </div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
+        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("video", { resolution: e.target.value }); }} title="Resolution">
           {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
-        <select className="prod-openart-select nodrag" value={String(durationSec)} onChange={(e) => setDurationSec(Number(e.target.value))} title="Clip length">
+        <select className="prod-openart-select nodrag" value={String(durationSec)} onChange={(e) => { setDurationSec(Number(e.target.value)); rememberMediaDefault("video", { durationSec: Number(e.target.value) }); }} title="Clip length">
           {durations.map((d) => <option key={d} value={d}>{d}s</option>)}
         </select>
       </div>
@@ -710,8 +720,8 @@ const TweenNodeView = memo(function TweenNodeView({ data }: NodeProps<TweenFlowN
 });
 
 const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGenFlowNode>) {
-  const [model, setModel] = useState(data.models[0]?.id ?? "");
-  const [resolution, setResolution] = useState(data.defaultResolution);
+  const [model, setModel] = useState(() => getMediaDefault("edit")?.model ?? data.models[0]?.id ?? "");
+  const [resolution, setResolution] = useState(() => getMediaDefault("edit")?.resolution ?? data.defaultResolution);
   const busy = data.busy === true;
   const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
   const run = async () => {
@@ -739,12 +749,12 @@ const EditGenNodeView = memo(function EditGenNodeView({ data }: NodeProps<EditGe
       <Handle type="source" position={Position.Right} title="Edit out — pipe into the output" />
       <div className="prod-graph-node-title">Edit image</div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => setModel(e.target.value)} title="Image model that accepts a reference image">
+        <select className="prod-openart-select nodrag" value={effModel} onChange={(e) => { setModel(e.target.value); rememberMediaDefault("edit", { model: e.target.value }); }} title="Image model that accepts a reference image">
           {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
         </select>
       </div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => setResolution(e.target.value)} title="Resolution">
+        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("edit", { resolution: e.target.value }); }} title="Resolution">
           <option value="1k">1k</option>
           <option value="2k">2k</option>
           <option value="4k">4k</option>
@@ -2542,12 +2552,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           refIds={shot.graphTweenRefIds ?? []}
           blocks={shot.graphTweenBlocks ?? []}
           keyframes={tweenKeyframesFor(shot, prod.meta.id, shot.graphTweenRefIds ?? [], new Map(references.map((r) => [r.id, r])))}
-          model={shot.graphTweenModel ?? "auto"}
-          resolution={shot.graphTweenResolution ?? "1080p"}
+          model={shot.graphTweenModel ?? getMediaDefault("tween")?.model ?? "auto"}
+          resolution={shot.graphTweenResolution ?? getMediaDefault("tween")?.resolution ?? "1080p"}
           videoModels={filterTweenModels(videoModels, endFrameModelIds)}
           onModelOptions={stable.onModelOptions}
-          onModelChange={(m) => onGraphField({ graphTweenModel: m })}
-          onResolutionChange={(r) => onGraphField({ graphTweenResolution: r })}
+          onModelChange={(m) => { onGraphField({ graphTweenModel: m }); rememberMediaDefault("tween", { model: m }); }}
+          onResolutionChange={(r) => { onGraphField({ graphTweenResolution: r }); rememberMediaDefault("tween", { resolution: r }); }}
           onBlocksChange={(b: TweenBlock[]) => onGraphField({ graphTweenBlocks: b })}
           onRunBlock={(blockId: string, durationSec: number) => onRunTweenBlock(blockId, durationSec)}
           busyBlock={busyBlock}
@@ -2556,6 +2566,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           stitching={stitching}
           stitched={!!shot.graphTweenOutput}
           reencoded={shot.graphTweenReencoded === true}
+          stitchUrl={shot.graphTweenOutput ? graphMediaUrl(prod.meta.id, shot.graphTweenOutput) : null}
           onPipeToOutput={onPipeTweenToOutput}
           piped={shot.graphOutputSource === "tween"}
           onClose={() => setTweenOpen(false)}

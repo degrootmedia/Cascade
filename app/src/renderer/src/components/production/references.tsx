@@ -1,5 +1,7 @@
 import { useState } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CustomRef, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
+import { isImageModel } from "../../../../shared/ipc.js";
+import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, XIcon } from "../icons.js";
@@ -357,13 +359,15 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
   models: OpenArtModelChoice[];
   onGenerate: (opts: CharacterSheetGenOptions) => Promise<void>;
 }) {
-  const imageModels = models.filter((m) => m.imageInput);
+  const imageModels = models.filter(isImageModel);
   const [characterId, setCharacterId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [view, setView] = useState<CharacterSheetView>("front");
-  const [model, setModel] = useState(imageModels[0]?.id ?? "");
-  const [resolution, setResolution] = useState("1k");
+  // Start where the user last left this dropdown (remembered globally across
+  // characters and productions).
+  const [model, setModel] = useState(() => getMediaDefault("character")?.model ?? imageModels[0]?.id ?? "");
+  const [resolution, setResolution] = useState(() => getMediaDefault("character")?.resolution ?? "1k");
   const [busy, setBusy] = useState(false);
   const [refining, setRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -393,16 +397,25 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
     setRefining(false);
   };
   /** Recall a character's last-used description + generation settings from the
-   *  dropdown; "＋ New character…" resets the form. */
+   *  dropdown; "＋ New character…" resets the form to the remembered defaults. */
   const selectCharacter = (id: string) => {
     setCharacterId(id);
     const c = characters.find((x) => x.id === id);
-    if (!c) { setName(""); setDescription(""); setView("front"); setModel(imageModels[0]?.id ?? ""); setResolution("1k"); return; }
+    if (!c) {
+      setName("");
+      setDescription("");
+      setView("front");
+      setModel(rememberedModel("character", imageModels.map((m) => m.id), imageModels[0]?.id ?? ""));
+      setResolution(getMediaDefault("character")?.resolution ?? "1k");
+      return;
+    }
     setName(c.name);
     setDescription(c.builder?.description ?? "");
     setView(c.builder?.view ?? "front");
-    setModel(c.builder?.model && imageModels.some((m) => m.id === c.builder!.model) ? c.builder!.model : (imageModels[0]?.id ?? ""));
-    setResolution(c.builder?.resolution ?? "1k");
+    setModel(c.builder?.model && imageModels.some((m) => m.id === c.builder!.model)
+      ? c.builder!.model
+      : rememberedModel("character", imageModels.map((m) => m.id), imageModels[0]?.id ?? ""));
+    setResolution(c.builder?.resolution ?? getMediaDefault("character")?.resolution ?? "1k");
   };
 
   return (
@@ -435,7 +448,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
             <select
               className="prod-openart-select"
               value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => { setModel(e.target.value); rememberMediaDefault("character", { model: e.target.value }); }}
               title="Image model"
               disabled={imageModels.length === 0}
             >
@@ -445,7 +458,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
             </select>
           </label>
           <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => setResolution(e.target.value)}>
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("character", { resolution: e.target.value }); }}>
               <option value="1k">1k</option>
               <option value="2k">2k</option>
               <option value="4k">4k</option>
@@ -508,13 +521,15 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
   onClose: () => void;
   onSubmit: (opts: ReferenceImageGenOptions) => Promise<void>;
 }) {
-  const imageModels = models.filter((m) => m.imageInput);
+  const imageModels = models.filter(isImageModel);
   const editable = references.filter((r) => r.imagePath || r.artwork);
   const startInEdit = !!initialRefId && editable.some((r) => r.id === initialRefId);
   const [mode, setMode] = useState<"generate" | "edit">(startInEdit ? "edit" : "generate");
-  const [model, setModel] = useState(imageModels[0]?.id ?? "");
-  const [resolution, setResolution] = useState("1k");
-  const [aspectRatio, setAspectRatio] = useState<ImageGenAspectRatio>("16:9");
+  // Start where the user last left this dropdown (remembered globally).
+  const remembered = getMediaDefault("reference");
+  const [model, setModel] = useState(() => remembered?.model ?? imageModels[0]?.id ?? "");
+  const [resolution, setResolution] = useState(() => remembered?.resolution ?? "1k");
+  const [aspectRatio, setAspectRatio] = useState<ImageGenAspectRatio>(() => (remembered?.aspectRatio as ImageGenAspectRatio) ?? "16:9");
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState(defaultCategoryId ?? "");
@@ -563,7 +578,7 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
         <select
           className="prod-openart-select"
           value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
-          onChange={(e) => setModel(e.target.value)}
+          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("reference", { model: e.target.value }); }}
           title="Image model"
           disabled={imageModels.length === 0}
         >
@@ -577,14 +592,14 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
 
         <div className="prod-video-row">
           <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => setResolution(e.target.value)}>
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("reference", { resolution: e.target.value }); }}>
               <option value="1k">1k</option>
               <option value="2k">2k</option>
               <option value="4k">4k</option>
             </select>
           </label>
           <label className="prod-label">Aspect ratio
-            <select className="prod-openart-select" value={aspectRatio} onChange={(e) => setAspectRatio(e.target.value as ImageGenAspectRatio)}>
+            <select className="prod-openart-select" value={aspectRatio} onChange={(e) => { setAspectRatio(e.target.value as ImageGenAspectRatio); rememberMediaDefault("reference", { aspectRatio: e.target.value }); }}>
               <option value="1:1">1:1</option>
               <option value="4:3">4:3</option>
               <option value="16:9">16:9</option>

@@ -55,6 +55,18 @@ export function ExpensesPanel() {
     }
   };
 
+  const reprice = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setView(await window.cascade.repriceExpenses());
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const entries = view?.entries ?? [];
 
   return (
@@ -68,6 +80,14 @@ export function ExpensesPanel() {
       <div className="prod-expenses-toolbar">
         <button className="prod-btn" onClick={() => void load()} disabled={busy}>
           Refresh
+        </button>
+        <button
+          className="prod-btn"
+          onClick={() => void reprice()}
+          disabled={busy}
+          title="Re-run the current Settings price rules over every generation (manual rows keep their amounts)"
+        >
+          Recompute prices
         </button>
         <button className="prod-btn" onClick={() => void window.cascade.openLedgerFile()} title="Open expenses.csv">
           Open text file

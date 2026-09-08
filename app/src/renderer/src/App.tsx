@@ -13,6 +13,7 @@ import { ViewTabs, type AppView } from "./components/ViewTabs.js";
 import { ProductionWorkspace } from "./components/ProductionWorkspace.js";
 import { AutoTextarea } from "./components/AutoTextarea.js";
 import { AttachFileIcon, StopButtonIcon, XIcon } from "./components/icons.js";
+import { expandCommand } from "../../shared/commands.js";
 
 import { applyAccent } from "./theme.js";
 
@@ -42,6 +43,8 @@ export function App() {
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [activeMeta, setActiveMeta] = useState<AgentMeta | null>(null);
   const [showAgents, setShowAgents] = useState(false);
+  /** Plan mode for the current chat (research + plan first, mutations gated). */
+  const [planMode, setPlanMode] = useState(false);
   /** Top-level view: chat home vs. Production Assistant (persisted). */
   const [view, setView] = useState<AppView>(() => {
     try {
@@ -220,9 +223,20 @@ export function App() {
   }
 
   async function send() {
-    const text = input.trim();
+    const raw = input.trim();
     const id = currentId;
-    if ((!text && attachments.length === 0) || !id || busy) return;
+    if ((!raw && attachments.length === 0) || !id || busy) return;
+    // Slash commands (e.g. /research, /plan, /plan-mode on) expand to a plain
+    // instruction; /plan-mode toggles the gate and sends nothing.
+    const cmd = expandCommand(raw);
+    let text = raw;
+    let togglePlan: boolean | undefined;
+    if (cmd) {
+      if (cmd.planMode !== undefined) togglePlan = cmd.planMode;
+      if (cmd.instruction) text = cmd.instruction;
+      else if (cmd.name === "plan-mode") text = "";
+    }
+    if (!text && !togglePlan && attachments.length === 0) return;
     const sendAttachments = attachments;
     setInput("");
     setAttachments([]);
@@ -230,18 +244,33 @@ export function App() {
     // Make the chat visible in the sidebar the moment the question is asked,
     // before the response starts arriving.
     void window.cascade.listSessions().then(setSessionList);
-    updateTranscript(id, (prev) => [...prev, { kind: "user", text, attachments: sendAttachments.length ? sendAttachments : undefined }]);
     try {
-      await window.cascade.sendMessage(id, text, sendAttachments.length ? sendAttachments : undefined);
+      // /plan-mode toggles the gate (and sends nothing); /plan also flips it on
+      // before sending the plan instruction.
+      if (togglePlan !== undefined) {
+        try {
+          await window.cascade.setPlanMode(id, togglePlan);
+          setPlanMode(togglePlan);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (text) {
+        updateTranscript(id, (prev) => [...prev, { kind: "user", text, attachments: sendAttachments.length ? sendAttachments : undefined }]);
+        try {
+          await window.cascade.sendMessage(id, text, sendAttachments.length ? sendAttachments : undefined);
+        } catch (err) {
+          const msg = String(err);
+          const friendly = msg.includes("NO_API_KEY")
+            ? "Add your API key in Settings first."
+            : msg;
+          updateTranscript(id, (prev) => [...prev, { kind: "notice", text: friendly }]);
+          if (msg.includes("NO_API_KEY")) setShowSettings(true);
+        }
+      }
       void window.cascade.listSessions().then(setSessionList);
-    } catch (err) {
-      const msg = String(err);
-      const friendly = msg.includes("NO_API_KEY")
-        ? "Add your API key in Settings first."
-        : msg;
-      updateTranscript(id, (prev) => [...prev, { kind: "notice", text: friendly }]);
+    } finally {
       setBusyIds((p) => ({ ...p, [id]: false }));
-      if (msg.includes("NO_API_KEY")) setShowSettings(true);
     }
   }
 
@@ -277,6 +306,7 @@ export function App() {
     }
     void window.cascade.getCurrentWorkspace().then(setWorkspace);
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
+    void window.cascade.getPlanMode(id).then(setPlanMode);
     void refreshActiveAgent(id);
   }
 
@@ -452,6 +482,22 @@ export function App() {
         <div className="composer-footer">
           {!pureChat && (
             <button
+              className={`plan-mode${planMode ? " on" : ""}`}
+              title={planMode ? "Plan mode is on — file edits and commands are gated until you approve the plan. Click to turn off." : "Turn on plan mode: Cascade researches and writes a plan before it can change files."}
+              disabled={busy}
+              onClick={() => {
+                const id = currentId;
+                if (!id) return;
+                const next = !planMode;
+                setPlanMode(next);
+                void window.cascade.setPlanMode(id, next);
+              }}
+            >
+              {planMode ? "✓ Plan mode" : "Plan mode"}
+            </button>
+          )}
+          {!pureChat && (
+            <button
               className="undo"
               title="Restore files changed by the last response"
               disabled={busy}
@@ -523,6 +569,8 @@ function applyEvent(prev: DisplayItem[], e: AgentEventIpc): DisplayItem[] {
     }
     case "error":
       return [...clearStreaming(prev), { kind: "notice", text: e.message }];
+    case "notice":
+      return [...prev, { kind: "notice", text: e.text }];
     case "agent-done":
       return clearStreaming(prev);
     default:

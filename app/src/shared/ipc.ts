@@ -18,6 +18,7 @@ export type AgentEventIpc =
   | { type: "turn-done"; usage: Record<string, number | undefined> }
   | { type: "agent-done"; finalText: string; totalCredits: number }
   | { type: "group-enabled"; group: string }
+  | { type: "notice"; text: string }
   | { type: "error"; message: string };
 
 /** An agent event tagged with the chat (session) it belongs to, so the renderer
@@ -70,6 +71,10 @@ export type ModelListResult =
 export interface SkillInfo {
   name: string;
   description: string;
+  /** Namespace the skill lives under ("spec", "oracle", "code", …). */
+  namespace?: string;
+  /** How the agent should treat the skill: sequential / advisory / utility. */
+  kind?: "sequential" | "advisory" | "utility";
 }
 
 /** Per-directory instructions (CASCADE.md) status for the current workspace. */
@@ -474,6 +479,37 @@ export interface OpenArtModelChoice {
   cost: number | null;
 }
 
+/** The one kind classification every dropdown follows: a model is IMAGE only
+ *  when it outputs images and is not a video generator — video models accept
+ *  an input image (image-to-video), so the imageInput flag alone can't
+ *  classify. Matches the auto-detected kind in Models & expenses and what an
+ *  "image" manual override bakes (videoInput cleared). */
+export const isImageModel = (m: Pick<OpenArtModelChoice, "imageInput" | "videoInput">): boolean =>
+  m.imageInput && !m.videoInput;
+/** A model the video dropdowns offer — any video-capable generator. */
+export const isVideoModel = (m: Pick<OpenArtModelChoice, "videoInput">): boolean => m.videoInput;
+
+/** Order a model list by the user's saved arrangement (Settings → Models &
+ *  expenses drag-to-reorder). Models missing from the order keep their
+ *  relative discovery order after the known ones, so a fresh model appends
+ *  instead of jumping. Stable sort — ties never reshuffle. */
+export function sortByModelOrder<T>(items: T[], order: string[], id: (t: T) => string): T[] {
+  if (!order || !order.length) return items;
+  const rank = new Map(order.map((mid, i) => [mid, i]));
+  return [...items].sort((a, b) => (rank.get(id(a)) ?? Infinity) - (rank.get(id(b)) ?? Infinity));
+}
+
+/** One generation dropdown's remembered last choice (Settings-backed, global
+ *  per context): each dropdown starts where the user last left it. */
+export interface MediaDefaultChoice {
+  model?: string;
+  resolution?: string;
+  durationSec?: number;
+  aspectRatio?: string;
+}
+/** The dropdown contexts a media default is remembered for. */
+export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "character" | "tween";
+
 /** Choices made in the per-shot video-generation modal. */
 export interface VideoGenOptions {
   /** OpenArt video model id, or "auto" for Cascade to pick. */
@@ -493,6 +529,23 @@ export interface VideoModelOptions {
   resolutions: string[];
   /** Clip lengths in seconds the model accepts. */
   durations: number[];
+}
+
+/** A discovered media model with its pricing ladder baked — the read model for
+ *  the Settings → Models & expenses tab. One entry per model from EITHER
+ *  vendor (ids are provider-namespaced, so the union can't collide). */
+export interface MediaModelLadder {
+  /** Which vendor surfaced this model (the settings tab groups by it). */
+  provider: MediaProviderId;
+  /** The model choice as surfaced by its vendor (display name, capabilities). */
+  choice: OpenArtModelChoice;
+  /** Resolution ladder, low → high (image: fixed 1k/2k/4k buckets; video:
+   *  read from the model's live form options, kind defaults when unreadable). */
+  resolutions: string[];
+  /** Cheapest video length in seconds this model accepts (null for images). */
+  durMin: number | null;
+  /** Most expensive video length in seconds this model accepts (null for images). */
+  durMax: number | null;
 }
 
 /** One row in the expenses ledger — a priced AI generation or a manual
@@ -522,17 +575,27 @@ export interface LedgerEntry {
   shotId?: string;
 }
 
-/** A pricing rule: kind + model + resolution + (video) duration → price. Empty
- *  string / null fields act as "*" wildcards. Exact matches beat wildcards;
+/** A pricing rule: kind + model → a dollar range. One range per model: the
+ *  price interpolates between minPrice (cheapest config) and maxPrice (most
+ *  expensive config) based on the generation's resolution and (video) length
+ *  against the model's baked option ladder (resolutions[] + durMin/durMax).
+ *  An empty model acts as "*" (any model). Exact models beat the wildcard;
  *  generations matching no rule are priced at $0. */
 export interface ExpensePriceRule {
   id: string;
   kind: "image" | "video";
   model: string;
-  resolution: string;
-  /** Video length in seconds this rule prices (null = any). Ignored for images. */
-  durationSec: number | null;
-  price: number;
+  /** Price at the cheapest config (lowest resolution, shortest video). */
+  minPrice: number;
+  /** Price at the most expensive config (highest resolution, longest video). */
+  maxPrice: number;
+  /** The model's resolution ladder, low → high (baked from its live form
+   *  options at edit time; kind defaults when unknown). */
+  resolutions: string[];
+  /** Shortest video length in seconds this range prices (null for images). */
+  durMin: number | null;
+  /** Longest video length in seconds this range prices (null for images). */
+  durMax: number | null;
 }
 
 /** The renderer read model for the Expenses page. */
@@ -792,6 +855,10 @@ export interface CascadeApi {
   stop(sessionId: string): void;
   /** Undo the file changes made by a chat's most recent agent turn. */
   undoLast(sessionId: string): Promise<UndoResultIpc>;
+  /** Turn plan mode on/off for the current chat (persisted per session). */
+  setPlanMode(sessionId: string, on: boolean): Promise<void>;
+  /** Whether plan mode is currently on for the given chat. */
+  getPlanMode(sessionId: string): Promise<boolean>;
   respondApproval(id: number, decision: ApprovalDecisionIpc): void;
   onAgentEvent(cb: (e: ChatEvent) => void): () => void;
   onApprovalRequest(cb: (req: ApprovalRequestIpc) => void): () => void;
@@ -819,6 +886,19 @@ export interface CascadeApi {
   /** Video model ids the user manually declared end-frame capable. */
   getEndFrameModels(): Promise<string[]>;
   setEndFrameModels(ids: string[]): Promise<void>;
+  /** Media model ids the user hides from the generation model dropdowns. */
+  getHiddenMediaModels(): Promise<string[]>;
+  setHiddenMediaModels(ids: string[]): Promise<void>;
+  /** Manual per-model kind assignments (model id → "image" | "video") that
+   *  override the provider's auto-detected flags in every model dropdown. */
+  getModelKindOverrides(): Promise<Record<string, "image" | "video">>;
+  setModelKindOverrides(overrides: Record<string, "image" | "video">): Promise<void>;
+  /** Per-dropdown remembered last choices (context → model/settings). */
+  getMediaDefaults(): Promise<Partial<Record<MediaDefaultCtx, MediaDefaultChoice>>>;
+  setMediaDefault(ctx: MediaDefaultCtx, patch: MediaDefaultChoice): Promise<void>;
+  /** The user's saved media model arrangement (dropdowns follow it). */
+  getMediaModelOrder(): Promise<string[]>;
+  setMediaModelOrder(ids: string[]): Promise<void>;
   /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
   showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
@@ -990,6 +1070,10 @@ export interface CascadeApi {
   refreshBoardPrompt(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: OpenArt image-capable models for the model dropdown (includes "auto"). */
   listOpenArtModels(): Promise<OpenArtModelChoice[]>;
+  /** Models & expenses: probe BOTH media vendors and bake each model's pricing
+   *  ladder (resolution ladder + video length range). Never filtered by the
+   *  hidden-model list — the settings tab must show every model. */
+  listAllMediaModels(): Promise<MediaModelLadder[]>;
   /** Step 3: native multi-picker for externally generated frames. Returns paths. */
   pickBoardImages(): Promise<string[]>;
   /**
@@ -1170,18 +1254,18 @@ export interface CascadeApi {
   getLedger(): Promise<LedgerView>;
   /** Expenses: the pricing rules edited from Settings. */
   getExpensePriceRules(): Promise<ExpensePriceRule[]>;
-  /** Expenses: persist the pricing rules edited from Settings. */
+  /** Expenses: persist the pricing rules edited from Settings. Saving re-prices
+   *  every existing generation against the new ranges (manual rows untouched). */
   setExpensePriceRules(rules: ExpensePriceRule[]): Promise<void>;
+  /** Expenses: re-run the current rules over every existing generation and
+   *  update its price (manual rows untouched). Resolves to the refreshed view. */
+  repriceExpenses(): Promise<LedgerView>;
   /** Expenses: save the current price rules to a user-picked CSV file.
    *  Resolves to the saved path, or null when the user cancels. */
   exportExpensePriceRules(): Promise<string | null>;
   /** Expenses: load price rules from a user-picked CSV file and apply them.
    *  Resolves to the applied rules (or null when the user cancels). */
   importExpensePriceRules(): Promise<{ path: string; rules: ExpensePriceRule[] } | null>;
-  /** Expenses: export a pre-filled price template (every model × resolution ×
-   *  video-length combination at $0) to a user-picked CSV file. Resolves to
-   *  the saved path, or null when cancelled / no models are available. */
-  exportExpensePriceTemplate(): Promise<string | null>;
   /** Expenses: add a manual "purchased asset" row with a custom dollar amount. */
   addManualExpense(label: string, amount: number): Promise<LedgerView>;
   /** Expenses: remove one ledger row. */
@@ -1212,6 +1296,8 @@ export const ipcContract = {
   "chat:send": { method: "sendMessage", kind: "invoke" },
   "chat:stop": { method: "stop", kind: "send" },
   "chat:undo": { method: "undoLast", kind: "invoke" },
+  "chat:setPlanMode": { method: "setPlanMode", kind: "invoke" },
+  "chat:getPlanMode": { method: "getPlanMode", kind: "invoke" },
   "approval:response": { method: "respondApproval", kind: "send" },
   "display:sync": { method: "syncDisplay", kind: "send" },
 
@@ -1232,6 +1318,14 @@ export const ipcContract = {
   "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
   "settings:getEndFrameModels": { method: "getEndFrameModels", kind: "invoke" },
   "settings:setEndFrameModels": { method: "setEndFrameModels", kind: "invoke" },
+  "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },
+  "settings:setHiddenMediaModels": { method: "setHiddenMediaModels", kind: "invoke" },
+  "settings:getModelKindOverrides": { method: "getModelKindOverrides", kind: "invoke" },
+  "settings:setModelKindOverrides": { method: "setModelKindOverrides", kind: "invoke" },
+  "settings:getMediaDefaults": { method: "getMediaDefaults", kind: "invoke" },
+  "settings:setMediaDefault": { method: "setMediaDefault", kind: "invoke" },
+  "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
+  "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
   "image:showMenu": { method: "showImageMenu", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
@@ -1306,6 +1400,7 @@ export const ipcContract = {
   "production:updateBoardPrompt": { method: "updateBoardPrompt", kind: "invoke" },
   "production:refreshBoardPrompt": { method: "refreshBoardPrompt", kind: "invoke" },
   "production:openArtModels": { method: "listOpenArtModels", kind: "invoke" },
+  "media:listAllModels": { method: "listAllMediaModels", kind: "invoke" },
   "production:openArtCredits": { method: "getOpenArtCredits", kind: "invoke" },
   "production:pickBoardImages": { method: "pickBoardImages", kind: "invoke" },
   "production:importBoards": { method: "importBoards", kind: "invoke" },
@@ -1354,9 +1449,9 @@ export const ipcContract = {
   "ledger:get": { method: "getLedger", kind: "invoke" },
   "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
   "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },
+  "ledger:reprice": { method: "repriceExpenses", kind: "invoke" },
   "ledger:exportRules": { method: "exportExpensePriceRules", kind: "invoke" },
   "ledger:importRules": { method: "importExpensePriceRules", kind: "invoke" },
-  "ledger:exportTemplate": { method: "exportExpensePriceTemplate", kind: "invoke" },
   "ledger:addManual": { method: "addManualExpense", kind: "invoke" },
   "ledger:removeEntry": { method: "removeLedgerEntry", kind: "invoke" },
   "ledger:openFile": { method: "openLedgerFile", kind: "invoke" },

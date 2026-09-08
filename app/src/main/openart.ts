@@ -260,9 +260,22 @@ export class OpenArtClient implements MediaProvider {
       if (!id) continue;
       const displayName = String(m.displayName ?? m.display_name ?? m.name ?? id);
       const description = String(m.description ?? m.summary ?? m.recommendedFor ?? "");
-      const media = Array.isArray(m.media) ? String((m.media as unknown[]).join(" ")) : String(m.media ?? "");
-      const modes = Array.isArray(m.modes) ? String((m.modes as unknown[]).join(" ")) : "";
-      const blob = `${media} ${modes} ${description}`.toLowerCase();
+      // Capability signals. Descriptions are marketing copy that routinely
+      // mention both modalities, so they are only a LAST resort: structured
+      // fields (media/modes/output-kind) decide whenever they carry any
+      // image/video signal, and the description only fills in when they're
+      // silent. This keeps image models whose copy mentions "video" out of
+      // the video lists without dropping models whose structured fields carry
+      // no modality tokens at all.
+      const mediaList = Array.isArray(m.media) ? (m.media as unknown[]).map(String) : [];
+      const modesList = Array.isArray(m.modes) ? (m.modes as unknown[]).map(String) : [];
+      const kindField = String(m.output_type ?? m.outputType ?? m.type ?? m.category ?? "").toLowerCase();
+      const structuredVideo =
+        /video/.test(kindField) || modesList.some((s) => /video/i.test(s)) || mediaList.some((s) => /video/i.test(s));
+      const structuredImage =
+        /image/.test(kindField) || modesList.some((s) => /image/i.test(s)) || mediaList.some((s) => /image/i.test(s));
+      const videoOutput = structuredVideo || (!structuredVideo && !structuredImage && /video/i.test(description));
+      const imageOutput = structuredImage || (!structuredVideo && !structuredImage && /image/i.test(description));
       // Credit cost: OpenArt sometimes reports it on the model entry — take the
       // first plausible number; otherwise null (unknown).
       const costRaw = m.cost ?? m.price ?? m.credit_cost ?? m.base_cost;
@@ -272,7 +285,7 @@ export class OpenArtClient implements MediaProvider {
         const v = (costRaw as Record<string, unknown>).base_cost ?? (costRaw as Record<string, unknown>).amount;
         if (typeof v === "number" && Number.isFinite(v)) cost = v;
       }
-      out.push({ id, displayName, description, imageInput: /image/i.test(blob), videoInput: /video/i.test(blob), cost });
+      out.push({ id, displayName, description, imageInput: imageOutput, videoInput: videoOutput, cost });
     }
     return out;
   }

@@ -1226,7 +1226,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Generate one in-betweener action block's clip (prompt = the block's;
    *  durationSec = the block's displayed length, so the submit never races a
    *  pending retime save). */
-  onRunTweenBlock?: (blockId: string, durationSec: number) => Promise<void>;
+  onRunTweenBlock?: (blockId: string, durationSec: number, model: string) => Promise<void>;
   /** Stitch every action block's selected clip into the continuous shot. */
   onStitchTween?: () => Promise<void>;
   /** Undo a stitch — back to the individual block clips (toggle on Stitch). */
@@ -2559,7 +2559,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           onModelChange={(m) => { onGraphField({ graphTweenModel: m }); rememberMediaDefault("tween", { model: m }); }}
           onResolutionChange={(r) => { onGraphField({ graphTweenResolution: r }); rememberMediaDefault("tween", { resolution: r }); }}
           onBlocksChange={(b: TweenBlock[]) => onGraphField({ graphTweenBlocks: b })}
-          onRunBlock={(blockId: string, durationSec: number) => onRunTweenBlock(blockId, durationSec)}
+          onRunBlock={(blockId: string, durationSec: number, model: string) => onRunTweenBlock(blockId, durationSec, model)}
           busyBlock={busyBlock}
           onStitch={() => onStitchTween()}
           onUnstitch={() => onUnstitchTween()}

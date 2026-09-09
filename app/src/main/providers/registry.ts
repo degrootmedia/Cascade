@@ -26,6 +26,33 @@ export function resolveProviderId(raw: unknown): MediaProviderId {
   return raw === "higgsfield" ? "higgsfield" : "openart";
 }
 
+/**
+ * Which vendor owns an explicit model pick. A `higgsfield:…` id always
+ * belongs to Higgsfield (ids leave that provider namespaced); "auto",
+ * empty, and unprefixed OpenArt ids defer to the caller's active provider
+ * (null = use active). Callers use this so a saved cross-vendor pick (e.g. a
+ * Seedance tween chosen under Higgsfield) still submits to its own vendor
+ * after the global provider flips — instead of silently falling back to the
+ * active vendor's first model (the Seedance→Gemini bug).
+ */
+export function providerOfModelId(model?: string): MediaProviderId | null {
+  if (typeof model !== "string") return null;
+  const m = model.trim();
+  if (!m || m === "auto") return null;
+  if (m.startsWith("higgsfield:")) return "higgsfield";
+  return null;
+}
+
+/** Resolve the provider for one generation call: the model's own vendor when
+ *  the pick names one, otherwise the global active vendor. */
+export function mediaForModel(
+  providers: Record<MediaProviderId, MediaProvider>,
+  activeId: MediaProviderId,
+  model?: string
+): MediaProvider {
+  return providers[providerOfModelId(model) ?? activeId] ?? providers[activeId];
+}
+
 export function createProviders(mcp: McpManager, recorder?: GenerationRecorder): Record<MediaProviderId, MediaProvider> {
   return {
     openart: new OpenArtClient(mcp, recorder),

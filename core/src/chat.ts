@@ -12,6 +12,48 @@ const READ_TIMEOUT_MS = 210_000;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2000;
 
+/** Full conversation payloads are only logged when the operator opts in. */
+const CHAT_DEBUG = process.env.CASCADE_DEBUG_CHAT === "1";
+
+const SECRET_RE = /\b(sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,}|[A-Za-z0-9+/]{40,}={0,2})\b/g;
+
+/** Mask key-like material so even debug logs are not credential dumps. */
+export function redactSecrets(s: string): string {
+  return s.replace(SECRET_RE, "[REDACTED]");
+}
+
+interface ChatLogMessage {
+  role: string;
+  content?: unknown;
+  tool_calls?: Array<{ function?: { name?: string } }>;
+}
+
+/**
+ * Log chat traffic: metadata only by default (roles, char counts, tool
+ * names); full payloads only with CASCADE_DEBUG_CHAT=1, redacted.
+ */
+export function logChatMetadata(
+  tag: string,
+  messages: ChatLogMessage[],
+  extra?: { model?: string; promptTokens?: number; completionTokens?: number }
+): void {
+  if (CHAT_DEBUG) {
+    console.debug(`${tag} payload`, redactSecrets(JSON.stringify(messages)));
+    return;
+  }
+  console.info(
+    `${tag} ${JSON.stringify({
+      ...extra,
+      count: messages.length,
+      messages: messages.map((m) => ({
+        role: m.role,
+        chars: typeof m.content === "string" ? m.content.length : undefined,
+        tools: m.tool_calls?.map((t) => t.function?.name).filter(Boolean),
+      })),
+    })}`
+  );
+}
+
 /** Whether an error message indicates a transient upstream failure worth
  *  retrying. gab.ai wraps every backend hiccup in a generic
  *  "[gab.ai error] The model failed to generate a response" banner; 5xx
@@ -159,7 +201,7 @@ export class ChatClient {
       max_tokens: 16000,
     };
     console.log(`[chat] streaming payload (${model}, ${messages.length} msgs, ${tools?.length ?? 0} tools):`);
-    console.log(JSON.stringify(payload, null, 2));
+    logChatMetadata("chat.request", messages, { model });
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
@@ -266,8 +308,7 @@ export class ChatClient {
   /** Non-streaming completion without tools — used for summarization. Usage data IS present on non-streaming responses. */
   async completeOnce(model: string, messages: ChatMessage[], maxTokens = 1000): Promise<{ text: string; usage: Usage }> {
     const payload = { model, messages, max_tokens: maxTokens };
-    console.log(`[chat] summarization payload (${model}, ${messages.length} msgs):`);
-    console.log(JSON.stringify(payload, null, 2));
+    logChatMetadata("chat.summarize", messages, { model });
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },

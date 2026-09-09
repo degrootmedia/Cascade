@@ -520,6 +520,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
   }
 
+  /** Step 2: rescan the production's references folder — images added externally
+   *  (dropped straight into references/) are adopted as references. */
+  async function rescanRefFolder() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.scanReferencesFolder(prod.meta.id);
+      setProd(next);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
   /** Step 2: generate or AI-edit a reference image via the media provider. The modal
    *  stays open (and shows errors) until the call succeeds. */
   async function runRefGen(opts: ReferenceImageGenOptions) {
@@ -796,6 +809,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // usually instant), unioned with the user's manual allowlist in main.
   // Null = not loaded yet → the tween lists show every video model until it
   // resolves; once resolved the lists are strictly limited to these ids.
+  // Refetched on provider change so the tween list always tracks the global
+  // provider's models (the probe is per-vendor, like the model list itself).
   const [endFrameModelIds, setEndFrameModelIds] = useState<string[] | null>(null);
   useEffect(() => {
     if (!graphShotId) return;
@@ -805,7 +820,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       .then((ids) => { if (live) setEndFrameModelIds(ids); })
       .catch(() => { if (live) setEndFrameModelIds([]); });
     return () => { live = false; };
-  }, [graphShotId, prod?.meta.id]);
+  }, [graphShotId, prod?.meta.id, mediaProviderId]);
 
   /** Step 2: remove a style and renumber the rest. */
   function removeStyle(idx: number) {
@@ -998,6 +1013,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setImportBusy(false);
+    }
+  }
+
+  /** Step 3: re-link broken storyboard image paths — after board files were
+   *  moved/renamed externally (or a production folder was re-registered), a
+   *  shot's artwork/history/node-graph generation paths can point at files that
+   *  no longer exist. Repoints every broken path to the newest frame present in
+   *  that shot's board folder. */
+  async function refreshBoardLinks() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.refreshBoardLinks(prod.meta.id);
+      setProd(next);
+      bustAll();
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -1593,13 +1626,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 3 in-betweener: generate one action block's clip (prompt = the
-   *  block's; keyframes resolved main-side). The node's selected model +
-   *  resolution ride the call — the tween dropdown only offers end-frame
-   *  models, and a legacy "auto" (or a dropped id) resolves to the first
-   *  listed one so the submission is always explicit. durationSec is the
-   *  block's displayed length (it can be newer than the last save after a
-   *  keyframe drag); main clamps it to the 1–15s grid as a backstop. */
-  async function runTweenBlock(shotId: string, blockId: string, durationSec?: number) {
+   *  block's; keyframes resolved main-side). `modelOverride` is the tween
+   *  dropdown's current selection, passed explicitly from the timeline modal
+   *  so the submission is exactly what the user sees selected — the list is
+   *  filtered to the global provider's end-frame models, and a legacy "auto"
+   *  (or a pick saved under a different provider) resolves to the first
+   *  listed one. durationSec is the block's displayed length (it can be newer
+   *  than the last save after a keyframe drag); main clamps it to the 1–15s
+   *  grid as a backstop. */
+  async function runTweenBlock(shotId: string, blockId: string, durationSec?: number, modelOverride?: string) {
     if (!prod) return;
     if (tweenBusyByShot[shotId]) return;
     setTweenBusyByShot((prev) => ({ ...prev, [shotId]: blockId }));
@@ -1607,8 +1642,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const list = filterTweenModels(mediaModels.filter((m) => m.videoInput), endFrameModelIds);
-      const saved = shot?.graphTweenModel;
-      const model = saved && list.some((m) => m.id === saved) ? saved : (list[0]?.id ?? "");
+      const saved = (shot?.graphTweenModel ?? "").trim();
+      const model = (modelOverride && modelOverride.trim()) ||
+        (saved && list.some((m) => m.id === saved) ? saved : (list[0]?.id ?? ""));
       const next = await window.cascade.generateTweenBlock(prod.meta.id, shotId, blockId, {
         model: model || undefined,
         resolution: shot?.graphTweenResolution,
@@ -2265,6 +2301,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onMove={moveReference}
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
+                onRescan={rescanRefFolder}
               />
             </DesignSection>
 
@@ -2369,6 +2406,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               </button>
               <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setPdfOpen(true)} title="Export the storyboard (frames + Audio/Visual) to a landscape PDF">
                 Export storyboard PDF
+              </button>
+              <span className="prod-boards-sep" />
+              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
+                Refresh Storyboard Images
               </button>
               <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
             </div>
@@ -2540,7 +2581,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
                   onRunEditGen={(model, resolution) => graphShotId ? runEditGenNode(graphShotId, model, resolution) : Promise.resolve()}
-                  onRunTweenBlock={(blockId, durationSec) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec) : Promise.resolve()}
+                  onRunTweenBlock={(blockId, durationSec, model) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyIds.has(graphShotId) : false}

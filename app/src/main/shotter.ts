@@ -116,15 +116,17 @@ export function validate(scenes: ProductionScene[]): string[] {
   return problems;
 }
 
-/** Move one shot to a new position (before `beforeShotId`, or at the end when null).
- *  Works across scenes — the shot is spliced out of its source scene and into
- *  the target scene at the insertion point, then every number on the global
- *  100-grid is re-derived. Returns the moved shot plus a map of id→oldNumber
- *  so callers can relocate board folders. */
+/** Move one shot to a new position (before `beforeShotId`, at the end of the
+ *  production when null, or at the end of one scene when `endSceneNumber` is
+ *  set with a null `beforeShotId`). Works across scenes — the shot is spliced
+ *  out of its source scene and into the target scene at the insertion point,
+ *  then every number on the global 100-grid is re-derived. Returns the moved
+ *  shot plus a map of id→oldNumber so callers can relocate board folders. */
 export function reorderShot(
   scenes: ProductionScene[],
   shotId: string,
-  beforeShotId: string | null
+  beforeShotId: string | null,
+  endSceneNumber?: number
 ): { shot: ProductionShot; oldNumbers: Map<string, string> } {
   if (beforeShotId === shotId) throw new Error("Cannot move a shot before itself.");
   const oldNumbers = new Map<string, string>();
@@ -145,10 +147,21 @@ export function reorderShot(
 
   // Locate target insertion point after removal (so same-scene moves are stable)
   if (beforeShotId === null) {
-    // Append at end of last scene (or source scene if now empty and was last)
-    const last = scenes[scenes.length - 1];
-    if (!last) throw new Error("No scenes to insert into.");
-    last.shots.push(source);
+    // End of one scene (its trailing gap), or end of the last scene when no
+    // scene was named
+    if (endSceneNumber != null) {
+      const target = scenes.find((s) => s.number === endSceneNumber);
+      if (!target) {
+        // Scene gone — put it back and fail (keeps state consistent)
+        sourceScene.shots.splice(sourceIdx, 0, source);
+        throw new Error(`Scene ${endSceneNumber} not found.`);
+      }
+      target.shots.push(source);
+    } else {
+      const last = scenes[scenes.length - 1];
+      if (!last) throw new Error("No scenes to insert into.");
+      last.shots.push(source);
+    }
   } else {
     let targetScene: ProductionScene | null = null;
     let targetIdx = -1;

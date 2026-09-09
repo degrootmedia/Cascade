@@ -186,14 +186,52 @@ export function suggestedReferences(rawCharacters: RawCharacter[] | undefined, r
   return lines.join("\n");
 }
 
-/** Absolute path of a production asset that lives inside its folder. */
+/** Absolute path of a production asset that lives inside its folder. Realpath-verified so symlinks cannot escape. */
 export function assetPath(p: Production, rel: string): string {
+  if (typeof rel !== "string" || rel.trim() === "" || rel.includes("\0")) {
+    throw new Error(`Refusing to touch outside the production folder: ${rel}`);
+  }
   const abs = path.resolve(p.meta.folder, rel);
   const root = path.resolve(p.meta.folder);
   if (abs !== root && !abs.startsWith(root + path.sep)) {
     throw new Error(`Refusing to touch outside the production folder: ${rel}`);
   }
+  // Realpath containment: a symlink inside the folder pointing at /etc, ~/.ssh
+  // etc. must not pass. Verify the deepest existing ancestor; creation paths
+  // (non-existent targets) are still validated.
+  try {
+    let cur = abs;
+    const tail: string[] = [];
+    for (;;) {
+      try {
+        const resolved = path.join(fs.realpathSync(cur), ...tail.reverse());
+        const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : root;
+        if (resolved !== realRoot && !resolved.startsWith(realRoot + path.sep)) {
+          throw new Error(`Refusing to touch outside the production folder: ${rel}`);
+        }
+        break;
+      } catch (e: unknown) {
+        if ((e as Error)?.message?.startsWith("Refusing to touch")) throw e;
+        if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+        const parent = path.dirname(cur);
+        if (parent === cur) throw new Error(`Refusing to touch outside the production folder: ${rel}`);
+        tail.push(path.basename(cur));
+        cur = parent;
+      }
+    }
+  } catch (e: unknown) {
+    if ((e as Error)?.message?.startsWith("Refusing to touch")) throw e;
+    throw new Error(`Refusing to touch outside the production folder: ${rel}`);
+  }
   return abs;
+}
+
+/** Async boundary validator for pipeline asset paths entering main. */
+export async function validateAssetPath(p: Production, rel: string): Promise<string> {
+  if (typeof rel !== "string" || rel.trim() === "") {
+    throw new Error("assetPath is required.");
+  }
+  return assetPath(p, rel);
 }
 
 /**
@@ -1225,6 +1263,50 @@ export function relocateBoardsForRenumber(
     }
     p.promptOverrides = nextOverrides;
   }
+}
+
+/** Re-link a shot's board-image paths to files that actually exist on disk.
+ *  When board files are moved/renamed externally (or a production is
+ *  re-registered from a folder whose JSON is gone), `shot.artwork`, its
+ *  history, and the node-graph generation paths can point at files that no
+ *  longer exist — the storyboard shows blank frames. This rescans each shot's
+ *  per-shot board folder (`boards/<number>/shot-<number>-*.jpg`) and repoints
+ *  every broken path to the newest existing frame. Valid paths are untouched.
+ *  Returns the number of links repaired. */
+export function refreshBoardLinks(p: Production): number {
+  let repaired = 0;
+  const fix = (shot: ProductionShot, rel: string | undefined): string | undefined => {
+    if (!rel) return rel;
+    try {
+      if (fs.existsSync(assetPath(p, rel))) return rel;
+    } catch { return rel; }
+    const dir = `${p.assets.boardsDir}/${shot.number}`;
+    let newest: { rel: string; mtime: number } | null = null;
+    try {
+      for (const f of fs.readdirSync(assetPath(p, dir))) {
+        if (!new RegExp(`^shot-${shot.number}-[^/]+\\.(?:jpg|jpeg)$`, "i").test(f)) continue;
+        try {
+          const st = fs.statSync(path.join(assetPath(p, dir), f));
+          if (!newest || st.mtimeMs > newest.mtime) newest = { rel: `${dir}/${f}`, mtime: st.mtimeMs };
+        } catch { /* unreadable entry — skip */ }
+      }
+    } catch { /* missing folder — nothing to relink to */ }
+    if (!newest) return rel;
+    repaired++;
+    return newest.rel;
+  };
+
+  for (const sc of p.scenes) {
+    for (const shot of sc.shots) {
+      shot.artwork = fix(shot, shot.artwork);
+      if (shot.artworkHistory?.length) {
+        shot.artworkHistory = shot.artworkHistory.map((rel) => fix(shot, rel) ?? rel);
+      }
+      for (const g of shot.graphImageGens ?? []) g.path = fix(shot, g.path) ?? g.path;
+      for (const g of shot.graphEditGens ?? []) g.path = fix(shot, g.path) ?? g.path;
+    }
+  }
+  return repaired;
 }
 
 /** How many generations each node-graph generation node keeps. */

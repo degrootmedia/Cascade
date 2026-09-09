@@ -8,6 +8,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "test": "vitest run",
+    "test:security": "vitest run test/security",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "package": "electron-vite build && electron-builder --win nsis"
   },
@@ -24,6 +25,7 @@
     "three": "^0.183.2"
   },
   "devDependencies": {
+    "@electron/fuses": "^1.8.0",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.1.2",
     "@types/react": "^18.3.0",
@@ -38,50 +40,5 @@
     "typescript": "^5.6.0",
     "vite": "^5.4.0",
     "vitest": "^2.1.0"
-  },
-  "build": {
-    "appId": "ai.cascade.app",
-    "productName": "Cascade",
-    "files": [
-      "out/**/*"
-    ],
-    "directories": {
-      "output": "release-0.6.5"
-    },
-    "win": {
-      "signAndEditExecutable": false,
-      "icon": "build/icon.png"
-    },
-    "nsis": {
-      "include": "build/installer.nsh",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    },
-    "extraResources": [
-      {
-        "from": "build/icon.png",
-        "to": "icon.png"
-      },
-      {
-        "from": "skills/magic-prompt.md",
-        "to": "skills/magic-prompt.md"
-      },
-      {
-        "from": "skills/spec",
-        "to": "skills/spec"
-      },
-      {
-        "from": "skills/oracle",
-        "to": "skills/oracle"
-      },
-      {
-        "from": "skills/code",
-        "to": "skills/code"
-      },
-      {
-        "from": "src/main/magic-prompt.md",
-        "to": "magic-prompt.md"
-      }
-    ]
   }
 }

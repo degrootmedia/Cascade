@@ -4,7 +4,7 @@ import { isImageModel } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
-import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, XIcon } from "../icons.js";
+import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 
@@ -140,7 +140,7 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onGenerate, onEditRef }: {
+export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onGenerate, onEditRef, onRescan }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
@@ -154,10 +154,18 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   /** Open the reference-image generation modal targeting a category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
+  /** Rescan the production's references folder: adopt images added externally. */
+  onRescan: () => Promise<void> | void;
 }) {
   const [categoryName, setCategoryName] = useState("");
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState("");
+  const [rescanning, setRescanning] = useState(false);
+  const rescan = async () => {
+    if (rescanning) return;
+    setRescanning(true);
+    try { await onRescan(); } finally { setRescanning(false); }
+  };
   const add = () => { if (name.trim()) { onAddReference(name, categoryId || undefined); setName(""); } };
   const groups = [{ id: "", name: "Uncategorized" }, ...categories];
   return (
@@ -167,6 +175,9 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}><PlusIcon size={14} /> Add category</button>
+        <button className="prod-btn ghost" disabled={rescanning} onClick={() => void rescan()} title="Rescan the production's references folder and adopt images added outside the app">
+          <RegenerateIcon size={14} /> {rescanning ? "Scanning…" : "Rescan folder"}
+        </button>
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (

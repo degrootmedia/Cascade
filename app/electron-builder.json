@@ -1,8 +1,10 @@
 {
   "appId": "ai.cascade.app",
   "productName": "Cascade",
+  "afterPack": "build/afterPack.js",
+  "asar": true,
   "directories": {
-    "output": "C:\\Cascade\\release-v0.5.6"
+    "output": "release"
   },
   "files": [
     "out/**/*"
@@ -14,15 +16,48 @@
     {
       "from": "build/icon.png",
       "to": "icon.png"
+    },
+    {
+      "from": "skills/magic-prompt.md",
+      "to": "skills/magic-prompt.md"
+    },
+    {
+      "from": "skills/spec",
+      "to": "skills/spec"
+    },
+    {
+      "from": "skills/oracle",
+      "to": "skills/oracle"
+    },
+    {
+      "from": "skills/code",
+      "to": "skills/code"
+    },
+    {
+      "from": "src/main/magic-prompt.md",
+      "to": "magic-prompt.md"
     }
   ],
   "nsis": {
     "oneClick": false,
-    "allowToChangeInstallationDirectory": true
+    "allowToChangeInstallationDirectory": true,
+    "include": "build/installer.nsh"
+  },
+  "mac": {
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist",
+    "notarize": {
+      "teamId": "TEAMID1234"
+    }
   },
   "win": {
     "target": "nsis",
     "icon": "build/app.ico",
-    "signAndEditExecutable": false
+    "signtoolOptions": {
+      "signingHashAlgorithms": ["sha256"]
+    },
+    "timeStampServer": "http://timestamp.digicert.com"
   }
 }

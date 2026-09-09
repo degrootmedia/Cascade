@@ -196,10 +196,12 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   onResolutionChange: (resolution: string) => void;
   /** Persist block edits (prompt, timing, history selection). */
   onBlocksChange: (blocks: TweenBlock[]) => void;
-  /** Generate one block's clip (uses the persisted model/resolution, plus the
-   *  block's displayed length so a retime that hasn't saved yet still submits
-   *  the timing the user sees). */
-  onRunBlock: (blockId: string, durationSec: number) => Promise<void>;
+  /** Generate one block's clip. `model` is the dropdown's CURRENT selection
+   *  (effectiveModel) — passed explicitly so the submission can never diverge
+   *  from what the user sees selected, even when the persisted pick fell back
+   *  to the first listed model. Also rides the block's displayed length (it
+   *  can be newer than the last save after a keyframe drag). */
+  onRunBlock: (blockId: string, durationSec: number, model: string) => Promise<void>;
   busyBlock: string | null;
   /** Stitch every block's selected clip into the continuous shot. */
   onStitch: () => Promise<void>;
@@ -295,10 +297,14 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const total = display.length ? display[display.length - 1].startSec + display[display.length - 1].durationSec : 0;
   const focus = display.find((b) => b.id === focusId) ?? display[0];
   const ready = display.filter((b) => b.gens?.[b.genIndex ?? 0]?.path).length;
-  // The model actually driving generation (the dropdown falls back to the
-  // first listed model when the persisted pick isn't offered). Block warnings
-  // and dropdown ghosting both key off its live duration options; unknown
-  // options (still loading, or an empty durations list) never warn/ghost.
+  // The model actually driving generation: exactly what the dropdown displays.
+  // The list is already filtered to the global provider's end-frame models
+  // upstream; when the persisted pick isn't in it (legacy "auto", or saved
+  // under a different provider) the dropdown falls back to the first listed
+  // model — and `effectiveModel` is what submits, so display and submission
+  // can never diverge. Block warnings and dropdown ghosting both key off its
+  // live duration options; unknown options (still loading, or an empty
+  // durations list) never warn/ghost.
   const effectiveModel = videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? model);
   const selectedOpts = allOpts[effectiveModel] ?? opts;
 
@@ -469,7 +475,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                     <button
                       className="prod-btn primary prod-tween-go"
                       disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || badLength}
-                      onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec); }}
+                      onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec, effectiveModel); }}
                       title={badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
                     >
                       {busyBlock === b.id ? "Generating…" : "Submit block"}

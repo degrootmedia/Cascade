@@ -30,6 +30,8 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Opt-in passthrough of parent env vars by name (e.g. GITHUB_TOKEN). */
+  envPassthrough?: string[];
   url?: string;
   disabled?: boolean;
 }
@@ -47,6 +49,56 @@ export interface McpServerStatus {
 
 const CONNECT_TIMEOUT_MS = 20_000;
 const CALL_TIMEOUT_MS = 120_000;
+
+const BASE_ENV_ALLOW = new Set(
+  [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TMPDIR",
+    // Windows essentials
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+  ].map((k) => k.toLowerCase())
+);
+
+/**
+ * Build a filtered child env: platform-essential allowlist + explicit
+ * per-server passthrough names + operator-declared server.env (wins).
+ * Never inherits the full parent env, so main-process secrets stay put.
+ */
+export function buildMcpEnv(
+  parent: NodeJS.ProcessEnv,
+  server: { env?: Record<string, string>; envPassthrough?: string[] }
+): NodeJS.ProcessEnv {
+  const passthrough = new Set((server.envPassthrough ?? []).map((k) => k.toLowerCase()));
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(parent)) {
+    if (v === undefined) continue;
+    const lk = k.toLowerCase();
+    if (BASE_ENV_ALLOW.has(lk) || passthrough.has(lk)) out[k] = v;
+  }
+  for (const [k, v] of Object.entries(server.env ?? {})) out[k] = v;
+  return out;
+}
 
 /** Tool names must satisfy ^[a-zA-Z0-9_-]{1,64}$ for the chat API. */
 function sanitizeName(serverName: string, toolName: string): string {
@@ -207,7 +259,7 @@ export class McpManager {
       const transport = new StdioClientTransport({
         command: server.command,
         args: server.args ?? [],
-        env: { ...(process.env as Record<string, string>), ...(server.env ?? {}) },
+        env: buildMcpEnv(process.env, server) as Record<string, string>,
         stderr: "ignore",
       });
       await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect to ${name}`);

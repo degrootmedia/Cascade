@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, importProduction, loadProduction, saveProduction } from "../src/main/productions.js";
+import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles } from "../src/main/productions.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 
@@ -302,6 +302,31 @@ describe("board frame selection persistence", () => {
     expect(boardFrameHistory(incoming.scenes[0].shots[0])).toEqual([
       "boards/0100/edit-1.jpg", "boards/0100/image-0.jpg", "boards/0100/image-1.jpg",
     ]);
+  });
+});
+
+describe("unclaimedReferenceFiles", () => {
+  it("skips files claimed by a character, product, or reference image/media path", () => {
+    const p = baseProduction({
+      characters: [{ id: "c1", name: "Mara", key: "", imagePath: "references/mara.png" }],
+      products: [{ id: "pr1", name: "Compass", imagePath: "references/compass.jpg" }],
+      references: [
+        { id: "r1", name: "Silk", imagePath: "references/silk.webp" },
+        { id: "r2", name: "Clip", media: "video", mediaPath: "references/clip.mp4" },
+      ],
+    });
+    const files = [
+      "references/mara.png", "references/compass.jpg", "references/silk.webp", "references/clip.mp4",
+      "references/new-drop.png", "references/another (2).jpg",
+    ];
+    expect(unclaimedReferenceFiles(files, p)).toEqual(["references/new-drop.png", "references/another (2).jpg"]);
+  });
+
+  it("claims media paths even for files that look like images and claims on an empty production", () => {
+    const p = baseProduction();
+    expect(unclaimedReferenceFiles(["references/a.png", "references/b.jpg"], p)).toEqual(["references/a.png", "references/b.jpg"]);
+    const media = baseProduction({ references: [{ id: "r1", name: "Odd", mediaPath: "references/a.png" }] });
+    expect(unclaimedReferenceFiles(["references/a.png", "references/b.jpg"], media)).toEqual(["references/b.jpg"]);
   });
 });
 

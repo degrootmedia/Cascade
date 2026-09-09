@@ -2,7 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeImage, protocol, screen } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, shell, Menu, nativeImage, protocol, screen } from "electron";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,11 +13,11 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, wireEditNodeToCurrentFrame, buildEditGenPrompt } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
-import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, mediaForModel, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
@@ -28,6 +28,8 @@ import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, sortByModelOrder, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { validateIpcArgs } from "../shared/ipc-schemas.js";
+import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
@@ -44,180 +46,51 @@ let mcp: McpManager;
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "cascade-media",
-    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, bypassCSP: true },
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      supportFetchAPI: true,
+      bypassCSP: false,
+    },
   },
 ]);
 
-/** Content-Type for a production media asset based on its extension. The
- *  cascade-media:// protocol serves audio (VO / music), video (per-shot
- *  generated clips), and GLB 3D models (design-page model viewer). */
-function mediaMimeForPath(rel: string): string {
-  const ext = path.extname(rel).slice(1).toLowerCase();
-  switch (ext) {
-    case "wav": return "audio/wav";
-    case "m4a":
-    case "aac": return "audio/mp4";
-    case "ogg": return "audio/ogg";
-    case "flac": return "audio/flac";
-    case "mp4":
-    case "m4v": return "video/mp4";
-    case "webm": return "video/webm";
-    case "mov": return "video/quicktime";
-    case "mkv": return "video/x-matroska";
-    case "avi": return "video/x-msvideo";
-    case "png": return "image/png";
-    case "jpg":
-    case "jpeg": return "image/jpeg";
-    case "webp": return "image/webp";
-    case "gif": return "image/gif";
-    case "bmp": return "image/bmp";
-    case "avif": return "image/avif";
-    case "svg": return "image/svg+xml";
-    case "glb": return "model/gltf-binary";
-    default: return "audio/mpeg";
-  }
+import { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, serveMediaFile } from "./media-protocol.js";
+import { validateExternalEditor, openWithExternalEditor } from "./external-editor.js";
+export { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, validateExternalEditor, openWithExternalEditor };
+
+function installCsp(): void {
+  session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
+    cb({
+      responseHeaders: {
+        ...details.responseHeaders,
+        "Content-Security-Policy": [cspForEnv(!!process.env.ELECTRON_RENDERER_URL)],
+      },
+    });
+  });
 }
 
 /**
- * Serve `cascade-media://<productionId>/<urlencoded-relpath>` from disk with
- * Range support so <audio> can seek and play large clips. `assetPath` guards
- * against paths escaping the production folder.
+ * Serve `cascade-media://<productionId>/<urlencoded-relpath>` from disk by
+ * streaming with Range support so <audio>/<video> can seek without buffering
+ * whole multi-GB files in the main process. `assetPath` confines the path to
+ * the production folder (realpath-verified).
  */
 function registerMediaProtocol(): void {
-  protocol.handle("cascade-media", (req) => {
+  protocol.handle("cascade-media", async (req) => {
+    let abs: string;
     try {
       const url = new URL(req.url);
       const p = productions.loadProduction(url.hostname);
       if (!p) return new Response("Unknown production", { status: 404 });
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-      const abs = assetPath(p, rel);
-      const stat = fs.statSync(abs);
-      const mime = mediaMimeForPath(abs);
-      const headers: Record<string, string> = {
-        "Content-Type": mime,
-        "Accept-Ranges": "bytes",
-        "Content-Length": String(stat.size),
-        "Cache-Control": "no-store",
-        // The renderer's <model-viewer> loads GLBs via fetch() from this
-        // custom scheme, which is a different origin than the app — the fetch
-        // would fail CORS without an explicit allow.
-        "Access-Control-Allow-Origin": "*",
-      };
-      const range = req.headers.get("range");
-      if (range) {
-        const m = /bytes=(\d*)-(\d*)/.exec(range);
-        if (m) {
-          const size = stat.size;
-          const start = m[1] ? Math.min(parseInt(m[1], 10), size - 1) : 0;
-          const end = m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1;
-          if (start <= end && start < size) {
-            const buf = fs.readFileSync(abs);
-            return new Response(new Uint8Array(buf.subarray(start, end + 1)), {
-              status: 206,
-              headers: {
-                ...headers,
-                "Content-Length": String(end - start + 1),
-                "Content-Range": `bytes ${start}-${end}/${size}`,
-              },
-            });
-          }
-        }
-      }
-  const buf = fs.readFileSync(abs);
-    return new Response(new Uint8Array(buf), { headers });
-  } catch {
-    return new Response("Not found", { status: 404 });
-  }
-  });
-}
-
-/** Whether a path is inside the ACL-locked WindowsApps container. */
-function isWindowsAppsPath(p: string): boolean {
-  return p.toLowerCase().includes("\\windowsapps\\") || p.toLowerCase().includes("/windowsapps/");
-}
-
-/** Spawn a process elevated via UAC (Windows only). Resolves when the elevation request was sent. */
-function spawnElevated(target: string, arg: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (process.platform !== "win32") {
-      reject(new Error("Elevation only supported on Windows"));
-      return;
-    }
-    const esc = (s: string) => s.replace(/'/g, "''");
-    const cmd = `Start-Process -FilePath '${esc(target)}' -ArgumentList '${esc(arg)}' -Verb RunAs`;
-    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], { windowsHide: true });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Elevated launch failed (code ${code})`));
-    });
-  });
-}
-
-/** Try to launch a Windows Store execution alias (e.g. Affinity.exe in WindowsApps) without touching the ACL-locked folder. */
-async function tryWindowsAppsAlias(absPath: string, editor: string): Promise<boolean> {
-  const alias = path.basename(editor) || "Affinity.exe";
-  const candidates: Array<{ cmd: string; args: string[]; opts?: Record<string, unknown> }> = [
-    // Execution aliases are on the user's effective PATH even though the folder can't be browsed.
-    { cmd: alias, args: [absPath], opts: { detached: true, stdio: "ignore" as const, shell: true } },
-    { cmd: "powershell.exe", args: ["-NoProfile", "-Command", `Start-Process -FilePath '${alias.replace(/'/g, "''")}' -ArgumentList '${absPath.replace(/'/g, "''")}'`], opts: { windowsHide: true } },
-    { cmd: "cmd.exe", args: ["/c", "start", "", `"${alias}"`, `"${absPath}"`], opts: { windowsHide: true } },
-  ];
-  for (const c of candidates) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(c.cmd, c.args, c.opts as never);
-        child.on("error", reject);
-        // Give the alias 400ms to fail; if no error, assume it launched.
-        setTimeout(() => { try { child.unref(); } catch {} resolve(); }, 400);
-        child.on("close", (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(String(code)));
-        });
-      });
-      return true;
+      abs = assetPath(p, rel);
     } catch {
-      continue;
+      return new Response("Forbidden", { status: 403 });
     }
-  }
-  return false;
-}
-
-/** Open `absPath` in the chosen external editor (or the OS default). */
-async function openWithExternalEditor(absPath: string): Promise<void> {
-  const editor = settings.getExternalEditor()?.trim();
-  if (editor) {
-    // Store apps (WindowsApps) are 0-byte reparse-point aliases: probing the
-    // folder via dialog/fs fails, and they must NOT be launched elevated
-    // (AppContainer blocks RunAs). Launch via the alias name on PATH instead.
-    if (isWindowsAppsPath(editor)) {
-      if (await tryWindowsAppsAlias(absPath, editor)) return;
-      // Fallback: try the absolute path elevated (covers non-Store exes that happen to live there).
-      try { await spawnElevated(editor, absPath); return; } catch {}
-      try {
-        const child = spawn(editor, [absPath], { detached: true, stdio: "ignore" });
-        child.on("error", () => {});
-        child.unref();
-        return;
-      } catch {}
-    } else {
-      // Normal desktop exe (Photoshop, Affinity non-Store, etc.): try direct, then elevated.
-      try {
-        const child = spawn(editor, [absPath], { detached: true, stdio: "ignore" });
-        let ok = true;
-        child.on("error", async () => {
-          try { await spawnElevated(editor, absPath); } catch { void shell.openPath(absPath); }
-        });
-        child.unref();
-        if (ok) return;
-      } catch {
-        try { await spawnElevated(editor, absPath); return; } catch {}
-      }
-    }
-  }
-  // No editor or all launch attempts failed → OS default (this is what you saw).
-  const err = await shell.openPath(absPath);
-  if (err) throw new Error(err);
+    return serveMediaFile(abs, req.headers.get("range"));
+  });
 }
 
 /**
@@ -658,6 +531,12 @@ function registerIpc() {
   // The active media vendor (OpenArt/Higgsfield) — a global setting resolved
   // per call, so every generation flow follows a Settings change immediately.
   const media = (): MediaProvider => providers[resolveProviderId(settings.getMediaProvider())];
+  // Per-model routing: an explicit `higgsfield:…` pick rides Higgsfield even
+  // when the global is OpenArt (and vice versa via the active fallback), so a
+  // saved cross-vendor pick can't silently fall back to the active vendor's
+  // first model. "auto"/empty defers to the global.
+  const mediaFor = (model?: string): MediaProvider =>
+    mediaForModel(providers, resolveProviderId(settings.getMediaProvider()), model);
 
   // 3D AI Studio REST integration (design-page model generator). The API key
   // is read from encrypted settings on demand; the client's HTTP surface is
@@ -673,12 +552,24 @@ function registerIpc() {
   function handle(channel: string, listener: (event: import("electron").IpcMainInvokeEvent, ...args: any[]) => unknown): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
     ipcHandlers.add(channel);
-    ipcMain.handle(channel, listener);
+    ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
+      if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
+      validateIpcArgs(channel, args);
+      return await listener(event, ...args);
+    });
   }
   function on(channel: string, listener: (event: import("electron").IpcMainEvent, ...args: any[]) => void): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
     ipcHandlers.add(channel);
-    ipcMain.on(channel, listener);
+    ipcMain.on(channel, (event, ...args) => {
+      if (!isTrustedSender(event)) return;
+      try {
+        validateIpcArgs(channel, args);
+      } catch {
+        return;
+      }
+      listener(event, ...args);
+    });
   }
 
   handle("chat:send", async (_e, sessionId: string, text: string, attachments?: ChatAttachment[]) => {
@@ -917,12 +808,20 @@ function registerIpc() {
       ],
     });
     if (res.canceled || !res.filePaths[0]) return null;
-    settings.setExternalEditor(res.filePaths[0]);
-    return res.filePaths[0];
+    const validated = await validateExternalEditor(res.filePaths[0]);
+    settings.setExternalEditor(validated);
+    return validated;
   });
 
-  handle("settings:setExternalEditor", (_e, p: string | null) => {
-    settings.setExternalEditor(p);
+  handle("settings:setExternalEditor", async (_e, p: string | null) => {
+    if (p === null || (typeof p === "string" && p.trim() === "")) {
+      settings.setExternalEditor(null);
+      return { ok: true };
+    }
+    if (typeof p !== "string") throw new Error("Invalid external editor value.");
+    const validated = await validateExternalEditor(p.trim());
+    settings.setExternalEditor(validated);
+    return { ok: true, path: validated };
   });
 
   handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; productionId?: string; relPath?: string; dataUrl?: string }) => {
@@ -1437,9 +1336,9 @@ function registerIpc() {
     })
   );
 
-  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null) =>
+  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number) =>
     mutateShots(id, (p) => {
-      const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId);
+      const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId, endSceneNumber);
       relocateBoardsForRenumber(p, oldNumbers);
     })
   );
@@ -1586,6 +1485,32 @@ function registerIpc() {
       throw new Error(friendlyApiError(e));
     }
     return productions.loadProduction(id) ?? p;
+  }
+
+  /** Video-job runner: generations run CONCURRENTLY (submit + 20-min poll off
+   *  the queue) so N shots/blocks can render at once; only the short
+   *  load→rebase→save commit rides the per-production FIFO. Each job mutates
+   *  its own loaded copy, so concurrent jobs never share objects — the commit
+   *  replays only that job's field diffs onto the freshest disk state. */
+  async function runVideoJob(
+    id: string,
+    label: string,
+    fn: (p: Production, emit: (m: string, l?: ProductionEvent["level"]) => void) => Promise<void>
+  ): Promise<Production> {
+    const snap = productions.loadProduction(id);
+    if (!snap) throw new Error("Production not found.");
+    productionEmit(id, `${label}…`);
+    const before = structuredClone(snap);
+    try {
+      await fn(snap, (m, l) => productionEmit(id, m, l));
+    } catch (e) {
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    await enqueueProduction(id, async () => {
+      productions.saveProduction(rebaseProduction(before, snap));
+    });
+    return productions.loadProduction(id) ?? snap;
   }
 
   // Step 3: storyboard frame generation (batched or single-shot). In-app
@@ -2054,7 +1979,7 @@ function registerIpc() {
     }
   });
 
-  handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?: string) => {
+handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -2065,6 +1990,24 @@ function registerIpc() {
       const image = nativeImage.createFromPath(assetPath(p, rel)).resize({ width: 480 });
       return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
     } catch { return null; }
+  });
+
+  // Step 3: re-link broken storyboard image paths — after board files were
+  // moved/renamed externally (or a production folder was re-registered), a
+  // shot's artwork/history/node-graph generation paths can point at files that
+  // no longer exist. Repoints every broken path to the newest frame present in
+  // that shot's board folder; valid paths are untouched.
+  handle("production:refreshBoardLinks", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const repaired = refreshBoardLinks(p);
+    if (repaired > 0) {
+      productions.saveProduction(p);
+      productionEmit(id, `Refresh storyboard images: re-linked ${repaired} broken frame path(s) to files on disk.`, "done");
+    } else {
+      productionEmit(id, "Refresh storyboard images: no broken links — every frame path already resolves.", "info");
+    }
+    return p;
   });
 
   handle("production:deleteBoardImage", (_e, id: string, shotId: string) => {
@@ -2098,7 +2041,7 @@ function registerIpc() {
   // as visual references; the finished clip is stored under videosDir and
   // played by the animatic timeline for this shot's duration window.
   handle("production:generateVideo", (_e, id: string, shotId: string, opts: VideoGenOptions) =>
-    runProductionJob(id, `Generating a video for a shot`, async (p, emit) => {
+    runVideoJob(id, `Generating a video for a shot`, async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       if (!shot.artwork) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
@@ -2110,7 +2053,7 @@ function registerIpc() {
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await media().generateVideoClip(p, shot, clean, emit);
+      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit);
       if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
       shot.videoPath = rel;
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
@@ -2154,7 +2097,7 @@ function registerIpc() {
   // connected, otherwise the shot's current frame. The clip is stored on the
   // node; it becomes shot.videoPath only when the node is piped to the output.
   handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[] }) =>
-    runProductionJob(id, "generating a video (node graph)", async (p, emit) => {
+    runVideoJob(id, "generating a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       const clean: VideoGenOptions = {
@@ -2180,7 +2123,7 @@ function registerIpc() {
       }
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
-      const { rel } = await media().generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
+      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
       if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath);
       emit(`Shot ${shot.number}: node video ready.`, "done");
@@ -2234,7 +2177,7 @@ function registerIpc() {
   // match in deriveTweenBlocks. The clip lands on the block's history — it
   // joins the continuous output only through production:stitchTween.
   handle("production:generateTweenBlock", (_e, id: string, shotId: string, blockId: string, opts: { model?: string; resolution?: string; durationSec?: number }) =>
-    runProductionJob(id, "generating an in-between", async (p, emit) => {
+    runVideoJob(id, "generating an in-between", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       syncTweenBlocks(p, shot);
@@ -2252,7 +2195,7 @@ function registerIpc() {
         prompt,
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await media().generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
+      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
       recordTweenBlockGen(block, rel, prompt, clean.model);
       emit(`Shot ${shot.number}: in-between ready — pick it in the block's dropdown to preview.`, "done");
     })
@@ -2896,6 +2839,46 @@ function registerIpc() {
     try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already gone */ }
   });
 
+  // Step 2: rescan referencesDir — adopt images the user dropped into the
+  // folder externally. Every image file no reference/character/product claims
+  // becomes a reference (name from the filename); a same-name reference with
+  // no image is filled in instead of duplicated.
+  handle("production:scanReferencesFolder", (_e, id: string): Production | null => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const dir = p.assets.referencesDir;
+    const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+    let rels: string[] = [];
+    try {
+      rels = fs.readdirSync(assetPath(p, dir))
+        .filter((f) => IMAGE_FILE.test(f))
+        .map((f) => `${dir}/${f}`);
+    } catch { /* missing folder — nothing to adopt */ }
+    const orphans = productions.unclaimedReferenceFiles(rels, p);
+    for (const rel of orphans) {
+      const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
+      const empty = (p.references ?? []).find((r) => !r.imagePath && r.name.trim().toLowerCase() === name.toLowerCase());
+      if (empty) {
+        empty.imagePath = rel;
+        empty.artwork = undefined;
+      } else {
+        p.references = [...(p.references ?? []), {
+          id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+          name,
+          imagePath: rel,
+          shotIds: [],
+        }];
+      }
+    }
+    if (orphans.length > 0) {
+      productions.saveProduction(p);
+      productionEmit(id, `Rescanned ${dir}/ — adopted ${orphans.length} reference image${orphans.length === 1 ? "" : "s"}.`, "done");
+    } else {
+      productionEmit(id, `Rescanned ${dir}/ — no new reference images.`);
+    }
+    return p;
+  });
+
   // Step 4: read the imported music file as a data URL (for the inline
   // player and the animatic AudioContext source).
   handle("production:musicFile", (_e, id: string) => {
@@ -3188,6 +3171,7 @@ function createWindow() {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
   if (saved?.isMaximized) win.maximize();
@@ -3246,8 +3230,13 @@ function createWindow() {
 
   // External links open in the default browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://")) shell.openExternal(url);
+    if (/^https?:/.test(url)) void shell.openExternal(url);
     return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (e, url) => {
+    const devUrl = process.env.ELECTRON_RENDERER_URL;
+    const trusted = devUrl ? url.startsWith(devUrl) : url.startsWith("file://");
+    if (!trusted) e.preventDefault();
   });
 
   // Right-click context menu: native edit menu for inputs/textareas (Cut/Copy/
@@ -3292,6 +3281,7 @@ app.whenReady().then(async () => {
   seedSkills(path.join(app.getPath("userData"), "skills"), bundledSkillsDir);
   registerMediaProtocol();
   registerIpc();
+  installCsp();
   createWindow();
   // Connect MCP servers in the background; don't block window startup.
   void mcp.reload().catch(() => {});

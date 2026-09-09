@@ -1989,6 +1989,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   user-select: none;
 }
 .shot-drag-handle:active { cursor: grabbing; }
+.shot-drag-handle { touch-action: none; }
 .shot-row:hover .shot-drag-handle { opacity: 1; color: var(--accent); border-color: var(--border); background: var(--bg-raised); }
 .shot-row.dragging { opacity: 0.4; }
 .shot-row.empty-drop { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); font-size: 0.78rem; }
@@ -2043,6 +2044,13 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-row, .shot-scene { transition: transform 0.15s ease; }
 .shot-row:not(.head):has(+ .shot-insert-zone:hover),
 .shot-scene:has(+ .scene-insert-zone:hover) { transform: translateY(-10px); }
+/* While a shot is dragged the add popups stand down: the hover gaps go inert
+   so no "+" pops and no push-apart slide fires mid-drag, and the scene-boundary
+   gaps stop intercepting the drag entirely. */
+.shot-table.dragging .shot-insert-zone,
+.shot-table.dragging .scene-insert-zone { pointer-events: none; }
+.shot-table.dragging .shot-row,
+.shot-table.dragging .shot-scene { transform: none; transition: none; }
 /* Explicit between-row dropzones — collapsed when idle, expanded when dragging */
 .shot-drop-zone { height: 10px; margin: 0; border-radius: 6px; border: 1px dashed transparent; display: flex; align-items: center; justify-content: center; transition: height 0.12s, background 0.12s, border-color 0.12s; overflow: hidden; }
 .shot-drop-zone:not(.idle) { border-color: color-mix(in srgb, var(--border) 70%, transparent); background: color-mix(in srgb, var(--bg-raised) 50%, transparent); }

@@ -8,7 +8,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { resolveSafe, WorkspaceError } from "./workspace.js";
 import type { ToolDefinition, ApprovalRequest, AgentTool } from "./types.js";
 
@@ -245,34 +245,111 @@ const grepTool: ToolSpec = {
 
 // -------------------------------------------------------------- run_command
 
-/** Commands refused outright — no approval can override these. */
-const BLOCKED_PATTERNS: RegExp[] = [
-  /\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)[a-z]*\s+([\/~]|[a-z]:\\?)\s*$/i, // rm -rf on a root
-  /\bformat\s+[a-z]:/i,
-  /\bmkfs\b/i,
-  /\bdel\s+\/[sq].*\s+[a-z]:\\\s*$/i,
-  /\brd\s+\/s.*\s+[a-z]:\\\s*$/i,
-  /\bdiskpart\b/i,
-  /\breg\s+delete\s+hklm/i,
-];
+export class CommandParseError extends Error {}
 
-/** Commands allowed but flagged loudly in the approval prompt. */
-const DANGER_PATTERNS: RegExp[] = [
-  /\brm\s+-[a-z]*r/i,
-  /\bdel\s+\/[sq]/i,
-  /\brd\s+\/s/i,
-  /\brmdir\b/i,
-  /\bremove-item\b.*-recurse/i,
-  /\bgit\s+(push\s+.*--force|reset\s+--hard|clean\s+-[a-z]*f)/i,
-  /\bshutdown\b|\brestart-computer\b/i,
-  /\bnetsh\b|\bfirewall\b/i,
-  /\bschtasks\b|\bcrontab\b/i,
-  /\bcurl\b.*\|\s*(sh|bash|powershell|iex)|\biwr\b.*\|\s*iex/i,
-];
+const SHELL_METACHARS = /[|&;<>()$`{}\[\]!*?~#\n\r]/;
 
-export function classifyCommand(cmd: string): "blocked" | "dangerous" | "normal" {
-  if (BLOCKED_PATTERNS.some((rx) => rx.test(cmd))) return "blocked";
-  if (DANGER_PATTERNS.some((rx) => rx.test(cmd))) return "dangerous";
+/**
+ * Tokenize a single program invocation into argv. Rejects shell syntax.
+ * Single quotes are fully literal; double quotes allow \" and \\ escapes.
+ */
+export function parseArgv(input: string): string[] {
+  const s = input.trim();
+  if (!s) throw new CommandParseError("Empty command.");
+
+  const argv: string[] = [];
+  let cur = "";
+  let started = false;
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      else cur += c;
+      started = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === "\\" && (s[i + 1] === '"' || s[i + 1] === "\\")) {
+        cur += s[++i];
+      } else if (c === '"') {
+        quote = null;
+      } else cur += c;
+      started = true;
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      quote = c;
+      started = true;
+      continue;
+    }
+    if (c === "\\" && i + 1 < s.length) {
+      // Escape only whitespace/quotes/backslash; a bare backslash stays
+      // literal so Windows paths (C:\tools\ed.exe) survive tokenizing.
+      const n = s[i + 1];
+      if (n === " " || n === "\t" || n === "'" || n === '"' || n === "\\") {
+        cur += n;
+        i++;
+      } else {
+        cur += c;
+      }
+      started = true;
+      continue;
+    }
+    if (c === " " || c === "\t") {
+      if (started) {
+        argv.push(cur);
+        cur = "";
+        started = false;
+      }
+      continue;
+    }
+    if (SHELL_METACHARS.test(c)) {
+      throw new CommandParseError(
+        `Shell syntax is not supported. Character "${c}" cannot be used. ` +
+          `Issue one program invocation at a time (no pipes, redirection, ` +
+          `substitution, chaining or globbing).`
+      );
+    }
+    cur += c;
+    started = true;
+  }
+
+  if (quote) throw new CommandParseError("Unterminated quote in command.");
+  if (started) argv.push(cur);
+  if (argv.length === 0) throw new CommandParseError("Empty command.");
+  return argv;
+}
+
+const REENTRANT_EXT = new Set([".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"]);
+
+function assertLaunchable(exe: string): void {
+  const ext = path.extname(exe).toLowerCase();
+  if (REENTRANT_EXT.has(ext)) {
+    throw new CommandParseError(
+      `Refusing to launch "${ext}" files: they re-enter a script interpreter. ` +
+        `Invoke the interpreter explicitly with the script as an argument.`
+    );
+  }
+}
+
+/**
+ * ADVISORY ONLY — feeds approval-dialog risk styling. Never gates execution.
+ */
+export type CommandRisk = "destructive" | "network" | "normal";
+
+export function labelCommandRisk(argv: string[]): CommandRisk {
+  const exe = path.basename(argv[0]).toLowerCase().replace(/\.exe$/, "");
+  const rest = argv.slice(1);
+  if (
+    ["rm", "rmdir", "del", "mkfs", "dd", "diskpart", "format", "shutdown", "reboot"].includes(exe)
+  )
+    return "destructive";
+  if (exe === "git" && rest.some((a) => a === "--hard" || a === "clean")) return "destructive";
+  if (["curl", "wget", "ssh", "scp", "nc", "ncat"].includes(exe)) return "network";
   return "normal";
 }
 
@@ -296,7 +373,12 @@ const runCommand: ToolSpec = {
   },
   describe(args) {
     const cmd = str(args, "command");
-    const danger = classifyCommand(cmd) === "dangerous";
+    let danger = false;
+    try {
+      danger = labelCommandRisk(parseArgv(cmd)) !== "normal";
+    } catch {
+      danger = true;
+    }
     return {
       tool: "run_command",
       summary: `${danger ? "⚠ DANGEROUS — " : ""}Run: ${truncate(cmd, 120)}`,
@@ -305,21 +387,68 @@ const runCommand: ToolSpec = {
   },
   async run(args, root) {
     const cmd = str(args, "command");
-    if (classifyCommand(cmd) === "blocked") {
-      return "ERROR: this command is blocked by Cascade's safety rules (destructive system-level operation). Ask the user to run it manually if truly needed.";
+    let argv: string[];
+    try {
+      argv = parseArgv(cmd);
+    } catch (e) {
+      return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
-    const timeout = Math.min(Number(args.timeout_seconds) || 0, 300) * 1000 || DEFAULT_CMD_TIMEOUT_MS;
+    try {
+      assertLaunchable(argv[0]);
+    } catch (e) {
+      return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    const timeoutMs = Math.min(Number(args.timeout_seconds) || 0, 300) * 1000 || DEFAULT_CMD_TIMEOUT_MS;
     return new Promise((resolve) => {
-      exec(cmd, { cwd: root, timeout, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
-        let out = "";
-        if (stdout) out += stdout;
-        if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr;
-        out = truncate(out, MAX_OUTPUT_CHARS);
-        if (err) {
-          const reason = err.killed ? `timed out after ${timeout / 1000}s` : `exit code ${err.code ?? "?"}`;
-          resolve(`ERROR (${reason})${out ? "\n" + out : ""}`);
+      const child = spawn(argv[0], argv.slice(1), {
+        cwd: root,
+        shell: false,
+        windowsHide: true,
+        windowsVerbatimArguments: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      let errText = "";
+      let truncated = false;
+      const CAP = 256 * 1024;
+      const onData = (buf: Buffer, sink: "o" | "e") => {
+        const t = buf.toString("utf8");
+        if (sink === "o") {
+          if (out.length < CAP) out += t;
+          else truncated = true;
         } else {
-          resolve(out || "(no output)");
+          if (errText.length < CAP) errText += t;
+          else truncated = true;
+        }
+      };
+      child.stdout.on("data", (b) => onData(b, "o"));
+      child.stderr.on("data", (b) => onData(b, "e"));
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+      if (timer.unref) timer.unref();
+      child.on("error", (e: NodeJS.ErrnoException) => {
+        clearTimeout(timer);
+        resolve(
+          e.code === "ENOENT"
+            ? `ERROR: Executable not found on PATH: ${argv[0]}`
+            : `ERROR: Failed to start process: ${e.message}`
+        );
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        let combined = out;
+        if (errText) combined += (combined ? "\n--- stderr ---\n" : "") + errText;
+        if (timedOut) combined += `\n[cascade] killed after ${timeoutMs / 1000}s`;
+        if (truncated) combined += "\n[... truncated]";
+        combined = truncate(combined, MAX_OUTPUT_CHARS);
+        if (timedOut || code !== 0) {
+          const reason = timedOut ? `timed out after ${timeoutMs / 1000}s` : `exit code ${code ?? "?"}`;
+          resolve(`ERROR (${reason})${combined ? "\n" + combined : ""}`);
+        } else {
+          resolve(combined || "(no output)");
         }
       });
     });

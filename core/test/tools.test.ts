@@ -82,8 +82,10 @@ describe("grep", () => {
 describe("run_command", () => {
   it("runs in the workspace cwd and captures output", async () => {
     fs.writeFileSync(path.join(root, "hello.txt"), "");
-    const cmd = process.platform === "win32" ? "dir /b" : "ls";
-    const res = await TOOLS.run_command.run({ command: cmd }, root);
+    // Shell builtins (dir/ls via cmd) are intentionally not launchable;
+    // run a real executable that lists the cwd instead.
+    fs.writeFileSync(path.join(root, "list.js"), "console.log(require('fs').readdirSync('.').join('\\n'))");
+    const res = await TOOLS.run_command.run({ command: "node list.js" }, root);
     expect(res).toContain("hello.txt");
   });
 

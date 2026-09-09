@@ -184,6 +184,22 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   return fresh;
 }
 
+/** Reference-image files (workspace-relative) that nothing on the production
+ *  claims yet — the input to the references-folder rescan. Characters,
+ *  products, and custom references claim their imagePath/mediaPath; everything
+ *  else in referencesDir is an orphan (e.g. an image dropped into the folder
+ *  externally) the rescan adopts as a new reference. */
+export function unclaimedReferenceFiles(files: string[], p: Production): string[] {
+  const claimed = new Set<string>();
+  for (const c of p.characters) if (c.imagePath) claimed.add(c.imagePath);
+  for (const c of p.products) if (c.imagePath) claimed.add(c.imagePath);
+  for (const r of p.references ?? []) {
+    if (r.imagePath) claimed.add(r.imagePath);
+    if (r.mediaPath) claimed.add(r.mediaPath);
+  }
+  return files.filter((f) => !claimed.has(f));
+}
+
 /** Walk every shot's artwork + history and convert any legacy PNG paths to
  *  the new JPEG layout. Returns true if anything changed. */
 function migrateBoardArtwork(p: Production): boolean {

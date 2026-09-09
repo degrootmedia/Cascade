@@ -1,11 +1,11 @@
 <!doctype html>
 <html>
   <head>
+    <!-- No CSP <meta> here on purpose: the policy response header installed
+      by the main process (see src/main/media-protocol.ts CSP_PROD) is the
+      single policy source. A second policy would intersect with it and
+      re-block cascade-media:/blob:/data: subresources. -->
     <meta charset="UTF-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:"
-    />
     <title>Cascade</title>
   </head>
   <body>

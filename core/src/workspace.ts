@@ -8,8 +8,10 @@
  */
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { promises as fsp } from "node:fs";
 
 export class WorkspaceError extends Error {}
+export class PathEscapeError extends Error {}
 
 /**
  * Resolve a model-supplied path safely inside the workspace root.
@@ -72,6 +74,41 @@ function nearestExistingAncestor(p: string): string | null {
     if (parent === cur) return null;
     cur = parent;
   }
+}
+
+/** Realpath the deepest existing ancestor so creation paths stay validated. */
+async function realpathDeepest(p: string): Promise<string> {
+  let cur = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(await fsp.realpath(cur), ...tail.reverse());
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT") throw e;
+      const parent = path.dirname(cur);
+      if (parent === cur) throw new PathEscapeError(`Cannot resolve path: ${p}`);
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Async realpath-based containment: confines `candidate` to `root` even
+ * across symlinks. Realpaths both sides; rejects prefix-sibling escapes.
+ */
+export async function resolveSafeAsync(root: string, candidate: string): Promise<string> {
+  if (typeof candidate !== "string" || candidate.length === 0) {
+    throw new PathEscapeError("path must be a non-empty string");
+  }
+  const realRoot = await fsp.realpath(path.resolve(root));
+  const abs = path.isAbsolute(candidate) ? candidate : path.join(realRoot, candidate);
+  const resolved = await realpathDeepest(abs);
+  if (resolved !== realRoot && !resolved.startsWith(realRoot + path.sep)) {
+    throw new PathEscapeError(`Path escapes workspace: ${candidate}`);
+  }
+  return resolved;
 }
 
 /** Filenames checked (in order) for per-directory instructions. */

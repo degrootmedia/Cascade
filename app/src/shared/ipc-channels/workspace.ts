@@ -1,0 +1,37 @@
+/** Workspace + settings + image-menu + models IPC channels. Fragment of ipcContract. */
+export const workspaceChannels = {
+  "workspace:pick": { method: "pickWorkspace", kind: "invoke" },
+  "workspace:pickSession": { method: "pickSessionWorkspace", kind: "invoke" },
+  "workspace:setSession": { method: "setSessionWorkspace", kind: "invoke" },
+  "workspace:setSessionNone": { method: "setSessionWorkspaceNone", kind: "invoke" },
+  "settings:clearWorkspace": { method: "clearDefaultWorkspace", kind: "invoke" },
+  "workspace:recent": { method: "getRecentWorkspaces", kind: "invoke" },
+  "workspace:current": { method: "getCurrentWorkspace", kind: "invoke" },
+} as const;
+
+export const settingsChannels = {
+  "settings:get": { method: "getSettings", kind: "invoke" },
+  "settings:setApiKey": { method: "setApiKey", kind: "invoke" },
+  "settings:setModel": { method: "setModel", kind: "invoke" },
+  "settings:setProvider": { method: "setProvider", kind: "invoke" },
+  "settings:setAccent": { method: "setAccent", kind: "invoke" },
+  "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
+  "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
+  "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
+  "settings:getEndFrameModels": { method: "getEndFrameModels", kind: "invoke" },
+  "settings:setEndFrameModels": { method: "setEndFrameModels", kind: "invoke" },
+  "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },
+  "settings:setHiddenMediaModels": { method: "setHiddenMediaModels", kind: "invoke" },
+  "settings:getModelKindOverrides": { method: "getModelKindOverrides", kind: "invoke" },
+  "settings:setModelKindOverrides": { method: "setModelKindOverrides", kind: "invoke" },
+  "settings:getMediaDefaults": { method: "getMediaDefaults", kind: "invoke" },
+  "settings:setMediaDefault": { method: "setMediaDefault", kind: "invoke" },
+  "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
+  "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
+  "image:showMenu": { method: "showImageMenu", kind: "invoke" },
+  "image:save": { method: "saveImage", kind: "invoke" },
+  "image:copy": { method: "copyImage", kind: "invoke" },
+  "image:editExternally": { method: "editImageExternally", kind: "invoke" },
+  "models:list": { method: "listModels", kind: "invoke" },
+  "credits:get": { method: "getCredits", kind: "invoke" },
+} as const;

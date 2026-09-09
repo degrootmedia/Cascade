@@ -1,5 +1,13 @@
 /** Types shared across main, preload, and renderer. */
 
+import { chatChannels } from "./ipc-channels/chat.js";
+import { workspaceChannels, settingsChannels } from "./ipc-channels/workspace.js";
+import { sessionChannels } from "./ipc-channels/sessions.js";
+import { mcpChannels } from "./ipc-channels/mcp.js";
+import { agentChannels } from "./ipc-channels/agents.js";
+import { productionChannels } from "./ipc-channels/production.js";
+import { ledgerChannels } from "./ipc-channels/ledger.js";
+
 export interface ApprovalRequestIpc {
   id: number;
   tool: string;
@@ -1028,6 +1036,12 @@ export interface CascadeApi {
    *  removed, so the references folder doesn't accumulate orphans. */
   removeReferenceFile(productionId: string, rel: string): Promise<void>;
   /**
+   * Step 2: rescan the production's referencesDir and adopt every on-disk
+   * image no reference/character/product points at yet — images dropped into
+   * the folder externally show up in the panel. Returns the updated production.
+   */
+  scanReferencesFolder(productionId: string): Promise<Production>;
+  /**
    * Step 1: ingest a script. `source` is an absolute file path or a Google
    * Docs share URL. Resolves to the updated production.
    */
@@ -1058,8 +1072,8 @@ export interface CascadeApi {
   deleteShot(productionId: string, shotId: string): Promise<Production>;
   /** Edit a shot's audio/visual text. */
   updateShot(productionId: string, shotId: string, patch: { audio?: string; visual?: string }): Promise<Production>;
-  /** Move a shot before another shot (or to the end when beforeShotId is null). Re-numbers and relocates board files. */
-  reorderShot(productionId: string, shotId: string, beforeShotId: string | null): Promise<Production>;
+  /** Move a shot before another shot (or to the end of the production when beforeShotId is null, or to the end of one scene when endSceneNumber is set). Re-numbers and relocates board files. */
+  reorderShot(productionId: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number): Promise<Production>;
   /** Start a production without a script: one scene with five blank shots (refuses when scenes already exist). */
   startBlank(productionId: string): Promise<Production>;
   /** Insert an empty scene after the given ordinal (0 = before the first, null = at the end); later scenes renumber. */
@@ -1108,13 +1122,22 @@ export interface CascadeApi {
    * <folder>/boards/import/ directory is scanned instead.
    */
   importBoards(productionId: string, files?: string[], shotId?: string): Promise<Production>;
-  /** Load a board frame as a data URL (thumbnail) for the contact sheet.
+/** Load a board frame as a data URL (thumbnail) for the contact sheet.
    *  `framePath` selects a frame from either generation node or legacy history;
    *  omit it for the current frame. */
   boardImage(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   /** Load a board frame at full resolution (no downscale) for the lightbox. */
   boardImageFull(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   boardThumbnail(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
+  /**
+   * Step 3: re-link broken storyboard image paths — after board files were
+   * moved/renamed externally (or a production folder was re-registered), a
+   * shot's `artwork`/history/node-graph generation paths can point at files
+   * that no longer exist. Each broken path is repointed to the newest
+   * `shot-<number>-*.jpg` present in that shot's board folder; valid paths are
+   * untouched. Returns the updated production.
+   */
+  refreshBoardLinks(productionId: string): Promise<Production>;
   deleteBoardImage(productionId: string, shotId: string): Promise<Production>;
   /**
    * Step 3: edit a shot's current frame via an image-input model — the frame
@@ -1318,171 +1341,14 @@ export interface IpcChannelSpec {
 }
 
 export const ipcContract = {
-  "chat:send": { method: "sendMessage", kind: "invoke" },
-  "chat:stop": { method: "stop", kind: "send" },
-  "chat:undo": { method: "undoLast", kind: "invoke" },
-  "chat:setPlanMode": { method: "setPlanMode", kind: "invoke" },
-  "chat:getPlanMode": { method: "getPlanMode", kind: "invoke" },
-  "approval:response": { method: "respondApproval", kind: "send" },
-  "display:sync": { method: "syncDisplay", kind: "send" },
-
-  "workspace:pick": { method: "pickWorkspace", kind: "invoke" },
-  "workspace:pickSession": { method: "pickSessionWorkspace", kind: "invoke" },
-  "workspace:setSession": { method: "setSessionWorkspace", kind: "invoke" },
-  "workspace:setSessionNone": { method: "setSessionWorkspaceNone", kind: "invoke" },
-  "settings:clearWorkspace": { method: "clearDefaultWorkspace", kind: "invoke" },
-  "workspace:recent": { method: "getRecentWorkspaces", kind: "invoke" },
-  "workspace:current": { method: "getCurrentWorkspace", kind: "invoke" },
-  "settings:get": { method: "getSettings", kind: "invoke" },
-  "settings:setApiKey": { method: "setApiKey", kind: "invoke" },
-  "settings:setModel": { method: "setModel", kind: "invoke" },
-  "settings:setProvider": { method: "setProvider", kind: "invoke" },
-  "settings:setAccent": { method: "setAccent", kind: "invoke" },
-  "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
-  "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
-  "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
-  "settings:getEndFrameModels": { method: "getEndFrameModels", kind: "invoke" },
-  "settings:setEndFrameModels": { method: "setEndFrameModels", kind: "invoke" },
-  "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },
-  "settings:setHiddenMediaModels": { method: "setHiddenMediaModels", kind: "invoke" },
-  "settings:getModelKindOverrides": { method: "getModelKindOverrides", kind: "invoke" },
-  "settings:setModelKindOverrides": { method: "setModelKindOverrides", kind: "invoke" },
-  "settings:getMediaDefaults": { method: "getMediaDefaults", kind: "invoke" },
-  "settings:setMediaDefault": { method: "setMediaDefault", kind: "invoke" },
-  "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
-  "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
-  "image:showMenu": { method: "showImageMenu", kind: "invoke" },
-  "image:save": { method: "saveImage", kind: "invoke" },
-  "image:copy": { method: "copyImage", kind: "invoke" },
-  "image:editExternally": { method: "editImageExternally", kind: "invoke" },
-  "models:list": { method: "listModels", kind: "invoke" },
-  "credits:get": { method: "getCredits", kind: "invoke" },
-
-  "sessions:list": { method: "listSessions", kind: "invoke" },
-  "sessions:load": { method: "loadSession", kind: "invoke" },
-  "sessions:activate": { method: "activateSession", kind: "send" },
-  "sessions:new": { method: "newSession", kind: "invoke" },
-  "sessions:current": { method: "getCurrentSessionId", kind: "invoke" },
-  "sessions:remove": { method: "removeSession", kind: "invoke" },
-  "sessions:rename": { method: "renameSession", kind: "invoke" },
-
-  "skills:list": { method: "listSkills", kind: "invoke" },
-  "skills:openFolder": { method: "openSkillsFolder", kind: "invoke" },
-  "workspace:instructions": { method: "getWorkspaceInstructions", kind: "invoke" },
-  "workspace:openInstructions": { method: "openWorkspaceInstructions", kind: "invoke" },
-
-  "mcp:getConfig": { method: "getMcpConfig", kind: "invoke" },
-  "mcp:setConfig": { method: "setMcpConfig", kind: "invoke" },
-  "mcp:status": { method: "getMcpStatus", kind: "invoke" },
-  "mcp:reload": { method: "reloadMcp", kind: "invoke" },
-  "mcp:onDemand": { method: "getMcpOnDemand", kind: "invoke" },
-  "mcp:setOnDemand": { method: "setMcpOnDemand", kind: "invoke" },
-  "media:listProviders": { method: "listMediaProviders", kind: "invoke" },
-  "media:getProvider": { method: "getMediaProvider", kind: "invoke" },
-  "media:setProvider": { method: "setMediaProvider", kind: "invoke" },
-
-  "agents:list": { method: "listAgents", kind: "invoke" },
-  "agents:get": { method: "getAgent", kind: "invoke" },
-  "agents:create": { method: "createAgent", kind: "invoke" },
-  "agents:update": { method: "updateAgent", kind: "invoke" },
-  "agents:uploadAvatar": { method: "uploadAgentAvatar", kind: "invoke" },
-  "agents:duplicate": { method: "duplicateAgent", kind: "invoke" },
-  "agents:remove": { method: "removeAgent", kind: "invoke" },
-  "agents:export": { method: "exportAgent", kind: "invoke" },
-  "agents:import": { method: "importAgent", kind: "invoke" },
-  "agents:getSessionAgent": { method: "getSessionAgent", kind: "invoke" },
-  "agents:setSessionAgent": { method: "setSessionAgent", kind: "invoke" },
-
-  /* Production Assistant */
-  "production:list": { method: "listProductions", kind: "invoke" },
-  "production:pickFolder": { method: "pickProductionFolder", kind: "invoke" },
-  "production:create": { method: "createProduction", kind: "invoke" },
-  "production:import": { method: "importProduction", kind: "invoke" },
-  "production:load": { method: "loadProduction", kind: "invoke" },
-  "production:save": { method: "saveProduction", kind: "invoke" },
-  "production:remove": { method: "removeProduction", kind: "invoke" },
-  "production:pickScriptFile": { method: "pickScriptFile", kind: "invoke" },
-  "production:pickReferenceImage": { method: "pickReferenceImage", kind: "invoke" },
-  "production:addReferenceMedia": { method: "addReferenceMedia", kind: "invoke" },
-  "production:addReferenceImage": { method: "addReferenceImage", kind: "invoke" },
-  "production:generateReferenceImage": { method: "generateReferenceImage", kind: "invoke" },
-  "production:generateCharacterSheet": { method: "generateCharacterSheet", kind: "invoke" },
-  "production:removeReferenceFile": { method: "removeReferenceFile", kind: "invoke" },
-  "production:ingest": { method: "ingestScript", kind: "invoke" },
-  "production:refineStyle": { method: "refineStylePrompt", kind: "invoke" },
-  "production:refineCharacterDescription": { method: "refineCharacterDescription", kind: "invoke" },
-  "production:generateStyles": { method: "generateStyles", kind: "invoke" },
-  "production:styleFromImage": { method: "styleFromImage", kind: "invoke" },
-  "production:insertShot": { method: "insertShot", kind: "invoke" },
-  "production:deleteShot": { method: "deleteShot", kind: "invoke" },
-  "production:updateShot": { method: "updateShot", kind: "invoke" },
-  "production:reorderShot": { method: "reorderShot", kind: "invoke" },
-  "production:startBlank": { method: "startBlank", kind: "invoke" },
-  "production:addScene": { method: "addScene", kind: "invoke" },
-  "production:generateBoards": { method: "generateBoards", kind: "invoke" },
-  "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
-  "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },
-  "production:recheckBoard": { method: "recheckBoard", kind: "invoke" },
-  "production:boardPrompts": { method: "exportBoardPrompts", kind: "invoke" },
-  "production:boardPrompt": { method: "getBoardPrompt", kind: "invoke" },
-  "production:updateBoardPrompt": { method: "updateBoardPrompt", kind: "invoke" },
-  "production:refreshBoardPrompt": { method: "refreshBoardPrompt", kind: "invoke" },
-  "production:openArtModels": { method: "listOpenArtModels", kind: "invoke" },
-  "media:listAllModels": { method: "listAllMediaModels", kind: "invoke" },
-  "production:openArtCredits": { method: "getOpenArtCredits", kind: "invoke" },
-  "production:pickBoardImages": { method: "pickBoardImages", kind: "invoke" },
-  "production:importBoards": { method: "importBoards", kind: "invoke" },
-  "production:boardImage": { method: "boardImage", kind: "invoke" },
-  "production:boardImageFull": { method: "boardImageFull", kind: "invoke" },
-  "production:boardThumbnail": { method: "boardThumbnail", kind: "invoke" },
-  "production:deleteBoardImage": { method: "deleteBoardImage", kind: "invoke" },
-  "production:editBoard": { method: "editBoard", kind: "invoke" },
-  "production:promoteBoardHistory": { method: "promoteBoardHistory", kind: "invoke" },
-  "production:planAnimatic": { method: "planAnimatic", kind: "invoke" },
-  "production:importVoiceover": { method: "importVoiceover", kind: "invoke" },
-  "production:voiceoverFile": { method: "voiceoverFile", kind: "invoke" },
-  "production:voiceoverUrl": { method: "voiceoverUrl", kind: "invoke" },
-  "production:removeVoiceover": { method: "removeVoiceover", kind: "invoke" },
-  "production:importMusic": { method: "importMusic", kind: "invoke" },
-  "production:musicFile": { method: "musicFile", kind: "invoke" },
-  "production:musicUrl": { method: "musicUrl", kind: "invoke" },
-  "production:removeMusic": { method: "removeMusic", kind: "invoke" },
-"production:generateVideo": { method: "generateVideo", kind: "invoke" },
-  "production:generateFrameNode": { method: "generateFrameNode", kind: "invoke" },
-  "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
-  "production:generateTweenBlock": { method: "generateTweenBlock", kind: "invoke" },
-  "production:stitchTween": { method: "stitchTween", kind: "invoke" },
-  "production:unstitchTween": { method: "unstitchTween", kind: "invoke" },
-  "production:generateEditNode": { method: "generateEditNode", kind: "invoke" },
-  "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
-  "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },
-  "production:videoUrl": { method: "videoUrl", kind: "invoke" },
-  "production:removeVideo": { method: "removeVideo", kind: "invoke" },
-  "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
-  "production:videoEndFrameModels": { method: "videoEndFrameModels", kind: "invoke" },
-  "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
-  "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
-  "production:generate3dModel": { method: "generate3dModel", kind: "invoke" },
-  "production:delete3dModel": { method: "delete3dModel", kind: "invoke" },
-  "production:save3dModel": { method: "save3dModel", kind: "invoke" },
-  "production:3daiCredits": { method: "get3daiCredits", kind: "invoke" },
-  "production:checkExternalEdits": { method: "checkExternalEdits", kind: "invoke" },
-  "production:assemblyBuild": { method: "assemblyBuild", kind: "invoke" },
-  "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
-  "production:assemblyOpenFolder": { method: "assemblyOpenFolder", kind: "invoke" },
-  "production:exportStoryboardPdf": { method: "exportStoryboardPdf", kind: "invoke" },
-  "production:pickStoryboardLogo": { method: "pickStoryboardLogo", kind: "invoke" },
-  "production:clearStoryboardLogo": { method: "clearStoryboardLogo", kind: "invoke" },
-  "production:storyboardLogoImage": { method: "storyboardLogoImage", kind: "invoke" },
-  "ledger:get": { method: "getLedger", kind: "invoke" },
-  "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
-  "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },
-  "ledger:reprice": { method: "repriceExpenses", kind: "invoke" },
-  "ledger:exportRules": { method: "exportExpensePriceRules", kind: "invoke" },
-  "ledger:importRules": { method: "importExpensePriceRules", kind: "invoke" },
-  "ledger:addManual": { method: "addManualExpense", kind: "invoke" },
-  "ledger:removeEntry": { method: "removeLedgerEntry", kind: "invoke" },
-  "ledger:openFile": { method: "openLedgerFile", kind: "invoke" },
+  ...chatChannels,
+  ...workspaceChannels,
+  ...settingsChannels,
+  ...sessionChannels,
+  ...mcpChannels,
+  ...agentChannels,
+  ...productionChannels,
+  ...ledgerChannels,
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */

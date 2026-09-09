@@ -116,6 +116,38 @@ describe("reorderShot", () => {
     expect(oldNumbers.get("id-0300")).toBe("0300");
     expect(validate(scenes)).toEqual([]);
   });
+
+  it("appends to the end of the named scene (trailing-gap drop)", () => {
+    const scenes = [scene(1, ["0100", "0200"]), scene(2, ["0300"])];
+    const { oldNumbers } = reorderShot(scenes, "id-0300", null, 1);
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0100", "id-0200", "id-0300"]);
+    expect(scenes[1].shots).toEqual([]);
+    expect(oldNumbers.get("id-0300")).toBe("0300");
+    expect(validate(scenes)).toEqual([]);
+  });
+
+  it("swaps two shots by appending the first to its own scene's end", () => {
+    const scenes = [scene(1, ["0100", "0200"])];
+    reorderShot(scenes, "id-0100", null, 1);
+    // Ids trade places; numbers re-derive on the grid in reading order.
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0200", "id-0100"]);
+    expect(scenes[0].shots.map((s) => s.number)).toEqual(["0100", "0200"]);
+    expect(validate(scenes)).toEqual([]);
+  });
+
+  it("drops a shot into an empty scene when endSceneNumber is set", () => {
+    const scenes = [scene(1, ["0100"]), scene(2, [])];
+    reorderShot(scenes, "id-0100", null, 2);
+    expect(scenes[0].shots).toHaveLength(0);
+    expect(scenes[1].shots.map((s) => s.number)).toEqual(["0100"]);
+    expect(validate(scenes)).toEqual([]);
+  });
+
+  it("restores and throws when the named scene does not exist", () => {
+    const scenes = [scene(1, ["0100", "0200"])];
+    expect(() => reorderShot(scenes, "id-0100", null, 7)).toThrow(/Scene 7 not found/);
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0100", "id-0200"]);
+  });
 });
 
 describe("numbering primitives", () => {

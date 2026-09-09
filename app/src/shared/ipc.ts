@@ -489,6 +489,25 @@ export const isImageModel = (m: Pick<OpenArtModelChoice, "imageInput" | "videoIn
 /** A model the video dropdowns offer — any video-capable generator. */
 export const isVideoModel = (m: Pick<OpenArtModelChoice, "videoInput">): boolean => m.videoInput;
 
+/** True when a shot carries anything worth confirming before delete: written
+ *  text/prompts or visible media/generations. Blank shots delete immediately;
+ *  anything with Audio/Visual direction, a custom prompt, a frame/history, a
+ *  video clip, node-graph generations, tween wiring/output, or a pending frame
+ *  job asks first. */
+export function shotHasContent(s: ProductionShot): boolean {
+  if (s.audio?.trim() || s.visual?.trim()) return true;
+  if (s.prompt?.trim() || s.graphVideoPrompt?.trim() || s.graphEditPrompt?.trim()) return true;
+  if (s.artwork || (s.artworkHistory?.length ?? 0) > 0) return true;
+  if (s.videoPath || s.graphTweenOutput || s.pendingImageGen) return true;
+  if ((s.graphImageGens?.length ?? 0) > 0) return true;
+  if ((s.graphVideoGens?.length ?? 0) > 0) return true;
+  if ((s.graphEditGens?.length ?? 0) > 0) return true;
+  if ((s.refIds?.length ?? 0) > 0) return true;
+  if ((s.graphTweenRefIds?.length ?? 0) > 0) return true;
+  if (s.graphTweenBlocks?.some((b) => b.prompt?.trim() || (b.gens?.length ?? 0) > 0)) return true;
+  return false;
+}
+
 /** Order a model list by the user's saved arrangement (Settings → Models &
  *  expenses drag-to-reorder). Models missing from the order keep their
  *  relative discovery order after the known ones, so a fresh model appends
@@ -901,6 +920,12 @@ export interface CascadeApi {
   setMediaModelOrder(ids: string[]): Promise<void>;
   /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
   showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
+  /** Download an image URL via the native save dialog (same as the native menu's "Save image as…"). */
+  saveImage(src: string): Promise<void>;
+  /** Copy the image under the given page coords to the clipboard (same as the native menu's "Copy image"). */
+  copyImage(x: number, y: number): Promise<void>;
+  /** Open an image in the external editor (same as the native menu's "Edit externally"). */
+  editImageExternally(opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
   onOpenSettings(cb: () => void): () => void;
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
@@ -1327,6 +1352,9 @@ export const ipcContract = {
   "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
   "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
   "image:showMenu": { method: "showImageMenu", kind: "invoke" },
+  "image:save": { method: "saveImage", kind: "invoke" },
+  "image:copy": { method: "copyImage", kind: "invoke" },
+  "image:editExternally": { method: "editImageExternally", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
 

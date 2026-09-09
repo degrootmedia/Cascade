@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 import { BoardCard } from "../src/renderer/src/components/production/boards.js";
+import { resetBoardThumbSchedulerForTests } from "../src/renderer/src/components/production/board-thumbs.js";
 
 const PRIMARY = "boards/0100/current.jpg";
 const EDIT = "boards/0100/edits/never primary #2.jpg";
@@ -49,6 +50,11 @@ describe("BoardCard history", () => {
   let root: Root;
   let currentPath: string;
   let restoreCascade: () => void;
+  // Thumbnails are scheduler-gated in production (first paint + viewport +
+  // queue) — the harness simulates an already-painted, visible card so tests
+  // observe the loaded state without real timers.
+  let prevRaf: unknown;
+  let prevObserver: unknown;
   const getBoardPrompt = vi.fn(async () => "A hero walks.");
   const boardThumbnail = vi.fn(async (_prodId: string, _shotId: string, path?: string): Promise<string | null> => thumbnail(path ?? currentPath));
   const boardImageFull = vi.fn(async (_prodId: string, _shotId: string, path?: string) => fullImage(path ?? currentPath));
@@ -57,7 +63,24 @@ describe("BoardCard history", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetBoardThumbSchedulerForTests();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    // setup-dom stubs rAF as a never-firing no-op — fire callbacks
+    // synchronously so the thumbnail scheduler's first-paint gate resolves
+    // in microtasks (which act drains), not macrotasks (which escape act).
+    prevRaf = (globalThis as Record<string, unknown>).requestAnimationFrame;
+    (globalThis as Record<string, unknown>).requestAnimationFrame = (cb: () => void) => {
+      cb();
+      return 0;
+    };
+    // jsdom has no IntersectionObserver — report every card as visible.
+    prevObserver = (globalThis as Record<string, unknown>).IntersectionObserver;
+    (globalThis as Record<string, unknown>).IntersectionObserver = class {
+      constructor(private cb: (entries: Array<{ isIntersecting: boolean }>) => void) {}
+      observe() { this.cb([{ isIntersecting: true }]); }
+      unobserve() {}
+      disconnect() {}
+    };
     // setup-dom supplies the DOM; BoardCard's prompt effect also needs this constructor.
     vi.stubGlobal("HTMLTextAreaElement", window.HTMLTextAreaElement);
     const previous = Object.getOwnPropertyDescriptor(window, "cascade");
@@ -78,6 +101,8 @@ describe("BoardCard history", () => {
     await act(async () => { root.unmount(); });
     host.remove();
     restoreCascade();
+    (globalThis as Record<string, unknown>).requestAnimationFrame = prevRaf;
+    (globalThis as Record<string, unknown>).IntersectionObserver = prevObserver;
     vi.unstubAllGlobals();
   });
 
@@ -90,6 +115,8 @@ describe("BoardCard history", () => {
         onTextChange: vi.fn(), showScript: false, selected: false,
         onDropFrame: vi.fn(), onPromoteHistory, onPromptFocus,
       }));
+      // Flush the scheduler chain (paint gate → queue → mocked IPC → setState).
+      await new Promise((r) => setTimeout(r, 20));
     });
   }
 
@@ -113,7 +140,9 @@ describe("BoardCard history", () => {
   it("browses never-primary edits and regular generations, loading and promoting exact paths", async () => {
     await render(makeShot());
     expectFrame(PRIMARY);
-    expect(getBoardPrompt).toHaveBeenCalledWith("prod1", "shot1");
+    // Prompts load on demand via the parent's focused-shot fetch — mounting a
+    // card must not fire its own prompt IPC.
+    expect(getBoardPrompt).not.toHaveBeenCalled();
     expect(boardThumbnail.mock.calls).toEqual([["prod1", "shot1"]]);
     expect(button(".prod-board-hist.prev").title).toBe("Previous frame (2 in history)");
     expect(host.querySelector(".prod-board-promote")).toBeNull();

@@ -10,6 +10,7 @@
  */
 import { Fragment, useRef, useState } from "react";
 import type { Production, ProductionScene } from "../../../shared/ipc.js";
+import { shotHasContent } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
 import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
@@ -276,6 +277,15 @@ function ShotRow({ prod, scene, index, onMutation, dragId, dragIdRef, onDragStar
 
   const isDragging = dragId === shot.id;
 
+  function handleDelete() {
+    // Include uncommitted drafts: typed-but-unblurred text still counts as content.
+    const effective = { ...shot, audio, visual };
+    if (shotHasContent(effective)) {
+      if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
+    }
+    onMutation(window.cascade.deleteShot(prod.meta.id, shot.id));
+  }
+
   return (
     <div className={"shot-row" + (dirty ? " dirty" : "") + (isDragging ? " dragging" : "")} onBlur={commit}>
       <button
@@ -313,7 +323,7 @@ function ShotRow({ prod, scene, index, onMutation, dragId, dragIdRef, onDragStar
         <button
           className="shot-delete"
           title="Delete this shot (numbers keep their gaps)"
-          onClick={() => onMutation(window.cascade.deleteShot(prod.meta.id, shot.id))}
+          onClick={handleDelete}
         >
           <XIcon size={13} />
         </button>

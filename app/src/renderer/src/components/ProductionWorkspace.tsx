@@ -1952,6 +1952,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length));
   }
 
+  /** Step 3: delete a shot from the storyboard (right-click menu). The
+   *  BoardCard confirms first when the shot has content. */
+  function deleteBoardShot(shotId: string) {
+    if (!prod) return;
+    apply(window.cascade.deleteShot(prod.meta.id, shotId));
+  }
+
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
    *  preview (speaker button on its timeline block). Affects only the shot's
    *  video track — the production-wide VO and music keep their sliders. */
@@ -2443,6 +2450,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                       reorderShot(src, targetId);
                     }}
                     onInsertAfter={() => insertBlankShot(flat, i)}
+                    onDelete={() => deleteBoardShot(shot.id)}
                   />
                 ))}
                 <button

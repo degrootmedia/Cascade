@@ -1252,8 +1252,21 @@ export function recordGraphEditGen(shot: ProductionShot, rel: string, prompt: st
   shot.graphEditGenIndex = 0;
 }
 
-/** Classic edits use the current board, not the edit node's previous source pipe. */
-export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+/** The edit-image prompt framing shared by the classic edit dialog and the
+ *  node-graph edit node: the source image occupies token 0, so `@[name]` tags
+ *  resolve from token 1. One builder so the two entries can't drift. */
+export function buildEditGenPrompt(editText: string): string {
+  return `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`;
+}
+
+/** Auto-wire the edit-image node's source pipe from the shot's current frame.
+ *  The classic edit dialog has no manual wiring UI, so it calls this before
+ *  generating: when the current frame is an image-node generation, point the
+ *  image-node selection at it and wire image→edit; when the output is a
+ *  reference, wire that reference into the edit node. Otherwise clear both
+ *  pipes and fall back to the current frame bytes (legacy stills, chained
+ *  edits). The node-graph path wires manually and never calls this. */
+export function wireEditNodeToCurrentFrame(shot: ProductionShot): void {
   const imageIndex = shot.artwork && !shot.graphEditGens?.some((g) => g.path === shot.artwork)
     ? shot.graphImageGens?.findIndex((g) => g.path === shot.artwork) ?? -1
     : -1;
@@ -1265,6 +1278,11 @@ export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: strin
   } else if (shot.graphOutputSource === "ref") {
     shot.graphEditSourceRefId = shot.graphOutputRefId;
   }
+}
+
+/** Classic edits use the current board, not the edit node's previous source pipe. */
+export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  wireEditNodeToCurrentFrame(shot);
   recordGraphEditGen(shot, rel, prompt, model);
   shot.graphEditPrompt = prompt;
   selectBoardFrame(shot, rel);

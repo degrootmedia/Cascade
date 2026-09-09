@@ -34,6 +34,8 @@ import {
   openArtPrompt,
   recordBoardArtwork,
   recordBoardEdit,
+  buildEditGenPrompt,
+  wireEditNodeToCurrentFrame,
   recordGraphEditGen,
   rebaseGenIndex,
   refTokens,
@@ -661,6 +663,52 @@ describe("recordBoardEdit", () => {
     expect(shot.graphEditImageSource).toBeUndefined();
     expect(shot.graphEditSourceRefId).toBeUndefined();
     expect(shot.artwork).toBe("edit.jpg");
+  });
+});
+
+describe("wireEditNodeToCurrentFrame", () => {
+  it("wires image→edit when the current frame is an image-node generation", () => {
+    const shot = makeShot({
+      artwork: "image-1.jpg",
+      graphImageGens: [
+        { path: "image-0.jpg", prompt: "p0", model: "m", at: "" },
+        { path: "image-1.jpg", prompt: "p1", model: "m", at: "" },
+      ],
+      graphImageGenIndex: 0,
+    });
+    wireEditNodeToCurrentFrame(shot);
+    expect(shot.graphImageGenIndex).toBe(1);
+    expect(shot.graphEditImageSource).toBe(true);
+    expect(shot.graphEditSourceRefId).toBeUndefined();
+  });
+
+  it("wires the output reference into the edit node", () => {
+    const shot = makeShot({ artwork: "ref-frame.jpg", graphOutputSource: "ref", graphOutputRefId: "ref-1" });
+    wireEditNodeToCurrentFrame(shot);
+    expect(shot.graphEditSourceRefId).toBe("ref-1");
+    expect(shot.graphEditImageSource).toBeUndefined();
+  });
+
+  it("clears pipes for legacy artwork so generation falls back to the current frame", () => {
+    const shot = makeShot({
+      artwork: "legacy.jpg",
+      graphImageGens: [{ path: "unrelated.jpg", prompt: "p", model: "m", at: "" }],
+      graphEditImageSource: true,
+      graphEditSourceRefId: "stale-ref",
+    });
+    wireEditNodeToCurrentFrame(shot);
+    expect(shot.graphEditImageSource).toBeUndefined();
+    expect(shot.graphEditSourceRefId).toBeUndefined();
+  });
+});
+
+describe("buildEditGenPrompt", () => {
+  it("frames the source as token 0 and caps instructions at 1200 chars", () => {
+    const prompt = buildEditGenPrompt("make it night");
+    expect(prompt).toContain("@image1");
+    expect(prompt).toContain("make it night");
+    const long = buildEditGenPrompt("x".repeat(2000));
+    expect(long.endsWith("x".repeat(1200))).toBe(true);
   });
 });
 

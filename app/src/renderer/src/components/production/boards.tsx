@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
-import { isImageModel, isVideoModel } from "../../../../shared/ipc.js";
+import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault } from "./media-defaults.js";
+import { afterFirstPaint, queueBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
-import { useImageContextMenu } from "../image-context-menu.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter }: {
+export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -48,12 +48,17 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   isDragging?: boolean;
   /** Insert a blank shot in the gutter after this card (Step 3 hover "+"). */
   onInsertAfter?: () => void;
+  /** Delete this shot (right-click menu). Confirmation is handled here when
+   *  the shot has content; blank shots delete immediately. */
+  onDelete?: () => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState<string>("");
+  // The prompt lives in the parent (focused-shot) fetch — every card firing
+  // its own getBoardPrompt IPC at mount was N wasted round-trips per page
+  // open, and the value was never even read (focusPrompt ignores it).
   // Shot direction edited on the card (Step 1's table edits the same fields).
   // Local drafts commit on blur; incoming saves resync while not focused.
   const [audio, setAudio] = useState(shot.audio);
@@ -78,15 +83,41 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   const histLen = history.length;
   const histIdx = historyPath && history.includes(historyPath) ? history.indexOf(historyPath) : null;
   const histPath = histIdx === null ? null : history[histIdx];
+  // Thumbnails load icons-first through a narrow queue: each card waits for
+  // first paint (so the icon <img>s committed in the same render win the
+  // race to the screen) AND for the card to near the viewport, then takes
+  // one of 4 queue slots — N cards no longer slam N parallel IPC resizes at
+  // mount while icons are still decoding.
+  const cardRef = useRef<HTMLElement>(null);
   useEffect(() => {
     let live = true;
     setImg(null);
     setHistoryPath(null);
     setHistCache({});
     setVideoFailed(false);
-    if (shot.artwork) {
-      window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => { if (live) setImg(d); }).catch(() => {});
+    if (!shot.artwork) return () => { live = false; };
+    const load = () => {
+      if (!live) return;
+      void afterFirstPaint().then(() => {
+        if (!live) return;
+        void queueBoardThumb(() => window.cascade.boardThumbnail(prod.meta.id, shot.id))
+          .then((d) => { if (live) setImg(d); })
+          .catch(() => {});
+      });
+    };
+    const el = cardRef.current;
+    if (typeof IntersectionObserver === "function" && el) {
+      const io = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((e) => e.isIntersecting)) { io.disconnect(); load(); }
+        },
+        // Start early so scrolling never shows a blank frame.
+        { rootMargin: "600px" },
+      );
+      io.observe(el);
+      return () => { live = false; io.disconnect(); };
     }
+    load();
     return () => { live = false; };
   }, [prod.meta.id, shot.id, shot.artwork, shot.videoPath, bust]);
 
@@ -107,46 +138,72 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
 
   // Right-click → native image menu, with the full-res file pinned for "Edit externally".
   const relForExternal = histPath ?? shot.artwork;
-  const externalMenu = useImageContextMenu({
-    src: relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined),
-    productionId: relForExternal ? prod.meta.id : undefined,
-    relPath: relForExternal ?? undefined,
-  });
+  const nativeSrc = relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined);
 
-  // Load the effective prompt into the editor when this shot OR the design
-  // it derives from changes (styles, brand, references, shot text) — so
-  // editing the master style in Step 2 is reflected here immediately. The
-  // override (shot.prompt) still wins over the auto-derived prompt.
-  const designSig = JSON.stringify([
-    prod.styles ?? [],
-    prod.brand ?? {},
-    prod.characters.map((c) => [c.id, c.name, c.key, !!(c.artwork || c.imagePath)]),
-    prod.products.map((pr) => [pr.id, pr.name, !!(pr.artwork || pr.imagePath)]),
-    (prod.references ?? []).map((r) => [(r.shotIds ?? []).includes(shot.id), r.name, !!(r.artwork || r.imagePath || r.media)]),
-    shot.refIds ?? [],
-    shot.audio,
-    shot.visual,
-  ]);
+  // Right-click anywhere on the panel → custom menu with Delete shot (red).
+  // Text inputs keep their native edit menu, so clicks inside them are ignored.
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    let live = true;
-    window.cascade.getBoardPrompt(prod.meta.id, shot.id).then((p) => {
-      if (!live) return;
-      // While the user is typing in this card's editor, never replace the
-      // value: the debounced save changes shot.prompt, re-runs this effect,
-      // and a round-tripped (normalized) string would reset the textarea's
-      // DOM value and yank the caret to the end.
-      const el = document.activeElement;
-      if (el instanceof HTMLTextAreaElement
-        && (el.classList.contains("prod-board-prompt") || el.classList.contains("prod-prompt-drawer-text"))) return;
-      setPrompt(p ?? shot.prompt ?? "");
-    }).catch(() => {});
-    return () => { live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prod.meta.id, shot.id, shot.prompt, shot.style, shot.styleNone, designSig]);
+    if (!menu) return;
+    const close = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+  function openPanelMenu(e: React.MouseEvent) {
+    if (!onDelete) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest("input, textarea")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY });
+  }
+  function confirmDeleteShot() {
+    setMenu(null);
+    // Include uncommitted card drafts: typed-but-unblurred direction counts.
+    const effective = { ...shot, audio, visual };
+    if (shotHasContent(effective)) {
+      if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
+    }
+    onDelete?.();
+  }
+  function saveMenuImage() {
+    if (!nativeSrc) return;
+    const src = nativeSrc;
+    setMenu(null);
+    void window.cascade.saveImage(src);
+  }
+  function copyMenuImage() {
+    const pos = menu;
+    setMenu(null);
+    void window.cascade.copyImage(pos?.x ?? 0, pos?.y ?? 0);
+  }
+  function editMenuImageExternally() {
+    setMenu(null);
+    void window.cascade.editImageExternally({
+      src: nativeSrc,
+      productionId: relForExternal ? prod.meta.id : undefined,
+      relPath: relForExternal ?? undefined,
+    });
+  }
+
+  // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
+  // focused-shot effect) only when a card is clicked — see onPromptFocus.
 
   return (
     <figure
+      ref={cardRef}
       className={"prod-board" + (selected ? " selected" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
+      onContextMenu={onDelete ? openPanelMenu : undefined}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
           e.preventDefault();
@@ -193,7 +250,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
       )}
       <div
         className="prod-board-frame"
-        onClick={() => onPromptFocus(shot.id, prompt)}
+        onClick={() => onPromptFocus(shot.id, "")}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-cascade-frame")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
         }}
@@ -251,7 +308,10 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             muted
             loop
             playsInline
-            preload="metadata"
+            // Clips load on demand: every card preloading metadata at page
+            // open was N parallel media fetches racing the icons. The first
+            // hover play() pulls the stream, so the delay is one hover only.
+            preload="none"
             onLoadedMetadata={(e) => {
               // Nudge past 0 so the first frame renders while paused.
               try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {}
@@ -259,7 +319,8 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             onMouseEnter={() => { try { boardVideoRef.current?.play(); } catch {} }}
             onMouseLeave={() => { try { boardVideoRef.current?.pause(); } catch {} }}
             onError={() => setVideoFailed(true)}
-            onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, prompt); }}
+            onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+            onContextMenu={onDelete ? openPanelMenu : undefined}
             onDragStart={(e) => {
               // Carry this frame's identity so another frame can accept it as a reference.
               e.dataTransfer.setData(
@@ -276,8 +337,12 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
               src={shownImg}
               alt={`Shot ${shot.number}`}
               className="prod-board-frame-img"
-              onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, prompt); }}
-              onContextMenu={externalMenu.onContextMenu}
+              // Yield to icons and anything more critical: this image's IPC
+              // already waited for first paint + viewport + queue slot.
+              loading="lazy"
+              decoding="async"
+              onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+              onContextMenu={onDelete ? openPanelMenu : undefined}
               onDragStart={(e) => {
                 // Carry this frame's identity so another frame can accept it as a reference.
                 e.dataTransfer.setData(
@@ -286,7 +351,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
                 );
                 e.dataTransfer.effectAllowed = "copy";
               }}
-              title="Click to edit this shot's prompt — right-click for image options — or drag onto another frame as a reference"
+              title="Click to edit this shot's prompt — right-click for shot options — or drag onto another frame as a reference"
             />
           </>
         ) : (
@@ -401,6 +466,45 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             ) : null}
             <figcaption>Shot {shot.number} — click anywhere to close</figcaption>
           </figure>
+        </div>
+      )}
+      {menu && onDelete && (
+        <div
+          ref={menuRef}
+          className="session-context-menu"
+          style={{ position: "fixed", top: menu.y, left: menu.x, zIndex: 60 }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        >
+          {nativeSrc && (
+            <>
+              <button
+                className="ctx-item"
+                onClick={saveMenuImage}
+              >
+                Save image as…
+              </button>
+              <button
+                className="ctx-item"
+                onClick={copyMenuImage}
+              >
+                Copy image
+              </button>
+              <button
+                className="ctx-item"
+                onClick={editMenuImageExternally}
+              >
+                Edit externally
+              </button>
+              <div className="ctx-sep" />
+            </>
+          )}
+          <button
+            className="ctx-item danger"
+            onClick={confirmDeleteShot}
+          >
+            Delete shot…
+          </button>
         </div>
       )}
     </figure>
@@ -632,7 +736,8 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
           }}
         />
         <p className="hint">
-          The current frame is sent as the reference image. Ctrl+Enter to submit.
+          The current frame is sent as the reference image — this wires the image&rarr;edit nodes
+          and pipes the result to the output, same as the node view. Ctrl+Enter to submit.
           The edit runs in the background &mdash; you can close this and queue more.
           The previous version stays in this frame's history (use the arrows on the card).
         </p>

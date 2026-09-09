@@ -13,9 +13,9 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refToken, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
-import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex } from "./pipeline.js";
+import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, wireEditNodeToCurrentFrame, buildEditGenPrompt } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { resolvePromptRefs } from "./providers/refs.js";
@@ -933,6 +933,28 @@ function registerIpc() {
         ? { dataUrl: String(opts.dataUrl) }
         : undefined;
     popImageContextMenu(win, { src: opts.src, x: Number(opts.x) || 0, y: Number(opts.y) || 0, edit });
+  });
+
+  // Direct image actions for the storyboard panel's single custom menu (same
+  // behaviors as the native menu items, without popping a second menu).
+  handle("image:save", (_e, src: string) => {
+    if (!win || typeof src !== "string" || !src) return;
+    win.webContents.downloadURL(src);
+  });
+
+  handle("image:copy", (_e, x: number, y: number) => {
+    if (!win) return;
+    win.webContents.copyImageAt(Number(x) || 0, Number(y) || 0);
+  });
+
+  handle("image:editExternally", (_e, opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }) => {
+    if (!win) return;
+    void openImageExternally(win, {
+      src: typeof opts?.src === "string" ? opts.src : undefined,
+      productionId: typeof opts?.productionId === "string" ? opts.productionId : undefined,
+      relPath: typeof opts?.relPath === "string" ? opts.relPath : undefined,
+      dataUrl: typeof opts?.dataUrl === "string" ? opts.dataUrl : undefined,
+    });
   });
 
   handle("models:list", async (): Promise<import("../shared/ipc.js").ModelListResult> => {
@@ -2354,7 +2376,7 @@ function registerIpc() {
       const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
       emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}${extras.length ? ` (+${extras.length} reference${extras.length === 1 ? "" : "s"})` : ""}…`);
       const png = await gen(
-        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
+        buildEditGenPrompt(editText),
         [{ name: sourceName, dataUrl }, ...extras],
         shot
       );
@@ -2468,32 +2490,61 @@ function registerIpc() {
     return out.filter((id) => !hidden.has(id) && kinds[id] !== "image");
   });
 
-  // Step 3 per-frame edit: send the shot's current frame to OpenArt as a
-  // visual reference with the user's edit prompt, using an image-input model.
-  // The result becomes the new current frame; the previous one moves into the
-  // shot's history (browsable with the frame arrows).
+  // Step 3 per-frame edit (classic storyboard view): the same edit-image
+  // node the node graph runs, with the wiring done automatically. The edit
+  // node's source pipe is bound from the shot's current frame first
+  // (image→edit, or the output reference→edit), then generation uses that
+  // pipe — reference pipe — current frame, exactly like
+  // production:generateEditNode. The result is recorded on the edit node and
+  // piped to the output, so the node view shows the full wiring afterwards.
+  // The previous frame moves into the shot's history (frame arrows).
   handle("production:editBoard", (_e, id: string, shotId: string, model: string, prompt: string) =>
     runProductionStep(id, 3, "editing one board", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
-      if (!shot.artwork) throw new Error("Generate or import a frame for this shot first - there's nothing to edit.");
       const text = typeof prompt === "string" ? prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof model === "string" && model.trim() && model !== "auto" ? model.trim() : undefined;
       const gen = media().imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
       if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.`);
-      const buf = fs.readFileSync(assetPath(p, shot.artwork));
-      const ext = (path.extname(shot.artwork).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
-      const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
-      emit(`Shot ${shot.number}: editing frame${modelId ? ` via ${modelId}` : ""}...`);
+      // Auto-wire the edit node from the current frame before resolving the
+      // source, so the generation rides the same pipe the node view shows.
+      wireEditNodeToCurrentFrame(shot);
+      // Source: image-node pipe > reference pipe > the shot's current frame
+      // (same order as production:generateEditNode).
+      let dataUrl: string | undefined;
+      let sourceName = `Shot ${shot.number} frame`;
+      if (shot.graphEditImageSource) {
+        const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+        if (src) {
+          dataUrl = fileDataUrl(p, src) ?? undefined;
+          if (dataUrl) sourceName = "Piped frame";
+        }
+      }
+      if (!dataUrl && shot.graphEditSourceRefId) {
+        const pool = [
+          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
+          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+        ];
+        const ref = pool.find((r) => r.id === shot.graphEditSourceRefId);
+        if (ref?.artwork) {
+          dataUrl = ref.artwork;
+          sourceName = ref.name;
+        }
+      }
+      if (!dataUrl && shot.artwork) {
+        dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
+      }
+      if (!dataUrl) throw new Error("Generate or import a frame for this shot first - there's nothing to edit.");
+      emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}...`);
       // Resolve @[name] tags in the edit text against the production's artwork
       // so the cited references are uploaded alongside the frame. The frame
       // occupies @image1 (token 0), so tags start at 1.
       const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
       const png = await gen(
-        `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`,
-        [{ name: "Current frame", dataUrl }, ...extras],
+        buildEditGenPrompt(editText),
+        [{ name: sourceName, dataUrl }, ...extras],
         shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
@@ -2713,7 +2764,7 @@ function registerIpc() {
       let refs: { name: string; dataUrl: string }[];
       if (sourceRef) {
         const { resolved, extras } = resolvePromptRefs(p, text, 1);
-        promptText = `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${resolved.slice(0, 1200)}`;
+        promptText = buildEditGenPrompt(resolved);
         refs = [{ name: sourceRef.name, dataUrl: sourceDataUrl! }, ...extras];
       } else {
         const { resolved, extras } = resolvePromptRefs(p, text, 0);

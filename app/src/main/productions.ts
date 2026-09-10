@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks } from "./pipeline.js";
+import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -91,6 +91,15 @@ export function loadProduction(id: string): ProductionFile | null {
   // sees the new layout.
   if (migrateBoardArtwork(p)) store.save(p);
   return p;
+}
+
+/** Absolute paths of every artwork-bearing reference image (characters,
+ *  products, custom references) — feeds the thumbnail-cache regenerator so
+ *  the node graph's reference tiles are pre-generated for older projects. */
+export function referenceImagePaths(p: ProductionFile): string[] {
+  return [...(p.characters ?? []), ...(p.products ?? []), ...(p.references ?? [])]
+    .filter((r) => !!r.imagePath)
+    .map((r) => assetPath(p, r.imagePath!));
 }
 
 export function saveProduction(p: ProductionFile): void {

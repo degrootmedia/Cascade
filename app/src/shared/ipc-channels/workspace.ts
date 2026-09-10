@@ -28,6 +28,7 @@ export const settingsChannels = {
   "settings:setMediaDefault": { method: "setMediaDefault", kind: "invoke" },
   "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
   "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
+  "settings:regenerateThumbnails": { method: "regenerateThumbnails", kind: "invoke" },
   "image:showMenu": { method: "showImageMenu", kind: "invoke" },
   "image:save": { method: "saveImage", kind: "invoke" },
   "image:copy": { method: "copyImage", kind: "invoke" },

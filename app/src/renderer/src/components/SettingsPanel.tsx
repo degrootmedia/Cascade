@@ -635,6 +635,9 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   /** 3D AI Studio API key (design-page 3D model generator). */
   const [has3daiKey, setHas3daiKey] = useState(settings.has3daiApiKey);
   const [apiKey3dai, setApiKey3daiInput] = useState("");
+  /** Reference-thumbnail cache regeneration (Settings → General). */
+  const [thumbsBusy, setThumbsBusy] = useState(false);
+  const [thumbResult, setThumbResult] = useState<string | null>(null);
 
   const providerLabel = API_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
 
@@ -719,6 +722,21 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   async function pickWorkspace() {
     const dir = await window.cascade.pickWorkspace();
     if (dir) setWorkspace(dir);
+  }
+
+  /** Pre-generate the compressed reference thumbnails for every production. */
+  async function regenerateThumbs() {
+    if (thumbsBusy) return;
+    setThumbsBusy(true);
+    setThumbResult(null);
+    try {
+      const r = await window.cascade.regenerateThumbnails();
+      setThumbResult(`${r.projects} project${r.projects === 1 ? "" : "s"} · ${r.generated} created · ${r.fromDisk} reused${r.failed ? ` · ${r.failed} skipped` : ""}`);
+    } catch (e) {
+      setThumbResult(`Failed: ${String(e).replace(/^Error:\s*/, "")}`);
+    } finally {
+      setThumbsBusy(false);
+    }
   }
 
   async function changeModel(id: string) {
@@ -924,6 +942,18 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
             Open skills folder
           </button>
         </p>
+
+        <label>Reference thumbnails</label>
+        <p className="hint">
+          The node graph shows small compressed JPEGs of your references so large projects load fast. Pre-generate
+          them here for every project (re-running is cheap — valid thumbnails are reused, stale ones pruned).
+        </p>
+        <div className="row">
+          <button disabled={thumbsBusy} onClick={() => void regenerateThumbs()}>
+            {thumbsBusy ? "Generating…" : "Regenerate thumbnail cache"}
+          </button>
+          {thumbResult && <span className="hint" style={{ flex: 1 }}>{thumbResult}</span>}
+        </div>
 
         {error && <p className="error-text">{error}</p>}
 

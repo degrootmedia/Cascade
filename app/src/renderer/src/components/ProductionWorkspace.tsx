@@ -724,16 +724,17 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     await styleFromImageDataUrl(dataUrl);
   }
 
-  /** Create a pasted image as a new reference with an auto-generated name (Ref-001…). */
-  async function createReferenceFromFile(file: File, forcedName?: string) {
-    if (!prodRef.current) return;
+  /** Create a pasted image as a new reference with an auto-generated name (Ref-001…).
+   *  Returns the created reference (for the node graph to place it on the canvas). */
+  async function createReferenceFromFile(file: File, forcedName?: string): Promise<{ id: string; name: string; artwork: string } | null> {
+    if (!prodRef.current) return null;
     if (file.size > 15 * 1024 * 1024) {
       setErr("That image is larger than 15 MB — use a smaller one.");
-      return;
+      return null;
     }
     if (!file.type.startsWith("image/")) {
       setErr(`${file.name}: not an image file.`);
-      return;
+      return null;
     }
     const name = forcedName ?? nextRefName();
     let dataUrl: string;
@@ -741,11 +742,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       dataUrl = await fileToDataUrl(file);
     } catch {
       setErr("Couldn't read the pasted image.");
-      return;
+      return null;
     }
     const imagePath = await persistRefImage(dataUrl, name);
-    if (!imagePath) { setErr("Couldn't save the pasted image."); return; }
-    saveField({ references: [...(prodRef.current?.references ?? []), { id: uid("ref"), name, imagePath, shotIds: [] }] });
+    if (!imagePath) { setErr("Couldn't save the pasted image."); return null; }
+    const prodId = prodRef.current.meta.id;
+    const id = uid("ref");
+    saveField({ references: [...(prodRef.current?.references ?? []), { id, name, imagePath, shotIds: [] }] });
+    return { id, name, artwork: cascadeMedia(prodId, imagePath) };
   }
 
   function batchRefNames(count: number): string[] {
@@ -782,27 +786,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     return () => window.removeEventListener("paste", onPaste);
   }, [prod?.currentStep, prod?.references, prod?.meta.id]);
 
-  // Node graph: Ctrl+V with an image creates a reference (Ref-001…), same as the Design page.
-  useEffect(() => {
-    if (!graphShotId) return;
-    const onPaste = (e: ClipboardEvent) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      const files: File[] = [];
-      for (const item of Array.from(items)) {
-        if (item.kind === "file" && item.type.startsWith("image/")) {
-          const f = item.getAsFile();
-          if (f) files.push(f);
-        }
-      }
-      if (!files.length) return;
-      e.preventDefault();
-      const names = batchRefNames(files.length);
-      files.forEach((f, i) => void createReferenceFromFile(f, names[i]));
-    };
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, [graphShotId, prod?.references, prod?.meta.id]);
+  // Node-graph paste is owned by NodeGraphModal (it creates the reference via
+  // onDropFile and places the node on the canvas at the paste point).
 
   // In-betweener: which video models accept a dedicated end frame (live
   // capability data, warmed when the media models were listed, so this is
@@ -1293,11 +1278,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Create/reuse a dropped reference WITHOUT tagging the prompt — node-graph
    *  drops just add the reference node, and connecting it to the prompt is an
-   *  explicit socket action. */
-  function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): void {
-    if (!prod) return;
+   *  explicit socket action. Returns the reference id for canvas placement. */
+  function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): string | undefined {
+    if (!prod) return undefined;
+    const existing = (prod.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
     const references = upsertReference(name, ref);
     if (references) saveField({ references });
+    if (existing) return existing.id;
+    return references?.find((r) => r.name.trim().toLowerCase() === name.toLowerCase())?.id;
   }
 
   /** Save a dropped/picked reference image (inline data URL) into the
@@ -1330,11 +1318,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Step 3: any image/video/audio dropped into the node graph automatically
    *  becomes a reference: all files are written into the production's
    *  referencesDir on disk. The reference is NOT tagged into the prompt —
-   *  connecting it to the prompt node is an explicit socket action. */
-  async function addFileReference(shotId: string, file: File) {
-    if (!prod) return;
+   *  connecting it to the prompt node is an explicit socket action.
+   *  Returns the created reference so the graph can place its node. */
+  async function addFileReference(shotId: string, file: File): Promise<{ id: string; name: string; artwork: string; media?: "video" | "audio"; mediaPath?: string } | null> {
+    if (!prod) return null;
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
-    if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return; }
+    if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return null; }
     const name = file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference";
     try {
       if (kind === "image") {
@@ -1345,18 +1334,22 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           reader.readAsDataURL(file);
         });
         const imagePath = await persistRefImage(dataUrl, name);
-        if (!imagePath) { setErr("Couldn't save the dropped image."); return; }
-        saveRefOnly(name, { imagePath });
+        if (!imagePath) { setErr("Couldn't save the dropped image."); return null; }
+        const id = saveRefOnly(name, { imagePath });
+        if (!id) return null;
+        return { id, name, artwork: cascadeMedia(prod.meta.id, imagePath) };
       } else {
         const saved = await window.cascade.addReferenceMedia(prod.meta.id, file.name, file.type, await file.arrayBuffer());
-        if (!saved) { setErr("Couldn't save the dropped media file."); return; }
-        saveRefOnly(name, { media: saved.kind, mediaPath: saved.path });
+        if (!saved) { setErr("Couldn't save the dropped media file."); return null; }
+        const id = saveRefOnly(name, { media: saved.kind, mediaPath: saved.path });
+        if (!id) return null;
+        return { id, name, artwork: "", media: saved.kind, mediaPath: saved.path };
       }
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
+      return null;
     }
   }
-
 
   /** Step 3: persist a shot's editable board-prompt override (empty clears it).
    *  The returned production is merged into renderer state immediately —
@@ -2571,7 +2564,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onPromptChange={(value) => { setFocusedPrompt(value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
                   onStyleChange={(style) => setGraphStyle(graphShotId!, style)}
                   onToggleBrand={(include) => { if (graphShotId) void setBrandForShot(graphShotId, include); }}
-                  onDropFile={(file) => { if (graphShotId) void addFileReference(graphShotId, file); }}
+                  onDropFile={(file) => graphShotId ? addFileReference(graphShotId, file) : Promise.resolve(null)}
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
                   imageModels={imageModels}
                   videoModels={mediaModels.filter(isVideoModel)}

@@ -1320,6 +1320,10 @@ export interface CascadeApi {
   removeLedgerEntry(id: string): Promise<LedgerView>;
   /** Expenses: open the human-readable CSV ledger in the OS file manager. */
   openLedgerFile(): Promise<void>;
+  /** Pre-generate the node-graph reference-thumbnail cache for every
+   *  production (compressed JPEGs), reusing valid entries and pruning stale
+   *  ones. Counts: newly encoded / reused from cache / could not encode. */
+  regenerateThumbnails(): Promise<{ generated: number; fromDisk: number; failed: number; projects: number }>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
 }
 

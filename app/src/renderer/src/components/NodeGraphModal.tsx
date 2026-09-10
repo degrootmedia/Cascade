@@ -54,6 +54,18 @@ function graphMediaUrl(prodId: string, rel: string): string {
   return `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
 }
 
+/** Thumbnail variant of a reference's artwork URL: the cascade-media protocol
+ *  serves a small compressed JPEG for `?thumb=1`, so the node view never pulls
+ *  full-resolution reference files just to draw node tiles. Legacy inline data
+ *  URLs are already in-memory and pass through unchanged. The full-res
+ *  `artwork` string is kept separately for the zoom lightbox + context menu. */
+export function refThumbUrl(artwork: string): string {
+  if (artwork.startsWith("cascade-media://")) {
+    return `${artwork}${artwork.includes("?") ? "&" : "?"}thumb=1`;
+  }
+  return artwork;
+}
+
 /** Per-model/per-mode cache for video form options — the MCP form lookup is
  *  slow, and nodes re-render often, so fetch each combination once. */
 const videoOptionsCache = new Map<string, VideoModelOptions | null>();
@@ -74,7 +86,11 @@ export interface GraphRef {
 
 interface RefData extends Record<string, unknown> {
   name: string;
+  /** Full-resolution artwork (cascade-media URL or inline data URL) — used by
+   *  the zoom lightbox and the context menu. */
   artwork: string;
+  /** Small compressed JPEG for the node tile (`?thumb=1` cascade-media URL). */
+  thumb: string;
   /** Playable cascade-media URL for video references. */
   mediaUrl?: string;
   /** false = tag present in the prompt but no matching reference (dangling). */
@@ -192,17 +208,18 @@ type TweenFlowNode = Node<TweenData, "tween">;
  *  selected edit). A source with nothing resolvable yet contributes no entry
  *  (the socket stays blank, like a wired-but-artwork-less reference). */
 function tweenKeyframesFor(shot: ProductionShot, prodId: string, ids: string[], byRefId: Map<string, GraphRef>): { id: string; name: string; artwork: string }[] {
+  const entry = (id: string, name: string, artwork: string) => ({ id, name, artwork: refThumbUrl(artwork) });
   return ids.flatMap((id) => {
     if (id === TWEEN_KEY_IMGGEN) {
       const g = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
-      return g?.path ? [{ id, name: "Image-gen frame", artwork: graphMediaUrl(prodId, g.path) }] : [];
+      return g?.path ? [entry(id, "Image-gen frame", graphMediaUrl(prodId, g.path))] : [];
     }
     if (id === TWEEN_KEY_EDITGEN) {
       const g = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
-      return g?.path ? [{ id, name: "Edit frame", artwork: graphMediaUrl(prodId, g.path) }] : [];
+      return g?.path ? [entry(id, "Edit frame", graphMediaUrl(prodId, g.path))] : [];
     }
     const r = byRefId.get(id);
-    return r && r.artwork ? [{ id, name: r.name, artwork: r.artwork }] : [];
+    return r && r.artwork ? [entry(id, r.name, r.artwork)] : [];
   });
 }
 
@@ -260,7 +277,7 @@ const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) 
     <div className={"prod-graph-node prod-graph-ref" + (data.tagged ? "" : " avail") + (data.missing ? " missing" : "")}>
       <Handle type="source" position={Position.Right} className="socket-ref" />
       {data.artwork
-        ? <><img src={data.artwork} alt={data.name} draggable={false} onContextMenu={extMenu.onContextMenu} /></>
+        ? <><img src={data.thumb || data.artwork} alt={data.name} draggable={false} onContextMenu={extMenu.onContextMenu} /></>
         : data.media === "video" && data.mediaUrl
           ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
           : data.media
@@ -1116,7 +1133,7 @@ function ShelfGroup({ prodId, group, onCanvasRefIds }: {
             }}
           >
             {r.artwork
-              ? <img src={r.artwork} alt={r.name} draggable={false} />
+              ? <img src={refThumbUrl(r.artwork)} alt={r.name} draggable={false} />
               : <div className="prod-graph-shelf-blank">{r.media === "video" ? "▶" : r.media === "audio" ? "♪" : "?"}</div>}
             <span className="prod-graph-shelf-name" title={`Reference @[${r.name}]`}>@[{r.name}]</span>
             {onCanvas && <span className="prod-graph-shelf-check">on canvas</span>}
@@ -1201,8 +1218,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onPromptChange: (value: string) => void;
   onStyleChange: (style: string) => void;
   onToggleBrand: (include: boolean) => void;
-  /** A media file dropped onto the canvas — becomes a reference in the parent. */
-  onDropFile: (file: File) => void;
+  /** A media file dropped/pasted onto the canvas — becomes a reference in the
+   *  parent. Resolves to the created reference so the graph can place its node. */
+  onDropFile: (file: File) => Promise<GraphRef | null> | void;
   /** The style link was detached: the parent clears the shot's style flag so
    *  the storyboard dropdown shows None. */
   onStyleDetached: () => void;
@@ -1295,6 +1313,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  from being re-added by the reconcile effect while the parent's async prompt
    *  save is still in flight; re-dragging from the shelf clears the entry. */
   const removedRefIdsRef = useRef<Set<string>>(new Set());
+  /** Paste stagger — each pasted reference lands offset from the last so a
+   *  multi-image paste doesn't stack every node on the same point. */
+  const pasteCountRef = useRef(0);
 
   const showHint = useCallback((message: string) => {
     setDropHint(message);
@@ -1589,6 +1610,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       data: {
         name: ref.name,
         artwork: ref.artwork,
+        thumb: refThumbUrl(ref.artwork),
         media: ref.media,
         mediaUrl: ref.media === "video" && ref.mediaPath ? graphMediaUrl(prod.meta.id, ref.mediaPath) : undefined,
         tagged: false,
@@ -1746,6 +1768,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         data: {
           name: t.name,
           artwork: t.ref?.artwork ?? "",
+          thumb: refThumbUrl(t.ref?.artwork ?? ""),
           media: t.ref?.media,
           mediaUrl: t.ref?.media === "video" && t.ref?.mediaPath ? graphMediaUrl(prod.meta.id, t.ref.mediaPath) : undefined,
           missing: !t.ref,
@@ -1763,7 +1786,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: `ref:${r.id}`,
         type: "ref" as const,
         position: ORIGIN,
-        data: { name: r.name, artwork: r.artwork, media: r.media, mediaUrl: r.media === "video" && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, tagged: false, refId: r.id, onToggle: stable.onToggle, onZoom: stable.onZoom, onRemove: stable.onRemoveRef },
+        data: { name: r.name, artwork: r.artwork, thumb: refThumbUrl(r.artwork), media: r.media, mediaUrl: r.media === "video" && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, tagged: false, refId: r.id, onToggle: stable.onToggle, onZoom: stable.onZoom, onRemove: stable.onRemoveRef },
         deletable: true,
       })),
       build({
@@ -2365,6 +2388,46 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   useEffect(() => () => { if (hintTimer.current !== null) window.clearTimeout(hintTimer.current); }, []);
 
+  /** Where a pasted reference lands: the viewport center in flow coordinates,
+   *  staggered so multi-image pastes don't stack. Falls back to the reference
+   *  column when the flow transform isn't measurable yet. */
+  const pastePosition = useCallback(() => {
+    const p = flowRef.current?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+    const base = {
+      x: Number.isFinite(p?.x) ? (p?.x ?? REF_X) : REF_X,
+      y: Number.isFinite(p?.y) ? (p?.y ?? REF_COL_TOP) : REF_COL_TOP,
+    };
+    const n = pasteCountRef.current++;
+    return { x: base.x + (n % 5) * 32, y: base.y + (n % 5) * 32 };
+  }, []);
+
+  // Ctrl+V with an image creates a reference AND places its node on the
+  // canvas — same as dropping the file, but at the viewport center. Text
+  // pastes are untouched.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && (item.type.startsWith("image/") || item.type.startsWith("video/") || item.type.startsWith("audio/"))) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (!files.length) return;
+      e.preventDefault();
+      void (async () => {
+        for (const file of files) {
+          const ref = await onDropFile(file);
+          if (ref) addPlacedRef(ref, pastePosition());
+        }
+      })();
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [onDropFile, addPlacedRef, pastePosition]);
+
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     // Map the drop point into flow coordinates; fall back to the origin when
@@ -2386,13 +2449,19 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     const files = Array.from(e.dataTransfer.files);
     if (!files.length) return;
-    for (const file of files) {
-      if (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !file.type.startsWith("audio/")) {
-        showHint(`${file.name}: only image, video, and audio files become references.`);
-        continue;
+    void (async () => {
+      // Stagger multi-file drops like pastes so every node stays visible.
+      let n = 0;
+      for (const file of files) {
+        if (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !file.type.startsWith("audio/")) {
+          showHint(`${file.name}: only image, video, and audio files become references.`);
+          continue;
+        }
+        const ref = await onDropFile(file);
+        if (ref) addPlacedRef(ref, { x: pos.x + (n % 5) * 32, y: pos.y + (n % 5) * 32 });
+        n += 1;
       }
-      onDropFile(file);
-    }
+    })();
   }, [onDropFile, showHint, references, addPlacedRef, addTool]);
 
   return (

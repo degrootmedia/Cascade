@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles } from "../src/main/productions.js";
+import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceImagePaths } from "../src/main/productions.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 
@@ -327,6 +327,25 @@ describe("unclaimedReferenceFiles", () => {
     expect(unclaimedReferenceFiles(["references/a.png", "references/b.jpg"], p)).toEqual(["references/a.png", "references/b.jpg"]);
     const media = baseProduction({ references: [{ id: "r1", name: "Odd", mediaPath: "references/a.png" }] });
     expect(unclaimedReferenceFiles(["references/a.png", "references/b.jpg"], media)).toEqual(["references/b.jpg"]);
+  });
+});
+
+describe("referenceImagePaths", () => {
+  it("collects absolute asset paths for every artwork-bearing reference", () => {
+    const p = baseProduction({
+      characters: [{ id: "c1", name: "Mara", key: "", imagePath: "references/mara.png" }],
+      products: [{ id: "pr1", name: "Compass", imagePath: "references/compass.jpg" }],
+      references: [
+        { id: "r1", name: "Silk", imagePath: "references/silk.webp" },
+        { id: "r2", name: "Clip", media: "video", mediaPath: "references/clip.mp4" },
+        { id: "r3", name: "Blank" },
+      ],
+    });
+    expect(referenceImagePaths(p)).toEqual([
+      path.join("C:/workspace/prod", "references/mara.png"),
+      path.join("C:/workspace/prod", "references/compass.jpg"),
+      path.join("C:/workspace/prod", "references/silk.webp"),
+    ]);
   });
 });
 

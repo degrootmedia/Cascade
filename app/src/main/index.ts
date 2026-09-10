@@ -57,6 +57,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 import { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, serveMediaFile } from "./media-protocol.js";
+import { loadRefThumbnail, setThumbCacheDir, regenerateRefThumbnails } from "./thumbnails.js";
 import { validateExternalEditor, openWithExternalEditor } from "./external-editor.js";
 export { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, validateExternalEditor, openWithExternalEditor };
 
@@ -75,19 +76,32 @@ function installCsp(): void {
  * Serve `cascade-media://<productionId>/<urlencoded-relpath>` from disk by
  * streaming with Range support so <audio>/<video> can seek without buffering
  * whole multi-GB files in the main process. `assetPath` confines the path to
- * the production folder (realpath-verified).
+ * the production folder (realpath-verified). A `?thumb=1` query serves a
+ * small compressed JPEG instead of the full file — the node graph's reference
+ * tiles use it; zoom/lightbox URLs keep the original.
  */
 function registerMediaProtocol(): void {
   protocol.handle("cascade-media", async (req) => {
     let abs: string;
+    let thumb = false;
     try {
       const url = new URL(req.url);
       const p = productions.loadProduction(url.hostname);
       if (!p) return new Response("Unknown production", { status: 404 });
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       abs = assetPath(p, rel);
+      thumb = url.searchParams.get("thumb") === "1";
     } catch {
       return new Response("Forbidden", { status: 403 });
+    }
+    if (thumb) {
+      const jpeg = await loadRefThumbnail(abs);
+      if (jpeg) {
+        return new Response(new Uint8Array(jpeg), {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg", "Content-Length": String(jpeg.length), "Cache-Control": "no-store" },
+        });
+      }
     }
     return serveMediaFile(abs, req.headers.get("range"));
   });
@@ -972,6 +986,24 @@ function registerIpc() {
     ensureSkillsDir(dir);
     void shell.openPath(dir);
     resetAllAgents(); // reload skill list next message (cheap; also picks up edits)
+  });
+
+  // ---- reference thumbnails ----
+  // Pre-generate the compressed node-graph thumbnails for every production's
+  // reference images (Settings → Regenerate thumbnail cache), so older/larger
+  // projects don't pay the first-open decode cost. Idempotent + prunes stale
+  // entries whose source file is gone.
+  handle("settings:regenerateThumbnails", async () => {
+    const paths: string[] = [];
+    const projects = new Set<string>();
+    for (const meta of productions.listProductions()) {
+      const p = productions.loadProduction(meta.id);
+      if (!p) continue;
+      projects.add(p.meta.id);
+      paths.push(...productions.referenceImagePaths(p));
+    }
+    const counts = await regenerateRefThumbnails(paths);
+    return { ...counts, projects: projects.size };
   });
 
   // ---- per-directory instructions (CASCADE.md) ----
@@ -3279,6 +3311,7 @@ app.whenReady().then(async () => {
     ? path.join(process.resourcesPath, "skills")
     : path.join(app.getAppPath(), "skills");
   seedSkills(path.join(app.getPath("userData"), "skills"), bundledSkillsDir);
+  setThumbCacheDir(path.join(app.getPath("userData"), "thumb-cache"));
   registerMediaProtocol();
   registerIpc();
   installCsp();

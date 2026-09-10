@@ -64,3 +64,98 @@ paths that still resolve are left alone. Main saves + logs when any link was
 repaired and returns the production; the renderer refreshes state and busts
 every card thumbnail. Verified: `tsc --noEmit` clean, 487 tests pass, `npm run
 build` succeeds.
+
+# Node graph reference thumbnails (small compressed JPEGs)
+
+User request: on large projects the node view loads slowly. The node-graph
+reference thumbnails should be small compressed JPEGs — full resolution is
+only needed when the user enlarges with the zoom button, or when the image is
+actually sent in a prompt (which main reads from disk via `assetPath`, so it's
+unaffected by what the renderer displays).
+
+## Plan
+
+- [ ] `main/thumbnails.ts` (new deep module): `loadRefThumbnail(absPath)` —
+      soft-imports Electron's `nativeImage` (mcp.ts pattern), resizes to a
+      256px max edge, compresses to JPEG (~65), caches by path+mtime with a
+      bounded LRU-ish eviction. Returns `null` when nativeImage is absent
+      (tests) or the file isn't a decodable image — caller falls through.
+- [ ] Wire `?thumb=1` into the `cascade-media` protocol handler
+      (`registerMediaProtocol` in `main/index.ts`): query param routes to the
+      thumbnail module; on failure serves the full file as before. Full-res
+      URLs and prompt sends are untouched.
+- [ ] Renderer (`NodeGraphModal.tsx`): `refThumbUrl(artwork)` helper —
+      `cascade-media://…` URLs get `?thumb=1`, legacy inline data URLs pass
+      through. Reference nodes (`RefNodeView` + `buildDerived` +
+      `addPlacedRef`), the side shelf items, and tween keyframe tiles display
+      the thumb; the zoom lightbox + context menu keep the full `artwork`.
+- [x] Tests: renderer (`ref-thumb.test.ts`) — canvas node + shelf `<img>` srcs
+      carry `?thumb=1`, zoom opens the lightbox with the full-res URL; main
+      (`thumbnails.test.ts`) — `loadRefThumbnail` returns null without
+      nativeImage / for missing files (fallback path).
+- [x] Verify: `npm run typecheck`, `npm test`, `npm run build` in `app/`.
+
+## Review
+
+Done. The node view now loads compressed thumbnails, not full-res files:
+
+- **Protocol level** — `cascade-media://…?thumb=1` serves a small JPEG.
+  `thumbnails.ts` (`loadRefThumbnail`) soft-imports Electron's `nativeImage`
+  (mcp.ts pattern), resizes to a 256px long edge, compresses to JPEG q65, and
+  caches by path+mtime (bounded at 500). `registerMediaProtocol` routes the
+  query there and falls through to the full file on any failure (missing file,
+  non-decodable format like SVG, or nativeImage absent).
+- **Renderer** — `refThumbUrl` (`NodeGraphModal.tsx`) turns disk-backed
+  `cascade-media://` artwork into `?thumb=1` variants (legacy inline data URLs
+  pass through). Canvas ref nodes (`buildDerived`/`addPlacedRef` →
+  `RefData.thumb`), the side shelf, and tween keyframe tiles all display the
+  thumb. The zoom lightbox and the image context menu keep the full-res
+  `artwork`; prompt sends were never affected (main reads the original from
+  disk via `assetPath`).
+- Verified: `tsc --noEmit` clean, 497 tests pass (2 new files:
+  `ref-thumb.test.ts` + `thumbnails.test.ts`), `npm run build` succeeds.
+
+# Regenerate thumbnail cache button (older projects)
+
+User request: make the compressed-thumbnail improvement apply to older
+projects too — a button in Settings that pre-creates all the low-res
+thumbnails up front, so large projects don't pay the first-open decode cost
+and the cache survives restarts.
+
+## Plan
+
+- [x] `main/thumbnails.ts`: versioned durable cache under
+      `userData/thumb-cache/` — entries are `<sha1(abspath)>-<mtimeMs>-<size>.jpg`
+      (version in the filename ⇒ a cache hit is valid exactly while its source
+      is the same file; no stale-entry race). `loadRefThumbnail` now serves
+      memory → disk → encode; `regenerateRefThumbnails(paths)` pre-encodes
+      (idempotent, reuses valid entries, yields every 16 so the main process
+      stays responsive) and prunes entries whose source file is gone.
+- [x] `main/productions.ts`: pure `referenceImagePaths(p)` — absolute asset
+      paths for every artwork-bearing character/product/reference.
+- [x] Contract: `regenerateThumbnails(): Promise<{ generated; fromDisk;
+      failed; projects }>` on `CascadeApi` (`shared/ipc.ts`) +
+      `settings:regenerateThumbnails` channel (`ipc-channels/workspace.ts`).
+- [x] Main handler (`index.ts`): iterate `listProductions()` →
+      `referenceImagePaths` → `regenerateRefThumbnails`; wire
+      `setThumbCacheDir(userData/thumb-cache)` at startup.
+- [x] Settings UI: **Regenerate thumbnail cache** button + result line in the
+      General tab (after Skills).
+- [x] Tests: `thumbDiskPath` versioning + prune-keeps-resolving-entries +
+      failed-count (no nativeImage) in `thumbnails.test.ts`; `referenceImagePaths`
+      in `productions.test.ts`.
+- [x] Verify: `tsc --noEmit` clean, 501 tests pass, `npm run build`.
+
+## Review
+
+Done. Settings → General → **Regenerate thumbnail cache** pre-encodes the
+compressed JPEGs for every production's reference images (characters,
+products, custom refs) into a durable `userData/thumb-cache/` directory, so
+older/large projects load the node view fast on every launch — not just the
+first. Entries are versioned by source mtime+size in the filename
+(`<sha1>-<mtimeMs>-<size>.jpg`), so a hit is valid exactly while its source is
+unchanged; the button reuses valid entries (idempotent) and prunes ones whose
+source file is gone. `loadRefThumbnail` serves memory → disk → encode, so the
+`?thumb=1` protocol path works with or without the pre-warm. UI shows a result
+line (`N projects · X created · Y reused · Z skipped`). Verified:
+`tsc --noEmit` clean, 501 tests pass, `npm run build` succeeds.

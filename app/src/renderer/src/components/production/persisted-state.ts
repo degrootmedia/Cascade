@@ -1,22 +1,26 @@
 /**
  * Renderer-side UI state (open/collapsed panels) persisted in localStorage so
- * it survives step switches and app restarts. Only collapsed entries are
- * stored ("1"); absence means open, and opening removes the entry.
+ * it survives step switches and app restarts. Collapsed is stored as "1",
+ * explicitly opened as "0"; absence means `initial` (open by default), so
+ * callers can default large groups to collapsed without overriding the user's
+ * explicit choice.
  */
 import { useEffect, useState } from "react";
 
-export function usePersistedCollapsed(key: string): [boolean, (v: boolean) => void] {
+export function usePersistedCollapsed(key: string, initial = false): [boolean, (v: boolean) => void] {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem(key) === "1";
+      const v = window.localStorage.getItem(key);
+      if (v === "1") return true;
+      if (v === "0") return false;
+      return initial;
     } catch {
-      return false;
+      return initial;
     }
   });
   useEffect(() => {
     try {
-      if (collapsed) window.localStorage.setItem(key, "1");
-      else window.localStorage.removeItem(key);
+      window.localStorage.setItem(key, collapsed ? "1" : "0");
     } catch { /* ignore */ }
   }, [key, collapsed]);
   return [collapsed, setCollapsed];

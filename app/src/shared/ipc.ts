@@ -166,6 +166,8 @@ export interface ProductionMeta {
 export interface GraphLayout {
   /** Node positions keyed by graph node id (ref/composer/style/brand/output). */
   positions?: Record<string, { x: number; y: number }>;
+  /** Node sizes keyed by graph node id (currently the frame output node). */
+  sizes?: Record<string, { width: number; height: number }>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
 }

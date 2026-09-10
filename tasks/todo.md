@@ -159,3 +159,46 @@ source file is gone. `loadRefThumbnail` serves memory → disk → encode, so th
 `?thumb=1` protocol path works with or without the pre-warm. UI shows a result
 line (`N projects · X created · Y reused · Z skipped`). Verified:
 `tsc --noEmit` clean, 501 tests pass, `npm run build` succeeds.
+
+# Node-graph shelf performance (large projects)
+
+Opening the node editor in large projects is slow: the shelf renders every
+reference's `?thumb=1` tile at once (unbounded `cascade-media://` loads).
+
+## Plan
+
+- [ ] `production/persisted-state.ts`: `usePersistedCollapsed(key, initial?)` —
+      absence means `initial`; explicit open persists `"0"` (was: removed).
+- [ ] `NodeGraphModal.tsx`: `ShelfThumb` — `cascade-media://` thumbs load only
+      after first paint + when scrolled into view (IntersectionObserver,
+      200px margin) + max 4 in-flight (module semaphore, released on
+      load/error/unmount); data-URL artwork + canvas nodes render as today
+      (plus `loading="lazy"`).
+- [ ] `NodeGraphModal.tsx`: `ShelfGroup` windowing (first 24 + Show more),
+      auto-collapse groups over 24 refs, `query` filter prop; shelf header gets
+      a filter input.
+- [x] Tests in `app/test/graph-shelf.test.ts`: small groups still expanded,
+      large group windowed + auto-collapsed + show-more, filter narrows items.
+- [x] Verify: `npm run typecheck`, `npm test` in `app/`.
+
+## Review
+
+Done. The shelf no longer mounts every tile + thumbnail at once:
+
+- `ShelfThumb` (`NodeGraphModal.tsx`): disk-backed thumbs arm only when the
+  tile scrolls near the viewport (IntersectionObserver, 200px margin) and
+  while one of 4 load slots is free (module semaphore, released on
+  load/error/unmount); data-URL artwork renders immediately, rows always
+  render with a blank placeholder holding layout. Canvas ref tiles got
+  `loading="lazy"`. Dropped an earlier first-paint gate — viewport + slots
+  are the real wins, with no hang mode when rAF stalls.
+- `ShelfGroup`: renders the first 24 matching tiles + Show more, groups over
+  24 refs start collapsed (persisted choice still wins), shelf header has a
+  name filter (`qShelfMatch` shared with the no-match empty state).
+- `usePersistedCollapsed(key, initial?)`: absence means `initial`, explicit
+  open persists `"0"` (was: entry removed) so new defaults don't fight the
+  user's choice; existing callers keep `initial = false`.
+- Tests: new scale cases in `graph-shelf.test.ts`, lazy-gating case in
+  `ref-thumb.test.ts` (controllable IO stub; old immediacy assertions kept
+  for the no-IO environment). Verified: `tsc --noEmit` clean, 504 pass +
+  1 pre-existing skip.

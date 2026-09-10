@@ -13,6 +13,7 @@ import {
   Background,
   ConnectionLineType,
   Handle,
+  NodeResizer,
   Position,
   ReactFlow,
   useUpdateNodeInternals,
@@ -277,7 +278,7 @@ const RefNodeView = memo(function RefNodeView({ data }: NodeProps<RefFlowNode>) 
     <div className={"prod-graph-node prod-graph-ref" + (data.tagged ? "" : " avail") + (data.missing ? " missing" : "")}>
       <Handle type="source" position={Position.Right} className="socket-ref" />
       {data.artwork
-        ? <><img src={data.thumb || data.artwork} alt={data.name} draggable={false} onContextMenu={extMenu.onContextMenu} /></>
+        ? <><img src={data.thumb || data.artwork} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} /></>
         : data.media === "video" && data.mediaUrl
           ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
           : data.media
@@ -533,18 +534,21 @@ const BrandNodeView = memo(function BrandNodeView({}: NodeProps<BrandFlowNode>) 
   );
 });
 
-const OutputNodeView = memo(function OutputNodeView({ data }: NodeProps<OutputFlowNode>) {
+const OutputNodeView = memo(function OutputNodeView({ data, selected }: NodeProps<OutputFlowNode>) {
   return (
-    <div className="prod-graph-node prod-graph-output">
-      <Handle id="in-out" type="target" position={Position.Left} title="Primary output — pipe a generation or reference in" />
-      <div className="prod-graph-node-title">Frame output</div>
-      {data.previewKind === "video" && data.previewUrl
-        ? <video className="prod-graph-output-img nodrag nowheel" src={data.previewUrl} controls muted loop playsInline preload="metadata" />
-        : data.previewUrl
-          ? <img className="prod-graph-output-img" src={data.previewUrl} alt={`Shot ${data.shotNumber}`} draggable={false} />
-          : <div className="prod-graph-output-blank">No output yet</div>}
-      {!data.bound && <span className="prod-graph-output-hint">Pipe an image, video, or reference in to feed the output</span>}
-    </div>
+    <>
+      <NodeResizer isVisible={selected} minWidth={240} minHeight={200} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
+      <div className="prod-graph-node prod-graph-output">
+        <Handle id="in-out" type="target" position={Position.Left} title="Primary output — pipe a generation or reference in" />
+        <div className="prod-graph-node-title">Frame output</div>
+        {data.previewKind === "video" && data.previewUrl
+          ? <video className="prod-graph-output-img nodrag nowheel" src={data.previewUrl} controls muted loop playsInline preload="metadata" />
+          : data.previewUrl
+            ? <img className="prod-graph-output-img" src={data.previewUrl} alt={`Shot ${data.shotNumber}`} draggable={false} />
+            : <div className="prod-graph-output-blank">No output yet</div>}
+        {!data.bound && <span className="prod-graph-output-hint">Pipe an image, video, or reference in to feed the output</span>}
+      </div>
+    </>
   );
 });
 
@@ -1099,14 +1103,131 @@ export const graphNodeTypes = nodeTypes;
 /* Reference shelf                                                     */
 /* ------------------------------------------------------------------ */
 
+/** Shelf tiles rendered per group before their thumbnails may load — keeps
+ *  the initial DOM small so large projects open fast. */
+const SHELF_PAGE = 24;
+/** Groups bigger than this start collapsed (persisted choice still wins). */
+const SHELF_AUTO_COLLAPSE_AT = 24;
+/** Max simultaneous shelf thumbnail loads — each `?thumb=1` fetch is a main-
+ *  process disk read + resize, so unbounded parallel loads stall the open. */
+const MAX_CONCURRENT_SHELF_THUMBS = 4;
+
+let shelfThumbActive = 0;
+const shelfThumbWaiters: Array<() => void> = [];
+
+/** Resolve with a slot release once fewer than MAX_CONCURRENT_SHELF_THUMBS
+ *  shelf thumbnails are in flight. FIFO; the slot is held until the image
+ *  settles (load/error/unmount), not just until its request starts. */
+function acquireShelfThumbSlot(): Promise<() => void> {
+  return new Promise<() => void>((resolve) => {
+    const grant = () => {
+      shelfThumbActive += 1;
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        shelfThumbActive -= 1;
+        const next = shelfThumbWaiters.shift();
+        if (next) next();
+      });
+    };
+    if (shelfThumbActive < MAX_CONCURRENT_SHELF_THUMBS) grant();
+    else shelfThumbWaiters.push(grant);
+  });
+}
+
+/** Test seam — reset the thumbnail slot scheduler between cases. */
+export function resetShelfThumbSchedulerForTests(): void {
+  shelfThumbActive = 0;
+  shelfThumbWaiters.length = 0;
+}
+
+/** Shelf thumbnail: disk-backed (`cascade-media://`) artwork loads only once
+ *  the tile scrolls near the viewport and while a load slot is free — so
+ *  opening the graph in a large project no longer fires N thumbnail encodes
+ *  at once. Inline data URLs are already in memory and render immediately.
+ *  The tile row itself always renders; only the `src` is gated, with a blank
+ *  placeholder holding the layout until then. */
+function ShelfThumb({ src, alt }: { src: string; alt: string }) {
+  const direct = !src.startsWith("cascade-media://");
+  const [armed, setArmed] = useState(direct);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const releaseRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (direct) return;
+    let live = true;
+    let observer: IntersectionObserver | null = null;
+    const start = () => {
+      void acquireShelfThumbSlot().then((release) => {
+        if (!live) { release(); return; }
+        releaseRef.current = release;
+        setArmed(true);
+      });
+    };
+    const el = boxRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") start();
+    else {
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting) {
+              observer?.disconnect();
+              observer = null;
+              start();
+            }
+          }
+        },
+        { rootMargin: "200px" },
+      );
+      observer.observe(el);
+    }
+    return () => {
+      live = false;
+      observer?.disconnect();
+      releaseRef.current?.();
+      releaseRef.current = null;
+    };
+  }, [direct, src]);
+  const settle = () => {
+    releaseRef.current?.();
+    releaseRef.current = null;
+  };
+  return (
+    <div ref={boxRef} className="prod-graph-shelf-thumb" aria-hidden="true">
+      {armed
+        ? <img src={refThumbUrl(src)} alt={alt} draggable={false} loading="lazy" decoding="async" onLoad={settle} onError={settle} />
+        : <div className="prod-graph-shelf-blank">…</div>}
+    </div>
+  );
+}
+
+/** Case-insensitive shelf name filter shared by ShelfGroup and the shelf's
+ *  no-match empty state, so both agree on what "matching" means. */
+function qShelfMatch(refs: GraphRef[], query: string): GraphRef[] {
+  const q = query.trim().toLowerCase();
+  return q ? refs.filter((r) => r.name.toLowerCase().includes(q)) : refs;
+}
+
 /** One collapsible category in the side reference shelf. Collapsed state is
- *  persisted per production + category name (mirrors the references panel). */
-function ShelfGroup({ prodId, group, onCanvasRefIds }: {
+ *  persisted per production + category name (mirrors the references panel).
+ *  Only the first SHELF_PAGE matching tiles render; the rest load behind a
+ *  Show-more button so large groups don't mount hundreds of rows at once. */
+function ShelfGroup({ prodId, group, query, onCanvasRefIds }: {
   prodId: string;
   group: { title: string; refs: GraphRef[] };
+  query: string;
   onCanvasRefIds: ReadonlySet<string>;
 }) {
-  const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.graph.shelf.${group.title}`);
+  const [collapsed, setCollapsed] = usePersistedCollapsed(
+    `cascade.prod.${prodId}.graph.shelf.${group.title}`,
+    group.refs.length > SHELF_AUTO_COLLAPSE_AT,
+  );
+  const [shown, setShown] = useState(SHELF_PAGE);
+  const matching = qShelfMatch(group.refs, query);
+  const q = query.trim().toLowerCase();
+  useEffect(() => { setShown(SHELF_PAGE); }, [q, group.refs]);
+  if (q && matching.length === 0) return null;
+  const visible = matching.slice(0, shown);
   return (
     <div className="prod-graph-shelf-group">
       <button
@@ -1117,9 +1238,9 @@ function ShelfGroup({ prodId, group, onCanvasRefIds }: {
       >
         <svg className={"prod-graph-shelf-caret" + (collapsed ? " collapsed" : "")} viewBox="0 0 16 16" width="9" height="9" aria-hidden="true"><path d="M5 3l6 5-6 5V3z" fill="currentColor" /></svg>
         <span className="prod-graph-shelf-group-name">{group.title}</span>
-        <span className="prod-graph-shelf-count">{group.refs.length}</span>
+        <span className="prod-graph-shelf-count">{q ? `${matching.length}/${group.refs.length}` : group.refs.length}</span>
       </button>
-      {!collapsed && group.refs.map((r) => {
+      {!collapsed && visible.map((r) => {
         const onCanvas = onCanvasRefIds.has(r.id);
         return (
           <div
@@ -1133,13 +1254,21 @@ function ShelfGroup({ prodId, group, onCanvasRefIds }: {
             }}
           >
             {r.artwork
-              ? <img src={refThumbUrl(r.artwork)} alt={r.name} draggable={false} />
+              ? <ShelfThumb src={r.artwork} alt={r.name} />
               : <div className="prod-graph-shelf-blank">{r.media === "video" ? "▶" : r.media === "audio" ? "♪" : "?"}</div>}
             <span className="prod-graph-shelf-name" title={`Reference @[${r.name}]`}>@[{r.name}]</span>
             {onCanvas && <span className="prod-graph-shelf-check">on canvas</span>}
           </div>
         );
       })}
+      {!collapsed && matching.length > visible.length && (
+        <button
+          className="prod-graph-shelf-more nodrag"
+          onClick={() => setShown((n) => n + SHELF_PAGE)}
+        >
+          Show more ({matching.length - visible.length} remaining)
+        </button>
+      )}
     </div>
   );
 }
@@ -1297,6 +1426,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const saveLayoutRef = useRef(onSaveLayout);
   saveLayoutRef.current = onSaveLayout;
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set());
+  const [shelfQuery, setShelfQuery] = useState("");
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ name: string; artwork: string } | null>(null);
@@ -1814,6 +1944,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "output",
         type: "frame" as const,
         position: ORIGIN,
+        // Resizable: the saved size restores the user's last expansion, else
+        // the default width (the CSS min keeps the blank state legible).
+        style: initialLayout?.sizes?.output
+          ? { width: initialLayout.sizes.output.width, height: initialLayout.sizes.output.height }
+          : { width: 300 },
         data: (() => {
           // The output mirrors ONLY its pipe: the bound node's selected
           // generation, or the piped reference's own media. Nothing is piped
@@ -1865,7 +2000,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(hasEditTool ? toolPair("edit", ORIGIN, ORIGIN).map((n) => build(n)) : []),
       ...(hasTweenTool ? [build(tweenNode(ORIGIN))] : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode, imageGenBusy, videoGenBusy, editGenBusy]);
+  }, [unionTagged, tagged, taggedVideo, taggedEdit, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, editPromptValue, thumbnail, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditGens, shot.graphEditGenIndex, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, imageModels, videoModels, references, shot.graphEditImageSource, shot.graphEditSourceRefId, hasVideoTool, hasEditTool, hasTweenTool, toolPair, tweenNode, imageGenBusy, videoGenBusy, editGenBusy, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -1874,7 +2009,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [nodes, setNodes] = useState<GraphNode[]>(() => {
     const first = buildDerived();
     const saved = initialLayout?.positions;
-    return saved ? first.map((d) => ({ ...d, position: saved[d.id] ?? d.position })) : first;
+    const savedSizes = initialLayout?.sizes;
+    return first.map((d) => ({
+      ...d,
+      position: saved?.[d.id] ?? d.position,
+      ...(d.id === "output" && savedSizes?.output ? { style: { ...((d as { style?: Record<string, unknown> }).style as Record<string, unknown>), width: savedSizes.output.width, height: savedSizes.output.height } } : {}),
+    }));
   });
   const nodesRef = useRef(nodes);
   useEffect(() => {
@@ -1905,7 +2045,23 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
       if (equal) return old;
       changed = true;
-      return { ...d, position: old.position, selected: old.selected, measured: old.measured };
+      // A rebuilt node keeps its canvas geometry: position, selection, and —
+      // for the resizable frame output — the user's live size. Without this a
+      // fresh preview (new generation piped in) would snap the node back to
+      // its default width.
+      {
+        const keep = old as unknown as Record<string, unknown>;
+        const merged: Record<string, unknown> = {
+          ...(d as unknown as Record<string, unknown>),
+          position: old.position,
+          selected: old.selected,
+          measured: old.measured,
+        };
+        if (typeof keep.width === "number") merged.width = keep.width;
+        if (typeof keep.height === "number") merged.height = keep.height;
+        if (keep.style !== undefined) merged.style = keep.style;
+        return merged as GraphNode;
+      }
     });
     if (!changed && next.length === nodesRef.current.length && next.every((n, i) => n === nodesRef.current[i])) return;
     nodesRef.current = next;
@@ -2075,10 +2231,28 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     nodesRef.current = final;
     setNodes(final);
-    if (dragStop || removed.length > 0 || toolNodeIds.size > 0) {
+    // A resize reports as a `dimensions` change (committed when the drag
+    // ends) — persist the output node's size alongside positions so the
+    // expansion survives closing and reopening the graph.
+    const resized = changes.some((c) => c.type === "dimensions" || (c as { type: string }).type === "resize");
+    if (dragStop || removed.length > 0 || toolNodeIds.size > 0 || resized) {
       // One save per drag gesture. The state only ever contains live nodes,
       // so no pruning is needed for deleted references.
-      saveLayoutRef.current({ positions: Object.fromEntries(final.map((n) => [n.id, n.position])) });
+      const sizes: Record<string, { width: number; height: number }> = {};
+      for (const n of final) {
+        if (n.id !== "output") continue;
+        const w = (n as { width?: number }).width
+          ?? (n as { measured?: { width?: number } }).measured?.width
+          ?? (n as { style?: { width?: number } }).style?.width;
+        const h = (n as { height?: number }).height
+          ?? (n as { measured?: { height?: number } }).measured?.height
+          ?? (n as { style?: { height?: number } }).style?.height;
+        if (typeof w === "number" && typeof h === "number") sizes[n.id] = { width: Math.round(w), height: Math.round(h) };
+      }
+      saveLayoutRef.current({
+        positions: Object.fromEntries(final.map((n) => [n.id, n.position])),
+        ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
+      });
     }
   }, [videoGenActive, editGenActive, tweenActive, showHint]);
 
@@ -2497,12 +2671,25 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             <div className="prod-graph-shelf-head">
               <span className="prod-graph-shelf-title">References</span>
               <span className="prod-graph-shelf-hint">Drag onto the canvas to add</span>
+              {references.length > 0 && (
+                <input
+                  className="prod-graph-shelf-search nodrag"
+                  type="text"
+                  value={shelfQuery}
+                  onChange={(e) => setShelfQuery(e.target.value)}
+                  placeholder="Filter references…"
+                  aria-label="Filter references"
+                />
+              )}
             </div>
             <div className="prod-graph-shelf-list">
               {shelfGroups.map((group) => (
-                <ShelfGroup key={group.title} prodId={prod.meta.id} group={group} onCanvasRefIds={onCanvasRefIds} />
+                <ShelfGroup key={group.title} prodId={prod.meta.id} group={group} query={shelfQuery} onCanvasRefIds={onCanvasRefIds} />
               ))}
               {references.length === 0 && <div className="prod-graph-shelf-empty">No references yet — drop image, video, or audio files onto the canvas to create them.</div>}
+              {references.length > 0 && shelfGroups.every((g) => qShelfMatch(g.refs, shelfQuery).length === 0) && (
+                <div className="prod-graph-shelf-empty">No references match “{shelfQuery.trim()}”.</div>
+              )}
             </div>
           </div>
           <div className="prod-graph-canvas" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>

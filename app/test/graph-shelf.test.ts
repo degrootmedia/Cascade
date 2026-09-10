@@ -31,7 +31,7 @@ const REFS = [
 let savedLayouts: Array<{ positions?: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } }> = [];
 let lastEmittedPrompt: string | null = null;
 
-function Harness({ initial, shotPatch, prodPatch }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown> }) {
+function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
   return createElement(NodeGraphModal, {
     prod: {
@@ -50,7 +50,7 @@ function Harness({ initial, shotPatch, prodPatch }: { initial?: string; shotPatc
     shot: { id: "s1", number: 1, prompt, promptManual: true, includeBrandIdentity: true, artwork: "boards/0001.jpg", ...shotPatch } as never,
     bust: 0,
     prompt,
-    references: REFS,
+    references: refs ?? REFS,
     styles: [],
     styleValue: "",
     includeBrand: true,
@@ -84,7 +84,7 @@ function Harness({ initial, shotPatch, prodPatch }: { initial?: string; shotPatc
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown> } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -208,6 +208,78 @@ describe("node-graph reference shelf", () => {
     await act(async () => { removeBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
     expect(refNodeCount(host)).toBe(1);
     expect(host.querySelectorAll(".prod-graph-shelf-item.on-canvas").length).toBe(1);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph shelf at scale", () => {
+  const MANY = Array.from({ length: 30 }, (_, i) => ({
+    id: `m${i}`,
+    name: `Prop${i}`,
+    artwork: "data:image/png;base64,AAAA",
+  })) as never;
+  const manyProdPatch = {
+    referenceCategories: [{ id: "c1", name: "Props" }],
+    references: (MANY as Array<{ id: string; name: string }>).map((r, i) => ({
+      id: r.id,
+      name: r.name,
+      categoryId: "c1",
+      imagePath: `references/prop${i}.png`,
+    })),
+  };
+
+  it("auto-collapses a large group and windows its tiles behind Show more", async () => {
+    const { root, host } = renderModal({ prodPatch: manyProdPatch, refs: MANY });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const heads = host.querySelectorAll(".prod-graph-shelf-group-head");
+    expect(heads.length).toBe(1);
+    // 30 refs > the auto-collapse threshold: starts collapsed, nothing mounted.
+    expect((heads[0] as HTMLButtonElement).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(0);
+
+    // Expand: first page of tiles + a Show-more button for the rest.
+    await act(async () => { (heads[0] as HTMLButtonElement).click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(24);
+    const more = host.querySelector(".prod-graph-shelf-more") as HTMLButtonElement;
+    expect(more).toBeTruthy();
+    expect(more.textContent).toContain("6 remaining");
+
+    // Show more mounts the rest and the button goes away.
+    await act(async () => { more.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(30);
+    expect(host.querySelector(".prod-graph-shelf-more")).toBeNull();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("filters shelf tiles by name", async () => {
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(3);
+
+    const search = host.querySelector(".prod-graph-shelf-search") as HTMLInputElement;
+    expect(search).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(search, "vill");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(1);
+    expect(host.querySelector(".prod-graph-shelf-name")?.textContent).toBe("@[Villain]");
+
+    // Clearing the filter restores every tile.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(search, "");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(3);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

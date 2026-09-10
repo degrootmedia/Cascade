@@ -3,7 +3,9 @@
  * the tween keyframe tiles display a small compressed JPEG (`?thumb=1` over
  * the cascade-media protocol) instead of the full-resolution file — while the
  * zoom lightbox keeps the full-res `artwork` URL. Legacy inline data-URL
- * artwork (already in-memory) passes through unchanged.
+ * artwork (already in-memory) passes through unchanged. Disk-backed shelf
+ * tiles load lazily (near the viewport, max 4 in flight), so their `src` is
+ * gated until the tile scrolls into view.
  */
 import { describe, it, expect } from "vitest";
 import { createElement, useState } from "react";
@@ -106,6 +108,8 @@ describe("node-graph reference thumbnails", () => {
     expect(nodeImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png?thumb=1");
 
     // The shelf lists every reference; disk refs thumb, legacy data URLs pass.
+    // (No IntersectionObserver in this environment, so every tile counts as
+    // visible and disk thumbs arm on mount.)
     const shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
     expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
     expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
@@ -121,6 +125,45 @@ describe("node-graph reference thumbnails", () => {
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
+  });
+
+  it("defers disk-backed shelf thumbs until their tile scrolls into view", async () => {
+    // A controllable IntersectionObserver: tiles arm only when the test
+    // reports them intersecting.
+    const RealIO = (globalThis as any).IntersectionObserver;
+    const fires: Array<(visible: boolean) => void> = [];
+    (globalThis as any).IntersectionObserver = class {
+      cb: (entries: Array<{ isIntersecting: boolean }>) => void;
+      constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void) { this.cb = cb; }
+      observe() { fires.push((v: boolean) => this.cb([{ isIntersecting: v }])); }
+      unobserve() {}
+      disconnect() {}
+    };
+    try {
+      const { root, host } = renderModal();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+      // Nothing scrolled into view: disk tiles show placeholders, while the
+      // in-memory data URL renders immediately.
+      let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      expect(shelfImgs).toEqual(["data:image/png;base64,LEGACY"]);
+      expect(fires.length).toBe(2);
+
+      // Scrolling the tiles into view arms their thumbs (slots are free).
+      await act(async () => {
+        for (const fire of fires) fire(true);
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
+      expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
+      expect(shelfImgs).toContain("data:image/png;base64,LEGACY");
+
+      await act(async () => { root.unmount(); });
+      document.body.removeChild(host);
+    } finally {
+      (globalThis as any).IntersectionObserver = RealIO;
+    }
   });
 
   it("a dragged shelf ref gets a thumb-bearing canvas node with full-res zoom", async () => {

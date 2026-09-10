@@ -96,6 +96,39 @@ export function insertShotAt(
   return shot;
 }
 
+/**
+ * Set one shot's number by hand — the manual override for "this frame must
+ * export as NNNN". Numbers are the assembly filename key (`shots/<number>.png`,
+ * `clips/<number>.mp4`), so a duplicate would make two shots write the same
+ * file, and the export would silently keep only one. The new number must be a
+ * valid 4-digit number within the numbering space (0100–9999) and not already
+ * held by another shot. Only this shot changes; the caller passes the returned
+ * oldNumbers map to relocate its board folder. Empty map = number unchanged.
+ */
+export function setShotNumber(
+  scenes: ProductionScene[],
+  shotId: string,
+  number: string
+): { oldNumbers: Map<string, string> } {
+  if (!isValidNumber(number) || toInt(number) < STEP) {
+    throw new Error(`"${number}" is not a valid shot number — use four digits (${FIRST_NUMBER}–9999).`);
+  }
+  let target: ProductionShot | undefined;
+  for (const scene of scenes) {
+    for (const shot of scene.shots) {
+      if (shot.id === shotId) { target = shot; continue; }
+      if (shot.number === number) throw new Error(`Shot ${number} already exists — choose a free number.`);
+    }
+  }
+  if (!target) throw new Error("Shot not found.");
+  const oldNumbers = new Map<string, string>();
+  if (target.number !== number) {
+    oldNumbers.set(target.id, target.number);
+    target.number = number;
+  }
+  return { oldNumbers };
+}
+
 /** Validate a numbering pass; returns human-readable problems (empty = ok). */
 export function validate(scenes: ProductionScene[]): string[] {
   const problems: string[] = [];

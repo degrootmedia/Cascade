@@ -98,3 +98,20 @@ export async function probeMedia(bin: string, absPath: string): Promise<{ durati
     });
   });
 }
+
+/** Probe a video's pixel dimensions by reading ffmpeg's `-i` info output.
+ *  Never throws; null when the stream size can't be read. */
+export async function probeVideoSize(bin: string, absPath: string): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, ["-hide_banner", "-nostdin", "-i", absPath], { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", (c: Buffer) => {
+      stderr += c.toString();
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      const m = /Video:.*?(\d{2,5})x(\d{2,5})/.exec(stderr);
+      resolve(m ? { width: Number(m[1]), height: Number(m[2]) } : null);
+    });
+  });
+}

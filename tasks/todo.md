@@ -202,3 +202,40 @@ Done. The shelf no longer mounts every tile + thumbnail at once:
   `ref-thumb.test.ts` (controllable IO stub; old immediacy assertions kept
   for the no-IO environment). Verified: `tsc --noEmit` clean, 504 pass +
   1 pre-existing skip.
+
+# Node-editor perf round 2 — measured bottlenecks
+
+The round-1 changes made no noticeable difference, so we profiled first.
+
+## Plan
+
+- [ ] Throwaway benchmark (`test/_perf-graph.test.ts`, deleted after): mount the
+      real `NodeGraphModal` + `BoardCard` grid at varied large shapes with
+      `performance.now()` + React `<Profiler>`.
+- [ ] Bound the shelf by total items, not per group: reveal each `ShelfGroup`'s
+      tiles only when it nears the viewport (IntersectionObserver).
+- [ ] Memoize `BoardCard` and give it reference-stable callbacks via a
+      `latestRef` + `useMemo` delegator in `ProductionWorkspace`.
+- [ ] Update `board-history.test.ts` + `ref-thumb.test.ts` for the new
+      shot-id-carrying signatures / group-reveal gating.
+- [ ] Verify: `npm run typecheck`, `npm test`, `npm run build`.
+
+## Review
+
+Measured first, then fixed the two real costs:
+
+- **`BoardCard` was un-memoized** — every workspace state change (opening the
+  graph = `setGraphShotId`, and every graph write) re-rendered every card:
+  ~194 ms for 600 shots. Cards now `memo`'d, and `ProductionWorkspace` passes
+  a stable `boardActions` (delegates reading `boardHandlerRef.current`, so
+  always fresh, never stale) with the shot id threaded into the callbacks.
+  Unrelated parent re-render: 600 cards **194 ms → 6 ms**.
+- **Shelf total-item bound** — per-group windowing (round 1) didn't help a
+  project with many *small* categories: 200 cats × 15 refs ≈ 2 985 tiles
+  ≈ 640 ms. `ShelfGroup` now reveals its tiles only when the group nears the
+  shelf viewport, so group count no longer multiplies mounted tiles.
+- Kept round 1 (thumbnail gating + per-group window + filter) unchanged.
+- Tests: `board-history.test.ts` promote assertions now expect
+  `(shotId, path)`; `ref-thumb.test.ts` lazy case reveals groups then tiles via
+  a controllable IO stub. Verified: `tsc --noEmit` clean, 504 pass + 1 skip,
+  `npm run build` succeeds. Lessons captured in `tasks/lessons.md`.

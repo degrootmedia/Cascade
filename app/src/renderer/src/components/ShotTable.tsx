@@ -14,7 +14,7 @@
  * boundary drop lines receive the drag.
  */
 import { Fragment, useRef, useState } from "react";
-import type { Production, ProductionScene } from "../../../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot } from "../../../shared/ipc.js";
 import { shotHasContent } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
 import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
@@ -107,6 +107,9 @@ export function ShotTable({ prod, onMutation }: Props) {
   }
 
   if (!prod.scenes.length) return null;
+  // Numbers are unique across the production (assembly keys filenames on them);
+  // the stepper disables a target slot that another shot already owns.
+  const occupied = new Set(prod.scenes.flatMap((s) => s.shots.map((x) => x.number)));
   return (
     <div className={"shot-table" + (dragId ? " dragging" : "")}>
       {prod.scenes.map((scene, i) => (
@@ -121,6 +124,7 @@ export function ShotTable({ prod, onMutation }: Props) {
           <SceneBlock
             scene={scene}
             prod={prod}
+            occupied={occupied}
             onMutation={onMutation}
             dragId={dragId}
             activeZone={activeZone}
@@ -139,6 +143,7 @@ export function ShotTable({ prod, onMutation }: Props) {
 interface SceneProps {
   scene: ProductionScene;
   prod: Production;
+  occupied: Set<string>;
   onMutation: Props["onMutation"];
   dragId: string | null;
   activeZone: string | null;
@@ -192,7 +197,7 @@ export function resolveShotDrop(
   return { beforeShotId: zone.before };
 }
 
-function SceneBlock({ scene, prod, onMutation, dragId, activeZone, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: SceneProps) {
+function SceneBlock({ scene, prod, occupied, onMutation, dragId, activeZone, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: SceneProps) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prod.meta.id}.scene.${scene.number}`);
   const open = !collapsed;
   const dragging = dragId !== null;
@@ -238,6 +243,7 @@ function SceneBlock({ scene, prod, onMutation, dragId, activeZone, onHandleDown,
                 prod={prod}
                 scene={scene}
                 index={i}
+                occupied={occupied}
                 onMutation={onMutation}
                 dragId={dragId}
                 onHandleDown={onHandleDown}
@@ -345,8 +351,104 @@ function SceneInsertZone({ prodId, afterSceneNumber, onMutation }: {
   );
 }
 
-function ShotRow({ prod, scene, index, onMutation, dragId, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: {
-  prod: Production; scene: ProductionScene; index: number; onMutation: Props["onMutation"];
+/** Normalize a typed number to the 4-digit form ("100" -> "0100"), or null
+ *  when it falls outside the numbering space. */
+function normalizeNumber(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+  const n = Number(digits);
+  if (!Number.isFinite(n) || n < 100 || n > 9999) return null;
+  return String(n).padStart(4, "0");
+}
+
+/** Step a number string by ±1, floored at 0100 / capped at 9999. */
+function stepNumber(base: string, delta: number): string | null {
+  const n = Number(base) + delta;
+  if (!Number.isInteger(n) || n < 100 || n > 9999) return null;
+  return String(n).padStart(4, "0");
+}
+
+/**
+ * Manual shot-number editor. Click the number to type a 4-digit value, or use
+ * ▲/▼ to step it by one. Main owns uniqueness — a slot another shot already
+ * holds disables the step, and a typed duplicate is rejected (the workspace
+ * error banner explains, and the field snaps back to the real number). Board
+ * files relocate with the number.
+ */
+function ShotNumberField({ prodId, shot, occupied, onMutation }: {
+  prodId: string;
+  shot: ProductionShot;
+  occupied: Set<string>;
+  onMutation: Props["onMutation"];
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(shot.number);
+
+  function apply(next: string) {
+    if (next !== shot.number) onMutation(window.cascade.setShotNumber(prodId, shot.id, next));
+  }
+
+  function commit() {
+    setEditing(false);
+    const norm = normalizeNumber(draft);
+    if (norm) apply(norm);
+  }
+
+  if (editing) {
+    return (
+      <input
+        className="shot-number-input"
+        autoFocus
+        value={draft}
+        inputMode="numeric"
+        maxLength={4}
+        title="Type a 4-digit shot number, then Enter"
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => setDraft(e.target.value.replace(/\D/g, "").slice(0, 4))}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          else if (e.key === "Escape") { e.preventDefault(); setDraft(shot.number); setEditing(false); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); const n = stepNumber(draft || shot.number, 1); if (n) setDraft(n); }
+          else if (e.key === "ArrowDown") { e.preventDefault(); const n = stepNumber(draft || shot.number, -1); if (n) setDraft(n); }
+        }}
+      />
+    );
+  }
+
+  const up = stepNumber(shot.number, 1);
+  const down = stepNumber(shot.number, -1);
+  const canUp = !!up && !occupied.has(up);
+  const canDown = !!down && !occupied.has(down);
+  return (
+    <span className="shot-number">
+      <button
+        className="shot-number-value"
+        title={`Shot ${shot.number} — click to set by hand`}
+        onClick={() => { setDraft(shot.number); setEditing(true); }}
+      >
+        {shot.number}
+      </button>
+      <span className="shot-number-steps">
+        <button
+          className="shot-number-step"
+          disabled={!canUp}
+          title={canUp ? "Step number up" : "Next number is taken"}
+          onClick={() => { if (up) apply(up); }}
+        >▲</button>
+        <button
+          className="shot-number-step"
+          disabled={!canDown}
+          title={canDown ? "Step number down" : "Previous number is taken"}
+          onClick={() => { if (down) apply(down); }}
+        >▼</button>
+      </span>
+    </span>
+  );
+}
+
+function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: {
+  prod: Production; scene: ProductionScene; index: number; occupied: Set<string>; onMutation: Props["onMutation"];
   dragId: string | null;
   onHandleDown: (shotId: string, x: number, y: number) => void;
   onHandleMove: (x: number, y: number) => void;
@@ -395,7 +497,7 @@ function ShotRow({ prod, scene, index, onMutation, dragId, onHandleDown, onHandl
       >
         <DragHandleIcon size={14} />
       </button>
-      <span className="shot-number" title={shot.id}>{shot.number}</span>
+      <ShotNumberField prodId={prod.meta.id} shot={shot} occupied={occupied} onMutation={onMutation} />
       <AutoTextarea
         className="shot-cell audio"
         value={audio}

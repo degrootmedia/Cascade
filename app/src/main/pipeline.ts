@@ -839,6 +839,37 @@ export interface ShotRef {
   artwork?: string;
 }
 
+/** MIME for a dropped reference video/audio file, by extension. */
+const MEDIA_MIME_BY_EXT: Record<string, string> = {
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  m4a: "audio/mp4",
+  aac: "audio/aac",
+  ogg: "audio/ogg",
+  flac: "audio/flac",
+};
+
+/** A dropped video/audio reference as an uploadable data URL, read from its
+ *  on-disk `mediaPath`. Returns undefined for image refs (which live in
+ *  `imagePath`/`artwork`) or when the media file is missing. */
+export function refMediaDataUrl(p: Production, ref: { media?: "video" | "audio"; mediaPath?: string }): string | undefined {
+  if (!ref.media || !ref.mediaPath) return undefined;
+  try {
+    const buf = fs.readFileSync(assetPath(p, ref.mediaPath));
+    const ext = path.extname(ref.mediaPath).slice(1).toLowerCase();
+    const mime = MEDIA_MIME_BY_EXT[ext] ?? (ref.media === "video" ? "video/mp4" : "audio/mpeg");
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Reference artwork as an uploadable data URL: an on-disk `imagePath` is read
  *  at call time (references live in referencesDir as files), with legacy inline
  *  data URLs as the fallback. Returns undefined when no artwork is available. */

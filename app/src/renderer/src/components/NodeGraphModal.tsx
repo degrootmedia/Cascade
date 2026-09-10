@@ -1223,13 +1223,31 @@ function ShelfGroup({ prodId, group, query, onCanvasRefIds }: {
     group.refs.length > SHELF_AUTO_COLLAPSE_AT,
   );
   const [shown, setShown] = useState(SHELF_PAGE);
+  // Mount this group's tiles only once it nears the shelf viewport. A project
+  // with many small categories (each under the auto-collapse/window size) would
+  // otherwise mount every tile at once — the group count, not just the per-
+  // group size, has to be bounded. Headers always render so the list is
+  // navigable; the tile bodies fill in on scroll.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    if (revealed) return;
+    const el = rootRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") { setRevealed(true); return; }
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) { setRevealed(true); io.disconnect(); } },
+      { rootMargin: "300px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [revealed]);
   const matching = qShelfMatch(group.refs, query);
   const q = query.trim().toLowerCase();
   useEffect(() => { setShown(SHELF_PAGE); }, [q, group.refs]);
   if (q && matching.length === 0) return null;
   const visible = matching.slice(0, shown);
   return (
-    <div className="prod-graph-shelf-group">
+    <div ref={rootRef} className="prod-graph-shelf-group">
       <button
         className="prod-graph-shelf-group-head"
         aria-expanded={!collapsed}
@@ -1240,7 +1258,7 @@ function ShelfGroup({ prodId, group, query, onCanvasRefIds }: {
         <span className="prod-graph-shelf-group-name">{group.title}</span>
         <span className="prod-graph-shelf-count">{q ? `${matching.length}/${group.refs.length}` : group.refs.length}</span>
       </button>
-      {!collapsed && visible.map((r) => {
+      {!collapsed && revealed && visible.map((r) => {
         const onCanvas = onCanvasRefIds.has(r.id);
         return (
           <div
@@ -1261,7 +1279,7 @@ function ShelfGroup({ prodId, group, query, onCanvasRefIds }: {
           </div>
         );
       })}
-      {!collapsed && matching.length > visible.length && (
+      {!collapsed && revealed && matching.length > visible.length && (
         <button
           className="prod-graph-shelf-more nodrag"
           onClick={() => setShown((n) => n + SHELF_PAGE)}
@@ -1427,6 +1445,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   saveLayoutRef.current = onSaveLayout;
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set());
   const [shelfQuery, setShelfQuery] = useState("");
+  // The reference shelf starts collapsed so opening the graph doesn't mount (and
+  // thumbnail-encode) every reference in the production. Toggling it open loads
+  // the shelf on demand.
+  const [shelfOpen, setShelfOpen] = useState(false);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ name: string; artwork: string } | null>(null);
@@ -2667,30 +2689,57 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           <button className="prod-btn" onClick={onClose}>Close</button>
         </div>
         <div className="prod-graph-body">
-          <div className="prod-graph-shelf">
-            <div className="prod-graph-shelf-head">
-              <span className="prod-graph-shelf-title">References</span>
-              <span className="prod-graph-shelf-hint">Drag onto the canvas to add</span>
-              {references.length > 0 && (
-                <input
-                  className="prod-graph-shelf-search nodrag"
-                  type="text"
-                  value={shelfQuery}
-                  onChange={(e) => setShelfQuery(e.target.value)}
-                  placeholder="Filter references…"
-                  aria-label="Filter references"
-                />
-              )}
-            </div>
-            <div className="prod-graph-shelf-list">
-              {shelfGroups.map((group) => (
-                <ShelfGroup key={group.title} prodId={prod.meta.id} group={group} query={shelfQuery} onCanvasRefIds={onCanvasRefIds} />
-              ))}
-              {references.length === 0 && <div className="prod-graph-shelf-empty">No references yet — drop image, video, or audio files onto the canvas to create them.</div>}
-              {references.length > 0 && shelfGroups.every((g) => qShelfMatch(g.refs, shelfQuery).length === 0) && (
-                <div className="prod-graph-shelf-empty">No references match “{shelfQuery.trim()}”.</div>
-              )}
-            </div>
+          <div className={"prod-graph-shelf" + (shelfOpen ? "" : " collapsed")}>
+            {shelfOpen ? (
+              <>
+                <div className="prod-graph-shelf-head">
+                  <div className="prod-graph-shelf-head-row">
+                    <button
+                      type="button"
+                      className="prod-graph-shelf-toggle nodrag"
+                      aria-expanded={true}
+                      title="Collapse the reference shelf"
+                      onClick={() => setShelfOpen(false)}
+                    >
+                      <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M10 3L5 8l5 5V3z" fill="currentColor" /></svg>
+                    </button>
+                    <span className="prod-graph-shelf-title">References</span>
+                  </div>
+                  <span className="prod-graph-shelf-hint">Drag onto the canvas to add</span>
+                  {references.length > 0 && (
+                    <input
+                      className="prod-graph-shelf-search nodrag"
+                      type="text"
+                      value={shelfQuery}
+                      onChange={(e) => setShelfQuery(e.target.value)}
+                      placeholder="Filter references…"
+                      aria-label="Filter references"
+                    />
+                  )}
+                </div>
+                <div className="prod-graph-shelf-list">
+                  {shelfGroups.map((group) => (
+                    <ShelfGroup key={group.title} prodId={prod.meta.id} group={group} query={shelfQuery} onCanvasRefIds={onCanvasRefIds} />
+                  ))}
+                  {references.length === 0 && <div className="prod-graph-shelf-empty">No references yet — drop image, video, or audio files onto the canvas to create them.</div>}
+                  {references.length > 0 && shelfGroups.every((g) => qShelfMatch(g.refs, shelfQuery).length === 0) && (
+                    <div className="prod-graph-shelf-empty">No references match “{shelfQuery.trim()}”.</div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="prod-graph-shelf-rail nodrag"
+                aria-expanded={false}
+                title="Show the reference shelf"
+                onClick={() => setShelfOpen(true)}
+              >
+                <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M6 3l5 5-5 5V3z" fill="currentColor" /></svg>
+                <span className="prod-graph-shelf-rail-label">References</span>
+                {references.length > 0 && <span className="prod-graph-shelf-rail-count">{references.length}</span>}
+              </button>
+            )}
           </div>
           <div className="prod-graph-canvas" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>
             <ReactFlow

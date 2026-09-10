@@ -167,6 +167,86 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const prodRef = useRef<Production | null>(prod);
   prodRef.current = prod;
 
+  // Board cards are memoized, so their callback props must keep a stable
+  // identity — otherwise every card re-renders on unrelated state changes
+  // (opening the node graph, shelf updates, etc.), which is the bulk of the
+  // cost on large productions. These delegates read the current render's
+  // closures through a ref, so they are stable AND never stale.
+  const boardHandlerRef = useRef<{
+    regenerate: (id: string) => void;
+    recheck: (id: string) => void;
+    importFrame: (id: string) => void;
+    edit: (id: string) => void;
+    video: (id: string) => void;
+    textChange: (id: string, patch: { audio: string; visual: string }) => void;
+    promptFocus: (id: string, prompt: string) => void;
+    dropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => void;
+    promoteHistory: (id: string, framePath: string) => void;
+    reorderDragStart: (id: string, e: React.DragEvent) => void;
+    reorderDrop: (id: string, e: React.DragEvent) => void;
+    reorderDragOver: (id: string) => void;
+    reorderDragEnd: () => void;
+    insertAfter: (id: string) => void;
+    remove: (id: string) => void;
+  }>(null as never);
+  boardHandlerRef.current = {
+    regenerate: (id) => void regenBoard(id),
+    recheck: (id) => void recheckBoard(id),
+    importFrame: (id) => void importFrames(id),
+    edit: (id) => setEditShotId(id),
+    video: (id) => setVideoShotId(id),
+    textChange: (id, patch) => void saveShotText(id, patch),
+    promptFocus: (id, prompt) => focusPrompt(id, prompt),
+    dropFrame: (id, source) => void dropFrameAsReference(id, source),
+    promoteHistory: (id, framePath) => void promoteHistory(id, framePath),
+    reorderDragStart: (id, e) => {
+      boardDragRef.current = id;
+      setBoardDragId(id);
+      e.dataTransfer.setData("application/x-cascade-shot-order", id);
+      e.dataTransfer.effectAllowed = "move";
+    },
+    reorderDrop: (targetId) => {
+      const src = boardDragRef.current;
+      setBoardDropTarget(null);
+      setBoardDragId(null);
+      boardDragRef.current = null;
+      if (!src || src === targetId) return;
+      reorderShot(src, targetId);
+    },
+    reorderDragOver: (id) => { if (boardDropTarget !== id) setBoardDropTarget(id); },
+    reorderDragEnd: () => {
+      setBoardDropTarget(null);
+      setTimeout(() => {
+        if (boardDragRef.current) { setBoardDragId(null); boardDragRef.current = null; }
+      }, 0);
+    },
+    insertAfter: (id) => {
+      const current = prodRef.current;
+      if (!current) return;
+      const flat = current.scenes.flatMap((sc) => sc.shots.map((shot) => ({ sc, shot })));
+      const i = flat.findIndex(({ shot }) => shot.id === id);
+      if (i >= 0) insertBlankShot(flat, i);
+    },
+    remove: (id) => deleteBoardShot(id),
+  };
+  const boardActions = useMemo(() => ({
+    onRegenerate: (id: string) => boardHandlerRef.current.regenerate(id),
+    onRecheck: (id: string) => boardHandlerRef.current.recheck(id),
+    onImport: (id: string) => boardHandlerRef.current.importFrame(id),
+    onEdit: (id: string) => boardHandlerRef.current.edit(id),
+    onVideo: (id: string) => boardHandlerRef.current.video(id),
+    onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
+    onPromptFocus: (id: string, prompt: string) => boardHandlerRef.current.promptFocus(id, prompt),
+    onDropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => boardHandlerRef.current.dropFrame(id, source),
+    onPromoteHistory: (id: string, framePath: string) => boardHandlerRef.current.promoteHistory(id, framePath),
+    onReorderDragStart: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDragStart(id, e),
+    onReorderDrop: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDrop(id, e),
+    onReorderDragOver: (id: string) => boardHandlerRef.current.reorderDragOver(id),
+    onReorderDragEnd: () => boardHandlerRef.current.reorderDragEnd(),
+    onInsertAfter: (id: string) => boardHandlerRef.current.insertAfter(id),
+    onDelete: (id: string) => boardHandlerRef.current.remove(id),
+  }), []);
+
   const refreshList = useCallback(async () => {
     try { setList(await window.cascade.listProductions()); } catch {}
   }, []);
@@ -2433,7 +2513,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   boardDragRef.current = null;
                 }}
               >
-                {prod.scenes.flatMap((sc) => sc.shots.map((shot) => ({ sc, shot }))).map(({ shot }, i, flat) => (
+                {prod.scenes.flatMap((sc) => sc.shots.map((shot) => ({ sc, shot }))).map(({ shot }) => (
                   <BoardCard
                     key={shot.id}
                     prod={prod}
@@ -2443,48 +2523,26 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyIds.has(shot.id) || tweenBusyByShot[shot.id] !== undefined || tweenStitchingIds.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
-                    onRegenerate={() => void regenBoard(shot.id)}
-                    onRecheck={() => void recheckBoard(shot.id)}
-                    onImport={() => void importFrames(shot.id)}
-                    onEdit={() => setEditShotId(shot.id)}
-                    onVideo={() => setVideoShotId(shot.id)}
-                    onTextChange={(patch) => void saveShotText(shot.id, patch)}
+                    onRegenerate={boardActions.onRegenerate}
+                    onRecheck={boardActions.onRecheck}
+                    onImport={boardActions.onImport}
+                    onEdit={boardActions.onEdit}
+                    onVideo={boardActions.onVideo}
+                    onTextChange={boardActions.onTextChange}
                     showScript={showBoardText}
-                    onPromptFocus={focusPrompt}
+                    onPromptFocus={boardActions.onPromptFocus}
                     selected={promptShotId === shot.id}
-                    onDropFrame={(source) => void dropFrameAsReference(shot.id, source)}
-                    onPromoteHistory={(framePath) => void promoteHistory(shot.id, framePath)}
+                    onDropFrame={boardActions.onDropFrame}
+                    onPromoteHistory={boardActions.onPromoteHistory}
                     draggable
                     isDragging={boardDragId === shot.id}
                     isReorderTarget={boardDropTarget === shot.id}
-                    onReorderDragStart={(id, e) => {
-                      boardDragRef.current = id;
-                      setBoardDragId(id);
-                      e.dataTransfer.setData("application/x-cascade-shot-order", id);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    onReorderDragOver={(id) => {
-                      if (boardDropTarget !== id) setBoardDropTarget(id);
-                    }}
-                    onReorderDragEnd={() => {
-                      setBoardDropTarget(null);
-                      setTimeout(() => {
-                        if (boardDragRef.current) {
-                          setBoardDragId(null);
-                          boardDragRef.current = null;
-                        }
-                      }, 0);
-                    }}
-                    onReorderDrop={(targetId) => {
-                      const src = boardDragRef.current;
-                      setBoardDropTarget(null);
-                      setBoardDragId(null);
-                      boardDragRef.current = null;
-                      if (!src || src === targetId) return;
-                      reorderShot(src, targetId);
-                    }}
-                    onInsertAfter={() => insertBlankShot(flat, i)}
-                    onDelete={() => deleteBoardShot(shot.id)}
+                    onReorderDragStart={boardActions.onReorderDragStart}
+                    onReorderDragOver={boardActions.onReorderDragOver}
+                    onReorderDragEnd={boardActions.onReorderDragEnd}
+                    onReorderDrop={boardActions.onReorderDrop}
+                    onInsertAfter={boardActions.onInsertAfter}
+                    onDelete={boardActions.onDelete}
                   />
                 ))}
                 <button

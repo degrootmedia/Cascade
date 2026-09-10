@@ -417,13 +417,13 @@ describe("videoRefsAssign end frames", () => {
     const out = videoRefsAssign(refs, {
       ...startProps(),
       endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
-    });
+    }, { frames: true });
     expect(out?.["startFrame"]).toMatchObject({ url: "u1", id: "i1" });
     expect(out?.["endFrame"]).toMatchObject({ url: "u2", id: "i2" });
   });
 
   it("keeps single-ref behavior identical (no end slot touched)", () => {
-    const out = videoRefsAssign([refs[0]], startProps());
+    const out = videoRefsAssign([refs[0]], startProps(), { frames: true });
     expect(out).toEqual({ startFrame: { type: "image", url: "u1", id: "i1" } });
   });
 
@@ -431,7 +431,7 @@ describe("videoRefsAssign end frames", () => {
     const out = videoRefsAssign(refs, {
       ...startProps(),
       visualReferences: { type: "array", items: {} },
-    });
+    }, { frames: true });
     expect(out?.["startFrame"]).toMatchObject({ url: "u1" });
     expect(out?.["visualReferences"]).toHaveLength(2);
   });
@@ -439,6 +439,19 @@ describe("videoRefsAssign end frames", () => {
   it("falls back to the array field alone when no object slots exist", () => {
     const out = videoRefsAssign(refs, { visualReferences: { type: "array", items: {} } });
     expect(out).toEqual({ visualReferences: refs });
+  });
+
+  it("never sets an end frame outside in-betweener mode", () => {
+    const out = videoRefsAssign(refs, {
+      ...startProps(),
+      endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      visualReferences: { type: "array", items: {} },
+    });
+    // startFrame carries the source frame; the second ref must not become an
+    // end keyframe — it and the frame ride visualReferences.
+    expect(out?.["endFrame"]).toBeUndefined();
+    expect(out?.["startFrame"]).toMatchObject({ url: "u1" });
+    expect(out?.["visualReferences"]).toEqual(refs);
   });
 });
 

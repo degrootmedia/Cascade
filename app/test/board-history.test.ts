@@ -153,7 +153,7 @@ describe("BoardCard history", () => {
     expect(button(".prod-board-promote").textContent?.trim()).toBe("Make Primary");
     expect(host.querySelector(".prod-board-hist-tag")).toBeNull();
     await click(".prod-board-promote");
-    expect(onPromoteHistory).toHaveBeenLastCalledWith(EDIT);
+    expect(onPromoteHistory).toHaveBeenLastCalledWith("shot1", EDIT);
 
     await click(".prod-board-hist.prev");
     expectFrame(GENERATED);
@@ -161,7 +161,7 @@ describe("BoardCard history", () => {
     expect(button(".prod-board-hist.prev").disabled).toBe(true);
     expect(button(".prod-board-hist.prev").title).toBe("Start of history");
     await click(".prod-board-promote");
-    expect(onPromoteHistory.mock.calls).toEqual([[EDIT], [GENERATED]]);
+    expect(onPromoteHistory.mock.calls).toEqual([["shot1", EDIT], ["shot1", GENERATED]]);
 
     await click(".prod-board-hist.next");
     expectFrame(EDIT);
@@ -189,7 +189,7 @@ describe("BoardCard history", () => {
       await click(".prod-board-promote");
     }
     expect(button(".prod-board-hist.prev").disabled).toBe(true);
-    expect(onPromoteHistory.mock.calls).toEqual([[EDIT], [GENERATED], [LEGACY]]);
+    expect(onPromoteHistory.mock.calls).toEqual([["shot1", EDIT], ["shot1", GENERATED], ["shot1", LEGACY]]);
     expect(boardThumbnail).toHaveBeenCalledTimes(4);
   });
 
@@ -220,7 +220,7 @@ describe("BoardCard history", () => {
     expect(button(".prod-board-hist.next").title).toBe("Newer frame");
     expect(boardThumbnail.mock.calls).toEqual([["prod1", "shot1"], ["prod1", "shot1", EDIT]]);
     await click(".prod-board-promote");
-    expect(onPromoteHistory.mock.calls).toEqual([[EDIT]]);
+    expect(onPromoteHistory.mock.calls).toEqual([["shot1", EDIT]]);
 
     await click(".prod-board-hist.next");
     expectFrame(NEW_EDIT);
@@ -264,7 +264,7 @@ describe("BoardCard history", () => {
     await click(".prod-board-hist.prev");
     expectFrame(EDIT);
     await click(".prod-board-promote");
-    expect(onPromoteHistory.mock.calls).toEqual([[EDIT]]);
+    expect(onPromoteHistory.mock.calls).toEqual([["shot1", EDIT]]);
 
     // Also cover an external primary change where the browsed edit stays in history.
     const newPrimary = source === "editgen" ? EDIT : GENERATED;

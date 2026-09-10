@@ -44,6 +44,30 @@ const MIME_BY_EXT: Record<string, string> = {
   ".flac": "audio/flac",
 };
 
+/** Reverse of MIME_BY_EXT for naming a data-URL upload by its content type.
+ *  A video reference must not be signed as a `.png` — OpenArt classifies the
+ *  upload by extension, so a mismatched name can silently drop it. */
+const EXT_BY_MIME: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+  "image/svg+xml": "svg",
+  "image/avif": "avif",
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+  "video/quicktime": "mov",
+  "video/x-matroska": "mkv",
+  "video/x-msvideo": "avi",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "audio/mp4": "m4a",
+  "audio/aac": "aac",
+  "audio/ogg": "ogg",
+  "audio/flac": "flac",
+};
+
 function mediaTypeOf(contentType: string): "image" | "video" | "audio" {
   if (contentType.startsWith("image/")) return "image";
   if (contentType.startsWith("video/")) return "video";
@@ -88,7 +112,7 @@ export async function uploadDataUrlReference(
   const mediaType = mediaTypeOf(contentType);
   const size = Math.ceil((b64.length * 3) / 4); // decoded byte length (base64 ≈ 4/3)
   const signText = await mcp.callRaw(SERVER, "openart_upload_sign", {
-    filename: `${path.basename(label).replace(/\.[^.]+$/, "") || "ref"}.png`,
+    filename: `${path.basename(label).replace(/\.[^.]+$/, "") || "ref"}.${EXT_BY_MIME[contentType] ?? "bin"}`,
     size,
     contentType,
     mediaType,

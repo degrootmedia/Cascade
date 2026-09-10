@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault } from "./media-defaults.js";
@@ -11,7 +11,7 @@ import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 
-export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
+function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -21,24 +21,24 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   pending?: boolean;
   /** A recheck is currently polling the pending job. */
   rechecking?: boolean;
-  onRegenerate: () => void;
+  onRegenerate: (shotId: string) => void;
   /** Recheck the shot's pending generation job and download the frame when ready. */
-  onRecheck?: () => void;
-  onImport: () => void;
+  onRecheck?: (shotId: string) => void;
+  onImport: (shotId: string) => void;
   /** Open the AI edit dialog for this frame. */
-  onEdit: () => void;
+  onEdit: (shotId: string) => void;
   /** Open the video-generation modal for this frame. */
-  onVideo: () => void;
+  onVideo: (shotId: string) => void;
   /** Persist the shot's Audio/Visual direction edited in the card's boxes. */
-  onTextChange: (patch: { audio: string; visual: string }) => void;
+  onTextChange: (shotId: string, patch: { audio: string; visual: string }) => void;
   /** Whether the Audio/Visual direction boxes render under the frame. */
   showScript: boolean;
   onPromptFocus: (shotId: string, prompt: string) => void;
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
-  onDropFrame: (source: { prodId: string; shotId: string; number: number }) => void;
+  onDropFrame: (shotId: string, source: { prodId: string; shotId: string; number: number }) => void;
   /** Select the browsed frame on its owning node and wire it to the output. */
-  onPromoteHistory: (framePath: string) => void;
+  onPromoteHistory: (shotId: string, framePath: string) => void;
   draggable?: boolean;
   onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
   onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
@@ -47,10 +47,10 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
   isReorderTarget?: boolean;
   isDragging?: boolean;
   /** Insert a blank shot in the gutter after this card (Step 3 hover "+"). */
-  onInsertAfter?: () => void;
+  onInsertAfter?: (shotId: string) => void;
   /** Delete this shot (right-click menu). Confirmation is handled here when
    *  the shot has content; blank shots delete immediately. */
-  onDelete?: () => void;
+  onDelete?: (shotId: string) => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -70,7 +70,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
     setVisual(shot.visual);
   }, [shot.audio, shot.visual, textFocused]);
   function commitText() {
-    if (audio !== shot.audio || visual !== shot.visual) onTextChange({ audio, visual });
+    if (audio !== shot.audio || visual !== shot.visual) onTextChange(shot.id, { audio, visual });
   }
   // Hover-preview video for the shot's generated clip (muted, looping). Falls
   // back to the still image if the clip can't be loaded.
@@ -174,7 +174,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
     if (shotHasContent(effective)) {
       if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
     }
-    onDelete?.();
+    onDelete?.(shot.id);
   }
   function saveMenuImage() {
     if (!nativeSrc) return;
@@ -232,7 +232,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           <button
             className="prod-board-insert-after"
             title="Insert a blank shot here"
-            onClick={(e) => { e.stopPropagation(); onInsertAfter(); }}
+            onClick={(e) => { e.stopPropagation(); onInsertAfter(shot.id); }}
           ><PlusIcon size={12} /></button>
         </div>
       )}
@@ -260,7 +260,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           e.currentTarget.classList.remove("dragover");
           const raw = e.dataTransfer.getData("application/x-cascade-frame");
           if (!raw) return;
-          try { const src = JSON.parse(raw) as { prodId: string; shotId: string; number: number }; if (src.shotId !== shot.id) void onDropFrame(src); } catch { /* ignore malformed drag payload */ }
+          try { const src = JSON.parse(raw) as { prodId: string; shotId: string; number: number }; if (src.shotId !== shot.id) void onDropFrame(shot.id, src); } catch { /* ignore malformed drag payload */ }
         }}
       >
         {histLen > 0 && histIdx === null && (
@@ -295,7 +295,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
           <button
             className="prod-board-promote"
             title="Set this history frame as the primary frame for this shot (the current frame moves into history)"
-            onClick={(e) => { e.stopPropagation(); onPromoteHistory(histPath); }}
+            onClick={(e) => { e.stopPropagation(); onPromoteHistory(shot.id, histPath); }}
           >
             Make Primary
           </button>
@@ -357,6 +357,14 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
         ) : (
           <span className="prod-board-empty">{shot.artwork ? "…" : pending ? "pending…" : "no frame"}</span>
         )}
+        {histIdx === null && shot.videoPath && !videoFailed && (
+          <span
+            className="prod-board-video-badge"
+            title="This shot has a video clip — hover the frame to preview it"
+          >
+            <FilmStripIcon size={40} />
+          </span>
+        )}
         {pending && (
           <span
             className="prod-board-pending"
@@ -386,7 +394,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             className="prod-board-regen"
             title="Regenerate this frame"
             disabled={regenerating}
-            onClick={onRegenerate}
+            onClick={() => onRegenerate(shot.id)}
           >
             {regenerating ? "…" : <RegenerateIcon size={12} />}
           </button>
@@ -394,7 +402,7 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             className="prod-board-edit"
             title="Edit this frame with AI (image-input model + prompt)"
             disabled={regenerating || !img}
-            onClick={onEdit}
+            onClick={() => onEdit(shot.id)}
           >
             <EditIcon size={12} />
           </button>
@@ -402,18 +410,18 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
             className="prod-board-video"
             title={shot.videoPath ? "Replace this shot's video" : "Generate a video from this frame"}
             disabled={regenerating || !img}
-            onClick={(e) => { e.stopPropagation(); onVideo(); }}
+            onClick={(e) => { e.stopPropagation(); onVideo(shot.id); }}
           >
             {videoBusy ? "…" : <FilmStripIcon size={12} />}
           </button>
-          <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(); }}><ImportIcon size={12} /></button>
+          <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(shot.id); }}><ImportIcon size={12} /></button>
         </div>
         {pending && (
           <button
             className="prod-board-recheck"
             title="Recheck the pending generation job and download the frame when ready"
             disabled={rechecking}
-            onClick={(e) => { e.stopPropagation(); onRecheck?.(); }}
+            onClick={(e) => { e.stopPropagation(); onRecheck?.(shot.id); }}
           >
             {rechecking ? "…" : "◷"}
           </button>
@@ -510,6 +518,13 @@ export function BoardCard({ prod, shot, bust, regenerating, videoBusy, pending, 
     </figure>
   );
 }
+
+/** Memoized: the workspace re-renders on every storyboard/node-graph state
+ *  change, and re-rendering every card (each builds history arrays + JSX) is
+ *  the bulk of that cost on large productions. Cards receive stable, shot-id-
+ *  keyed callbacks (see ProductionWorkspace's boardActions) so unrelated state
+ *  changes skip them entirely. */
+export const BoardCard = memo(BoardCardInner);
 
 /** Step 3: video-generation dialog for one frame. The shot's current frame is
  *  always used as the reference; pick a video model, resolution and length,

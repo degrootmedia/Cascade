@@ -487,6 +487,10 @@ export interface OpenArtModelChoice {
   videoInput: boolean;
   /** Base credit cost for one job (may be null for metadata). */
   cost: number | null;
+  /** Advertised video-mode spellings from the model list (e.g. `image2video`,
+   *  `element2video`). Used to submit in the mode that actually carries
+   *  references; absent for non-video models. */
+  videoModes?: string[];
 }
 
 /** The one kind classification every dropdown follows: a model is IMAGE only
@@ -1074,6 +1078,8 @@ export interface CascadeApi {
   deleteShot(productionId: string, shotId: string): Promise<Production>;
   /** Edit a shot's audio/visual text. */
   updateShot(productionId: string, shotId: string, patch: { audio?: string; visual?: string }): Promise<Production>;
+  /** Manually set a shot's 4-digit number. Rejected when the number is malformed, below 0100, or already used by another shot; board files relocate with the number. */
+  setShotNumber(productionId: string, shotId: string, number: string): Promise<Production>;
   /** Move a shot before another shot (or to the end of the production when beforeShotId is null, or to the end of one scene when endSceneNumber is set). Re-numbers and relocates board files. */
   reorderShot(productionId: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number): Promise<Production>;
   /** Start a production without a script: one scene with five blank shots (refuses when scenes already exist). */

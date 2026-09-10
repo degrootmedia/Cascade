@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
-import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
+import { OpenArtClient, videoRefsAssign, videoRefMaxHeight } from "../src/main/openart.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
@@ -160,6 +160,33 @@ describe("OpenArtClient.listModelChoices", () => {
     expect(choices.find((c) => c.id === "wan-2-7-text-to-image")).toMatchObject({ imageInput: true, videoInput: false });
     expect(choices.find((c) => c.id === "grok-imagine-2-0")).toMatchObject({ imageInput: true, videoInput: false });
     expect(choices.find((c) => c.id === "veo-3-1")).toMatchObject({ imageInput: true, videoInput: true });
+  });
+
+  it("parses the media-keyed `modes` object (real shape) and captures video-mode spellings", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () =>
+        JSON.stringify([
+          {
+            id: "wan2-7-image",
+            displayName: "Wan 2.7 Image",
+            // Real entries warn about the video siblings in the description.
+            description: "Wan 2.7 Image - strongest on in-image text. Note this is the IMAGE model; the separately-listed Wan 2.7 and Wan 3.0 are video.",
+            modes: { image: [{ mode: "text2image" }, { mode: "image2image" }] },
+          },
+          {
+            id: "gemini-omni-flash",
+            displayName: "Gemini Omni Flash",
+            description: "Text-, image-, and reference/element-to-video.",
+            modes: { video: [{ mode: "text2video" }, { mode: "image2video" }, { mode: "element2video" }] },
+          },
+        ]),
+    });
+    const choices = await new OpenArtClient(mcp).listModelChoices();
+    expect(choices.find((c) => c.id === "wan2-7-image")).toMatchObject({ videoInput: false });
+    expect(choices.find((c) => c.id === "gemini-omni-flash")).toMatchObject({
+      videoInput: true,
+      videoModes: ["text2video", "image2video", "element2video"],
+    });
   });
 
   it("falls back to the description only when structured fields carry no modality signal", async () => {
@@ -322,6 +349,26 @@ describe("resolvePromptRefs (providers/refs, ex-OpenArtClient method)", () => {
     expect(resolved).toBe("Show @[Empty] and @image1");
     expect(extras).toEqual([{ name: "Gandalf", dataUrl: "data:image/png;base64,QUFBQQ==" }]);
   });
+
+  it("resolves a dropped video reference only when includeVideo is on", () => {
+    const folder = path.join(dataDir, "refs-video");
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "references", "clip.mp4"), Buffer.from("mp4-bytes"));
+    const p = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+      references: [{ id: "r1", name: "Clip", media: "video", mediaPath: "references/clip.mp4" }],
+    });
+    // Video generation opts in: the clip resolves from disk as a video data URL.
+    const video = resolvePromptRefs(p, "follow @[Clip]", 0, true);
+    expect(video.resolved).toBe("follow @image1");
+    expect(video.extras).toEqual([
+      { name: "Clip", dataUrl: `data:video/mp4;base64,${Buffer.from("mp4-bytes").toString("base64")}` },
+    ]);
+    // Image generation leaves it off: the tag is unresolved and nothing uploads.
+    const image = resolvePromptRefs(p, "follow @[Clip]", 0);
+    expect(image.resolved).toBe("follow @[Clip]");
+    expect(image.extras).toEqual([]);
+  });
 });
 
 describe("videoRefsAssign", () => {
@@ -341,7 +388,7 @@ describe("videoRefsAssign", () => {
         },
       },
     };
-    expect(videoRefsAssign(refs, props)).toEqual({
+    expect(videoRefsAssign(refs, props, { frames: true })).toEqual({
       startFrame: { type: "image", label: "Shot 0100 frame", url: "https://example.invalid/frame.png", id: "vr-1" },
     });
   });
@@ -349,19 +396,65 @@ describe("videoRefsAssign", () => {
   it("maps conventional url aliases (access_url, src) to the reference url", () => {
     const refs = [{ url: "https://example.invalid/f.png" }];
     const props = { startFrame: { type: "object", properties: { access_url: { type: "string" } } } };
-    expect(videoRefsAssign(refs, props)).toEqual({ startFrame: { access_url: "https://example.invalid/f.png" } });
+    expect(videoRefsAssign(refs, props, { frames: true })).toEqual({ startFrame: { access_url: "https://example.invalid/f.png" } });
   });
 
   it("falls back to the whole reference when no sub-field maps", () => {
     const refs = [{ type: "image", label: "Frame", url: "https://example.invalid/f.png" }];
     const props = { startFrame: { type: "object", properties: { raw: { type: "string" } } } };
-    expect(videoRefsAssign(refs, props)).toEqual({ startFrame: refs[0] });
+    expect(videoRefsAssign(refs, props, { frames: true })).toEqual({ startFrame: refs[0] });
   });
 
   it("uses array-style visualReferences for array fields", () => {
     const refs = [{ url: "https://example.invalid/a.png" }];
     const props = { visualReferences: { type: "array", items: { type: "object" } } };
     expect(videoRefsAssign(refs, props)).toEqual({ visualReferences: refs });
+  });
+
+  it("finds non-visualReferences array field spellings", () => {
+    const refs = [{ url: "https://example.invalid/a.png" }];
+    expect(videoRefsAssign(refs, { referenceImages: { type: "array", items: {} } })).toEqual({ referenceImages: refs });
+    expect(videoRefsAssign(refs, { refImages: { type: "array", items: {} } })).toEqual({ refImages: refs });
+    expect(videoRefsAssign(refs, { media: { type: "array", items: {} } })).toEqual({ media: refs });
+    expect(videoRefsAssign(refs, { inputImages: { type: "array", items: {} } })).toEqual({ inputImages: refs });
+  });
+
+  it("does not mistake the singular start-frame object for the reference array", () => {
+    const refs = [{ type: "image", url: "https://example.invalid/f.png" }];
+    const props = { referenceImage: { type: "object", properties: { url: { type: "string" } } } };
+    expect(videoRefsAssign(refs, props)).toEqual({ referenceImage: { url: "https://example.invalid/f.png" } });
+  });
+
+  it("normal flows fill the required start frame but never an end frame, and bind all refs as references", () => {
+    // image2video forms mark startFrame required, so normal generation must
+    // fill it with the source frame — but it must NOT drop the second reference
+    // into endFrame (that shape is reserved for the in-betweener). Every ref
+    // rides visualReferences so video clips upload and positions stay aligned.
+    const refs = [
+      { type: "image", label: "Shot 0100 frame", url: "https://example.invalid/frame.png", id: "vr-1" },
+      { type: "video", label: "Clip", url: "https://example.invalid/clip.mp4", id: "vr-2" },
+    ];
+    const props = {
+      startFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      visualReferences: { type: "array", items: { type: "object" } },
+    };
+    expect(videoRefsAssign(refs, props)).toEqual({
+      startFrame: { type: "image", url: "https://example.invalid/frame.png", id: "vr-1" },
+      visualReferences: refs,
+    });
+  });
+});
+
+describe("videoRefMaxHeight", () => {
+  it("reads the cap from the form text and defaults to 720p", () => {
+    expect(videoRefMaxHeight({
+      visualReferences: { type: "array", items: { description: "Video resolution must be between 480p and 720p" } },
+    })).toBe(720);
+    expect(videoRefMaxHeight({
+      visualReferences: { type: "array", items: { description: "Video resolution up to 1080p" } },
+    })).toBe(1080);
+    expect(videoRefMaxHeight({ visualReferences: { type: "array" } })).toBe(720);
   });
 });
 
@@ -710,6 +803,136 @@ describe("OpenArtClient generation recorder", () => {
       productionId: "prod-1",
       shotId: "s1",
     });
+  });
+
+  it("uploads video references in normal generation without setting an end frame", async () => {
+    const folder = path.join(dataDir, "prod-videorefs");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    fs.writeFileSync(path.join(folder, "references", "clip.mp4"), Buffer.from("mp4-bytes"));
+    let seenParams: Record<string, unknown> | undefined;
+    const signCalls: Record<string, unknown>[] = [];
+    const resizeCalls: { dataUrl: string; maxHeight: number }[] = [];
+    const base = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              startFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+              endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+              visualReferences: { type: "array", items: { type: "object" } },
+              duration: { type: "string", enum: ["5s", "10s"] },
+            },
+          },
+        }),
+      openart_upload_sign: (args) => {
+        signCalls.push(args);
+        return JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: `vr-${signCalls.length}`, url: "https://example.invalid/vr" } });
+      },
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-vid","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const orig = base.callRawFull.bind(base);
+    (base as { callRawFull: unknown }).callRawFull = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "openart_generate_video") seenParams = (a as { params: Record<string, unknown> }).params;
+      return orig(s, t, a);
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    try {
+      const client = new OpenArtClient(base, undefined, async (dataUrl, maxHeight) => {
+        resizeCalls.push({ dataUrl, maxHeight });
+        return dataUrl;
+      });
+      const prod = makeProduction({
+        meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+        references: [{ id: "r1", name: "Clip", media: "video", mediaPath: "references/clip.mp4" }],
+      });
+      const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+      await client.generateVideoClip(
+        prod, shot, { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate @[Clip]" }, () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // The start frame is filled (image2video requires it), the cited video clip
+    // rides visualReferences, and no end frame is set outside the in-betweener.
+    expect(seenParams?.startFrame).toMatchObject({ type: "image" });
+    expect(seenParams?.endFrame).toBeUndefined();
+    expect(seenParams?.visualReferences).toHaveLength(2);
+    // The video reference was offered to the resizer at the default 720p cap.
+    expect(resizeCalls).toHaveLength(1);
+    expect(resizeCalls[0].maxHeight).toBe(720);
+    // The video clip is signed as a video, not mislabeled as a `.png` image.
+    const videoSign = signCalls.find((c) => c.contentType === "video/mp4");
+    expect(videoSign?.mediaType).toBe("video");
+    expect(videoSign?.purpose).toBe("create-video");
+    expect(String(videoSign?.filename)).toMatch(/\.mp4$/);
+  });
+
+  it("submits in the advertised element2video mode when refs are present", async () => {
+    const folder = path.join(dataDir, "prod-omni");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    let seenArgs: Record<string, unknown> | undefined;
+    const base = fakeMcp({
+      // Real model-list shape: `modes` is an object keyed by output media.
+      openart_model_list: () => JSON.stringify([{
+        model: "gemini-omni-flash",
+        displayName: "Gemini Omni Flash",
+        description: "Text-, image-, and reference/element-to-video.",
+        modes: {
+          video: [
+            { mode: "text2video" },
+            { mode: "image2video" },
+            { mode: "element2video" },
+          ],
+        },
+      }]),
+      openart_model_form_get: (args) => {
+        // image2video parses but declares no reference array; element2video is
+        // the reference mode where the refs actually belong.
+        if (args.mode === "image2video") {
+          return JSON.stringify({ jsonSchema: { properties: { startFrame: { type: "object", properties: { url: {} } }, duration: { type: "string", enum: ["4s"] } } } });
+        }
+        if (args.mode === "element2video") {
+          return JSON.stringify({ jsonSchema: { properties: { elements: { type: "array", items: {} }, elementTypes: { type: "array" }, duration: { type: "string", enum: ["4s"] } } } });
+        }
+        return JSON.stringify({ jsonSchema: { properties: {} } });
+      },
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-x", url: "https://example.invalid/vr", type: "image" } }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-omni","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const orig = base.callRawFull.bind(base);
+    (base as { callRawFull: unknown }).callRawFull = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "openart_generate_video") seenArgs = a;
+      return orig(s, t, a);
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    try {
+      const prod = makeProduction({
+        meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+        characters: [{ id: "c1", name: "Hero", key: "", artwork: "data:image/png;base64,SGVyby1hcnQ=" }],
+      });
+      const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+      await new OpenArtClient(base).generateVideoClip(
+        prod, shot, { model: "auto", resolution: "1080p", durationSec: 4, prompt: "animate @[Hero]" }, () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seenArgs?.mode).toBe("element2video");
+    const params = seenArgs?.params as Record<string, unknown>;
+    // The `elements` array carries the refs; `elementTypes` (a metadata array)
+    // must not be mistaken for the reference field.
+    expect(params.elements).toHaveLength(2);
+    expect(params.elementTypes).toBeUndefined();
+    expect(params.startFrame).toBeUndefined();
   });
 
   it("fails loudly instead of coercing when the model can't do the requested length", async () => {

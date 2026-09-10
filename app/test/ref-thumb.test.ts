@@ -89,6 +89,13 @@ function renderModal(opts: { initial?: string } = {}): { root: any; host: HTMLDi
   return { root, host };
 }
 
+/** The shelf starts collapsed; click its rail to load and render it. */
+async function openShelf(host: HTMLDivElement): Promise<void> {
+  const rail = host.querySelector(".prod-graph-shelf-rail") as HTMLButtonElement | null;
+  if (!rail) return;
+  await act(async () => { rail.click(); await new Promise((r) => setTimeout(r, 0)); });
+}
+
 describe("refThumbUrl", () => {
   it("adds ?thumb=1 to cascade-media URLs and leaves data URLs untouched", () => {
     expect(refThumbUrl("cascade-media://p1/references/hero.png")).toBe("cascade-media://p1/references/hero.png?thumb=1");
@@ -101,6 +108,7 @@ describe("node-graph reference thumbnails", () => {
   it("canvas ref nodes and shelf tiles load the compressed thumb, zoom shows full-res", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
 
     // Tagged @[Hero] renders a canvas node; its tile uses the thumb URL.
     const nodeImg = host.querySelector(".prod-graph-node.prod-graph-ref img") as HTMLImageElement;
@@ -127,9 +135,9 @@ describe("node-graph reference thumbnails", () => {
     document.body.removeChild(host);
   });
 
-  it("defers disk-backed shelf thumbs until their tile scrolls into view", async () => {
-    // A controllable IntersectionObserver: tiles arm only when the test
-    // reports them intersecting.
+  it("defers shelf groups and disk-backed thumbs until they scroll into view", async () => {
+    // A controllable IntersectionObserver: groups and tiles mount/arm only
+    // when the test reports them intersecting.
     const RealIO = (globalThis as any).IntersectionObserver;
     const fires: Array<(visible: boolean) => void> = [];
     (globalThis as any).IntersectionObserver = class {
@@ -139,21 +147,29 @@ describe("node-graph reference thumbnails", () => {
       unobserve() {}
       disconnect() {}
     };
+    const flushIO = async () => {
+      await act(async () => {
+        const queued = fires.splice(0);
+        for (const fire of queued) fire(true);
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    };
     try {
       const { root, host } = renderModal();
       await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      await openShelf(host);
 
-      // Nothing scrolled into view: disk tiles show placeholders, while the
-      // in-memory data URL renders immediately.
+      // The category group isn't in view yet: no tiles mount at all.
+      expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(0);
+
+      // Reveal the group: tiles mount, but disk thumbs stay placeholders while
+      // the in-memory data URL renders immediately.
+      await flushIO();
       let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toEqual(["data:image/png;base64,LEGACY"]);
-      expect(fires.length).toBe(2);
 
-      // Scrolling the tiles into view arms their thumbs (slots are free).
-      await act(async () => {
-        for (const fire of fires) fire(true);
-        await new Promise((r) => setTimeout(r, 0));
-      });
+      // Scroll the tiles into view: disk thumbs arm (slots are free).
+      await flushIO();
       shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
       expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");

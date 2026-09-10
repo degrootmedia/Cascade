@@ -6,7 +6,7 @@
  * the cited artwork alongside the shot's frame). One home, imported by each
  * provider and by the IPC handlers that resolve tags before generating.
  */
-import { refArtworkDataUrl, refToken } from "../pipeline.js";
+import { refArtworkDataUrl, refMediaDataUrl, refToken } from "../pipeline.js";
 import { refTagMatches } from "../../shared/prompt-grammar.js";
 import type { Production } from "../../shared/ipc.js";
 
@@ -16,16 +16,28 @@ import type { Production } from "../../shared/ipc.js";
  * (@imageN) plus the referenced images, ready to upload alongside the
  * shot's frame. `startToken` is the token index to begin at — the shot's
  * own frame always occupies @image1.
+ *
+ * `includeVideo` additionally resolves dropped video references from their
+ * on-disk file, for video generation where a reference can be a clip rather
+ * than a still. Image generation leaves it off so a video is never uploaded
+ * to an image model.
  */
 export function resolvePromptRefs(
   p: Production,
   prompt: string,
-  startToken: number
+  startToken: number,
+  includeVideo = false
 ): { resolved: string; extras: { name: string; dataUrl: string }[] } {
   const candidates = [
     ...p.characters.map((c) => ({ name: c.name, artwork: refArtworkDataUrl(p, c) })),
     ...p.products.map((pr) => ({ name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-    ...(p.references ?? []).map((r) => ({ name: r.name, artwork: refArtworkDataUrl(p, r) })),
+    ...(p.references ?? []).map((r) => ({
+      name: r.name,
+      artwork:
+        includeVideo && r.media === "video"
+          ? refMediaDataUrl(p, r) ?? refArtworkDataUrl(p, r)
+          : refArtworkDataUrl(p, r),
+    })),
   ].filter((r): r is { name: string; artwork: string } => Boolean(r.name && r.artwork));
   const extras: { name: string; dataUrl: string }[] = [];
   const nameToken = new Map<string, string>();

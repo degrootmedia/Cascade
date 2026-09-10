@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, wireEditNodeToCurrentFrame, buildEditGenPrompt } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
@@ -1337,7 +1337,12 @@ function registerIpc() {
 
   handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number) =>
     mutateShots(id, (p) => {
+      const oldNumbers = new Map<string, string>();
+      for (const scene of p.scenes) for (const shot of scene.shots) oldNumbers.set(shot.id, shot.number);
       shotter.insertShotAt(p.scenes, sceneNumber, index);
+      // A front insert (or an exhausted mid-number gap) re-derives the whole
+      // 100-grid; relocate board folders so files follow their shots.
+      relocateBoardsForRenumber(p, oldNumbers);
     })
   );
 
@@ -1365,6 +1370,13 @@ function registerIpc() {
         }
       }
       throw new Error("Shot not found.");
+    })
+  );
+
+  handle("production:setShotNumber", (_e, id: string, shotId: string, number: string) =>
+    mutateShots(id, (p) => {
+      const { oldNumbers } = shotter.setShotNumber(p.scenes, shotId, number);
+      relocateBoardsForRenumber(p, oldNumbers);
     })
   );
 
@@ -2139,18 +2151,22 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
-      // Additional references plugged into the video node's open sockets: only
-      // image refs (inline artwork) can be uploaded as visual references.
+      // Additional references plugged into the video node's open sockets. Both
+      // image artwork and dropped video clips upload as visual references.
       const extraRefs: { name: string; dataUrl: string }[] = [];
       if (Array.isArray(opts?.refIds)) {
         const pool = [
-          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
-          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+          ...p.characters.map((c) => ({ id: c.id, name: c.name, data: refArtworkDataUrl(p, c) })),
+          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, data: refArtworkDataUrl(p, pr) })),
+          ...(p.references ?? []).map((r) => ({
+            id: r.id,
+            name: r.name,
+            data: r.media === "video" ? refMediaDataUrl(p, r) : refArtworkDataUrl(p, r),
+          })),
         ];
         for (const rid of opts.refIds) {
-          const ref = pool.find((r) => r.id === rid && r.artwork);
-          if (ref?.artwork) extraRefs.push({ name: ref.name, dataUrl: ref.artwork });
+          const ref = pool.find((r) => r.id === rid && r.data);
+          if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
         }
       }
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;

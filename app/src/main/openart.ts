@@ -19,6 +19,7 @@ import { assetPath, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { citePrompt, resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, ProviderEmit } from "./providers/types.js";
 import { uploadDataUrlReference } from "./openart-upload.js";
+import { resizeVideoRefToHeight } from "./video-ref.js";
 import {
   IMAGE_URI_EXT_RX,
   IMAGE_URL_RX,
@@ -87,6 +88,43 @@ export const START_FRAME_KEY_RX = /^(startFrame|firstFrame|startImage|sourceImag
  *  slot; every other model still receives both frames via the array fallback. */
 export const END_FRAME_KEY_RX = /^(endFrame|lastFrame|endImage|targetImage|outputImage)$/i;
 
+/** A form key that looks like an array of reference media — the field every
+ *  uploaded reference (images and dropped clips) is bound to. Covers the
+ *  vendor's common spellings (`visualReferences`, `referenceImages`,
+ *  `refImages`, `media`, `inputImages`, …); the start/end frame slots are
+ *  excluded so a single-frame object field is never mistaken for the array. */
+export const REFERENCE_ARRAY_KEY_RX = /reference|refs?|medias?|inputs?|image_?refs?|video_?refs?|images?|videos?|elements?/i;
+
+/** The model form's array-shaped reference field key, or null when it declares
+ *  none. Shared by the binder and the mode picker so a ref-carrying submission
+ *  never lands on a form that would silently drop the references. */
+export function referenceArrayKey(props: Record<string, unknown>): string | null {
+  for (const key of Object.keys(props)) {
+    if (!REFERENCE_ARRAY_KEY_RX.test(key)) continue;
+    // `elementTypes`/`mediaTypes` list the accepted kinds, not the media.
+    if (/type/i.test(key)) continue;
+    if (START_FRAME_KEY_RX.test(key) || END_FRAME_KEY_RX.test(key)) continue;
+    const p = props[key] as { type?: string; items?: unknown } | undefined;
+    if (!p) continue;
+    if (p.type === "array" || p.items) return key;
+  }
+  return null;
+}
+
+/** The maximum input-video height a model's form allows, read from any
+ *  resolution constraint in the schema text (e.g. Seedance's "Video resolution
+ *  must be between 480p and 720p"). Defaults to 720p when unspecified — a safe
+ *  ceiling for video *elements*, whose detail matters far less than the output.
+ *  Returns 0 (no resize) only for a non-positive/NaN cap. */
+export function videoRefMaxHeight(props: Record<string, unknown>): number {
+  const text = JSON.stringify(props);
+  const between = /video\s+resolution[^.]{0,40}?between\s*(\d{3,4})p\s*and\s*(\d{3,4})p/i.exec(text);
+  if (between) return Number(between[2]);
+  const bounded = /video\s+resolution[^.]{0,60}?(?:up to|max(?:imum)?|at most|no (?:more|higher) than)\s*(\d{3,4})p/i.exec(text);
+  if (bounded) return Number(bounded[1]);
+  return 720;
+}
+
 /** The form key `videoRefsAssign` would fill with the end keyframe (first
  *  non-array match), or null when the schema declares no dedicated end-frame
  *  slot. Shared by the submit path and the capability probe so the two can
@@ -103,21 +141,32 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
 }
 
 /** Fit the uploaded visual references into the video model's reference field.
- *  The workflow is normally "text prompt + start frame" (image2video): the
- *  frame is a single image, so single-image object fields (startFrame,
- *  inputImage, …) are preferred over array-style fields (visualReferences).
- *  When TWO references are uploaded (the in-betweener's start + end keyframes),
- *  end-frame object fields (endFrame, lastFrame, …) are filled from the second
- *  reference as well; models without an end-frame slot still get both frames
- *  via the array fallback. Returns null when no reference field is found — the
- *  caller then falls back to `params.visualReferences`.
+ *
+ *  Two shapes, chosen by `opts.frames`:
+ *   - Normal image/text-to-video (default): the source frame fills the
+ *     start-frame slot (image2video forms mark it required — a submission
+ *     without it is rejected) and every reference — the frame, @[name]
+ *     artwork, and any dropped video clips — also rides the array-style
+ *     visualReferences field. The END-frame slot is never touched, so a second
+ *     reference can't be mistaken for an end keyframe.
+ *   - In-betweener (`frames: true`): the start/end keyframe pair binds to the
+ *     model's dedicated startFrame/endFrame object slots (falling back to the
+ *     array when a slot is absent), since a start→end interpolation is exactly
+ *     what those slots are for.
+ *
+ *  Returns null when no reference field is found — the caller then falls back
+ *  to `params.visualReferences`.
  *
  *  For an object-shaped frame field, EVERY schema sub-property is filled
  *  from the uploaded reference (exact field name first, then the conventional
  *  aliases). Schemas like Grok's `startFrame {type,label,url,id}` require
  *  `type` and `label`; mapping only url/id dropped them and the server rejected
  *  the frame with `startFrame.type: expected "image"`. */
-export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<string, unknown>): Record<string, unknown> | null {
+export function videoRefsAssign(
+  refs: Record<string, unknown>[],
+  props: Record<string, unknown>,
+  opts?: { frames?: boolean }
+): Record<string, unknown> | null {
   if (!refs.length) return null;
   const keys = Object.keys(props);
   const fillObject = (ref: Record<string, unknown>, properties: Record<string, unknown>): Record<string, unknown> => {
@@ -133,7 +182,8 @@ export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<s
     return out;
   };
   const out: Record<string, unknown> = {};
-  // Pass 1a: single start-frame object fields (the common image2video shape).
+  // Pass 1a: the single start-frame object field (the common image2video shape)
+  // — the source frame, required by image2video forms in every mode.
   for (const key of keys) {
     if (!START_FRAME_KEY_RX.test(key)) continue;
     const p = props[key] as { type?: string; items?: unknown; properties?: Record<string, unknown> } | undefined;
@@ -147,11 +197,11 @@ export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<s
     }
     break;
   }
-  // Pass 1b: end-frame object fields (in-betweening) — only when a second
-  // reference was uploaded. Models without this slot ignore it; both frames
-  // still reach the model through the pass-2 array field below.
+  // Pass 1b: end-frame object field — in-betweening ONLY. Normal generation must
+  // never set it, else a second reference becomes an accidental end keyframe.
+  // Models without this slot still get both frames through the pass-2 fallback.
   let endFilled = false;
-  if (refs.length > 1) {
+  if (opts?.frames === true && refs.length > 1) {
     const endKey = endFrameSlotKey(props);
     if (endKey) {
       const p = props[endKey] as { properties?: Record<string, unknown> } | undefined;
@@ -164,17 +214,13 @@ export function videoRefsAssign(refs: Record<string, unknown>[], props: Record<s
       endFilled = true;
     }
   }
-  if (Object.keys(out).length && (refs.length < 2 || endFilled)) return out;
-  // Pass 2: array-style reference fields. When two frames were uploaded but
-  // the schema has no end-frame slot, BOTH frames ride the array field (merged
-  // with any start-frame object assignment above) so the model still sees the
-  // end keyframe.
-  for (const key of keys) {
-    if (!/visualReference|references/i.test(key)) continue;
-    const p = props[key] as { type?: string; items?: unknown } | undefined;
-    if (!p) continue;
-    if (p.type === "array" || p.items) return { ...out, [key]: refs };
-  }
+  if (opts?.frames === true && Object.keys(out).length && (refs.length < 2 || endFilled)) return out;
+  // Pass 2: array-style reference fields — every ref (the source frame plus
+  // extras) so positional citation stays aligned and video clips upload. The
+  // field name varies by vendor (`visualReferences`, `referenceImages`, …),
+  // so scan for any array-shaped reference field.
+  const refKey = referenceArrayKey(props);
+  if (refKey) return { ...out, [refKey]: refs };
   return Object.keys(out).length ? out : null;
 }
 
@@ -199,10 +245,13 @@ export class OpenArtClient implements MediaProvider {
 
   /** A recorder (the expenses ledger) that observes every successful
    *  generation with its resolved metadata. Injected so the tally is testable
-   *  at the same seam as the McpManager fake. */
+   *  at the same seam as the McpManager fake. `resizeVideoRef` downscales an
+   *  oversized video reference to a model's allowed input height; injected so
+   *  the ffmpeg-backed implementation stays out of unit tests. */
   constructor(
     private readonly mcp: McpManager,
-    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void }
+    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void },
+    private readonly resizeVideoRef: (dataUrl: string, maxHeight: number) => Promise<string> = resizeVideoRefToHeight
   ) {}
 
   /** Fire the generation recorder; a tally write must never break a
@@ -269,11 +318,34 @@ export class OpenArtClient implements MediaProvider {
       // no modality tokens at all.
       const mediaList = Array.isArray(m.media) ? (m.media as unknown[]).map(String) : [];
       const modesList = Array.isArray(m.modes) ? (m.modes as unknown[]).map(String) : [];
+      // The modern model list exposes `modes` as an OBJECT keyed by output
+      // media: `{ image: [{mode,description}], video: [{mode,…}] }`. Parse the
+      // video-mode spellings so generation can submit in the mode that
+      // actually carries references (e.g. `element2video`), and so an
+      // image-only model whose description merely mentions "video" is never
+      // offered in the video dropdowns.
+      const modesByMedia: Record<string, string[]> = {};
+      if (m.modes && typeof m.modes === "object" && !Array.isArray(m.modes)) {
+        for (const [media, list] of Object.entries(m.modes as Record<string, unknown>)) {
+          if (!Array.isArray(list)) continue;
+          modesByMedia[media.toLowerCase()] = list
+            .map((e) => String((e as { mode?: unknown } | null)?.mode ?? e ?? ""))
+            .filter(Boolean);
+        }
+      }
+      const videoModes = modesByMedia.video ?? [];
+      const imageModes = modesByMedia.image ?? [];
       const kindField = String(m.output_type ?? m.outputType ?? m.type ?? m.category ?? "").toLowerCase();
       const structuredVideo =
-        /video/.test(kindField) || modesList.some((s) => /video/i.test(s)) || mediaList.some((s) => /video/i.test(s));
+        /video/.test(kindField) ||
+        modesList.some((s) => /video/i.test(s)) ||
+        videoModes.length > 0 ||
+        mediaList.some((s) => /video/i.test(s));
       const structuredImage =
-        /image/.test(kindField) || modesList.some((s) => /image/i.test(s)) || mediaList.some((s) => /image/i.test(s));
+        /image/.test(kindField) ||
+        modesList.some((s) => /image/i.test(s)) ||
+        imageModes.length > 0 ||
+        mediaList.some((s) => /image/i.test(s));
       const videoOutput = structuredVideo || (!structuredVideo && !structuredImage && /video/i.test(description));
       const imageOutput = structuredImage || (!structuredVideo && !structuredImage && /image/i.test(description));
       // Credit cost: OpenArt sometimes reports it on the model entry — take the
@@ -285,7 +357,7 @@ export class OpenArtClient implements MediaProvider {
         const v = (costRaw as Record<string, unknown>).base_cost ?? (costRaw as Record<string, unknown>).amount;
         if (typeof v === "number" && Number.isFinite(v)) cost = v;
       }
-      out.push({ id, displayName, description, imageInput: imageOutput, videoInput: videoOutput, cost });
+      out.push({ id, displayName, description, imageInput: imageOutput, videoInput: videoOutput, cost, videoModes });
     }
     return out;
   }
@@ -334,9 +406,20 @@ export class OpenArtClient implements MediaProvider {
     if (!j) return null;
     const schema = j.jsonSchema as Record<string, unknown> | undefined;
     const allOf = Array.isArray(schema?.allOf) ? (schema.allOf as Record<string, unknown>[]) : [];
-    const first = allOf[0];
-    const props = first?.properties ?? schema?.properties;
-    return props && typeof props === "object" ? (props as Record<string, unknown>) : null;
+    // Merge every schema block (open_model_form_get splits a form across
+    // allOf entries); a later block can carry the reference array even when
+    // the first only has the prompt/duration fields.
+    const merged: Record<string, unknown> = {};
+    let found = false;
+    const absorb = (props: unknown) => {
+      if (props && typeof props === "object") {
+        Object.assign(merged, props as Record<string, unknown>);
+        found = true;
+      }
+    };
+    for (const entry of allOf) absorb(entry?.properties);
+    absorb(schema?.properties);
+    return found ? merged : null;
   }
 
   /** Pull the resolution/duration options out of a model form's props map. */
@@ -649,12 +732,9 @@ export class OpenArtClient implements MediaProvider {
   }
 
 /** Fit the uploaded visual references into the video model's reference field.
-   *  The workflow is "text prompt + start frame" (image2video) — or start +
-   *  end frames for in-betweening: the frames are single images, so
-   *  single-image object fields (startFrame/endFrame, inputImage, …) are
-   *  preferred over array-style fields (visualReferences). Returns null when
-   *  no reference field is found — the caller then falls back to
-   *  `params.visualReferences`. */
+   *  Normal generation binds them as an array; the in-betweener passes
+   *  `frames: true` to reach the dedicated start/end slots. See the free
+   *  function for the exact rules. */
 private videoRefsAssign = videoRefsAssign;
 
   /** Build the OpenArt generate-tool arguments for one board.
@@ -722,7 +802,8 @@ private videoRefsAssign = videoRefsAssign;
     modelId: string,
     projectId: string | null,
     mode: string,
-    formProps: Record<string, unknown> | null
+    formProps: Record<string, unknown> | null,
+    frames: boolean
   ): Record<string, unknown> {
     const props = formProps ?? {};
     const params: Record<string, unknown> = { prompt };
@@ -731,7 +812,7 @@ private videoRefsAssign = videoRefsAssign;
     const dur = this.videoDurationAssign(opts.durationSec, props);
     if (dur) Object.assign(params, dur);
     if (refs.length) {
-      const refAssign = this.videoRefsAssign(refs, props);
+      const refAssign = this.videoRefsAssign(refs, props, { frames });
       if (refAssign) Object.assign(params, refAssign);
       else params.visualReferences = refs; // last-resort fallback
     }
@@ -1179,24 +1260,8 @@ text.match(IMAGE_URL_RX)?.[0] ??
       }
     }
     refs.push(...(extraRefs ?? []));
-    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length);
+    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
     refs.push(...extras);
-
-    // Uploads ride the same positional binding as images (probed live); the
-    // sign request uses purpose "create-video" — using the image purpose can
-    // make OpenArt reject the upload and silently drop the reference.
-    const uploaded: Record<string, unknown>[] = [];
-    const submitted: (string | null)[] = [];
-    for (const [i, r] of refs.entries()) {
-      try {
-        const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name, "create-video");
-        uploaded.push(vr);
-        submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
-      } catch {
-        emit(`Reference "${r.name}" couldn't be uploaded — continuing without it.`, "error");
-      }
-    }
-    const fullPrompt = citePrompt(resolved, refs, submitted);
 
     // Resolve the model id ("auto" → first video-capable model), then discover
     // the mode the model's form accepts: image-to-video when references are
@@ -1214,25 +1279,79 @@ text.match(IMAGE_URL_RX)?.[0] ??
       }
       modelId = modelId || video[0]?.id || "";
     }
+    // Mode choice. The model list advertises the exact video-mode spellings
+    // (OpenArt rejects a model+media combination it doesn't know), so prefer
+    // those over guesses. When references are present, mode spellings that
+    // carry references (`element2video`, `*reference*`, `omni`) go first —
+    // image2video only animates the frame as a literal first frame and
+    // exposes no reference array.
+    const isRefyMode = (m: string) => /element|reference|ref2|omni/i.test(m);
+    const advertised = models.find((mm) => mm.id === modelId)?.videoModes ?? [];
+    const staticRefModes = ["element2video", "image2video", "image_to_video", "img2video", "reference2video", "reference_to_video", "ref2video", "reference_video", "omni2video", "omni", "multimodal2video", "video2video", "video"];
+    const staticTextModes = ["text2video", "text_to_video", "video"];
     const modeCandidates = refs.length
-      ? ["image2video", "image_to_video", "img2video", "video2video", "video"]
-      : ["text2video", "text_to_video", "video"];
-    let mode = modeCandidates[0];
+      ? [...advertised.filter(isRefyMode), ...advertised.filter((m) => !isRefyMode(m)), ...staticRefModes]
+      : [...advertised.filter((m) => !isRefyMode(m)), ...advertised.filter(isRefyMode), ...staticTextModes];
+    // De-dupe while preserving order.
+    const seenModes = new Set<string>();
+    const orderedModes = modeCandidates.filter((m) => (seenModes.has(m) ? false : (seenModes.add(m), true)));
+    let mode = orderedModes[0] ?? (refs.length ? "element2video" : "text2video");
     let formProps: Record<string, unknown> | null = null;
     let formRawReply = "";
     if (modelId) {
       const formRaw = this.findTool(/^openart_model_form_get$/);
       if (formRaw) {
-        for (const m of modeCandidates) {
+        // Prefer a mode whose form actually declares an array reference field
+        // when references were uploaded. Fall back to the first parsing mode
+        // when no mode advertises a reference array.
+        let refMode: { mode: string; props: Record<string, unknown> } | null = null;
+        for (const m of orderedModes) {
+          let raw = "";
           try {
-            const raw = await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode: m });
-            formProps = this.parseModelFormProperties(raw);
-            if (formProps) { mode = m; break; }
+            raw = await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode: m });
+          } catch { /* try the next mode spelling */ continue; }
+          const props = this.parseModelFormProperties(raw);
+          if (!props) {
             if (!formRawReply) formRawReply = String(raw ?? "");
-          } catch { /* try the next mode spelling */ }
+            continue;
+          }
+          if (formProps === null) { formProps = props; mode = m; }
+          if (refs.length && referenceArrayKey(props)) { refMode = { mode: m, props }; break; }
+          if (!refs.length) break;
         }
+        if (refMode) { formProps = refMode.props; mode = refMode.mode; }
       }
     }
+
+    // Uploads ride the same positional binding as images (probed live); the
+    // sign request uses purpose "create-video" — using the image purpose can
+    // make OpenArt reject the upload and silently drop the reference. Video
+    // references are downscaled first when the model caps input video
+    // resolution (e.g. Seedance element2video rejects anything above 720p),
+    // so an oversized clip doesn't fail the whole submission.
+    const maxVideoH = videoRefMaxHeight(formProps ?? {});
+    const uploaded: Record<string, unknown>[] = [];
+    const submitted: (string | null)[] = [];
+    for (const [i, r] of refs.entries()) {
+      try {
+        let dataUrl = r.dataUrl;
+        if (/^data:video\//i.test(dataUrl)) {
+          const resized = await this.resizeVideoRef(dataUrl, maxVideoH);
+          if (resized !== dataUrl) {
+            dataUrl = resized;
+            emit(`Shot ${shot.number}: resized video reference "${r.name}" to ${maxVideoH}p for this model.`);
+          }
+        }
+        const vr = await uploadDataUrlReference(this.mcp, dataUrl, r.name, "create-video");
+        uploaded.push(vr);
+        submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        emit(`Reference "${r.name}" couldn't be uploaded (${why}) — continuing without it.`, "error");
+      }
+    }
+    const fullPrompt = citePrompt(resolved, refs, submitted);
+
     const projectId = await this.resolveProject(p, (m) => emit(m)).catch(() => null);
 
     // Fail loudly when the model's live form proves it can't do the requested
@@ -1250,12 +1369,38 @@ text.match(IMAGE_URL_RX)?.[0] ??
       }
     }
 
-    const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps);
+    const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps, !!frameRefs);
     // Diagnostics: surface exactly what reaches OpenArt so a silently-ignored
     // length (the recurring "asked 2s, got the 5s default" bug) is visible in
     // the job log instead of a mystery. The params carry no secrets.
     const paramsObj = (args.params as Record<string, unknown>) ?? {};
     const durationKeys = Object.keys(paramsObj).filter((k) => /duration|length|seconds|clip|frames|time/i.test(k));
+    // Reference binding diagnostic: which array field the uploaded refs landed
+    // in, or a warning when they didn't (the "video reference isn't uploading"
+    // failure mode). `paramsObj[k] === uploaded` identifies the field the
+    // binder assigned, since `videoGenArgs` passes that exact array.
+    const refArrayKey = uploaded.length
+      ? Object.keys(paramsObj).find((k) => Array.isArray(paramsObj[k]) && paramsObj[k] === uploaded)
+      : undefined;
+    // When the refs couldn't be bound, dump the chosen mode's form fields
+    // (array-shaped ones marked `[]`) so the real reference field name is
+    // visible instead of a mystery.
+    const formFieldDump = formProps
+      ? Object.keys(formProps)
+          .map((k) => {
+            const p = formProps[k] as { type?: unknown; items?: unknown } | undefined;
+            return `${k}${p?.type === "array" || p?.items ? "[]" : ""}`;
+          })
+          .join(", ")
+      : "";
+    const refInfo = refs.length
+      ? ` refs ${uploaded.length}/${refs.length}` +
+        (refArrayKey
+          ? ` → ${refArrayKey}`
+          : uploaded.length
+            ? ` ⚠ no reference array field in the ${mode} form${formFieldDump ? ` — fields: [${formFieldDump}]` : ""}`
+            : "")
+      : "";
     const formKeys = formProps ? Object.keys(formProps) : [];
     const formDurationish = formKeys.filter((k) => /duration|length|seconds|clip|frames|time|time_?span|video/i.test(k));
     const formReplyInfo = formProps
@@ -1283,7 +1428,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
           .join(" | ")
       : "";
     emit(
-      `Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}… ` +
+      `Shot ${shot.number}: submitting video job${modelId ? ` via ${modelId}` : ""}…${refInfo} ` +
       (durationKeys.length
         ? `params ${durationKeys.map((k) => `${k}=${JSON.stringify(paramsObj[k])}`).join(", ")}`
         : `⚠ no duration/length param was set (OpenArt may default to 5s). Model form fields: [${formKeys.join(", ")}]${formDurationish.length ? ` — duration-ish: [${formDurationish.join(", ")}]` : ""}${schemaDump ? ` — ${schemaDump}` : ""}${formReplyInfo}`)

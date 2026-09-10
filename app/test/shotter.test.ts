@@ -14,6 +14,7 @@ import {
   nextNumber,
   reorderShot,
   renumber,
+  setShotNumber,
   validate,
 } from "../src/main/shotter.js";
 
@@ -147,6 +148,41 @@ describe("reorderShot", () => {
     const scenes = [scene(1, ["0100", "0200"])];
     expect(() => reorderShot(scenes, "id-0100", null, 7)).toThrow(/Scene 7 not found/);
     expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0100", "id-0200"]);
+  });
+});
+
+describe("setShotNumber", () => {
+  it("sets a free number in place and reports the old number", () => {
+    const scenes = [scene(1, ["0100", "0200", "0300"])];
+    const { oldNumbers } = setShotNumber(scenes, "id-0200", "0150");
+    expect(scenes[0].shots.map((s) => s.number)).toEqual(["0100", "0150", "0300"]);
+    expect(oldNumbers.get("id-0200")).toBe("0200");
+    expect(validate(scenes)).toEqual([]);
+  });
+
+  it("is a no-op (empty map) when the number is unchanged", () => {
+    const scenes = [scene(1, ["0100"])];
+    const { oldNumbers } = setShotNumber(scenes, "id-0100", "0100");
+    expect(oldNumbers.size).toBe(0);
+    expect(scenes[0].shots[0].number).toBe("0100");
+  });
+
+  it("rejects a number another shot already owns", () => {
+    const scenes = [scene(1, ["0100", "0200"])];
+    expect(() => setShotNumber(scenes, "id-0100", "0200")).toThrow(/Shot 0200 already exists/);
+    // Rejected — nothing moved.
+    expect(scenes[0].shots.map((s) => s.number)).toEqual(["0100", "0200"]);
+  });
+
+  it("rejects malformed and out-of-space numbers", () => {
+    const scenes = [scene(1, ["0100"])];
+    expect(() => setShotNumber(scenes, "id-0100", "20")).toThrow(/not a valid shot number/);
+    expect(() => setShotNumber(scenes, "id-0100", "0099")).toThrow(/not a valid shot number/);
+    expect(() => setShotNumber(scenes, "id-0100", "ABCD")).toThrow(/not a valid shot number/);
+  });
+
+  it("throws when the shot does not exist", () => {
+    expect(() => setShotNumber([scene(1, ["0100"])], "nope", "0200")).toThrow(/Shot not found/);
   });
 });
 

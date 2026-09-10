@@ -118,4 +118,33 @@ control chars � only a byte-level scan found them.
 
 - Media-model capability flags must come from structured fields only (media/modes/output_type), never free-text descriptions. OpenArt descriptions routinely mention both modalities ('image and video'), so a /video/ match on the description blob misflags image models (e.g. 'Wan 2.7 Image', 'Grok Imagine Image 2.0') as video and pollutes every video dropdown plus the expense-image classification. Test with a fixture whose description mentions video but whose structured fields are image-only.
 
-- Structured-only model classification can DROP models whose structured fields carry no modality tokens (both flags false = invisible everywhere). Use structured fields to decide, but fall back to the description only when structured fields are completely silent � that fixes description false-positives without the recall regression.
+- Structured-only model classification can DROP models whose structured fields carry no modality tokens (both flags false = invisible everywhere). Use structured fields to decide, but fall back to the description only when structured fields are completely silent � that fixes description false-positives without the recall regression.
+
+## 2026-09-10 — node-editor perf: two unmeasured fixes missed the bottleneck
+
+- Symptom: opening the node editor is slow on large productions. First round
+  (lazy + capped shelf thumbnails, per-group window of 24) made "no noticeable
+  difference."
+- Root cause of the miss: the fixes were reasoned, not measured. The real costs
+  were (a) `BoardCard` was un-memoized, so every workspace state change
+  (opening the graph = `setGraphShotId`) re-rendered every card — 600 cards
+  ≈ 194 ms per render — and (b) per-group windowing doesn't bound total items
+  when a project has many small categories (200 cats × 15 refs ≈ 2 985 items
+  ≈ 640 ms). Both were invisible without a benchmark.
+- Rules:
+  1. Before optimizing, write a throwaway benchmark that mounts the real
+     component with representative large inputs (varied shapes: few-big vs
+     many-small) and logs `performance.now()` + a React `<Profiler>`. Delete it
+     after. The bottleneck is usually not the one you can reason to.
+  2. "Large project" is multi-dimensional — shots, references, categories. Test
+     each axis; a fix that only bounds one axis (per-group window) won't help
+     projects large along another (group count).
+  3. A list of memoized children is only memoized if their props are
+     reference-stable. Plain `function` handlers recreated each render + inline
+     lambdas defeat `memo`. Route per-item callbacks through a `latestRef` +
+     stable `useMemo` delegator (keeps them fresh AND stable) and pass the item
+     id into the callback.
+  4. Per-group virtualization still needs a per-group viewport gate
+     (`IntersectionObserver`) or a project with many tiny groups mounts
+     everything at once. jsdom has no IO — write the gating test with a
+     controllable IO stub.

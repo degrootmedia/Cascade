@@ -31,7 +31,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | ffmpeg seam | `app/src/main/ffmpeg.ts` | Locating the ffmpeg binary (bundled `ffmpeg-static`, asar-unpacked when packaged, else PATH) + `runFfmpeg`/`probeMedia` that `assembly.ts` injects. Pure node — never imports Electron. |
 | Reference thumbnails | `app/src/main/thumbnails.ts` | The `?thumb=1` query on `cascade-media://` URLs: `loadRefThumbnail` resizes a reference image to a 256px long edge and compresses to JPEG (~65), served from a bounded memory cache then a versioned durable cache under `userData/thumb-cache/` (`<sha1>-<mtimeMs>-<size>.jpg` — valid exactly while its source is unchanged), then a fresh encode; any failure falls through to the full file. `regenerateRefThumbnails` pre-encodes every production's reference images (`referenceImagePaths` in `productions.ts`) from Settings → Regenerate thumbnail cache and prunes stale entries. Node-graph tiles use it (`refThumbUrl` in `NodeGraphModal.tsx`) — zoom/lightbox URLs keep the full-res file, and prompt sends read the original from disk, so nothing downstream sees the thumb. |
 | Production store | `app/src/main/productions.ts` | Production document persistence + migration. |
-| Shotter | `app/src/main/shotter.ts` | The 4-digit shot-numbering module: 100-grid derivation (`nextNumber`/`insertMid`/`renumber`), mid-numbered shot inserts with a full-renumber escape hatch, cross-scene reorder with board-folder relocation, and the scene-level surface (`blankScenes` — the 1-scene × 5-blank-shots skeleton for script-less productions — and `insertScene`, which splices an empty scene and renumbers later scene ordinals 1..N; scene ordinals are display-only, shot numbers untouched). |
+| Shotter | `app/src/main/shotter.ts` | The 4-digit shot-numbering module: 100-grid derivation (`nextNumber`/`insertMid`/`renumber`), mid-numbered shot inserts with a full-renumber escape hatch, cross-scene reorder with board-folder relocation, and the manual `setShotNumber` override (one shot only — rejects malformed/sub-0100 numbers and any slot another shot already owns, since assembly keys `shots/<number>.*` filenames on it; board folder relocates to follow), and the scene-level surface (`blankScenes` — the 1-scene × 5-blank-shots skeleton for script-less productions — and `insertScene`, which splices an empty scene and renumbers later scene ordinals 1..N; scene ordinals are display-only, shot numbers untouched). |
 | Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), the `userData/ledger.json` singleton, and the human-readable `userData/expenses.csv` mirror. Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
 | Document store | `app/src/main/store.ts` | The generic JSON-document store (`createStore`) behind sessions, productions, and agents: atomic temp+rename writes, newest-first list, archive/ soft-deletes, decode/encode hooks, side-file hooks. Settings stays a bespoke singleton (encryption + memo cache). |
 | IPC contract | `app/src/shared/ipc.ts` | The single channel map (`ipcContract`) that derives the renderer API, drives the preload adapter, and validates every main-process handler. Adding a channel = one contract entry, not three files. |
@@ -135,6 +135,20 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   dropdowns (every pick is explicit; legacy "auto" values resolve main-side to
   the house default). Unproven models still receive both frames via the array
   fallback when a submission slips past the lists.
+  The end-frame slot is **reserved for the in-betweener**: normal video
+  generation (the classic modal and the video node) never sets it — a second
+  reference would otherwise become an accidental end keyframe. It still fills
+  the model's required start-frame slot with its source frame (image2video
+  forms reject a submission without it), and binds that frame plus cited
+  `@[name]` artwork and any dropped video references through the model's array
+  reference field (`videoRefsAssign` / `referenceArrayKey` in `openart.ts`).
+  When references are present normal generation submits in the model's
+  advertised reference mode (read from the model list's media-keyed `modes`,
+  e.g. `element2video`) rather than `image2video`, and downscales oversized
+  input video references to the model's allowed height first (`video-ref.ts`,
+  default 720p) so a cap like Seedance's 480p–720p video-element limit doesn't
+  fail the submission. Only `generateTweenBlock` passes `frames: true` to bind
+  the start/end keyframe pair to the dedicated slots.
   `syncTweenBlocks` prunes dead reference keyframes but keeps gen-node
   sentinels unconditionally (a pre-generation wire must survive; generation
   reports a clear error if a keyframe still resolves to nothing).

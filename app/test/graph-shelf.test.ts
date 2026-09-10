@@ -92,6 +92,13 @@ function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknow
   return { root, host };
 }
 
+/** The shelf starts collapsed; click its rail to load and render it. */
+async function openShelf(host: HTMLDivElement): Promise<void> {
+  const rail = host.querySelector(".prod-graph-shelf-rail") as HTMLButtonElement | null;
+  if (!rail) return;
+  await act(async () => { rail.click(); await new Promise((r) => setTimeout(r, 0)); });
+}
+
 function dropOnCanvas(host: HTMLDivElement, type: string, data: string): void {
   const canvas = host.querySelector(".prod-graph-canvas") as HTMLElement;
   const ev = new Event("drop", { bubbles: true, cancelable: true }) as Event & { dataTransfer: DataTransfer };
@@ -142,6 +149,7 @@ describe("node-graph reference shelf", () => {
       },
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
 
     // Only @[Hero] (tagged) gets a node.
     expect(refNodeCount(host)).toBe(1);
@@ -166,6 +174,7 @@ describe("node-graph reference shelf", () => {
       },
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
 
     const heads = host.querySelectorAll(".prod-graph-shelf-group-head");
     expect(heads.length).toBe(2);
@@ -192,6 +201,7 @@ describe("node-graph reference shelf", () => {
     savedLayouts = [];
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
 
     expect(refNodeCount(host)).toBe(1);
     await act(async () => {
@@ -233,6 +243,7 @@ describe("node-graph shelf at scale", () => {
   it("auto-collapses a large group and windows its tiles behind Show more", async () => {
     const { root, host } = renderModal({ prodPatch: manyProdPatch, refs: MANY });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
 
     const heads = host.querySelectorAll(".prod-graph-shelf-group-head");
     expect(heads.length).toBe(1);
@@ -259,6 +270,7 @@ describe("node-graph shelf at scale", () => {
   it("filters shelf tiles by name", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
     expect(host.querySelectorAll(".prod-graph-shelf-item").length).toBe(3);
 
     const search = host.querySelector(".prod-graph-shelf-search") as HTMLInputElement;
@@ -407,6 +419,7 @@ describe("node-graph delete key", () => {
     lastEmittedPrompt = null;
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
     expect(refNodeCount(host)).toBe(1);
 
     selectNode(host, ".prod-graph-node.prod-graph-ref");
@@ -428,6 +441,7 @@ describe("node-graph delete key", () => {
     lastEmittedPrompt = null;
     const { root, host } = renderModal({ initial: "Style: S\n\nhello @[Hero] @[Villain]\n\nBrand identity: B" });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
     expect(refNodeCount(host)).toBe(2);
 
     // Selecting one of the two tagged refs and deleting it removes just that

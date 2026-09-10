@@ -23,6 +23,7 @@ export const productionChannels = {
   "production:insertShot": { method: "insertShot", kind: "invoke" },
   "production:deleteShot": { method: "deleteShot", kind: "invoke" },
   "production:updateShot": { method: "updateShot", kind: "invoke" },
+  "production:setShotNumber": { method: "setShotNumber", kind: "invoke" },
   "production:reorderShot": { method: "reorderShot", kind: "invoke" },
   "production:startBlank": { method: "startBlank", kind: "invoke" },
   "production:addScene": { method: "addScene", kind: "invoke" },

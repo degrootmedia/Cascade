@@ -16,6 +16,7 @@ import type { McpManager } from "../mcp.js";
 import type { ImageGenFn } from "../pipeline.js";
 import type {
   ImageGenAspectRatio,
+  ImageModelOptions,
   LedgerGenMeta,
   MediaProviderId,
   OpenArtBoardConfig,
@@ -101,6 +102,11 @@ export interface MediaProvider {
    *  model (or its options) can't be read. */
   videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null>;
 
+  /** The quality options an image model accepts. Null when the model
+   *  declares none or can't be read (the caller hides the quality
+   *  dropdown and the vendor default applies). */
+  imageModelOptions(modelId: string): Promise<ImageModelOptions | null>;
+
   /** Ids of the video-capable models that accept a dedicated end frame
    *  (the in-betweener's start→end submit path). Empty when none is proven —
    *  the caller unions this with the user's manual allowlist before the
@@ -121,6 +127,7 @@ export interface ProviderDeps {
 // Re-exported so vendor modules and tests share one vocabulary.
 export type {
   ImageGenAspectRatio,
+  ImageModelOptions,
   LedgerGenMeta,
   MediaProviderId,
   OpenArtBoardConfig,

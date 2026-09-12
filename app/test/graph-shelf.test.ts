@@ -33,6 +33,10 @@ let lastEmittedPrompt: string | null = null;
 
 function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
+  // Merge `onGraphField` patches back into the shot so graph mutations (adding
+  // an edit node, piping) round-trip like the real workspace.
+  const [shotState, setShotState] = useState<Record<string, unknown>>({});
+  const shot = { id: "s1", number: 1, prompt, promptManual: true, includeBrandIdentity: true, artwork: "boards/0001.jpg", ...shotPatch, ...shotState };
   return createElement(NodeGraphModal, {
     prod: {
       meta: { id: "p1", name: "T" },
@@ -47,7 +51,7 @@ function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; sh
       scenes: [{ id: "sc1", name: "S", shots: [{ id: "s1", number: 1, prompt, promptManual: true, includeBrandIdentity: true, artwork: "boards/0001.jpg" }] }],
       ...prodPatch,
     } as never,
-    shot: { id: "s1", number: 1, prompt, promptManual: true, includeBrandIdentity: true, artwork: "boards/0001.jpg", ...shotPatch } as never,
+    shot: shot as never,
     bust: 0,
     prompt,
     references: refs ?? REFS,
@@ -68,7 +72,7 @@ function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; sh
     onRunEditGen: async () => {},
     onSelectGraphGen: () => {},
     onCycleGraphGen: () => {},
-    onGraphField: () => {},
+    onGraphField: (patch: Record<string, unknown>) => setShotState((prev) => ({ ...prev, ...patch })),
     onPipeImageToVideo: () => {},
     onPipeImageToOutput: () => {},
     onPipeVideoToOutput: () => {},
@@ -317,7 +321,7 @@ describe("node-graph tool panel", () => {
     const { root, host } = renderModal({
       shotPatch: {
         graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
-        graphEditGens: [{ path: "boards/edit1.jpg", prompt: "edit", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
+        graphEditNodes: [{ id: "edit0", prompt: "edit", genIndex: 0, gens: [{ path: "boards/edit1.jpg", prompt: "edit", model: "auto", at: "2026-01-01T00:00:00.000Z" }] }],
       },
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
@@ -326,7 +330,9 @@ describe("node-graph tool panel", () => {
     expect(host.querySelector(".prod-graph-node.prod-graph-videoprompt")).toBeTruthy();
     expect(host.querySelector(".prod-graph-node.prod-graph-editgen")).toBeTruthy();
     expect(host.querySelector(".prod-graph-node.prod-graph-editprompt")).toBeTruthy();
-    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(2);
+    // Only the video tile reports "on canvas" — edit nodes count as a list, the
+    // tile always adds another.
+    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(1);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

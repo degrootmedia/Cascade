@@ -33,6 +33,7 @@ export const settingsChannels = {
   "image:save": { method: "saveImage", kind: "invoke" },
   "image:copy": { method: "copyImage", kind: "invoke" },
   "image:editExternally": { method: "editImageExternally", kind: "invoke" },
+  "image:showInFolder": { method: "showInFolder", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
 } as const;

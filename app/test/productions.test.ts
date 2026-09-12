@@ -193,8 +193,8 @@ describe("applyRendererState", () => {
               audio: "",
               visual: "Hero walks",
               graphOutputSource: "editgen",
-              graphEditGens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" }],
-              graphEditGenIndex: 0,
+              graphOutputEditNodeId: "edit0",
+              graphEditNodes: [{ id: "edit0", prompt: "make it night", gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" }], genIndex: 0 }],
               artwork: undefined,
               videoPath: "videos/stale.mp4",
             },
@@ -221,7 +221,7 @@ describe("board frame selection persistence", () => {
       id: "shot1", number: "0100", audio: "", visual: "Hero walks",
       artwork: "boards/0100/current.jpg", artworkHistory: ["boards/0100/legacy.jpg", "boards/0100/older.jpg"],
       graphImageGens: images, graphImageGenIndex: 0,
-      graphEditGens: edits, graphEditGenIndex: 1,
+      graphEditNodes: [{ id: "edit0", prompt: "", gens: edits, genIndex: 1 }],
       graphOutputSource: "videogen", videoPath: "videos/clip.mp4", graphImageToVideo: true,
       graphVideoGens: [{ path: "videos/clip.mp4", prompt: "motion", model: "video-model", at: "" }],
       graphVideoGenIndex: 0,
@@ -253,9 +253,8 @@ describe("board frame selection persistence", () => {
       expect(restored.videoPath).toBeUndefined();
       expect(restored.graphOutputSource).toBe(kind === "edit" ? "editgen" : "imagegen");
       expect(restored.graphImageGenIndex).toBe(selected.graphImageGenIndex);
-      expect(restored.graphEditGenIndex).toBe(selected.graphEditGenIndex);
+      expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
       expect(restored.graphImageGens).toEqual(selected.graphImageGens);
-      expect(restored.graphEditGens).toEqual(selected.graphEditGens);
       expect(restored.graphVideoGens).toEqual(selected.graphVideoGens);
       expect(restored.graphImageToVideo).toBe(true);
       expect(boardFrameHistory(restored)).toEqual(history);
@@ -275,9 +274,9 @@ describe("board frame selection persistence", () => {
       scenes: [{ number: 1, title: "S1", shots: [shot] }],
     });
     const images = structuredClone(shot.graphImageGens);
-    for (const [rel, prompt, imageSource] of [
-      ["boards/0100/edit-1.jpg", "make it night", true],
-      ["boards/0100/edit-2.jpg", "add rain", undefined],
+    for (const [rel, prompt, expectedSource] of [
+      ["boards/0100/edit-1.jpg", "make it night", { kind: "imagegen" }],
+      ["boards/0100/edit-2.jpg", "add rain", { kind: "editgen", nodeId: "edit0" }],
     ] as const) {
       recordBoardEdit(incoming.scenes[0].shots[0], rel, prompt, "edit-model");
       const selected = structuredClone(incoming.scenes[0].shots[0]);
@@ -287,18 +286,18 @@ describe("board frame selection persistence", () => {
       const restored = loaded.scenes[0].shots[0];
       expect(restored.artwork).toBe(rel);
       expect(restored.graphOutputSource).toBe("editgen");
-      expect(restored.graphEditGenIndex).toBe(0);
+      const active = (restored.graphEditNodes ?? []).find((n) => n.id === restored.graphOutputEditNodeId)!;
+      expect(active.genIndex).toBe(0);
+      expect(active.source).toEqual(expectedSource);
       expect(restored.graphImageGenIndex).toBe(1);
-      expect(restored.graphEditImageSource).toBe(imageSource);
-      expect(restored.graphEditSourceRefId).toBeUndefined();
       expect(restored.graphEditPrompt).toBe(prompt);
-      expect(restored.graphEditGens).toEqual(selected.graphEditGens);
+      expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
       expect(restored.graphImageGens).toEqual(images);
       expect(restored.artworkHistory).toEqual(selected.artworkHistory);
       expect(restored.graphImageToVideo).toBe(true);
       incoming.scenes = loaded.scenes;
     }
-    expect(incoming.scenes[0].shots[0].graphEditGens).toHaveLength(2);
+    expect(incoming.scenes[0].shots[0].graphEditNodes).toHaveLength(2);
     expect(boardFrameHistory(incoming.scenes[0].shots[0])).toEqual([
       "boards/0100/edit-1.jpg", "boards/0100/image-0.jpg", "boards/0100/image-1.jpg",
     ]);

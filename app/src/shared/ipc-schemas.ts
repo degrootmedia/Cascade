@@ -71,6 +71,13 @@ const validators: Record<string, (args: unknown[]) => void> = {
   "workspace:setSession": (args) => {
     checkPathString(args[0], "dir");
   },
+  "image:showInFolder": (args) => {
+    const o = args[0] as { productionId?: unknown; relPath?: unknown; src?: unknown } | undefined;
+    if (!o || typeof o !== "object") throw new Error("IPC validation: image:showInFolder expects an options object");
+    if (o.productionId !== undefined) checkOptionalPathString(o.productionId, "productionId", 256);
+    if (o.relPath !== undefined) checkOptionalPathString(o.relPath, "relPath");
+    if (o.src !== undefined) checkOptionalPathString(o.src, "src", 8192);
+  },
 };
 
 /** Validate raw invoke/send args for a channel. Throws on invalid payloads. */

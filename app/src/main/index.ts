@@ -15,9 +15,12 @@ import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { McpManager } from "./mcp.js";
-import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, wireEditNodeToCurrentFrame, buildEditGenPrompt } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";
+import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
-import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, mediaForModel, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary } from "./providers/higgsfield-cli.js";
+import { getOpenArtCliStatus, resolveOpenArtCliBinary } from "./providers/openart-cli.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
@@ -27,12 +30,12 @@ import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, san
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, sortByModelOrder, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sortByModelOrder, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -175,28 +178,42 @@ async function openDataUrlExternally(win: BrowserWindow, dataUrl: string): Promi
   await openWithExternalEditor(tmp);
 }
 
+/** Reveal a production asset (image or video) in the OS file manager, selecting
+ *  it when the platform supports it. No-op when it isn't a real file. */
+function revealProductionFile(target: { productionId?: string; relPath?: string; src?: string }): void {
+  try {
+    const file = resolveProductionFile(target);
+    if (!file) return;
+    const p = productions.loadProduction(file.productionId);
+    if (!p) return;
+    const abs = assetPath(p, file.relPath);
+    if (fs.existsSync(abs)) shell.showItemInFolder(abs);
+  } catch { /* not a resolvable/contained production file — nothing to reveal */ }
+}
+
 /** Open an image in the external editor. Accepts an explicit production file
  *  (`productionId`+`relPath`), an inline data URL, or a raw src URL (cascade-
  *  media / data: / http). Shared by every image context menu so "Edit
  *  externally" behaves identically no matter where the image lives. */
 async function openImageExternally(win: BrowserWindow, target: { productionId?: string; relPath?: string; dataUrl?: string; src?: string }): Promise<void> {
   try {
-    if (target.productionId && target.relPath) {
-      const p = productions.loadProduction(target.productionId);
+    const file = resolveProductionFile(target);
+    if (file) {
+      const p = productions.loadProduction(file.productionId);
       if (!p) throw new Error("Production not found.");
       // Board frames: hand the original (high-quality) file to the editor, and
       // watch it so the JPEG preview is re-encoded when the user returns.
-      const originalRel = originalForJpegRel(p, target.relPath);
+      const originalRel = originalForJpegRel(p, file.relPath);
       if (originalRel) {
         const originalAbs = assetPath(p, originalRel);
         if (fs.existsSync(originalAbs)) {
-          trackExternalEdit(p, target.relPath, originalRel);
+          trackExternalEdit(p, file.relPath, originalRel);
           await openWithExternalEditor(originalAbs);
           return;
         }
       }
-      const abs = assetPath(p, target.relPath);
-      if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${target.relPath}`);
+      const abs = assetPath(p, file.relPath);
+      if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${file.relPath}`);
       await openWithExternalEditor(abs);
       return;
     }
@@ -205,26 +222,6 @@ async function openImageExternally(win: BrowserWindow, target: { productionId?: 
       return;
     }
     const src = target.src ?? "";
-    if (src.startsWith("cascade-media://")) {
-      const url = new URL(src);
-      const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-      const prodId = url.hostname;
-      const p = productions.loadProduction(prodId);
-      if (!p) throw new Error("Production not found for this image.");
-      const originalRel = originalForJpegRel(p, rel);
-      if (originalRel) {
-        const originalAbs = assetPath(p, originalRel);
-        if (fs.existsSync(originalAbs)) {
-          trackExternalEdit(p, rel, originalRel);
-          await openWithExternalEditor(originalAbs);
-          return;
-        }
-      }
-      const abs = assetPath(p, rel);
-      if (!fs.existsSync(abs)) throw new Error(`Image not found: ${rel}`);
-      await openWithExternalEditor(abs);
-      return;
-    }
     if (src.startsWith("data:image/")) {
       await openDataUrlExternally(win, src);
       return;
@@ -243,36 +240,50 @@ async function openImageExternally(win: BrowserWindow, target: { productionId?: 
   }
 }
 
-/** Pop the right-click menu for an image: Save image as… / Copy image / Edit
- *  externally. This is the single menu builder — the native `context-menu`
- *  event and the renderer-triggered `image:showMenu` IPC both funnel through
- *  it, so every image in the app gets the same three options with the same
- *  wording. `edit` pins the full-res target when the renderer knows it. */
-function popImageContextMenu(win: BrowserWindow, opts: { src: string; x: number; y: number; edit?: { productionId: string; relPath: string } | { dataUrl: string } }): void {
+/** Pop the right-click menu for an image or video: Save as… / Copy image /
+ *  Edit externally / Open file folder. This is the single menu builder — the
+ *  native `context-menu` event and the renderer-triggered `image:showMenu` IPC
+ *  both funnel through it, so every media element in the app gets the same
+ *  options with the same wording. `edit` pins the full-res target when the
+ *  renderer knows it; "Open file folder" only appears for real production
+ *  files (not inline data URLs or remote links). */
+function popMediaContextMenu(win: BrowserWindow, opts: { media: "image" | "video"; src: string; x: number; y: number; edit?: { productionId: string; relPath: string } | { dataUrl: string } }): void {
   const src = opts.src;
-  const canEditExternally = !!opts.edit || src.startsWith("cascade-media://") || src.startsWith("data:image/") || /^https?:\/\//.test(src);
+  const isVideo = opts.media === "video";
+  const canEditExternally = !isVideo && (!!opts.edit || src.startsWith("cascade-media://") || src.startsWith("data:image/") || /^https?:\/\//.test(src));
   const editorLabel = (() => {
     const ed = settings.getExternalEditor();
     if (!ed) return "Edit externally";
     const base = path.basename(ed).replace(/\.[^.]+$/, "");
     return `Edit in ${base}`;
   })();
+  const fileTarget = opts.edit && "relPath" in opts.edit
+    ? { productionId: opts.edit.productionId, relPath: opts.edit.relPath }
+    : resolveProductionFile({ src });
   const template: Electron.MenuItemConstructorOptions[] = [
     {
-      label: "Save image as…",
+      label: isVideo ? "Save video as…" : "Save image as…",
       click: () => win.webContents.downloadURL(src), // triggers the native save dialog
     },
-    {
+  ];
+  if (!isVideo) {
+    template.push({
       label: "Copy image",
       click: () => win.webContents.copyImageAt(opts.x, opts.y),
-    },
-  ];
+    });
+  }
   if (canEditExternally) {
     template.push({
       label: editorLabel,
       click: () => {
         void openImageExternally(win, opts.edit ?? { src });
       },
+    });
+  }
+  if (fileTarget) {
+    template.push({ type: "separator" }, {
+      label: "Open file folder",
+      click: () => revealProductionFile(fileTarget),
     });
   }
   Menu.buildFromTemplate(template).popup();
@@ -541,8 +552,18 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 function registerIpc() {
   // Every successful generation feeds the expenses ledger, which prices it
   // against the user's rules and keeps the CSV tally in sync.
-  const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) });
-  // The active media vendor (OpenArt/Higgsfield) — a global setting resolved
+  // The `higgsfield` CLI binary (Higgsfield CLI transport): an explicit
+  // Settings path wins; otherwise the PATH probe below (resolved once at
+  // startup — a local `where`/`which`, no network). Lazy so a Settings path
+  // change applies without rebuilding providers.
+  let higgsCliPathCache: string | null | undefined;
+  void resolveHiggsfieldCliBinary().then((p) => { higgsCliPathCache = p; }).catch(() => { higgsCliPathCache = null; });
+  const higgsCliBinary = (): string | null => settings.getHiggsfieldCliBinary() ?? higgsCliPathCache ?? null;
+  let openArtCliPathCache: string | null | undefined;
+  void resolveOpenArtCliBinary().then((p) => { openArtCliPathCache = p; }).catch(() => { openArtCliPathCache = null; });
+  const openArtCliBinary = (): string | null => settings.getOpenArtCliBinary() ?? openArtCliPathCache ?? null;
+  const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) }, higgsCliBinary, openArtCliBinary);
+  // The active media vendor (OpenArt/Higgsfield/Higgsfield CLI) — a global setting resolved
   // per call, so every generation flow follows a Settings change immediately.
   const media = (): MediaProvider => providers[resolveProviderId(settings.getMediaProvider())];
   // Per-model routing: an explicit `higgsfield:…` pick rides Higgsfield even
@@ -838,14 +859,14 @@ function registerIpc() {
     return { ok: true, path: validated };
   });
 
-  handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; productionId?: string; relPath?: string; dataUrl?: string }) => {
+  handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }) => {
     if (!win || typeof opts?.src !== "string" || !opts.src) return;
     const edit = opts.productionId && opts.relPath
       ? { productionId: String(opts.productionId), relPath: String(opts.relPath) }
       : opts.dataUrl
         ? { dataUrl: String(opts.dataUrl) }
         : undefined;
-    popImageContextMenu(win, { src: opts.src, x: Number(opts.x) || 0, y: Number(opts.y) || 0, edit });
+    popMediaContextMenu(win, { media: opts.media === "video" ? "video" : "image", src: opts.src, x: Number(opts.x) || 0, y: Number(opts.y) || 0, edit });
   });
 
   // Direct image actions for the storyboard panel's single custom menu (same
@@ -867,6 +888,14 @@ function registerIpc() {
       productionId: typeof opts?.productionId === "string" ? opts.productionId : undefined,
       relPath: typeof opts?.relPath === "string" ? opts.relPath : undefined,
       dataUrl: typeof opts?.dataUrl === "string" ? opts.dataUrl : undefined,
+    });
+  });
+
+  handle("image:showInFolder", (_e, opts: { productionId?: string; relPath?: string; src?: string }) => {
+    revealProductionFile({
+      productionId: typeof opts?.productionId === "string" ? opts.productionId : undefined,
+      relPath: typeof opts?.relPath === "string" ? opts.relPath : undefined,
+      src: typeof opts?.src === "string" ? opts.src : undefined,
     });
   });
 
@@ -1057,6 +1086,32 @@ function registerIpc() {
   handle("media:setProvider", (_e, id: MediaProviderId) => {
     settings.setMediaProvider(id);
   });
+
+  // Top-bar dial: every vendor's balance at once (each isolated — one vendor
+  // down or unconnected resolves to null without blanking the others).
+  handle("media:getCredits", async (): Promise<Record<MediaProviderId, number | null>> =>
+    getMediaCredits(providers)
+  );
+
+  // Higgsfield CLI transport config: custom binary path + read-only status
+  // (resolved binary, version, auth). The status probe is read-only and
+  // never spends credits.
+  handle("media:getHiggsCliBinary", async (): Promise<string | null> => settings.getHiggsfieldCliBinary());
+  handle("media:setHiggsCliBinary", (_e, p: string | null) => {
+    settings.setHiggsfieldCliBinary(typeof p === "string" ? p : null);
+  });
+  handle("media:getHiggsCliStatus", async (): Promise<HiggsfieldCliStatus> =>
+    getHiggsfieldCliStatus(higgsCliBinary())
+  );
+
+  // OpenArt CLI transport config: custom binary path + read-only status.
+  handle("media:getOpenArtCliBinary", async (): Promise<string | null> => settings.getOpenArtCliBinary());
+  handle("media:setOpenArtCliBinary", (_e, p: string | null) => {
+    settings.setOpenArtCliBinary(typeof p === "string" ? p : null);
+  });
+  handle("media:getOpenArtCliStatus", async (): Promise<OpenArtCliStatus> =>
+    getOpenArtCliStatus(openArtCliBinary())
+  );
 
   // ---- agents ----
   handle("agents:list", () => agents.listAgents());
@@ -1455,7 +1510,6 @@ function registerIpc() {
       // the job's copied generation arrays — re-anchor at the user's path.
       const genPairs = [
         ["graphImageGens", "graphImageGenIndex"],
-        ["graphEditGens", "graphEditGenIndex"],
         ["graphVideoGens", "graphVideoGenIndex"],
       ] as const;
       for (const [arrKey, idxKey] of genPairs) {
@@ -1463,6 +1517,14 @@ function registerIpc() {
         (shot as unknown as Record<string, unknown>)[idxKey] = rebaseGenIndex(
           prev[arrKey], prev[idxKey], shot[arrKey], shot[idxKey], next[arrKey], next[idxKey],
         );
+      }
+      // Edit nodes own per-node histories; re-anchor each node's selection.
+      for (const node of shot.graphEditNodes ?? []) {
+        const prevNode = prev.graphEditNodes?.find((n) => n.id === node.id);
+        const nextNode = next.graphEditNodes?.find((n) => n.id === node.id);
+        if (!prevNode || !nextNode) continue;
+        if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
+        node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
       }
     }
     return fresh;
@@ -1566,16 +1628,21 @@ function registerIpc() {
     emit: (m: string, l?: ProductionEvent["level"]) => void,
     genOpts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[] }
   ): Promise<void> => {
-    const gen = media().imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
+    // Route by the production's stored pick, not the global vendor: an
+    // explicit `higgsfield:…` pick rides Higgsfield even when the global is
+    // OpenArt (mirrors the video-node path via mediaFor). "auto"/empty defers
+    // to the global.
+    const routed = mediaFor(p.openArt?.model);
+    const gen = routed.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
     if (!gen) {
-      emit(`${media().displayName} MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
+      emit(`${routed.displayName} MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
       exportBoardPrompts(p, emit);
       emit("Generate the frames with those prompts, then use “Import frames…” (name each file with its shot number, e.g. 0100.png).", "info");
       p.status[3] = "todo";
       return;
     }
-    emit(`Using the ${media().displayName} MCP server for image generation.`);
-    await generateBoards(p, gen, emit, { ...genOpts, providerName: media().displayName });
+    emit(`Using the ${routed.displayName} MCP server for image generation.`);
+    await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName });
   };
 
   handle("production:generateBoards", (_e, id: string, opts?: { maxShots?: number; regenerateAll?: boolean }) =>
@@ -1616,7 +1683,7 @@ function registerIpc() {
       emit(`Shot ${shot.number}: rechecking the pending generation job…`, "info");
       let buf: Buffer;
       try {
-        const got = await media().recheckPendingImage(pending);
+        const got = await mediaFor(pending.model).recheckPendingImage(pending);
         if (!got) {
           emit(`Shot ${shot.number}: the frame is still rendering — check again in a minute.`, "info");
           return;
@@ -2123,8 +2190,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!shot) throw new Error("Shot not found.");
       const prompt = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
       if (!prompt) throw new Error("The prompt is empty — write something in the prompt node first.");
-      const gen = media().imageGenFn(p, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined, typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined, (m) => emit(m, "info"));
-      if (!gen) throw new Error(`${media().displayName} MCP isn't connected, so frames can't be generated in-app.`);
+      const frameModel = typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : undefined;
+      const frameResolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      const frameMedia = mediaFor(frameModel);
+      const gen = frameMedia.imageGenFn(p, frameModel, frameResolution, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${frameMedia.displayName} MCP isn't connected, so frames can't be generated in-app.`);
       // References: the @[name] tags the composer prompt actually cites.
       const { resolved, extras } = resolvePromptRefs(p, prompt, 0);
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
@@ -2204,8 +2274,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const dataUrl = g?.path ? fileDataUrl(p, g.path) : null;
       return dataUrl ? { name: "Image-gen frame", dataUrl } : null;
     }
-    if (sourceId === TWEEN_KEY_EDITGEN) {
-      const g = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
+    const editNodeId = parseEditNodeKeyframe(sourceId);
+    if (editNodeId) {
+      const g = editNodeSelection(shot, editNodeId);
       const dataUrl = g?.path ? fileDataUrl(p, g.path) : null;
       return dataUrl ? { name: "Edit frame", dataUrl } : null;
     }
@@ -2320,38 +2391,48 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return p;
   });
 
-  // Step 3 node graph: AI-edit one image for the edit-image node. The source
-  // image is the node's source pipe — the image node's selected generation,
-  // else a reference's artwork — falling back to the shot's current frame.
-  // The result is stored on the edit node; it becomes the shot's artwork only
-  // when the node is piped to the output.
-  handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string }) =>
+  // Step 3 node graph: AI-edit one image for a specific edit-image node. The
+  // source image is that node's source pipe — a parent edit node's selection,
+  // the image node's selection, or a reference's artwork — falling back to the
+  // shot's current frame. The result is stored on the node; it becomes the
+  // shot's artwork only when the node is piped to the output.
+  handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string }) =>
     runProductionStep(id, 3, "editing an image (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
+      const node = getEditNode(shot, opts?.nodeId);
+      if (!node) throw new Error("Edit-image node not found — drag one onto the canvas first.");
       const text = typeof opts?.prompt === "string" ? opts.prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
-      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
-      if (!gen) throw new Error(`${media().displayName} MCP isn't connected, so frames can't be edited in-app.`);
-      // Source: image-node pipe > reference pipe > the shot's current frame.
+      const editMedia = mediaFor(modelId);
+      const gen = editMedia.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${editMedia.displayName} MCP isn't connected, so frames can't be edited in-app.`);
+      // Source: the node's own pipe (parent edit / image node / reference),
+      // then the shot's current frame.
+      const source = node.source;
       let dataUrl: string | undefined;
       let sourceName = `Shot ${shot.number} frame`;
-      if (shot.graphEditImageSource) {
+      if (source?.kind === "imagegen") {
         const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
         if (src) {
           dataUrl = fileDataUrl(p, src) ?? undefined;
           if (dataUrl) sourceName = "Piped frame";
         }
-      }
-      if (!dataUrl && shot.graphEditSourceRefId) {
+      } else if (source?.kind === "editgen") {
+        const sel = editNodeSelection(shot, source.nodeId);
+        if (sel?.path) {
+          dataUrl = fileDataUrl(p, sel.path) ?? undefined;
+          if (dataUrl) sourceName = "Piped edit";
+        }
+      } else if (source?.kind === "ref") {
         const pool = [
           ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
           ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
           ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
         ];
-        const ref = pool.find((r) => r.id === shot.graphEditSourceRefId);
+        const ref = pool.find((r) => r.id === source.refId);
         if (ref?.artwork) {
           dataUrl = ref.artwork;
           sourceName = ref.name;
@@ -2372,7 +2453,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordGraphEditGen(shot, jpegRel, text, modelId ?? "auto");
+      node.prompt = text;
+      recordGraphEditGen(shot, node.id, jpegRel, text, modelId ?? "auto");
       syncBoardOutputToPipe(shot);
       emit(`Shot ${shot.number}: node edit ready.`, "done");
     }, { needsApiKey: false })
@@ -2454,7 +2536,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // repeated lookups are instant. Null when the form can't be read — the
   // caller falls back to a generic set.
   handle("production:videoModelOptions", async (_e, modelId: string, withImage?: boolean): Promise<VideoModelOptions | null> => {
-    return media().videoModelOptions(String(modelId ?? ""), withImage === true);
+    return mediaFor(String(modelId ?? "")).videoModelOptions(String(modelId ?? ""), withImage === true);
+  });
+
+  handle("production:imageModelOptions", async (_e, modelId: string): Promise<ImageModelOptions | null> => {
+    return mediaFor(String(modelId ?? "")).imageModelOptions(String(modelId ?? ""));
   });
 
   // Step 3 in-betweener: which video models accept a dedicated end-frame
@@ -2481,14 +2567,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return out.filter((id) => !hidden.has(id) && kinds[id] !== "image");
   });
 
-  // Step 3 per-frame edit (classic storyboard view): the same edit-image
-  // node the node graph runs, with the wiring done automatically. The edit
-  // node's source pipe is bound from the shot's current frame first
-  // (image→edit, or the output reference→edit), then generation uses that
-  // pipe — reference pipe — current frame, exactly like
-  // production:generateEditNode. The result is recorded on the edit node and
-  // piped to the output, so the node view shows the full wiring afterwards.
-  // The previous frame moves into the shot's history (frame arrows).
+  // Step 3 per-frame edit (classic storyboard view): appends a new edit-image
+  // node to the shot's graph, chained from whatever currently feeds the output
+  // (the previous edit node, the image node, or a reference), then pipes the
+  // result to the output — so the node view shows the full daisy chain
+  // afterwards. The previous frame moves into the shot's history (arrows).
   handle("production:editBoard", (_e, id: string, shotId: string, model: string, prompt: string) =>
     runProductionStep(id, 3, "editing one board", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -2496,29 +2579,34 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const text = typeof prompt === "string" ? prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof model === "string" && model.trim() && model !== "auto" ? model.trim() : undefined;
-      const gen = media().imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
-      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.`);
-      // Auto-wire the edit node from the current frame before resolving the
-      // source, so the generation rides the same pipe the node view shows.
-      wireEditNodeToCurrentFrame(shot);
-      // Source: image-node pipe > reference pipe > the shot's current frame
-      // (same order as production:generateEditNode).
+      const editMedia = mediaFor(modelId);
+      const gen = editMedia.imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
+      if (!gen) throw new Error(`${editMedia.displayName} MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.`);
+      // Create the node up front so the generation rides the same pipe the node
+      // view will show: chained from the output edit node / image node / ref.
+      const node = newEditNode(shot, text, chainSourceForEdit(shot));
+      const source = node.source;
       let dataUrl: string | undefined;
       let sourceName = `Shot ${shot.number} frame`;
-      if (shot.graphEditImageSource) {
+      if (source?.kind === "imagegen") {
         const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
         if (src) {
           dataUrl = fileDataUrl(p, src) ?? undefined;
           if (dataUrl) sourceName = "Piped frame";
         }
-      }
-      if (!dataUrl && shot.graphEditSourceRefId) {
+      } else if (source?.kind === "editgen") {
+        const sel = editNodeSelection(shot, source.nodeId);
+        if (sel?.path) {
+          dataUrl = fileDataUrl(p, sel.path) ?? undefined;
+          if (dataUrl) sourceName = "Piped edit";
+        }
+      } else if (source?.kind === "ref") {
         const pool = [
           ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
           ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
           ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
         ];
-        const ref = pool.find((r) => r.id === shot.graphEditSourceRefId);
+        const ref = pool.find((r) => r.id === source.refId);
         if (ref?.artwork) {
           dataUrl = ref.artwork;
           sourceName = ref.name;
@@ -2539,7 +2627,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         shot
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordBoardEdit(shot, jpegRel, text, modelId ?? "auto");
+      recordBoardEdit(shot, jpegRel, text, modelId ?? "auto", node);
       productionEmit(id, `Shot ${shot.number}: frame edited.`);
     }, { needsApiKey: false })
   );
@@ -2737,8 +2825,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
       const aspectRatio: ReferenceImageGenOptions["aspectRatio"] = opts?.aspectRatio === "1:1" || opts?.aspectRatio === "4:3" ? opts.aspectRatio : "16:9";
-      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), aspectRatio);
-      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so references can't be generated in-app.`);
+      const refMedia = mediaFor(modelId);
+      const gen = refMedia.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), aspectRatio);
+      if (!gen) throw new Error(`${refMedia.displayName} MCP isn't connected (no image-generation tool found), so references can't be generated in-app.`);
 
       // Editing: the source reference's current image is uploaded as the
       // visual reference (occupies @image1); @[name] tags in the edit text add
@@ -2819,8 +2908,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
       // Character sheets are always 16:9, whatever the view layout.
-      const gen = media().imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
-      if (!gen) throw new Error(`${media().displayName} MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.`);
+      const sheetMedia = mediaFor(modelId);
+      const gen = sheetMedia.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
+      if (!gen) throw new Error(`${sheetMedia.displayName} MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.`);
 
       const promptText = characterSheetPrompt(description, view);
       emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}…`);
@@ -3047,7 +3137,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (res.canceled || !filePath) return null;
     const rules = await ledger.applyModelOptions(
       ledger.parsePriceRulesCsv(fs.readFileSync(filePath, "utf8")),
-      async (modelId) => (await media().videoModelOptions(modelId, true)) ?? null
+      async (modelId) => (await mediaFor(modelId).videoModelOptions(modelId, true)) ?? null
     );
     ledger.setPriceRules(rules);
     return { path: filePath, rules: ledger.getPriceRules() };
@@ -3290,8 +3380,8 @@ function createWindow() {
   // Right-click context menu: native edit menu for inputs/textareas (Cut/Copy/
   // Paste/Select All), and a save/copy/edit-externally menu for images.
   win.webContents.on("context-menu", (_e, params) => {
-    if (params.mediaType === "image" && params.srcURL) {
-      popImageContextMenu(win!, { src: params.srcURL, x: params.x, y: params.y });
+    if ((params.mediaType === "image" || params.mediaType === "video") && params.srcURL) {
+      popMediaContextMenu(win!, { media: params.mediaType, src: params.srcURL, x: params.x, y: params.y });
       return;
     }
     if (params.isEditable) {

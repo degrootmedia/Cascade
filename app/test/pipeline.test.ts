@@ -8,7 +8,7 @@
  * same code the OpenArtClient and the renderer depend on.
  */
 import { describe, it, expect, vi } from "vitest";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem } from "../src/shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode } from "../src/shared/ipc.js";
 
 // pipeline.ts imports scripting.ts for its text-extraction helpers; the tests
 // never touch them, and scripting's dynamic pdf-parse import doesn't resolve
@@ -412,6 +412,18 @@ describe("applyVideoOutput", () => {
     expect(shot.artwork).toBe("boards/0100/shot-0100-abc.jpg");
   });
 
+  it("adopts the edit node's selected frame as the still when it feeds the video source", () => {
+    const shot = makeShot({
+      graphEditToVideo: true,
+      graphVideoSourceEditNodeId: "edit0",
+      graphImageGens: [{ path: "boards/0100/stale-image.jpg", prompt: "p", model: "m", at: "" }],
+      graphImageGenIndex: 0,
+      graphEditNodes: [{ id: "edit0", prompt: "", gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }], genIndex: 0 }],
+    });
+    applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
+    expect(shot.artwork).toBe("boards/0100/shot-0100-edit.jpg");
+  });
+
   it("leaves an existing artwork untouched", () => {
     const shot = makeShot({
       artwork: "boards/0100/shot-0100-existing.jpg",
@@ -462,11 +474,11 @@ describe("selectBoardFrame", () => {
     const videos = [{ path: "clip.mp4", prompt: "motion", model: "video-model", at: "" }];
     const shot = makeShot({
       graphImageGens: images, graphImageGenIndex: 0,
-      graphEditGens: edits, graphEditGenIndex: 0,
+      graphEditNodes: [{ id: "edit0", prompt: "", gens: edits, genIndex: 0, source: { kind: "ref", refId: "edit-ref" } }],
       graphVideoGens: videos, graphVideoGenIndex: 0,
       artwork: "legacy.jpg", artworkHistory: ["older.jpg"], videoPath: "clip.mp4",
       graphOutputSource: "ref", graphOutputRefId: "ref-1",
-      graphImageToVideo: true, graphEditImageSource: true, graphEditSourceRefId: "edit-ref",
+      graphImageToVideo: true,
     });
     const before = structuredClone({ images, edits, videos });
     Object.freeze(images);
@@ -482,7 +494,8 @@ describe("selectBoardFrame", () => {
       expect(shot.artwork).toBe(rel);
       expect(shot.graphOutputSource).toBe(source);
       expect(shot.graphImageGenIndex).toBe(imageIndex);
-      expect(shot.graphEditGenIndex).toBe(editIndex);
+      expect(shot.graphEditNodes?.[0].genIndex).toBe(editIndex);
+      expect(shot.graphOutputEditNodeId).toBe(source === "editgen" ? "edit0" : undefined);
       expect(shot.graphOutputRefId).toBeUndefined();
       expect(shot.videoPath).toBeUndefined();
       expect(shot.artworkHistory).not.toContain(rel);
@@ -490,12 +503,11 @@ describe("selectBoardFrame", () => {
     }
     expect(shot.artworkHistory).toEqual(["image-2.jpg", "edit-2.jpg", "image-1.jpg", "legacy.jpg", "older.jpg"]);
     expect(shot.graphImageGens).toBe(images);
-    expect(shot.graphEditGens).toBe(edits);
+    expect(shot.graphEditNodes?.[0].gens).toBe(edits);
     expect(shot.graphVideoGens).toBe(videos);
     expect({ images, edits, videos }).toEqual(before);
     expect(shot.graphImageToVideo).toBe(true);
-    expect(shot.graphEditImageSource).toBe(true);
-    expect(shot.graphEditSourceRefId).toBe("edit-ref");
+    expect(shot.graphEditNodes?.[0].source).toEqual({ kind: "ref", refId: "edit-ref" });
     expect(shot.graphVideoGenIndex).toBe(0);
   });
 
@@ -503,15 +515,14 @@ describe("selectBoardFrame", () => {
     const shot = makeShot({
       graphImageGens: [{ path: "shared.jpg", prompt: "image", model: "m", at: "" }],
       graphImageGenIndex: 0,
-      graphEditGens: [
+      graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 0, gens: [
         { path: "other.jpg", prompt: "other", model: "m", at: "" },
         { path: "shared.jpg", prompt: "edit", model: "m", at: "" },
-      ],
-      graphEditGenIndex: 0,
+      ] }],
     });
     selectBoardFrame(shot, "shared.jpg");
     expect(shot.graphOutputSource).toBe("editgen");
-    expect(shot.graphEditGenIndex).toBe(1);
+    expect(shot.graphEditNodes?.[0].genIndex).toBe(1);
     expect(shot.graphImageGenIndex).toBe(0);
     expect(syncBoardOutputToPipe(shot)).toBe(false);
   });
@@ -521,15 +532,16 @@ describe("selectBoardFrame", () => {
       artwork: "current.jpg", artworkHistory: ["legacy.jpg", ""], videoPath: "clip.mp4",
       graphOutputSource: "ref", graphOutputRefId: "ref-1",
       graphImageGens: [{ path: "image.jpg", prompt: "image", model: "m", at: "" }],
-      graphEditGens: [{ path: "edit.jpg", prompt: "edit", model: "m", at: "" }],
+      graphEditNodes: [{ id: "edit0", prompt: "", gens: [{ path: "edit.jpg", prompt: "edit", model: "m", at: "" }] }],
       graphVideoGens: [{ path: "clip.mp4", prompt: "video", model: "m", at: "" }],
     });
     const before = structuredClone(shot);
-    const { graphImageGens, graphEditGens, artworkHistory } = shot;
+    const { graphImageGens, artworkHistory } = shot;
+    const editGens = shot.graphEditNodes![0].gens;
     expect(() => selectBoardFrame(shot, rel)).toThrow(/Cannot select board frame.*not in this shot's/);
     expect(shot).toEqual(before);
     expect(shot.graphImageGens).toBe(graphImageGens);
-    expect(shot.graphEditGens).toBe(graphEditGens);
+    expect(shot.graphEditNodes?.[0].gens).toBe(editGens);
     expect(shot.artworkHistory).toBe(artworkHistory);
   });
 
@@ -538,7 +550,8 @@ describe("selectBoardFrame", () => {
     const originalItems = [...images];
     const shot = makeShot({
       artwork: "image-3.jpg", artworkHistory: ["legacy.jpg"],
-      graphImageGens: images, graphImageGenIndex: 3, graphEditGenIndex: 2, graphImageToVideo: true,
+      graphImageGens: images, graphImageGenIndex: 3, graphImageToVideo: true,
+      graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 2, gens: [{ path: "edit.jpg", prompt: "p", model: "m", at: "" }] }],
     });
     selectBoardFrame(shot, "legacy.jpg");
     expect(shot.graphImageGens).toBe(images);
@@ -546,7 +559,7 @@ describe("selectBoardFrame", () => {
     for (let i = 0; i < originalItems.length; i++) expect(shot.graphImageGens?.[i]).toBe(originalItems[i]);
     expect(shot.graphImageGens?.[20]).toEqual({ path: "legacy.jpg", prompt: "", model: "", at: "" });
     expect(shot.graphImageGenIndex).toBe(20);
-    expect(shot.graphEditGenIndex).toBe(2);
+    expect(shot.graphEditNodes?.[0].genIndex).toBe(2);
     expect(shot.graphImageToVideo).toBe(true);
     expect(shot.graphOutputSource).toBe("imagegen");
     expect(shot.artworkHistory).toEqual(["image-3.jpg"]);
@@ -573,23 +586,26 @@ describe("recordBoardEdit", () => {
     const oldEdit = { path: "old-edit.jpg", prompt: "old edit", model: "old-model", at: "2026-09-01T00:00:00.000Z" };
     const shot = makeShot({
       artwork: "image-2.jpg", graphImageGens: images, graphImageGenIndex: 0,
-      graphEditGens: [oldEdit], graphEditGenIndex: 0, graphEditSourceRefId: "stale-ref",
+      graphEditNodes: [{ id: "edit0", prompt: "", gens: [oldEdit], genIndex: 0, source: { kind: "ref", refId: "stale-ref" } }],
       graphOutputSource: "videogen", graphOutputRefId: "stale-output-ref", videoPath: "clip.mp4",
       graphImageToVideo: true, prompt: "image prompt", graphVideoPrompt: "motion prompt",
     });
     const before = structuredClone(images);
-    recordBoardEdit(shot, "new-edit.jpg", "make it night", "edit-model");
+    const id = recordBoardEdit(shot, "new-edit.jpg", "make it night", "edit-model");
+    expect(id).toBe("edit1");
+    const node = shot.graphEditNodes?.find((n) => n.id === id)!;
     expect(shot.graphImageGens).toBe(images);
     expect(shot.graphImageGens).toEqual(before);
     expect(shot.graphImageGenIndex).toBe(2);
-    expect(shot.graphEditImageSource).toBe(true);
-    expect(shot.graphEditSourceRefId).toBeUndefined();
-    expect(shot.graphEditGens?.[0]).toEqual({ path: "new-edit.jpg", prompt: "make it night", model: "edit-model", at: expect.any(String) });
-    expect(Number.isFinite(Date.parse(shot.graphEditGens![0].at))).toBe(true);
-    expect(shot.graphEditGens?.[1]).toBe(oldEdit);
-    expect(shot.graphEditGenIndex).toBe(0);
+    expect(node.source).toEqual({ kind: "imagegen" });
+    expect(node.gens?.[0]).toEqual({ path: "new-edit.jpg", prompt: "make it night", model: "edit-model", at: expect.any(String) });
+    expect(Number.isFinite(Date.parse(node.gens![0].at))).toBe(true);
+    expect(node.genIndex).toBe(0);
+    // The previous edit node is untouched — classic edits append to the chain.
+    expect(shot.graphEditNodes?.find((n) => n.id === "edit0")?.gens?.[0]).toBe(oldEdit);
     expect(shot.graphEditPrompt).toBe("make it night");
     expect(shot.graphOutputSource).toBe("editgen");
+    expect(shot.graphOutputEditNodeId).toBe(id);
     expect(shot.graphOutputRefId).toBeUndefined();
     expect(shot.artwork).toBe("new-edit.jpg");
     expect(shot.artworkHistory).toEqual(["image-2.jpg"]);
@@ -603,11 +619,11 @@ describe("recordBoardEdit", () => {
   it("binds a reference output before replacing that output pipe with the edit", () => {
     const shot = makeShot({
       artwork: "ref-frame.jpg", graphOutputSource: "ref", graphOutputRefId: "ref-1",
-      graphEditImageSource: true, graphEditSourceRefId: "stale-ref", graphImageGenIndex: 2,
+      graphImageGenIndex: 2,
     });
-    recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
-    expect(shot.graphEditSourceRefId).toBe("ref-1");
-    expect(shot.graphEditImageSource).toBeUndefined();
+    const id = recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
+    const node = shot.graphEditNodes?.find((n) => n.id === id)!;
+    expect(node.source).toEqual({ kind: "ref", refId: "ref-1" });
     expect(shot.graphImageGenIndex).toBe(2);
     expect(shot.graphImageGens).toBeUndefined();
     expect(shot.graphOutputSource).toBe("editgen");
@@ -616,19 +632,17 @@ describe("recordBoardEdit", () => {
     expect(shot.artworkHistory).toEqual(["ref-frame.jpg"]);
   });
 
-  it("clears stale source pipes when re-editing an edit, keeping the current-frame fallback", () => {
+  it("chains a second classic edit from the first, keeping the current-frame fallback", () => {
     const shot = makeShot({
       artwork: "image.jpg", graphImageGens: [{ path: "image.jpg", prompt: "image", model: "m", at: "" }],
       graphImageGenIndex: 0, graphOutputSource: "imagegen", graphImageToVideo: true,
     });
-    recordBoardEdit(shot, "first-edit.jpg", "make it night", "auto");
-    expect(shot.graphEditImageSource).toBe(true);
-    const firstEdit = shot.graphEditGens![0];
-    shot.graphEditSourceRefId = "stale-ref";
-    recordBoardEdit(shot, "second-edit.jpg", "add rain", "auto");
-    expect(shot.graphEditImageSource).toBeUndefined();
-    expect(shot.graphEditSourceRefId).toBeUndefined();
-    expect(shot.graphEditGens?.[1]).toBe(firstEdit);
+    const firstId = recordBoardEdit(shot, "first-edit.jpg", "make it night", "auto");
+    expect(shot.graphEditNodes?.find((n) => n.id === firstId)?.source).toEqual({ kind: "imagegen" });
+    const secondId = recordBoardEdit(shot, "second-edit.jpg", "add rain", "auto");
+    const second = shot.graphEditNodes?.find((n) => n.id === secondId)!;
+    expect(second.source).toEqual({ kind: "editgen", nodeId: firstId });
+    expect(shot.graphEditNodes?.length).toBe(2);
     expect(shot.graphImageGens).toHaveLength(1);
     expect(shot.graphImageGenIndex).toBe(0);
     expect(shot.graphImageToVideo).toBe(true);
@@ -641,27 +655,26 @@ describe("recordBoardEdit", () => {
   it("uses the current-frame fallback for legacy artwork instead of an unrelated image selection", () => {
     const shot = makeShot({
       artwork: "legacy.jpg", graphImageGens: [{ path: "unrelated.jpg", prompt: "p", model: "m", at: "" }],
-      graphImageGenIndex: 0, graphEditImageSource: true, graphEditSourceRefId: "stale-ref",
+      graphImageGenIndex: 0,
     });
-    recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
-    expect(shot.graphEditImageSource).toBeUndefined();
-    expect(shot.graphEditSourceRefId).toBeUndefined();
+    const id = recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
+    const node = shot.graphEditNodes?.find((n) => n.id === id)!;
+    expect(node.source).toBeUndefined();
     expect(shot.graphImageGens).toHaveLength(1);
     expect(shot.graphImageGenIndex).toBe(0);
     expect(shot.artworkHistory).toEqual(["legacy.jpg"]);
     expect(shot.artwork).toBe("edit.jpg");
   });
 
-  it("does not claim an image-node source for an edit whose path also exists on the image node", () => {
+  it("chains from the output edit node rather than claiming an image-node source for a shared path", () => {
     const shot = makeShot({
-      artwork: "shared.jpg", graphOutputSource: "editgen",
+      artwork: "shared.jpg", graphOutputSource: "editgen", graphOutputEditNodeId: "edit0",
       graphImageGens: [{ path: "shared.jpg", prompt: "image", model: "m", at: "" }],
-      graphEditGens: [{ path: "shared.jpg", prompt: "edit", model: "m", at: "" }],
-      graphEditImageSource: true,
+      graphEditNodes: [{ id: "edit0", prompt: "edit", gens: [{ path: "shared.jpg", prompt: "edit", model: "m", at: "" }] }],
     });
-    recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
-    expect(shot.graphEditImageSource).toBeUndefined();
-    expect(shot.graphEditSourceRefId).toBeUndefined();
+    const id = recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
+    const node = shot.graphEditNodes?.find((n) => n.id === id)!;
+    expect(node.source).toEqual({ kind: "editgen", nodeId: "edit0" });
     expect(shot.artwork).toBe("edit.jpg");
   });
 });
@@ -678,27 +691,22 @@ describe("wireEditNodeToCurrentFrame", () => {
     });
     wireEditNodeToCurrentFrame(shot);
     expect(shot.graphImageGenIndex).toBe(1);
-    expect(shot.graphEditImageSource).toBe(true);
-    expect(shot.graphEditSourceRefId).toBeUndefined();
+    expect(shot.graphEditNodes?.[0].source).toEqual({ kind: "imagegen" });
   });
 
   it("wires the output reference into the edit node", () => {
     const shot = makeShot({ artwork: "ref-frame.jpg", graphOutputSource: "ref", graphOutputRefId: "ref-1" });
     wireEditNodeToCurrentFrame(shot);
-    expect(shot.graphEditSourceRefId).toBe("ref-1");
-    expect(shot.graphEditImageSource).toBeUndefined();
+    expect(shot.graphEditNodes?.[0].source).toEqual({ kind: "ref", refId: "ref-1" });
   });
 
-  it("clears pipes for legacy artwork so generation falls back to the current frame", () => {
+  it("leaves the source unset for legacy artwork so generation falls back to the current frame", () => {
     const shot = makeShot({
       artwork: "legacy.jpg",
       graphImageGens: [{ path: "unrelated.jpg", prompt: "p", model: "m", at: "" }],
-      graphEditImageSource: true,
-      graphEditSourceRefId: "stale-ref",
     });
     wireEditNodeToCurrentFrame(shot);
-    expect(shot.graphEditImageSource).toBeUndefined();
-    expect(shot.graphEditSourceRefId).toBeUndefined();
+    expect(shot.graphEditNodes?.[0].source).toBeUndefined();
   });
 });
 
@@ -714,18 +722,19 @@ describe("buildEditGenPrompt", () => {
 
 describe("recordGraphEditGen", () => {
   it("stores the edit newest-first and selects it", () => {
-    const shot = makeShot();
-    recordGraphEditGen(shot, "boards/0100/shot-0100-edit1.jpg", "make it night", "auto");
-    recordGraphEditGen(shot, "boards/0100/shot-0100-edit2.jpg", "add rain", "auto");
-    expect(shot.graphEditGens?.[0].path).toBe("boards/0100/shot-0100-edit2.jpg");
-    expect(shot.graphEditGens?.[1].path).toBe("boards/0100/shot-0100-edit1.jpg");
-    expect(shot.graphEditGenIndex).toBe(0);
+    const shot = makeShot({ graphEditNodes: [{ id: "edit0", prompt: "" }] });
+    recordGraphEditGen(shot, "edit0", "boards/0100/shot-0100-edit1.jpg", "make it night", "auto");
+    recordGraphEditGen(shot, "edit0", "boards/0100/shot-0100-edit2.jpg", "add rain", "auto");
+    const node = shot.graphEditNodes![0];
+    expect(node.gens?.[0].path).toBe("boards/0100/shot-0100-edit2.jpg");
+    expect(node.gens?.[1].path).toBe("boards/0100/shot-0100-edit1.jpg");
+    expect(node.genIndex).toBe(0);
   });
 
   it("caps the stored edits at GRAPH_HISTORY_CAP", () => {
-    const shot = makeShot();
-    for (let i = 0; i < 25; i++) recordGraphEditGen(shot, `boards/0100/edit-${i}.jpg`, "p", "auto");
-    expect(shot.graphEditGens?.length).toBe(20);
+    const shot = makeShot({ graphEditNodes: [{ id: "edit0", prompt: "" }] });
+    for (let i = 0; i < 25; i++) recordGraphEditGen(shot, "edit0", `boards/0100/edit-${i}.jpg`, "p", "auto");
+    expect(shot.graphEditNodes?.[0].gens?.length).toBe(20);
   });
 });
 
@@ -733,8 +742,7 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
   it("never displaces a deliberate edit-image pipe", () => {
     const shot = makeShot({
       graphOutputSource: "editgen",
-      graphEditGens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }],
-      graphEditGenIndex: 0,
+      graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 0, gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }] }],
     });
     hookImageGenToOutput(shot);
     expect(shot.graphOutputSource).toBe("editgen");
@@ -746,14 +754,13 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
     // lives on in its node's history) or the sync would wipe the clip.
     const shot = makeShot({
       graphOutputSource: "editgen",
-      graphEditGens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }],
-      graphEditGenIndex: 0,
+      graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 0, gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }] }],
       videoPath: "videos/shot-0100-new.mp4",
     });
     hookVideoGenToOutput(shot);
     expect(shot.graphOutputSource).toBe("videogen");
     expect(shot.videoPath).toBe("videos/shot-0100-new.mp4");
-    expect(shot.graphEditGens).toHaveLength(1);
+    expect(shot.graphEditNodes).toHaveLength(1);
   });
 
   it("hooks a classic image generation when nothing is piped", () => {
@@ -801,15 +808,16 @@ describe("syncBoardOutputToPipe", () => {
   const edit = { path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" };
   const frame = { path: "boards/0100/shot-0100-frame.jpg", prompt: "p", model: "auto", at: "" };
   const clip = { path: "videos/shot-0100-clip.mp4", prompt: "p", model: "auto", at: "" };
+  const editNode = (gens: GraphGenItem[] = [edit], genIndex = 0): GraphEditNode => ({ id: "edit0", prompt: "", gens, genIndex });
 
   it("applies a piped edit-image node's selected edit as the storyboard frame", () => {
-    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0 });
+    const shot = makeShot({ graphOutputSource: "editgen", graphOutputEditNodeId: "edit0", graphEditNodes: [editNode()] });
     expect(syncBoardOutputToPipe(shot)).toBe(true);
     expect(shot.artwork).toBe(edit.path);
   });
 
   it("re-derives the frame when a stale/missing artwork raced a renderer save", () => {
-    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0, artwork: "boards/0100/shot-0100-stale.jpg", videoPath: "videos/stale.mp4" });
+    const shot = makeShot({ graphOutputSource: "editgen", graphOutputEditNodeId: "edit0", graphEditNodes: [editNode()], artwork: "boards/0100/shot-0100-stale.jpg", videoPath: "videos/stale.mp4" });
     expect(syncBoardOutputToPipe(shot)).toBe(true);
     expect(shot.artwork).toBe(edit.path);
     expect(shot.videoPath).toBeUndefined();
@@ -819,7 +827,8 @@ describe("syncBoardOutputToPipe", () => {
   it.each(["imagegen", "editgen"] as const)("clears stale video for a matching %s still without changing history", (source) => {
     const history = ["legacy.jpg"];
     const shot = makeShot({
-      graphOutputSource: source, graphImageGens: [frame], graphEditGens: [edit],
+      graphOutputSource: source, graphImageGens: [frame], graphEditNodes: [editNode()],
+      graphOutputEditNodeId: source === "editgen" ? "edit0" : undefined,
       artwork: source === "imagegen" ? frame.path : edit.path, videoPath: "videos/stale.mp4",
       artworkHistory: history,
     });
@@ -831,7 +840,8 @@ describe("syncBoardOutputToPipe", () => {
 
   it.each(["imagegen", "editgen"] as const)("preserves an untracked legacy still when the %s output actually changes", (source) => {
     const shot = makeShot({
-      graphOutputSource: source, graphImageGens: [frame], graphEditGens: [edit],
+      graphOutputSource: source, graphImageGens: [frame], graphEditNodes: [editNode()],
+      graphOutputEditNodeId: source === "editgen" ? "edit0" : undefined,
       artwork: "legacy.jpg", artworkHistory: [frame.path, edit.path, "older.jpg"],
     });
     expect(syncBoardOutputToPipe(shot)).toBe(true);
@@ -841,13 +851,13 @@ describe("syncBoardOutputToPipe", () => {
   });
 
   it("is a no-op when artwork already mirrors the piped edit", () => {
-    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [edit], graphEditGenIndex: 0, artwork: edit.path });
+    const shot = makeShot({ graphOutputSource: "editgen", graphOutputEditNodeId: "edit0", graphEditNodes: [editNode()], artwork: edit.path });
     expect(syncBoardOutputToPipe(shot)).toBe(false);
     expect(shot.artwork).toBe(edit.path);
   });
 
   it("clears the frame when the piped node has no generation yet", () => {
-    const shot = makeShot({ graphOutputSource: "editgen", graphEditGens: [], artwork: "boards/0100/old.jpg", videoPath: "videos/old.mp4" });
+    const shot = makeShot({ graphOutputSource: "editgen", graphOutputEditNodeId: "edit0", graphEditNodes: [editNode([])], artwork: "boards/0100/old.jpg", videoPath: "videos/old.mp4" });
     expect(syncBoardOutputToPipe(shot)).toBe(true);
     expect(shot.artwork).toBeUndefined();
     expect(shot.videoPath).toBeUndefined();
@@ -870,6 +880,17 @@ describe("syncBoardOutputToPipe", () => {
     expect(syncBoardOutputToPipe(shot)).toBe(true);
     expect(shot.videoPath).toBe(clip.path);
     expect(shot.artwork).toBe(frame.path);
+  });
+
+  it("uses the edit pipe as the videogen still when the edit node feeds the video source", () => {
+    const shot = makeShot({
+      graphOutputSource: "videogen", graphVideoGens: [clip], graphVideoGenIndex: 0,
+      graphEditToVideo: true, graphVideoSourceEditNodeId: "edit0", graphImageGens: [frame], graphImageGenIndex: 0,
+      graphEditNodes: [editNode()],
+    });
+    expect(syncBoardOutputToPipe(shot)).toBe(true);
+    expect(shot.videoPath).toBe(clip.path);
+    expect(shot.artwork).toBe(edit.path);
   });
 
   it("leaves unpiped/classic shots untouched", () => {

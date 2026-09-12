@@ -12,7 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
-import { OpenArtClient, videoRefsAssign, videoRefMaxHeight } from "../src/main/openart.js";
+import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
+import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
@@ -446,15 +447,14 @@ describe("videoRefsAssign", () => {
   });
 });
 
-describe("videoRefMaxHeight", () => {
-  it("reads the cap from the form text and defaults to 720p", () => {
-    expect(videoRefMaxHeight({
-      visualReferences: { type: "array", items: { description: "Video resolution must be between 480p and 720p" } },
-    })).toBe(720);
-    expect(videoRefMaxHeight({
-      visualReferences: { type: "array", items: { description: "Video resolution up to 1080p" } },
-    })).toBe(1080);
-    expect(videoRefMaxHeight({ visualReferences: { type: "array" } })).toBe(720);
+describe("video-ref 720p ceiling", () => {
+  it("caps every video reference at 720p regardless of model", () => {
+    expect(VIDEO_REF_MAX_HEIGHT).toBe(720);
+  });
+
+  it("resizeVideoRef is the single-arg 720p wrapper", async () => {
+    // Non-video input passes through untouched.
+    await expect(resizeVideoRef("data:image/png;base64,eA==")).resolves.toBe("data:image/png;base64,eA==");
   });
 });
 
@@ -605,6 +605,47 @@ describe("OpenArtClient.imageGenFn", () => {
     });
     const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
     await expect(gen("any", [])).rejects.toThrow(/failed/i);
+  });
+
+  it("fails loudly on a stale image pick instead of generating on another model", async () => {
+    let submitted = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => { submitted = true; return '{"status":"PENDING","historyId":"h-x","pollAfterSeconds":0}'; },
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction(), "stale-openart-id")!;
+    await expect(gen("any", [])).rejects.toThrow(/isn't an OpenArt model/);
+    expect(submitted).toBe(false);
+  });
+
+  it("emits a submit notice naming the resolved model + mode", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "kling-v2", displayName: "Kling V2", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              aspectRatio: { type: "string", enum: ["16:9", "1:1", "9:16"] },
+              resolution: { type: "string", enum: ["1k", "2k", "4k"] },
+              imageCount: { type: "integer" },
+            },
+          },
+        }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-notice","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("notice-jpeg")] }),
+    });
+    const notices: string[] = [];
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction(), undefined, undefined, (m) => { notices.push(m); })!;
+    await gen("Draw a castle", []);
+    expect(notices.some((m) => /Submitting image job via kling-v2/.test(m))).toBe(true);
+    expect(notices.some((m) => /mode=text2image/.test(m))).toBe(true);
+  });
+
+  it("imageModelOptions returns null (quality rides the resolution tier)", async () => {
+    const client = new OpenArtClient(fakeMcp({}));
+    await expect(client.imageModelOptions("kling-v2")).resolves.toBeNull();
+    await expect(client.imageModelOptions("higgsfield:seedance_2_5")).resolves.toBeNull();
   });
 });
 
@@ -805,6 +846,26 @@ describe("OpenArtClient generation recorder", () => {
     });
   });
 
+  it("fails loudly on a stale video pick instead of billing another model", async () => {
+    const folder = path.join(dataDir, "prod-stale-video");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    let submitted = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_generate_video: () => { submitted = true; return '{"status":"PENDING","historyId":"h-x","pollAfterSeconds":0}'; },
+    });
+    const client = new OpenArtClient(mcp);
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    await expect(
+      client.generateVideoClip(prod, shot, { model: "higgsfield:seedance_2_5", resolution: "1080p", durationSec: 5, prompt: "animate" }, () => {})
+    ).rejects.toThrow(/isn't an OpenArt model/);
+    expect(submitted).toBe(false);
+  });
+
   it("uploads video references in normal generation without setting an end frame", async () => {
     const folder = path.join(dataDir, "prod-videorefs");
     fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
@@ -813,7 +874,7 @@ describe("OpenArtClient generation recorder", () => {
     fs.writeFileSync(path.join(folder, "references", "clip.mp4"), Buffer.from("mp4-bytes"));
     let seenParams: Record<string, unknown> | undefined;
     const signCalls: Record<string, unknown>[] = [];
-    const resizeCalls: { dataUrl: string; maxHeight: number }[] = [];
+    const resizeCalls: { dataUrl: string }[] = [];
     const base = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
       openart_model_form_get: () =>
@@ -842,8 +903,8 @@ describe("OpenArtClient generation recorder", () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
     try {
-      const client = new OpenArtClient(base, undefined, async (dataUrl, maxHeight) => {
-        resizeCalls.push({ dataUrl, maxHeight });
+      const client = new OpenArtClient(base, undefined, async (dataUrl) => {
+        resizeCalls.push({ dataUrl });
         return dataUrl;
       });
       const prod = makeProduction({
@@ -862,9 +923,8 @@ describe("OpenArtClient generation recorder", () => {
     expect(seenParams?.startFrame).toMatchObject({ type: "image" });
     expect(seenParams?.endFrame).toBeUndefined();
     expect(seenParams?.visualReferences).toHaveLength(2);
-    // The video reference was offered to the resizer at the default 720p cap.
+    // The video reference was offered to the resizer (universal 720p ceiling).
     expect(resizeCalls).toHaveLength(1);
-    expect(resizeCalls[0].maxHeight).toBe(720);
     // The video clip is signed as a video, not mislabeled as a `.png` image.
     const videoSign = signCalls.find((c) => c.contentType === "video/mp4");
     expect(videoSign?.mediaType).toBe("video");
@@ -933,6 +993,57 @@ describe("OpenArtClient generation recorder", () => {
     expect(params.elements).toHaveLength(2);
     expect(params.elementTypes).toBeUndefined();
     expect(params.startFrame).toBeUndefined();
+  });
+
+  it("prefers a frame-slot mode for an in-betweener even when a refy mode parses first", async () => {
+    const folder = path.join(dataDir, "prod-tween-mode");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    let seenArgs: Record<string, unknown> | undefined;
+    const base = fakeMcp({
+      openart_model_list: () => JSON.stringify([{
+        model: "tween-pro",
+        displayName: "Tween Pro",
+        modes: { video: [{ mode: "element2video" }, { mode: "image2video" }] },
+      }]),
+      openart_model_form_get: (args) => {
+        // element2video: ref-array-only form — an in-between submitted here
+        // would ride the array as plain references (the reported bug).
+        if (args.mode === "element2video") {
+          return JSON.stringify({ jsonSchema: { properties: { elements: { type: "array", items: {} }, duration: { type: "string", enum: ["4s"] } } } });
+        }
+        // image2video: dedicated start/end object slots, no reference array.
+        return JSON.stringify({ jsonSchema: { properties: { startFrame: { type: "object", properties: { type: {}, url: {} } }, endFrame: { type: "object", properties: { type: {}, url: {} } }, duration: { type: "string", enum: ["4s"] } } } });
+      },
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-x", url: "https://example.invalid/vr", type: "image" } }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-tw","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const orig = base.callRawFull.bind(base);
+    (base as { callRawFull: unknown }).callRawFull = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "openart_generate_video") seenArgs = a;
+      return orig(s, t, a);
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    try {
+      const prod = makeProduction({
+        meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+      });
+      const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+      await new OpenArtClient(base).generateVideoClip(
+        prod, shot, { model: "auto", resolution: "1080p", durationSec: 4, prompt: "turn around" }, () => {},
+        undefined, [],
+        { start: { name: "Start", dataUrl: "data:image/png;base64,c3RhcnQ=" }, end: { name: "End", dataUrl: "data:image/png;base64,ZW5k" } }
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seenArgs?.mode).toBe("image2video");
+    const params = seenArgs?.params as Record<string, unknown>;
+    expect(params.startFrame).toMatchObject({ type: "image" });
+    expect(params.endFrame).toMatchObject({ type: "image" });
   });
 
   it("fails loudly instead of coercing when the model can't do the requested length", async () => {

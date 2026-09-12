@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
+import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -130,6 +130,9 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     shots: sc.shots.map((sh) => {
       // Legacy fields no longer used (single-VO model, cuts-only timeline).
       const { voiceoverPath: _v, transition: _t, ...rest } = sh as typeof sh & { voiceoverPath?: unknown; transition?: unknown };
+      // Fold any legacy single-edit fields from a stale renderer payload into
+      // the edit-node list before the output pipe is re-derived from it.
+      migrateEditNodes(rest);
       // The output pipe is authoritative: re-derive artwork/videoPath so a
       // renderer save with a stale or missing frame can't diverge from the
       // graph's frame output node (e.g. an edit-image node piped to output).
@@ -151,6 +154,9 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.referenceCategories = Array.isArray(p.referenceCategories) ? p.referenceCategories : [];
   if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
     fresh.openArt = { model: p.openArt.model, resolution: p.openArt.resolution };
+    if (typeof p.openArt.quality === "string" && p.openArt.quality.trim()) {
+      fresh.openArt.quality = p.openArt.quality.trim();
+    }
   }
   if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
     fresh.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;
@@ -217,6 +223,7 @@ function migrateBoardArtwork(p: Production): boolean {
     for (const s of sc.shots) {
       if (migrateGraphGenerations(s)) changed = true;
       if (migrateGraphPipes(s)) changed = true;
+      if (migrateEditNodes(s)) changed = true;
       if (syncTweenBlocks(p, s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;

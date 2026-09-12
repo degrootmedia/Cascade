@@ -9,7 +9,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { refTagMatches } from "../../../shared/prompt-grammar.js";
+import { isTagOnlyDiff, refTagMatches } from "../../../shared/prompt-grammar.js";
 
 export interface PromptContentHandle {
   focus(): void;
@@ -294,7 +294,11 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     if (!hasPendingDrag && el.textContent === text) return;
     const sel = window.getSelection();
     const inBox = !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
-    if (deferExternalWhileFocused && inBox && pendingCaret.current === null) return;
+    // While the caret lives in the box, external text is deferred so typing
+    // never jumps — except tag-only diffs (graph connect/disconnect), which
+    // must rebuild under the caret (mapped through below) or the chips
+    // diverge from the saved prompt permanently.
+    if (deferExternalWhileFocused && inBox && pendingCaret.current === null && !isTagOnlyDiff(el.textContent ?? "", text)) return;
     const oldText = el.textContent ?? "";
     const oldCaret = pendingCaret.current ?? (inBox ? selectionOffsets(el).start : null);
     buildDom(el, text);

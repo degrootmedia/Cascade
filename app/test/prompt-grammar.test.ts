@@ -15,12 +15,14 @@ import {
   hasRefTag,
   IMAGE_URL_RX,
   insertBrandParagraph,
+  isTagOnlyDiff,
   parseJsonLooseArray,
   parseJsonLooseObject,
   parsePromptBoxes,
   refTagMatches,
   refTagNames,
   removeRefTag,
+  replaceRefTagAt,
   stripBrandParagraph,
   stripReferenceClause,
   stripStyleParagraph,
@@ -59,6 +61,24 @@ describe("addRefTag / removeRefTag / hasRefTag", () => {
   it("removes every occurrence and tidies blank lines", () => {
     const p = "A @[Gandalf] B\n\n\n\nC @[gandalf] D";
     expect(removeRefTag(p, "Gandalf")).toBe("A  B\n\nC  D");
+  });
+});
+
+describe("replaceRefTagAt", () => {
+  it("replaces the tag at the given occurrence, preserving its position", () => {
+    expect(replaceRefTagAt("Show @[Gandalf] and @[Aragorn]", 1, "Legolas")).toBe("Show @[Gandalf] and @[Legolas]");
+  });
+
+  it("drops a duplicate of the incoming name elsewhere (cited once)", () => {
+    expect(replaceRefTagAt("@[Gandalf] and @[Aragorn]", 0, "Aragorn")).toBe("@[Aragorn] and");
+  });
+
+  it("keeps the same ref in place when re-dropped on its own slot", () => {
+    expect(replaceRefTagAt("A @[Gandalf] B @[Legolas] C", 0, "Gandalf")).toBe("A @[Gandalf] B @[Legolas] C");
+  });
+
+  it("appends when the index is out of range", () => {
+    expect(replaceRefTagAt("Action.", 3, "Gandalf")).toBe("Action.\n\n@[Gandalf]");
   });
 });
 
@@ -109,6 +129,20 @@ describe("parsePromptBoxes / composePromptBoxes", () => {
     const boxes = { style: "Photoreal", content: "@[Gandalf] rides.", brand: "#123456" };
     expect(composePromptBoxes(boxes)).toBe("Style: Photoreal\n\n@[Gandalf] rides.\n\nBrand identity: #123456");
     expect(parsePromptBoxes(composePromptBoxes(boxes))).toEqual(boxes);
+  });
+});
+
+describe("isTagOnlyDiff", () => {
+  it("accepts tag add / remove / replace / reorder under focused typing", () => {
+    expect(isTagOnlyDiff("Action.", "Action.\n\n@[Gandalf]")).toBe(true);
+    expect(isTagOnlyDiff("Action.\n\n@[Gandalf]", "Action.")).toBe(true);
+    expect(isTagOnlyDiff("Show @[Gandalf] and @[Aragorn]", "Show @[Aragorn] and @[Gandalf]")).toBe(true);
+    expect(isTagOnlyDiff("Show @[Gandalf]", "Show @[Legolas]")).toBe(true);
+  });
+
+  it("rejects genuine prose edits so focused typing stays deferred", () => {
+    expect(isTagOnlyDiff("Action.", "Action with more words.")).toBe(false);
+    expect(isTagOnlyDiff("Hello @[Gandalf]", "Goodbye @[Gandalf]")).toBe(false);
   });
 });
 

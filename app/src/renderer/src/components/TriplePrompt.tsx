@@ -7,7 +7,7 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PromptContentEditor, type PromptContentHandle } from "./PromptContentEditor.js";
-import { composePromptBoxes, parsePromptBoxes, type PromptBoxes } from "../../../shared/prompt-grammar.js";
+import { composePromptBoxes, isTagOnlyDiff, parsePromptBoxes, type PromptBoxes } from "../../../shared/prompt-grammar.js";
 
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
@@ -81,11 +81,15 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
       const isBrandFocused = !!brandRef.current && brandRef.current === active;
       const anyFocused = isContentFocused || isStyleFocused || isBrandFocused;
       if (anyFocused) {
-        // Merge only the unfocused boxes; keep the focused one(s) as-is.
+        // Merge only the unfocused boxes; keep the focused one(s) as-is —
+        // except tag-only content diffs (graph connect/disconnect), which the
+        // focused content box must accept so the chip appears/vanishes under
+        // the caret instead of diverging from the saved prompt forever.
         let changed = false;
         const next: PromptBoxes = { ...boxesRef.current };
         if (!isStyleFocused && incoming.style !== boxesRef.current.style) { next.style = incoming.style; changed = true; }
         if (!isContentFocused && incoming.content !== boxesRef.current.content) { next.content = incoming.content; changed = true; }
+        else if (isContentFocused && incoming.content !== boxesRef.current.content && isTagOnlyDiff(boxesRef.current.content, incoming.content)) { next.content = incoming.content; changed = true; }
         if (!isBrandFocused && incoming.brand !== boxesRef.current.brand) { next.brand = incoming.brand; changed = true; }
         // Also handle includeBrand structural change: the Brand box may
         // appear/disappear based on incoming, even while content focused.

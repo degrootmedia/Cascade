@@ -73,6 +73,44 @@ export function removeRefTag(text: string, name: string): string {
   return text.replace(refTagPattern(name), "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Strip every `@[Name]` tag (used to compare the non-tag text of two prompts). */
+export function stripRefTags(text: string): string {
+  return text.replace(/@\[[^\]]+\]/g, "");
+}
+
+/** True when two prompt texts differ only by `@[Name]` tags (add, remove,
+ *  replace, or reorder) — the surrounding prose is identical modulo
+ *  whitespace. Graph-side connect/disconnect mutations are exactly this shape,
+ *  so a focused content editor can accept them without moving the caret off
+ *  the user's unsaved typing, while genuine prose edits stay deferred. */
+export function isTagOnlyDiff(a: string, b: string): boolean {
+  if (a === b) return true;
+  const norm = (s: string) => stripRefTags(s).replace(/\s+/g, " ").trim();
+  return norm(a) === norm(b);
+}
+
+/** Replace the `@[Name]` tag at occurrence `index` with a different reference
+ *  name, preserving its position in the prompt. Used when a connection is
+ *  dropped onto an occupied socket: the incoming reference takes the slot the
+ *  old one held instead of appending. An out-of-range index appends instead.
+ *  The incoming name is kept only once — any other occurrence of it is dropped
+ *  so a reference is never cited twice. */
+export function replaceRefTagAt(text: string, index: number, name: string): string {
+  const matches = refTagMatches(text);
+  if (index < 0 || index >= matches.length) return addRefTag(text, name);
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    out += text.slice(cursor, m.index);
+    cursor = m.index + m.tag.length;
+    if (i === index) out += `@[${name}]`;
+    else if (m.name.toLowerCase() !== name.toLowerCase()) out += m.tag;
+  }
+  out += text.slice(cursor);
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // ---- Style / Brand identity paragraphs ------------------------------------
 
 /** The whole `Brand identity:` paragraph (leading or following a blank line). */

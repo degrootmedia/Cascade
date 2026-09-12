@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
-import { getMediaDefault, rememberMediaDefault } from "./media-defaults.js";
+import { getMediaDefault } from "./media-defaults.js";
 import { afterFirstPaint, queueBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { closestResolution } from "../resolution.js";
@@ -139,6 +139,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   // Right-click → native image menu, with the full-res file pinned for "Edit externally".
   const relForExternal = histPath ?? shot.artwork;
   const nativeSrc = relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined);
+  // The card can show the shot's video instead of a frame — "Open file folder"
+  // reveals whichever file is actually on screen.
+  const relForFolder = histIdx === null && shot.videoPath && !videoFailed ? shot.videoPath : relForExternal;
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
@@ -194,6 +197,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
       productionId: relForExternal ? prod.meta.id : undefined,
       relPath: relForExternal ?? undefined,
     });
+  }
+  function openMenuFolder() {
+    setMenu(null);
+    if (relForFolder) void window.cascade.showInFolder({ productionId: prod.meta.id, relPath: relForFolder });
   }
 
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
@@ -484,26 +491,38 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
-          {nativeSrc && (
+          {(nativeSrc || relForFolder) && (
             <>
-              <button
-                className="ctx-item"
-                onClick={saveMenuImage}
-              >
-                Save image as…
-              </button>
-              <button
-                className="ctx-item"
-                onClick={copyMenuImage}
-              >
-                Copy image
-              </button>
-              <button
-                className="ctx-item"
-                onClick={editMenuImageExternally}
-              >
-                Edit externally
-              </button>
+              {nativeSrc && (
+                <>
+                  <button
+                    className="ctx-item"
+                    onClick={saveMenuImage}
+                  >
+                    Save image as…
+                  </button>
+                  <button
+                    className="ctx-item"
+                    onClick={copyMenuImage}
+                  >
+                    Copy image
+                  </button>
+                  <button
+                    className="ctx-item"
+                    onClick={editMenuImageExternally}
+                  >
+                    Edit externally
+                  </button>
+                </>
+              )}
+              {relForFolder && (
+                <button
+                  className="ctx-item"
+                  onClick={openMenuFolder}
+                >
+                  Open file folder
+                </button>
+              )}
               <div className="ctx-sep" />
             </>
           )}
@@ -531,23 +550,26 @@ export const BoardCard = memo(BoardCardInner);
  *  and write a motion prompt (with @[name] references, like the side panel).
  *  Shows the estimated credit cost before submitting. */
 
-export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPromptChange, onClose, onSubmit }: {
+export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onShotField, onPromptChange, onClose, onSubmit }: {
   shot: ProductionShot;
   prod: Production;
   models: OpenArtModelChoice[];
   /** Synced prompt — when provided, this IS the `graphVideoPrompt` source of truth shared with the node graph's video-prompt node. */
   prompt?: string;
   onPromptChange?: (text: string) => void;
+  /** Persists per-shot selections (model / resolution / length) onto the shot. */
+  onShotField: (patch: Partial<ProductionShot>) => void;
   onClose: () => void;
   onSubmit: (opts: VideoGenOptions) => void;
 }) {
   const videoModels = models.filter(isVideoModel);
-  // Start where the user last left this dropdown (remembered globally, so
-  // model + resolution + length carry across shots and productions).
+  // Start where THIS shot last left the dropdowns — the saved per-shot choice
+  // wins; the global media-default only seeds shots that never picked, so a
+  // change in one shot never propagates to the others.
   const remembered = getMediaDefault("video");
-  const [model, setModel] = useState(() => remembered?.model ?? videoModels[0]?.id ?? "");
-  const [resolution, setResolution] = useState(() => remembered?.resolution ?? "1080p");
-  const [durationSec, setDurationSec] = useState(() => remembered?.durationSec ?? 5);
+  const [model, setModel] = useState(() => shot.graphVideoModel ?? remembered?.model ?? videoModels[0]?.id ?? "");
+  const [resolution, setResolution] = useState(() => shot.graphVideoResolution ?? remembered?.resolution ?? "1080p");
+  const [durationSec, setDurationSec] = useState(() => shot.graphVideoDurationSec ?? remembered?.durationSec ?? 5);
   const fallback = "Animate this reference image with smooth, cinematic motion.";
   const external = externalPrompt ?? shot.graphVideoPrompt ?? fallback;
   const [prompt, setPrompt] = useState(external);
@@ -627,7 +649,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         <select
           className="prod-openart-select"
           value={videoModels.some((m) => m.id === model) ? model : (videoModels[0]?.id ?? "")}
-          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("video", { model: e.target.value }); }}
+          onChange={(e) => { setModel(e.target.value); onShotField({ graphVideoModel: e.target.value }); }}
           title="Video model"
           disabled={videoModels.length === 0}
         >
@@ -640,12 +662,12 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
         {videoModels.length === 0 && <p className="hint">No video models reported — connect the media MCP server.</p>}
         <div className="prod-video-row">
           <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("video", { resolution: e.target.value }); }}>
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); onShotField({ graphVideoResolution: e.target.value }); }}>
               {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
           <label className="prod-label">Length
-            <select className="prod-openart-select" value={durationSec} onChange={(e) => { setDurationSec(Number(e.target.value)); rememberMediaDefault("video", { durationSec: Number(e.target.value) }); }}>
+            <select className="prod-openart-select" value={durationSec} onChange={(e) => { setDurationSec(Number(e.target.value)); onShotField({ graphVideoDurationSec: Number(e.target.value) }); }}>
               {durations.map((s) => <option key={s} value={s}>{s}s</option>)}
             </select>
           </label>
@@ -684,9 +706,14 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onPr
  *  describe the change; the current frame is sent as the visual reference and
  *  the result becomes the new frame (previous one kept in history). */
 
-export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onPromptChange, onSubmit, onClose }: {
+export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelChange, prompt: externalPrompt, onPromptChange, onSubmit, onClose }: {
   shotNumber: string;
   models: OpenArtModelChoice[];
+  /** This shot's edit chain's last-used model (the output-bound edit node's
+   *  pick) — per-shot/per-node persistence wins over the global default. */
+  savedModel?: string;
+  /** Persists a model change onto the same edit node. */
+  onSavedModelChange?: (model: string) => void;
   /** Synced prompt — when provided, this IS the `graphEditPrompt` source of truth shared with the node graph's edit-prompt node. */
   prompt?: string;
   onPromptChange?: (text: string) => void;
@@ -694,7 +721,7 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
   onClose: () => void;
 }) {
   const imageModels = models.filter(isImageModel);
-  const [model, setModel] = useState(() => getMediaDefault("edit")?.model ?? imageModels[0]?.id ?? "");
+  const [model, setModel] = useState(() => savedModel ?? getMediaDefault("edit")?.model ?? imageModels[0]?.id ?? "");
   const external = externalPrompt ?? "";
   const [prompt, setPrompt] = useState(external);
   const [focused, setFocused] = useState(false);
@@ -724,7 +751,7 @@ export function EditBoardModal({ shotNumber, models, prompt: externalPrompt, onP
         <select
           className="prod-openart-select"
           value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
-          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("edit", { model: e.target.value }); }}
+          onChange={(e) => { setModel(e.target.value); onSavedModelChange?.(e.target.value); }}
           title="Image model that accepts a reference image"
           disabled={imageModels.length === 0}
         >

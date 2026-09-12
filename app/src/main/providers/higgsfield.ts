@@ -29,6 +29,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { McpManager } from "../mcp.js";
 import { assetPath, type ImageGenFn } from "../pipeline.js";
+import { resizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 import {
   dataUrlToBytes,
   IMAGE_URL_RX,
@@ -37,6 +38,7 @@ import {
 } from "../../shared/prompt-grammar.js";
 import type {
   ImageGenAspectRatio,
+  ImageModelOptions,
   LedgerGenMeta,
   OpenArtBoardConfig,
   OpenArtModelChoice,
@@ -73,7 +75,7 @@ const UUID_RX = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 // internal wait). Anything matching keeps polling; anything else is treated
 // as terminal and must carry a result URL.
 const NON_TERMINAL_RX = /queued|processing|running|pending|starting|submitted|in[-_ ]?progress|poll_after_seconds/i;
-const FAILED_RX = /—\s*(failed|cancelled|error)\b/i;
+const FAILED_RX = /—\s*(failed|cancelled|error|nsfw|blocked)\b/i;
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -204,19 +206,30 @@ export class HiggsfieldProvider implements MediaProvider {
     return m.output_type === "video";
   }
 
-  /** Resolve a stored/selected id to the raw id to submit: foreign or unknown
-   *  ids fall back to the house default (or the first model of that kind). */
+  /** Resolve a stored/selected id to the raw id to submit. "auto"/empty fall
+   *  back to the house default (or the first model of that kind). An EXPLICIT
+   *  pick that isn't in the vendor's catalog fails loudly instead of silently
+   *  substituting another model — a stale cross-vendor pick once billed a
+   *  job to the wrong model and hid behind an opaque server 500. */
   private async resolveImageModel(choice: string, items: HiggsModel[]): Promise<string> {
-    const raw = higgsfieldRawId(choice);
+    const trimmed = (choice ?? "").trim();
+    const raw = higgsfieldRawId(trimmed);
     const pool = items.filter(HiggsfieldProvider.imageCapable);
     if (raw && pool.some((m) => m.id === raw)) return raw;
+    if (trimmed && trimmed !== "auto" && pool.length) {
+      throw new Error(`"${trimmed}" isn't a Higgsfield image model (the active media provider is Higgsfield) — re-pick the model and retry; switching media providers can strand a stale pick.`);
+    }
     return pool.some((m) => m.id === DEFAULT_IMAGE_MODEL) ? DEFAULT_IMAGE_MODEL : (pool[0]?.id ?? "");
   }
 
   private async resolveVideoModel(choice: string, items: HiggsModel[], preferEndFrame: boolean): Promise<string> {
-    const raw = higgsfieldRawId(choice);
+    const trimmed = (choice ?? "").trim();
+    const raw = higgsfieldRawId(trimmed);
     const pool = items.filter(HiggsfieldProvider.videoCapable);
     if (raw && pool.some((m) => m.id === raw)) return raw;
+    if (trimmed && trimmed !== "auto" && pool.length) {
+      throw new Error(`"${trimmed}" isn't a Higgsfield video model (the active media provider is Higgsfield) — re-pick the model and retry; switching media providers can strand a stale pick.`);
+    }
     if (preferEndFrame) {
       const withEnd = pool.find((m) => HiggsfieldProvider.mediaRoles(m).includes("end_image"));
       if (withEnd?.id) return withEnd.id;
@@ -239,8 +252,35 @@ export class HiggsfieldProvider implements MediaProvider {
     return roles[0] ?? null;
   }
 
+  /** The role a video reference should ride, read from the media
+   *  declarations: the first role whose name says video (the live catalog
+   *  declares `video_references` on the image-type media entry), else the
+   *  first role on a video-type media. Null when the model declares no video
+   *  slot — a video reference then has nowhere native to go. */
+  private static videoMediaRole(m: HiggsModel | null): string | null {
+    if (!m) return null;
+    for (const media of m.medias ?? []) {
+      for (const r of media.roles ?? []) if (/^video/.test(r)) return r;
+    }
+    for (const media of m.medias ?? []) {
+      if (media.type !== "video") continue;
+      return (media.roles ?? [])[0] ?? null;
+    }
+    return null;
+  }
+
   private static param(m: HiggsModel, name: string): HiggsParam | null {
     return m.parameters?.find((p) => p.name === name) ?? null;
+  }
+
+  /** True when a generate_video failure is the backend's "references don't
+   *  belong in text-to-video mode" validation (live 2026-09-11: Seedance 2.5
+   *  inferred mode 't2v' for an image_references + video_references submission
+   *  and 422'd). That shape is retryable with the source frame as the
+   *  start-image anchor; anything else must surface as-is. */
+  private static isT2VRefsRejection(why: string): boolean {
+    return /does not accept reference media/i.test(why)
+      || (/t2v/i.test(why) && /reference/i.test(why));
   }
 
   /** The declared max count for a media role ("roles: image x1" →  1), or
@@ -358,9 +398,25 @@ export class HiggsfieldProvider implements MediaProvider {
 
   // ---- submit + poll ----------------------------------------------------------
 
-  /** Pull the job UUID out of a generate submit reply (`- <uuid> "⬦"` lines). */
+  /** Pull the job UUID out of a generate submit reply. Only the
+   *  `- <uuid> "<prompt>"` job lines count — other replies (notably the
+   *  preset-matcher notice) also carry UUIDs (preset ids) that must never be
+   *  polled as jobs. */
   private static submitJobId(text: string): string | null {
-    return text.match(UUID_RX)?.[0] ?? null;
+    return text.match(new RegExp(`^-\\s*(${UUID_RX.source})\\s+"`, "m"))?.[1] ?? null;
+  }
+
+  /** A preset-matcher notice ("This prompt looks like the Higgsfield preset
+   *  …") submits no job — it offers a preset id plus a `declined_preset_id`
+   *  bypass for literal generation. Returns the preset name + id when the
+   *  reply carries a notice and no job line, else null. */
+  private static presetNotice(text: string): { name: string; id: string } | null {
+    if (HiggsfieldProvider.submitJobId(text)) return null;
+    const id = text.match(new RegExp(`preset[_ ]id:\\s*"(${UUID_RX.source})"`, "i"))?.[1]
+      ?? text.match(new RegExp(`preset[_ ]id:\\s*(${UUID_RX.source})\\b`, "i"))?.[1];
+    if (!id) return null;
+    const name = text.match(/preset\s+"([^"]+)"/i)?.[1] ?? "preset";
+    return { name, id };
   }
 
   /** One attempt to fetch bytes from a URL; null when not fetchable. */
@@ -445,6 +501,33 @@ export class HiggsfieldProvider implements MediaProvider {
     return out;
   }
 
+  /** The quality tier an image model accepts, read from its catalog detail
+   *  (a `quality`-named parameter with string options, e.g. Seedream's
+   *  basic/high). Null for foreign ids, unknown models, and models declaring
+   *  no quality options — the caller then hides the quality dropdown and the
+   *  vendor default applies. */
+  async imageModelOptions(modelId: string): Promise<ImageModelOptions | null> {
+    const raw = higgsfieldRawId(modelId);
+    if (!raw || raw === "auto") return null;
+    const detail = await this.modelDetail(raw).catch(() => null);
+    if (!detail || !HiggsfieldProvider.imageCapable(detail)) return null;
+    const quality = (detail.parameters ?? []).find((qp) => /^quality$/i.test(qp.name ?? ""));
+    if (!quality || !Array.isArray(quality.options)) return null;
+    const qualities = Array.from(
+      new Set(
+        quality.options
+          .map((v) => String(v).trim())
+          .filter((s) => s && !/^(auto|default)$/i.test(s))
+      )
+    );
+    if (!qualities.length) return null;
+    const def = String(quality.default ?? "").trim();
+    return {
+      qualities,
+      defaultQuality: def && qualities.some((q) => q.toLowerCase() === def.toLowerCase()) ? def : null,
+    };
+  }
+
   /** Ids (namespaced) of the video-capable models declaring a dedicated
    *  end-frame role. Empty when none is proven — the caller unions this with
    *  the user's manual allowlist before the tween dropdown offers anything. */
@@ -488,7 +571,6 @@ export class HiggsfieldProvider implements MediaProvider {
     onNotice?: (msg: string) => void,
     aspectRatio: ImageGenAspectRatio = "16:9"
   ): ImageGenFn | null {
-    void onNotice;
     if (!this.findTool(/^generate_image$/)) return null;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot): Promise<Buffer> => {
@@ -543,9 +625,43 @@ export class HiggsfieldProvider implements MediaProvider {
         const match = resParam.options.find((v) => String(v).toLowerCase() === want);
         if (match !== undefined) params.resolution = match;
       }
+      // Quality tier (Seedream basic/high, Hazel low/medium/high, …): sent
+      // ONLY when the production config names a tier the model's catalog
+      // actually declares — never guessed, so models without a quality param
+      // keep their vendor default.
+      const qualityParam = detail ? (detail.parameters ?? []).find((qp) => /^quality$/i.test(qp.name ?? "")) : null;
+      const wantQuality = (p.openArt?.quality ?? "").trim();
+      if (qualityParam && Array.isArray(qualityParam.options) && wantQuality) {
+        const match = qualityParam.options.find((v) => String(v).trim().toLowerCase() === wantQuality.toLowerCase());
+        if (match !== undefined) params.quality = match;
+      }
       if (medias.length) params.medias = medias;
 
-      const text = await this.mcp.callRaw(SERVER, "generate_image", { params });
+      // Diagnostics: surface exactly what reaches Higgsfield (mirrors the
+      // video path's paramDump) so a wrong-model suspicion can be settled
+      // from the log instead of the website's history view.
+      onNotice?.(
+        `Submitting image job via ${modelId} ` +
+          `(${[
+            `resolution=${JSON.stringify(params.resolution ?? resolution)}`,
+            params.quality !== undefined ? `quality=${JSON.stringify(params.quality)}` : "",
+            params.aspect_ratio !== undefined ? `aspect_ratio=${JSON.stringify(params.aspect_ratio)}` : "",
+            medias.length ? `medias[${medias.map((m) => m.role).join("|")}] x${medias.length}` : "no medias",
+          ]
+            .filter(Boolean)
+            .join(" ")})`
+      );
+
+      let text = await this.mcp.callRaw(SERVER, "generate_image", { params });
+      // The prompt can match a Higgsfield preset ("IN THE DARK", …) — the
+      // server then returns a notice instead of a job. Decline it once and
+      // generate the prompt literally; a bare preset id must never reach the
+      // job parser (polling it 500s with "Something went wrong").
+      const preset = HiggsfieldProvider.presetNotice(text);
+      if (preset) {
+        onNotice?.(`Higgsfield matched the "${preset.name}" preset — declining it and generating your prompt literally…`);
+        text = await this.mcp.callRaw(SERVER, "generate_image", { params: { ...params, declined_preset_id: preset.id } });
+      }
       const genMeta: LedgerGenMeta = {
         kind: "image",
         model: `${HIGGSFIELD_ID_PREFIX}${modelId}`,
@@ -622,9 +738,16 @@ export class HiggsfieldProvider implements MediaProvider {
 
   /**
    * Generate one video clip for a shot. Mirrors the OpenArt generateVideoClip
-   * contract (same args, same { rel } result): the source frame(s) occupy the
-   * start_image/end_image roles when the model declares them, else ride the
-   * generic image-reference role.
+   * contract (same args, same { rel } result). Role binding: in-betweener
+   * submissions (frameRefs) put the start/end keyframes in the model's
+   * start_image/end_image slots; ordinary node-graph/modaless submissions ride
+   * the generic reference path — the source frame lands in the image-reference
+   * role and dropped video clips land in the model's video element role,
+   * downscaled to 720p first (mirroring OpenArt's video-ref resize) so a
+   * capped model doesn't reject the submission. When the backend answers that
+   * references don't belong in the inferred text-to-video mode (Seedance 2.5
+   * 422), ordinary submissions retry ONCE with the source frame rebound to
+   * start_image — the image-to-video anchor — reusing the uploaded media ids.
    */
   async generateVideoClip(
     p: Production,
@@ -658,7 +781,9 @@ export class HiggsfieldProvider implements MediaProvider {
       refs.push(HiggsfieldProvider.fileDataUrl(p, sourceRel, `Shot ${shot.number} frame`));
     }
     refs.push(...(extraRefs ?? []));
-    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length);
+    // includeVideo: a @[name] tag can cite a dropped video reference, whose
+    // bytes live in mediaPath (no artwork) — same as the OpenArt path.
+    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
     refs.push(...extras);
 
     const modelId = await this.resolveVideoModel(opts.model, items, Boolean(frameRefs?.end));
@@ -667,32 +792,58 @@ export class HiggsfieldProvider implements MediaProvider {
     const roles = detail ? HiggsfieldProvider.mediaRoles(detail) : [];
     const startRole = HiggsfieldProvider.pickRole(roles, ["start_image", "image", "image_references"]);
     const refRole = HiggsfieldProvider.pickRole(roles, ["image_references", "image"]);
+    const videoRole = HiggsfieldProvider.videoMediaRole(detail);
     const endRole = detail && roles.includes("end_image")
       ? "end_image"
       : (refRole ?? startRole);
 
     // `uploaded` mirrors `refs` (media_id per success, null per failure) so
     // the prompt citation can anchor tokens to submitted positions.
+    // `boundRoles` mirrors `refs` with the role each ref was submitted under
+    // (null when it had nowhere to go), so a t2v-rejection retry can rebind
+    // the source frame without re-uploading anything.
     const medias: { value: string; role: string }[] = [];
     const uploaded: (string | null)[] = [];
+    const boundRoles: (string | null)[] = [];
     for (const [i, r] of refs.entries()) {
-      // Start frame →  start slot; end keyframe →  end slot (or the reference
-      // role when the model declares no end slot — both frames still reach
-      // the model, the array-fallback idea OpenArt uses); every other ref
-      // rides the generic reference role.
-      const wantRole = frameRefs?.end && i === 1 ? endRole : i === 0 ? startRole : (refRole ?? startRole);
+      // In-betweener submissions bind keyframes to their slots (start → start,
+      // end → end). Everything else rides the reference path: image refs —
+      // including the source frame — go to the generic image-reference role
+      // (never the start-image slot, so no dropped reference can be mistaken
+      // for a keyframe), and video references go to the model's video-element
+      // role when it declares one.
+      const isVideoRef = /^data:video\//i.test(r.dataUrl);
+      const wantRole = frameRefs?.end && i === 1
+        ? endRole
+        : (frameRefs && i === 0)
+          ? startRole
+          : isVideoRef
+            ? (videoRole ?? refRole ?? startRole)
+            : (refRole ?? startRole);
       if (!wantRole) {
         uploaded.push(null);
+        boundRoles.push(null);
         emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
         continue;
       }
       try {
-        const id = await this.uploadDataUrl(r.dataUrl, r.name);
+        let dataUrl = r.dataUrl;
+        if (isVideoRef) {
+          const resized = await resizeVideoRef(dataUrl);
+          if (resized !== dataUrl) {
+            dataUrl = resized;
+            emit(`Shot ${shot.number}: resized video reference "${r.name}" to ${VIDEO_REF_MAX_HEIGHT}p for this model.`);
+          }
+        }
+        const id = await this.uploadDataUrl(dataUrl, r.name);
         medias.push({ value: id, role: wantRole });
         uploaded.push(id);
-      } catch {
+        boundRoles.push(wantRole);
+      } catch (e) {
         uploaded.push(null);
-        emit(`Reference "${r.name}" couldn't be uploaded — continuing without it.`, "error");
+        boundRoles.push(wantRole);
+        const why = e instanceof Error ? e.message : String(e);
+        emit(`Reference "${r.name}" couldn't be uploaded (${why}) — continuing without it.`, "error");
       }
     }
     const fullPrompt = citePrompt(resolved, refs, uploaded);
@@ -734,8 +885,70 @@ export class HiggsfieldProvider implements MediaProvider {
     if (aspects.includes("16:9")) params.aspect_ratio = "16:9";
     if (medias.length) params.medias = medias;
 
-    emit(`Shot ${shot.number}: submitting video job via ${modelId}⬦`);
-    const text = await this.mcp.callRaw(SERVER, "generate_video", { params });
+    // Diagnostics: surface exactly what reaches Higgsfield so a server-side
+    // rejection (the opaque "Something went wrong" 500) can be mirrored by a
+    // probe and attached to a support ticket. Prompt text is shown truncated;
+    // the params carry nothing sensitive.
+    const dumpParams = (ms: { value: string; role: string }[]): string =>
+      [
+        `model=${modelId}`,
+        `duration=${JSON.stringify(params.duration)}`,
+        params.resolution !== undefined ? `resolution=${JSON.stringify(params.resolution)}` : "",
+        params.aspect_ratio !== undefined ? `aspect_ratio=${JSON.stringify(params.aspect_ratio)}` : "",
+        `count=${JSON.stringify(params.count)}`,
+        ms.length ? `medias[${ms.map((m) => m.role).join("|")}] x${ms.length}` : "no medias",
+        `prompt=${JSON.stringify(String(params.prompt ?? "").slice(0, 140))}`,
+      ].filter(Boolean).join(" ");
+    let paramDump = dumpParams(medias);
+    emit(`Shot ${shot.number}: submitting video job via ${modelId}⬦ (${paramDump})`);
+    let text: string;
+    try {
+      text = await this.mcp.callRaw(SERVER, "generate_video", { params });
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      // The backend inferred text-to-video mode and rejected the references.
+      // Retry once with the source frame as the start-image anchor (the
+      // image-to-video trigger), reusing the uploaded media ids — no
+      // re-upload, no prompt change. Tween submissions already bind keyframe
+      // slots, so there is nothing to rebind there.
+      const canReanchor = !frameRefs
+        && medias.length > 0
+        && uploaded[0] != null
+        && boundRoles[0] !== "start_image"
+        && roles.includes("start_image");
+      if (!canReanchor || !HiggsfieldProvider.isT2VRefsRejection(why)) {
+        throw new Error(`${why} — submitted: ${paramDump}`);
+      }
+      emit(`Shot ${shot.number}: ${modelId} rejected references in text-to-video mode — retrying with the source frame as the start image…`);
+      const reanchored: { value: string; role: string }[] = [];
+      for (const [i, id] of uploaded.entries()) {
+        if (id == null) continue;
+        const role = i === 0 ? "start_image" : boundRoles[i];
+        if (!role) continue;
+        reanchored.push({ value: id, role });
+      }
+      if (!reanchored.length || !reanchored.some((m) => m.role === "start_image")) {
+        throw new Error(`${why} — submitted: ${paramDump}`);
+      }
+      params.medias = reanchored;
+      paramDump = dumpParams(reanchored);
+      emit(`Shot ${shot.number}: retrying video job via ${modelId}⬦ (${paramDump})`);
+      try {
+        text = await this.mcp.callRaw(SERVER, "generate_video", { params });
+      } catch (e2) {
+        const why2 = e2 instanceof Error ? e2.message : String(e2);
+        throw new Error(`${why2} — submitted: ${paramDump} (first attempt: ${why})`);
+      }
+    }
+    // The prompt can match a Higgsfield preset ("IN THE DARK", …) — the
+    // server then returns a notice instead of a job. Decline it once and
+    // generate the prompt literally; a bare preset id must never reach the
+    // job parser (polling it 500s with "Something went wrong").
+    const preset = HiggsfieldProvider.presetNotice(text);
+    if (preset) {
+      emit(`Shot ${shot.number}: Higgsfield matched the "${preset.name}" preset — declining it and generating your prompt literally…`);
+      text = await this.mcp.callRaw(SERVER, "generate_video", { params: { ...params, declined_preset_id: preset.id } });
+    }
 
     const done = await (async (): Promise<{ buf: Buffer; ext: string }> => {
       const jobId = HiggsfieldProvider.submitJobId(text);

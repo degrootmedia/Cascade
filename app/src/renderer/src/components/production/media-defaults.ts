@@ -1,9 +1,15 @@
 /**
  * The generation dropdowns' remembered last choices (Settings-backed, global
- * per context — see MediaDefaultCtx in shared/ipc.ts). Every model dropdown
- * seeds from its context's remembered choice (validated against the current
- * list) and writes back on change, so each dropdown starts where the user
- * last left it — across modals, node-graph nodes, and productions.
+ * per context — see MediaDefaultCtx in shared/ipc.ts). Some contexts persist
+ * per shot or per node instead (`graphVideo*` on the shot, `model`/`resolution`
+ * on each `GraphEditNode`) — there this module only supplies the *fallback*
+ * seed for shots/nodes that never picked, and their controls never write back
+ * here, so a change in one shot cannot propagate globally.
+ *
+ * Every other model dropdown seeds from its context's remembered choice
+ * (validated against the current list) and writes back on change, so each
+ * dropdown starts where the user last left it — across modals, node-graph
+ * nodes, and productions.
  */
 import type { CascadeApi, MediaDefaultChoice, MediaDefaultCtx } from "../../../../shared/ipc.js";
 

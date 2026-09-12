@@ -46,12 +46,17 @@ const FALLBACK_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"];
 const FALLBACK_VIDEO_DURATIONS = [5, 10, 15, 20];
 
 /** Sub-panel display names, one per media vendor (matches PROVIDER_META). */
-const PROVIDER_LABELS: Record<string, string> = { openart: "OpenArt", higgsfield: "Higgsfield" };
-const PROVIDER_ORDER = ["openart", "higgsfield"];
+const PROVIDER_LABELS: Record<string, string> = { openart: "OpenArt", higgsfield: "Higgsfield", "higgsfield-cli": "Higgsfield CLI", "openart-cli": "OpenArt CLI" };
+const PROVIDER_ORDER = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
 
 /** The vendor a model id belongs to. Provider ids are namespaced where they
- *  leave the provider (higgsfield:<id>); everything else is OpenArt. */
-const providerOf = (id: string): string => (id.startsWith("higgsfield:") ? "higgsfield" : "openart");
+ *  leave the provider (higgsfield:<id>, higgsfield-cli:<id>,
+ *  openart-cli:<id>); everything else is OpenArt. */
+const providerOf = (id: string): string =>
+  id.startsWith("higgsfield-cli:") ? "higgsfield-cli"
+  : id.startsWith("higgsfield:") ? "higgsfield"
+  : id.startsWith("openart-cli:") ? "openart-cli"
+  : "openart";
 
 /** The ladder a rule interpolates over, as a short human label. */
 const ladderLabel = (d: ModelPriceDraft): string => {
@@ -517,7 +522,7 @@ function ExpensePricingSection() {
           <button
             onClick={() => void refresh()}
             disabled={busy}
-            title="Re-probe both media providers for every available image and video model"
+            title="Re-probe all media providers for every available image and video model"
           >
             Refresh models
           </button>
@@ -555,11 +560,31 @@ function MediaProviderSection() {
   /** Manual end-frame allowlist, edited one id per line. */
   const [endFrameText, setEndFrameText] = useState("");
   const [endFrameSaved, setEndFrameSaved] = useState(false);
+  /** Higgsfield CLI transport: custom binary path + live status. */
+  const [cliBinary, setCliBinary] = useState("");
+  const [cliBinarySaved, setCliBinarySaved] = useState(false);
+  const [cliStatus, setCliStatus] = useState<{ binary: string | null; version: string | null; authenticated: boolean; account: string | null } | null>(null);
+  /** OpenArt CLI transport: custom binary path + live status. */
+  const [oaCliBinary, setOaCliBinary] = useState("");
+  const [oaCliBinarySaved, setOaCliBinarySaved] = useState(false);
+  const [oaCliStatus, setOaCliStatus] = useState<{ binary: string | null; version: string | null; authenticated: boolean; account: string | null } | null>(null);
+
+  const refreshCli = () => {
+    void window.cascade.getHiggsfieldCliBinary().then((p) => setCliBinary(p ?? "")).catch(() => {});
+    void window.cascade.getHiggsfieldCliStatus().then(setCliStatus).catch(() => setCliStatus(null));
+  };
+
+  const refreshOaCli = () => {
+    void window.cascade.getOpenArtCliBinary().then((p) => setOaCliBinary(p ?? "")).catch(() => {});
+    void window.cascade.getOpenArtCliStatus().then(setOaCliStatus).catch(() => setOaCliStatus(null));
+  };
 
   useEffect(() => {
     void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
     void window.cascade.getMediaProvider().then(setActive).catch(() => {});
     void window.cascade.getEndFrameModels().then((ids) => setEndFrameText(ids.join("\n"))).catch(() => {});
+    refreshCli();
+    refreshOaCli();
   }, []);
 
   const saveEndFrame = async () => {
@@ -568,6 +593,32 @@ function MediaProviderSection() {
       const ids = endFrameText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       await window.cascade.setEndFrameModels(ids);
       setEndFrameSaved(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const saveCliBinary = async () => {
+    setCliBinarySaved(false);
+    try {
+      await window.cascade.setHiggsfieldCliBinary(cliBinary.trim() ? cliBinary.trim() : null);
+      setCliBinarySaved(true);
+      refreshCli();
+      void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
+      window.dispatchEvent(new Event("cascade:media-provider-changed"));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const saveOaCliBinary = async () => {
+    setOaCliBinarySaved(false);
+    try {
+      await window.cascade.setOpenArtCliBinary(oaCliBinary.trim() ? oaCliBinary.trim() : null);
+      setOaCliBinarySaved(true);
+      refreshOaCli();
+      void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
+      window.dispatchEvent(new Event("cascade:media-provider-changed"));
     } catch (e) {
       setError(String(e));
     }
@@ -595,10 +646,57 @@ function MediaProviderSection() {
             <input type="radio" name="media-provider" checked={active === p.id} onChange={() => void change(p.id)} />
             {p.displayName}
           </label>
-          <span className="hint">{p.available ? "connected" : "not connected — add its MCP server below"}</span>
+          <span className="hint">{p.available ? "connected" : p.id === "higgsfield-cli"
+            ? "not found — install the higgsfield CLI (`npm i -g @higgsfield/cli`) or set a custom binary path below"
+            : p.id === "openart-cli"
+            ? "not found — install the openart CLI (https://github.com/OpenArt-AI/cli) or set a custom binary path below"
+            : "not connected — add its MCP server below"}</span>
         </div>
       ))}
       <p className="hint">Which service generates storyboard frames, clips, and reference images. Applies to every production.</p>
+      <label style={{ marginTop: 8 }}>Higgsfield CLI binary <span className="hint">(optional — blank resolves `higgsfield` from PATH)</span></label>
+      <div className="row">
+        <input
+          type="text"
+          value={cliBinary}
+          onChange={(e) => { setCliBinary(e.target.value); setCliBinarySaved(false); }}
+          placeholder="C:\Users\you\AppData\Roaming\npm\higgsfield.cmd"
+          title="Full path to the higgsfield CLI binary. Leave blank to use the one on PATH."
+          style={{ flex: 1 }}
+        />
+        <button onClick={() => void saveCliBinary()}>Save path</button>
+        <button onClick={() => void refreshCli()} title="Re-check the binary, version, and login">Check status</button>
+        {cliBinarySaved && <span className="hint">saved</span>}
+      </div>
+      {cliStatus && (
+        <p className="hint">
+          {cliStatus.binary ? `Binary: ${cliStatus.binary}` : "Binary: not found"}
+          {cliStatus.version ? ` · ${cliStatus.version}` : ""}
+          {` · ${cliStatus.authenticated ? `signed in${cliStatus.account ? ` as ${cliStatus.account}` : ""}` : "not signed in — run `higgsfield auth login` in a terminal"}`}
+        </p>
+      )}
+      <label style={{ marginTop: 8 }}>OpenArt CLI binary <span className="hint">(optional — blank resolves `openart` from PATH)</span></label>
+      <div className="row">
+        <input
+          type="text"
+          value={oaCliBinary}
+          onChange={(e) => { setOaCliBinary(e.target.value); setOaCliBinarySaved(false); }}
+          placeholder="C:\Users\you\AppData\Local\Programs\openart\bin\openart.exe"
+          title="Full path to the openart CLI binary. Leave blank to use the one on PATH."
+          style={{ flex: 1 }}
+        />
+        <button onClick={() => void saveOaCliBinary()}>Save path</button>
+        <button onClick={() => void refreshOaCli()} title="Re-check the binary, version, and login">Check status</button>
+        {oaCliBinarySaved && <span className="hint">saved</span>}
+      </div>
+      {oaCliStatus && (
+        <p className="hint">
+          {oaCliStatus.binary ? `Binary: ${oaCliStatus.binary}` : "Binary: not found"}
+          {oaCliStatus.version ? ` · ${oaCliStatus.version}` : ""}
+          {` · ${oaCliStatus.authenticated ? `signed in${oaCliStatus.account ? ` as ${oaCliStatus.account}` : ""}` : "not signed in — run `openart login` in a terminal"}`}
+        </p>
+      )}
+      <p className="hint">OpenArt CLI video takes a single start-frame image — no end frames or extra references. In-betweening and multi-reference video need the OpenArt MCP transport.</p>
       <label style={{ marginTop: 8 }}>In-betweener end-frame models</label>
       <textarea
         rows={3}

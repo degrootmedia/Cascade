@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, MediaProviderId, MediaProviderInfo, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
 import { Transcript } from "./components/Transcript.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
+import { MediaProviderToggle, type MediaCredits } from "./components/MediaProviderToggle.js";
 import { FolderPicker } from "./components/FolderPicker.js";
 import { AgentPicker } from "./components/AgentPicker.js";
 import { AgentsPanel } from "./components/AgentsPanel.js";
@@ -35,6 +36,11 @@ export function App() {
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [credits, setCredits] = useState<number | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  /** Top-bar media dial: active vendor, per-vendor balances + availability. */
+  const [mediaProvider, setMediaProvider] = useState<MediaProviderId>("openart");
+  const [mediaCredits, setMediaCredits] = useState<MediaCredits>({ openart: null, higgsfield: null, "higgsfield-cli": null, "openart-cli": null });
+  const [mediaAvailable, setMediaAvailable] = useState<Record<MediaProviderId, boolean>>({ openart: true, higgsfield: true, "higgsfield-cli": true, "openart-cli": true });
+  const [mediaProviderList, setMediaProviderList] = useState<MediaProviderInfo[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
@@ -163,6 +169,51 @@ export function App() {
   useEffect(() => {
     void refreshMeta();
   }, [refreshMeta]);
+
+  /** Top-bar dial data: active vendor + per-vendor balances + availability. */
+  const refreshMedia = useCallback(async () => {
+    try {
+      const [id, credits, list] = await Promise.all([
+        window.cascade.getMediaProvider(),
+        window.cascade.getMediaCredits(),
+        window.cascade.listMediaProviders(),
+      ]);
+      setMediaProvider(id);
+      setMediaCredits(credits);
+      setMediaProviderList(list);
+      setMediaAvailable((prev) => {
+        const next = { ...prev };
+        for (const p of list) next[p.id] = p.available;
+        return next;
+      });
+    } catch {
+      /* keep last-known values */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMedia();
+    const onChange = () => void refreshMedia();
+    window.addEventListener("cascade:media-provider-changed", onChange);
+    window.addEventListener("focus", onChange);
+    const timer = window.setInterval(() => void refreshMedia(), 60_000);
+    return () => {
+      window.removeEventListener("cascade:media-provider-changed", onChange);
+      window.removeEventListener("focus", onChange);
+      window.clearInterval(timer);
+    };
+  }, [refreshMedia]);
+
+  /** Dial selection: optimistic flip, then broadcast so production views refresh. */
+  const selectMedia = useCallback((id: MediaProviderId) => {
+    setMediaProvider((prev) => {
+      if (prev === id) return prev;
+      void window.cascade.setMediaProvider(id).then(() => {
+        window.dispatchEvent(new Event("cascade:media-provider-changed"));
+      }).catch(() => void refreshMedia());
+      return id;
+    });
+  }, [refreshMedia]);
 
   // First-run: open settings if there's no API key yet (workspace is optional — pure chat works without one).
   useEffect(() => {
@@ -362,21 +413,31 @@ export function App() {
         value={view}
         onChange={switchView}
         rightContent={
-          <ModelPicker
-            models={models}
-            current={effectiveModel}
-            disabled={busy}
-            onChange={(id) => {
-              if (activeMeta) {
-                void window.cascade.updateAgent(activeMeta.id, { model: id }).then(() => {
-                  void refreshActiveAgent(currentId);
-                  void refreshAgents();
-                });
-              } else {
-                void window.cascade.setModel(id).then(() => refreshMeta());
-              }
-            }}
-          />
+          <>
+            <ModelPicker
+              models={models}
+              current={effectiveModel}
+              disabled={busy}
+              onChange={(id) => {
+                if (activeMeta) {
+                  void window.cascade.updateAgent(activeMeta.id, { model: id }).then(() => {
+                    void refreshActiveAgent(currentId);
+                    void refreshAgents();
+                  });
+                } else {
+                  void window.cascade.setModel(id).then(() => refreshMeta());
+                }
+              }}
+            />
+            <span className="view-tabs-divider" aria-hidden="true" />
+            <MediaProviderToggle
+              active={mediaProvider}
+              credits={mediaCredits}
+              available={mediaAvailable}
+              providers={mediaProviderList}
+              onSelect={selectMedia}
+            />
+          </>
         }
       />
       {view === "home" ? (

@@ -2,7 +2,11 @@ import type { ProductionShot } from "./ipc.js";
 
 /** All selectable stills, including node generations that were never primary. */
 export function boardFrameHistory(shot: ProductionShot): string[] {
-  const generations = [...(shot.graphImageGens ?? []), ...(shot.graphEditGens ?? [])]
+  const editGens = [
+    ...(shot.graphEditGens ?? []),
+    ...(shot.graphEditNodes ?? []).flatMap((n) => n.gens ?? []),
+  ];
+  const generations = [...(shot.graphImageGens ?? []), ...editGens]
     .sort((a, b) => {
       const aTime = Date.parse(a.at);
       const bTime = Date.parse(b.at);

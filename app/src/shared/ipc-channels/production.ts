@@ -68,6 +68,7 @@ export const productionChannels = {
   "production:videoUrl": { method: "videoUrl", kind: "invoke" },
   "production:removeVideo": { method: "removeVideo", kind: "invoke" },
   "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },
+  "production:imageModelOptions": { method: "imageModelOptions", kind: "invoke" },
   "production:videoEndFrameModels": { method: "videoEndFrameModels", kind: "invoke" },
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },

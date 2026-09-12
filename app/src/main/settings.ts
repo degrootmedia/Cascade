@@ -36,6 +36,10 @@ interface SettingsFile {
   mcpOnDemand: string[];
   /** Which MCP vendor serves image/video generation (global setting). */
   mediaProvider: string;
+  /** Custom path to the `higgsfield` CLI binary (null = resolve from PATH). */
+  higgsfieldCliBinary: string | null;
+  /** Custom path to the `openart` CLI binary (null = resolve from PATH). */
+  openartCliBinary: string | null;
   /** UI accent color (hex), applied to the --accent CSS variable. */
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
@@ -106,6 +110,8 @@ const DEFAULTS: SettingsFile = {
   recentProductions: [],
   mcpOnDemand: ["openart"],
   mediaProvider: "openart",
+  higgsfieldCliBinary: null,
+  openartCliBinary: null,
   accent: "#4f8ef7",
   externalEditor: null,
   encrypted3daiApiKey: null,
@@ -148,7 +154,7 @@ function load(): SettingsFile {
   // default agent payload stays lean. Applies to fresh installs (DEFAULTS
   // lacks it) and migrates existing profiles that predate the vendor.
   if (!s.mcpOnDemand.includes("higgsfield")) s.mcpOnDemand = [...s.mcpOnDemand, "higgsfield"];
-  if (s.mediaProvider !== "higgsfield" && s.mediaProvider !== "openart") s.mediaProvider = "openart";
+  if (s.mediaProvider !== "higgsfield" && s.mediaProvider !== "higgsfield-cli" && s.mediaProvider !== "openart-cli" && s.mediaProvider !== "openart") s.mediaProvider = "openart";
   cache = s;
   return cache!;
 }
@@ -276,14 +282,36 @@ export function setMcpOnDemand(names: string[]): void {
   save();
 }
 
-/** Which MCP vendor serves image/video generation ("openart" default). */
+/** Which vendor serves image/video generation ("openart" default). */
 export function getMediaProvider(): string {
   const v = load().mediaProvider;
-  return v === "higgsfield" ? "higgsfield" : "openart";
+  return v === "higgsfield" || v === "higgsfield-cli" || v === "openart-cli" ? v : "openart";
 }
 
 export function setMediaProvider(id: string): void {
-  load().mediaProvider = id === "higgsfield" ? "higgsfield" : "openart";
+  load().mediaProvider = id === "higgsfield" || id === "higgsfield-cli" || id === "openart-cli" ? id : "openart";
+  save();
+}
+
+/** Custom path to the `higgsfield` CLI binary, or null to resolve from PATH. */
+export function getHiggsfieldCliBinary(): string | null {
+  const v = load().higgsfieldCliBinary;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+export function setHiggsfieldCliBinary(p: string | null): void {
+  load().higgsfieldCliBinary = typeof p === "string" && p.trim() ? p.trim() : null;
+  save();
+}
+
+/** Custom path to the `openart` CLI binary, or null to resolve from PATH. */
+export function getOpenArtCliBinary(): string | null {
+  const v = load().openartCliBinary;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+export function setOpenArtCliBinary(p: string | null): void {
+  load().openartCliBinary = typeof p === "string" && p.trim() ? p.trim() : null;
   save();
 }
 

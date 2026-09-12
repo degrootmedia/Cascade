@@ -23,7 +23,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Harness skills | `app/src/main/skills.ts` | The chat-side skill system: markdown instruction files the agent pulls in on demand via `read_skill`. Flat files or namespaced directories (`skills/spec/research.md` → `spec:research`); optional frontmatter (`kind: sequential|advisory|utility`, `triggers`, `namespace`) parsed by `parseFrontmatter`; advertised grouped-by-kind in the system prompt (`prompts.skillsPrompt`) so the model knows how to treat each. Bundled harness skills in `app/skills/` (`spec:` RPI, `oracle:` advisory, `code:` utilities) are seeded into `userData/skills/` on startup (`seedSkills`). |
 | Plan mode | `core/src/planmode.ts` + `app/src/shared/commands.ts` | The Research→Plan→Implement gate: `AgentConfig.planMode` turns on a system-prompt directive and `planGate` blocks `write_file`/`edit_file`/`run_command` in the loop until the plan is approved. Toggled per chat (persisted on the session), surfaced via a composer chip and `/plan-mode on|off`; `/research /plan /implement /finish /architect /challenge /review /commit` expand to skill instructions (`expandCommand`). |
 | OpenArtClient | `app/src/main/openart.ts` | The whole OpenArt integration: model discovery, live form-schema introspection, per-model option assignment, async image/video generation + polling, project resolution, video-options cache. Takes the `McpManager` as its constructor seam — that interface IS the test surface. Implements `MediaProvider` (foreign `higgsfield:…` model ids resolve to the house default). |
-| MediaProvider | `app/src/main/providers/` | The abstraction over MCP image/video vendors: the `MediaProvider` interface (`types.ts`), the global registry (`registry.ts`), vendor-neutral `resolvePromptRefs` + `citePrompt` (`refs.ts` — both vendors bind references positionally from the submitted array, probed live on each), and the `HiggsfieldProvider` adapter (`higgsfield.ts` — catalog-driven, `sync:true` polling, S3-upload reference path, no project concept). index.ts resolves the active vendor per call from the global settings selection. Model ids are namespaced (`higgsfield:<id>`) where they leave the provider. |
+| MediaProvider | `app/src/main/providers/` | The abstraction over MCP image/video vendors: the `MediaProvider` interface (`types.ts`), the global registry (`registry.ts`), vendor-neutral `resolvePromptRefs` + `citePrompt` (`refs.ts` — both vendors bind references positionally from the submitted array, probed live on each), and the `HiggsfieldProvider` adapter (`higgsfield.ts` — catalog-driven, `sync:true` polling, S3-upload reference path, no project concept; ordinary non-tween submissions ride the reference path — the source frame in the image-reference role (never `start_image`, so no dropped ref can be mistaken for a keyframe), dropped video refs in the model's video-media role downscaled to 720p first via `video-ref`; when the backend 422s that refs don't belong in the inferred t2v mode, ordinary submissions retry ONCE with the source frame rebound to `start_image` (reusing the uploaded media ids — no re-upload); only in-betweener `frameRefs` bind start/end slots; a preset-matcher notice (no job line — job ids parse ONLY from `- <uuid> "…"` lines) is declined once via `declined_preset_id` so the literal prompt generates). index.ts resolves the active vendor per call from the global settings selection. Model ids are namespaced (`higgsfield:<id>`) where they leave the provider. An explicit model pick that isn't in the active vendor's catalog **throws instead of substituting** (both adapters — a stale cross-vendor pick from a provider switch once billed a job to the wrong model while the dropdown showed another); only `auto`/empty fall back to the house default. |
 | MCP manager | `app/src/main/mcp.ts` | Connecting/owning MCP servers; namespaced tools; the `callRaw*` host-side call surface the media providers use. |
 | ModelgenClient | `app/src/main/modelgen.ts` | The 3D AI Studio REST integration: Tencent Hunyuan Pro text/image-to-3D generation (submit → poll → download), GLB bytes + credit balance. Takes the API key getter and an `HttpFetch` as constructor seams — that injection IS the test surface (`app/test/modelgen.test.ts`). |
 | Pipeline | `app/src/main/pipeline.ts` | Prompt derivation + deterministic transforms (script breakdown, board prompts, animatic planning). Receives `ImageGenFn` from the active `MediaProvider` — never imports a vendor. |
@@ -106,13 +106,24 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   back on change via the renderer's `production/media-defaults.ts` cache —
   so each dropdown starts where the user last left it, globally.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
-  whose persisted state lives on `ProductionShot.graph*` fields.
+  whose persisted state lives on `ProductionShot.graph*` fields. **Edit-image
+  nodes** are a list (`graphEditNodes: GraphEditNode[]`), not a singleton: each
+  has its own prompt, generation history, and `source` pipe (the image node,
+  a reference, or a parent edit node), so any edit can daisy-chain into
+  another (cycle-checked in `NodeGraphModal`). The output names its feeding
+  edit via `graphOutputEditNodeId`; the video source via
+  `graphVideoSourceEditNodeId`. The classic Edit-frame popup appends a new edit
+  node to whatever chain currently feeds the output (`chainSourceForEdit` +
+  `recordBoardEdit` in `pipeline.ts`) and binds it as the output — the wiring
+  shows up in the graph automatically.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes
   into one continuous shot. A keyframe is a **source id** stored in
   `graphTweenRefIds` (`TweenBlock.startRefId`/`endRefId`): a reference id
   (characters/products/custom artwork) OR a generation-node sentinel —
-  `TWEEN_KEY_IMGGEN`/`TWEEN_KEY_EDITGEN` (`shared/ipc.ts`) — so the image
-  node's selected frame and the edit node's selected edit feed the sockets
+  `TWEEN_KEY_IMGGEN` / `editgen:<nodeId>` (`editNodeKeyframe`,
+  `parseEditNodeKeyframe` in `shared/ipc.ts`; the bare legacy `TWEEN_KEY_EDITGEN`
+  resolves to `edit0`) — so the image node's selected frame and each edit
+  node's selected edit feed the sockets
   alongside reference nodes. One **action block** = 1 start keyframe + 1 end
   keyframe + 1 action prompt (`TweenBlock` in `shared/ipc.ts`); each block
   generates its own start→end clip via `generateTweenBlock`, keeps per-block

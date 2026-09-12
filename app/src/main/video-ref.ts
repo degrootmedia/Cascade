@@ -1,11 +1,11 @@
 /**
  * Video-reference resizing.
  *
- * Some models cap the resolution of input video *elements* (e.g. Seedance
+ * Every dropped video reference is downscaled to at most 720p before upload,
+ * regardless of model — some models cap input video *elements* (e.g. Seedance
  * element2video rejects anything above 720p) even when the generated output can
- * be 4K. Before uploading a dropped video reference, probe its dimensions and
- * downscale it to the model's allowed height so OpenArt doesn't reject the
- * submission. Pure node — the ffmpeg seam is imported, and any failure (no
+ * be 4K, and a single ceiling keeps both media vendors on the same path.
+ * Pure node — the ffmpeg seam is imported, and any failure (no
  * ffmpeg, unreadable clip) falls through to the original data URL.
  */
 import * as fs from "node:fs";
@@ -22,6 +22,10 @@ const EXT_FOR_MIME: Record<string, string> = {
   "video/x-matroska": "mkv",
   "video/x-msvideo": "avi",
 };
+
+/** Input-video-reference ceiling: every video ref is capped to this height
+ *  before upload, regardless of model. */
+export const VIDEO_REF_MAX_HEIGHT = 720;
 
 /**
  * Downscale a `data:video/...` URL so its height is at most `maxHeight`,
@@ -62,4 +66,13 @@ export async function resizeVideoRefToHeight(dataUrl: string, maxHeight: number)
       try { fs.unlinkSync(f); } catch { /* already gone */ }
     }
   }
+}
+
+/**
+ * Downscale a `data:video/...` URL to the universal 720p ceiling.
+ * Thin wrapper over `resizeVideoRefToHeight` so call sites can't drift
+ * per-model — pass only the data URL.
+ */
+export function resizeVideoRef(dataUrl: string): Promise<string> {
+  return resizeVideoRefToHeight(dataUrl, VIDEO_REF_MAX_HEIGHT);
 }

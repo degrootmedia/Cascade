@@ -26,8 +26,8 @@ import {
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
-import { isTweenGenKeyframe } from "../shared/ipc.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, TweenBlock } from "../shared/ipc.js";
+import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, TweenBlock } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1165,17 +1165,93 @@ export function recordBoardArtwork(shot: ProductionShot, rel: string): void {
   shot.artwork = rel;
 }
 
+/** The edit node with `id`, else the first edit node (undefined when none). */
+export function getEditNode(shot: ProductionShot, id?: string): GraphEditNode | undefined {
+  const nodes = shot.graphEditNodes ?? [];
+  return id ? nodes.find((n) => n.id === id) : nodes[0];
+}
+
+/** The edit node holding `rel` in its history, with the stored index. */
+export function findEditGen(shot: ProductionShot, rel: string): { node: GraphEditNode; index: number } | null {
+  for (const node of shot.graphEditNodes ?? []) {
+    const index = node.gens?.findIndex((g) => g.path === rel) ?? -1;
+    if (index >= 0) return { node, index };
+  }
+  return null;
+}
+
+/** The selected still of an edit node. */
+export function editNodeSelection(shot: ProductionShot, id?: string): GraphGenItem | undefined {
+  const node = getEditNode(shot, id);
+  return node?.gens?.[node.genIndex ?? 0];
+}
+
+/** The source frame an edit node edits, resolved to a workspace-relative path:
+ *  the parent edit node's selection or the image node's selection. Undefined
+ *  for a reference / shot-frame source (the caller resolves those separately). */
+export function editNodeSourcePath(shot: ProductionShot, node: GraphEditNode): string | undefined {
+  const src = node.source;
+  if (!src) return undefined;
+  if (src.kind === "imagegen") return shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+  if (src.kind === "editgen") return editNodeSelection(shot, src.nodeId)?.path;
+  return undefined;
+}
+
+/** Append a fresh edit node, returning it. `source` is the pipe feeding it. */
+export function newEditNode(shot: ProductionShot, prompt: string, source?: GraphEditNode["source"]): GraphEditNode {
+  const nodes = shot.graphEditNodes ??= [];
+  let i = 0;
+  while (nodes.some((n) => n.id === `edit${i}`)) i++;
+  const node: GraphEditNode = { id: `edit${i}`, prompt };
+  if (source) node.source = source;
+  nodes.push(node);
+  return node;
+}
+
+/** True when `ancestorId` is reachable from `nodeId` by following source pipes
+ *  (used to reject edit→edit cycles). */
+export function editNodeDependsOn(shot: ProductionShot, nodeId: string, ancestorId: string): boolean {
+  const seen = new Set<string>();
+  let cur = getEditNode(shot, nodeId);
+  while (cur && cur.source?.kind === "editgen" && !seen.has(cur.id)) {
+    if (cur.source.nodeId === ancestorId) return true;
+    seen.add(cur.id);
+    cur = getEditNode(shot, cur.source.nodeId);
+  }
+  return false;
+}
+
+/** The source pipe for a classic edit of the shot's current frame: chain from
+ *  the output edit node, else the image node's frame, else the output
+ *  reference. Undefined = the shot's current frame bytes (legacy still). */
+export function chainSourceForEdit(shot: ProductionShot): GraphEditNode["source"] | undefined {
+  if (shot.graphOutputSource === "editgen") {
+    const from = getEditNode(shot, shot.graphOutputEditNodeId);
+    if (from) return { kind: "editgen", nodeId: from.id };
+  }
+  if (shot.graphOutputSource === "imagegen") return { kind: "imagegen" };
+  if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) return { kind: "ref", refId: shot.graphOutputRefId };
+  const imageIndex = shot.artwork ? shot.graphImageGens?.findIndex((g) => g.path === shot.artwork) ?? -1 : -1;
+  if (imageIndex >= 0) {
+    shot.graphImageGenIndex = imageIndex;
+    return { kind: "imagegen" };
+  }
+  return undefined;
+}
+
 /** Select a still by identity and route its owning node to the board output. */
 export function selectBoardFrame(shot: ProductionShot, rel: string): void {
-  const editIndex = shot.graphEditGens?.findIndex((g) => g.path === rel) ?? -1;
+  const editHit = findEditGen(shot, rel);
   const imageIndex = shot.graphImageGens?.findIndex((g) => g.path === rel) ?? -1;
-  if (!rel || (editIndex < 0 && imageIndex < 0 && shot.artwork !== rel && !shot.artworkHistory?.includes(rel))) {
+  if (!rel || (!editHit && imageIndex < 0 && shot.artwork !== rel && !shot.artworkHistory?.includes(rel))) {
     throw new Error(`Cannot select board frame "${rel}": it is not in this shot's image/edit generations or artwork history.`);
   }
-  if (editIndex >= 0) {
-    shot.graphEditGenIndex = editIndex;
+  if (editHit) {
+    editHit.node.genIndex = editHit.index;
     shot.graphOutputSource = "editgen";
+    shot.graphOutputEditNodeId = editHit.node.id;
   } else {
+    shot.graphOutputEditNodeId = undefined;
     if (imageIndex >= 0) {
       shot.graphImageGenIndex = imageIndex;
     } else {
@@ -1278,6 +1354,9 @@ export function relocateBoardsForRenumber(
     if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
     if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
     if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+    for (const node of shot.graphEditNodes ?? []) {
+      if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+    }
   }
 
   // promptOverrides is keyed by displayed number — move entries with the shot
@@ -1335,6 +1414,7 @@ export function refreshBoardLinks(p: Production): number {
       }
       for (const g of shot.graphImageGens ?? []) g.path = fix(shot, g.path) ?? g.path;
       for (const g of shot.graphEditGens ?? []) g.path = fix(shot, g.path) ?? g.path;
+      for (const node of shot.graphEditNodes ?? []) for (const g of node.gens ?? []) g.path = fix(shot, g.path) ?? g.path;
     }
   }
   return repaired;
@@ -1358,11 +1438,13 @@ export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: s
   shot.graphVideoGenIndex = 0;
 }
 
-/** Store an AI-edited frame on the shot's edit-image node (newest first). */
-export function recordGraphEditGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+/** Store an AI-edited frame on the named edit node (newest first). */
+export function recordGraphEditGen(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string): void {
+  const node = getEditNode(shot, nodeId);
+  if (!node) return;
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
-  shot.graphEditGens = [item, ...(shot.graphEditGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
-  shot.graphEditGenIndex = 0;
+  node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  node.genIndex = 0;
 }
 
 /** The edit-image prompt framing shared by the classic edit dialog and the
@@ -1372,33 +1454,40 @@ export function buildEditGenPrompt(editText: string): string {
   return `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`;
 }
 
-/** Auto-wire the edit-image node's source pipe from the shot's current frame.
- *  The classic edit dialog has no manual wiring UI, so it calls this before
- *  generating: when the current frame is an image-node generation, point the
- *  image-node selection at it and wire image→edit; when the output is a
- *  reference, wire that reference into the edit node. Otherwise clear both
- *  pipes and fall back to the current frame bytes (legacy stills, chained
- *  edits). The node-graph path wires manually and never calls this. */
-export function wireEditNodeToCurrentFrame(shot: ProductionShot): void {
-  const imageIndex = shot.artwork && !shot.graphEditGens?.some((g) => g.path === shot.artwork)
-    ? shot.graphImageGens?.findIndex((g) => g.path === shot.artwork) ?? -1
-    : -1;
-  shot.graphEditImageSource = undefined;
-  shot.graphEditSourceRefId = undefined;
-  if (imageIndex >= 0) {
-    shot.graphImageGenIndex = imageIndex;
-    shot.graphEditImageSource = true;
-  } else if (shot.graphOutputSource === "ref") {
-    shot.graphEditSourceRefId = shot.graphOutputRefId;
-  }
+/** Auto-wire an edit node's source pipe from the shot's current frame. The
+ *  classic edit dialog has no manual wiring UI, so the node it is about to
+ *  generate for calls this: when the output is already an edit node, chain
+ *  from it; when the current frame is an image-node generation, point the
+ *  image-node selection at it and wire image→node; when the output is a
+ *  reference, wire that reference in. Otherwise the node falls back to the
+ *  current frame bytes (legacy stills). The node-graph path wires manually. */
+export function wireEditNodeToCurrentFrame(shot: ProductionShot, node?: GraphEditNode): void {
+  const target = node ?? newEditNode(shot, "");
+  target.source = chainSourceForEdit(shot);
 }
 
-/** Classic edits use the current board, not the edit node's previous source pipe. */
-export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string): void {
-  wireEditNodeToCurrentFrame(shot);
-  recordGraphEditGen(shot, rel, prompt, model);
+/** Classic edits append to the chain: a new edit node whose source is whatever
+ *  currently feeds the output (the previous edit node, the image node, or a
+ *  reference), then become the output feed. Pass a pre-created `node` (from
+ *  `newEditNode`, so the caller could resolve its source before generating);
+ *  otherwise one is created here. Returns the node's id. */
+export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string, node?: GraphEditNode): string {
+  const target = node ?? newEditNode(shot, prompt, chainSourceForEdit(shot));
+  target.prompt = prompt;
+  // The model chosen in the classic dialog becomes this node's own pick —
+  // per-node model persistence (see GraphEditNode.model).
+  target.model = model;
+  recordGraphEditGen(shot, target.id, rel, prompt, model);
   shot.graphEditPrompt = prompt;
-  selectBoardFrame(shot, rel);
+  shot.graphOutputSource = "editgen";
+  shot.graphOutputEditNodeId = target.id;
+  shot.graphOutputRefId = undefined;
+  shot.videoPath = undefined;
+  // An explicit node selection exists now; the classic migration must not
+  // sweep the new frame into the image node's history on the next load.
+  shot.graphMigrated = true;
+  recordBoardArtwork(shot, rel);
+  return target.id;
 }
 
 // ---- in-betweener ----------------------------------------------------------
@@ -1547,7 +1636,13 @@ export function buildTweenConcatList(absPaths: string[]): string {
 export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string): void {
   shot.videoPath = rel;
   if (!shot.artwork) {
-    const source = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path ?? sourceFallback;
+    // The still comes from the node that fed the video's source input — the
+    // edit-image node when `graphEditToVideo`, otherwise the image node — or
+    // the piped source path itself.
+    const sourceNode = shot.graphEditToVideo
+      ? editNodeSelection(shot, shot.graphVideoSourceEditNodeId)?.path
+      : shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+    const source = sourceNode ?? sourceFallback;
     if (source) shot.artwork = source;
   }
 }
@@ -1605,7 +1700,7 @@ export function rebaseGenIndex(
  *  on `shot.artwork`. Returns true when anything changed. */
 export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
   const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
-  const editSel = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0];
+  const editSel = editNodeSelection(shot, shot.graphOutputEditNodeId);
   const vidSel = shot.graphVideoGens?.[shot.graphVideoGenIndex ?? 0];
   switch (shot.graphOutputSource) {
     case "imagegen":
@@ -1630,7 +1725,10 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
       if (vidSel?.path) {
         let changed = false;
         if (shot.videoPath !== vidSel.path) { shot.videoPath = vidSel.path; changed = true; }
-        if (!shot.artwork && imgSel?.path && shot.artwork !== imgSel.path) { shot.artwork = imgSel.path; changed = true; }
+        // The still mirror comes from whichever image node feeds the video
+        // source (edit node when graphEditToVideo, else the image node).
+        const feed = shot.graphEditToVideo ? editNodeSelection(shot, shot.graphVideoSourceEditNodeId) : imgSel;
+        if (!shot.artwork && feed?.path && shot.artwork !== feed.path) { shot.artwork = feed.path; changed = true; }
         return changed;
       }
       if (shot.videoPath !== undefined) { shot.videoPath = undefined; return true; }
@@ -1680,6 +1778,42 @@ export function migrateGraphGenerations(shot: ProductionShot): boolean {
   shot.artworkHistory = undefined;
   shot.videoPath = undefined;
   shot.graphMigrated = true;
+  return true;
+}
+
+/** One-time migration: fold the legacy single edit-image node's flat fields
+ *  into `graphEditNodes` (as `edit0`) and rewrite the bare `"editgen"` tween
+ *  sentinel to `editgen:edit0`. `graphEditPrompt` is kept as the classic
+ *  popup's draft. Guarded by the presence of `graphEditNodes`. */
+export function migrateEditNodes(shot: ProductionShot): boolean {
+  if (shot.graphEditNodes) return false;
+  const tweenHasLegacyEdit = (shot.graphTweenRefIds ?? []).some((id) => id === TWEEN_KEY_EDITGEN)
+    || (shot.graphTweenBlocks ?? []).some((b) => b.startRefId === TWEEN_KEY_EDITGEN || b.endRefId === TWEEN_KEY_EDITGEN);
+  const hasLegacy = !!(shot.graphEditGens?.length || shot.graphEditImageSource || shot.graphEditSourceRefId
+    || shot.graphEditToVideo || (shot.graphEditPrompt ?? "").trim() || shot.graphOutputSource === "editgen" || tweenHasLegacyEdit);
+  if (!hasLegacy) return false;
+  const node: GraphEditNode = { id: "edit0", prompt: shot.graphEditPrompt ?? "" };
+  if (shot.graphEditGens?.length) node.gens = shot.graphEditGens;
+  if (shot.graphEditGenIndex !== undefined) node.genIndex = shot.graphEditGenIndex;
+  if (shot.graphEditImageSource) node.source = { kind: "imagegen" };
+  else if (shot.graphEditSourceRefId) node.source = { kind: "ref", refId: shot.graphEditSourceRefId };
+  if (shot.graphEditStyleConnected) node.styleConnected = true;
+  shot.graphEditNodes = [node];
+  if (shot.graphOutputSource === "editgen") shot.graphOutputEditNodeId = "edit0";
+  if (shot.graphEditToVideo) shot.graphVideoSourceEditNodeId = "edit0";
+  if (shot.graphTweenRefIds?.length) {
+    shot.graphTweenRefIds = shot.graphTweenRefIds.map((id) => (id === TWEEN_KEY_EDITGEN ? editNodeKeyframe("edit0") : id));
+  }
+  for (const b of shot.graphTweenBlocks ?? []) {
+    if (b.startRefId === TWEEN_KEY_EDITGEN) b.startRefId = editNodeKeyframe("edit0");
+    if (b.endRefId === TWEEN_KEY_EDITGEN) b.endRefId = editNodeKeyframe("edit0");
+  }
+  delete shot.graphEditGens;
+  delete shot.graphEditGenIndex;
+  delete shot.graphEditImageSource;
+  delete shot.graphEditSourceRefId;
+  delete shot.graphEditToVideo;
+  delete shot.graphEditStyleConnected;
   return true;
 }
 

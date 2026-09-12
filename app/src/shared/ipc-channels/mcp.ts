@@ -9,4 +9,11 @@ export const mcpChannels = {
   "media:listProviders": { method: "listMediaProviders", kind: "invoke" },
   "media:getProvider": { method: "getMediaProvider", kind: "invoke" },
   "media:setProvider": { method: "setMediaProvider", kind: "invoke" },
+  "media:getCredits": { method: "getMediaCredits", kind: "invoke" },
+  "media:getHiggsCliBinary": { method: "getHiggsfieldCliBinary", kind: "invoke" },
+  "media:setHiggsCliBinary": { method: "setHiggsfieldCliBinary", kind: "invoke" },
+  "media:getHiggsCliStatus": { method: "getHiggsfieldCliStatus", kind: "invoke" },
+  "media:getOpenArtCliBinary": { method: "getOpenArtCliBinary", kind: "invoke" },
+  "media:setOpenArtCliBinary": { method: "setOpenArtCliBinary", kind: "invoke" },
+  "media:getOpenArtCliStatus": { method: "getOpenArtCliStatus", kind: "invoke" },
 } as const;

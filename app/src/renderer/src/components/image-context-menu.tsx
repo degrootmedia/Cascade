@@ -6,6 +6,9 @@
  *  target when the displayed src is a thumbnail that main can't resolve. */
 export function useImageContextMenu(opts: {
   src?: string;
+  /** Which menu variant to build (video drops "Copy image" / edit). Defaults
+   *  to an image menu. */
+  media?: "image" | "video";
   productionId?: string;
   relPath?: string;
   dataUrl?: string;
@@ -19,6 +22,7 @@ export function useImageContextMenu(opts: {
         src: opts.src!,
         x: e.clientX,
         y: e.clientY,
+        media: opts.media,
         productionId: opts.productionId,
         relPath: opts.relPath,
         dataUrl: opts.dataUrl,

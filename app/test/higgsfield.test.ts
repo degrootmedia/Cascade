@@ -117,16 +117,53 @@ const PLAIN_VID_MODEL = {
   medias: [{ name: "medias", type: "image", roles: ["start_image", "image_references"] }],
 };
 
+const OMNI_VID_MODEL = {
+  ...VID_MODEL,
+  id: "omni_vid",
+  name: "Omni Vid",
+  medias: [
+    { name: "medias", type: "video", roles: ["video"] },
+    { name: "medias", type: "image", roles: ["image_references"] },
+  ],
+};
+
+/** Live Seedance 2.5 shape (2026-09-11): image roles plus a dedicated video
+ *  references role — the submission that 422'd with "mode 't2v' does not
+ *  accept reference media" rode [image_references, video_references]. */
+const SEEDANCE25_MODEL = {
+  ...VID_MODEL,
+  medias: [
+    { name: "medias", type: "image", roles: ["start_image", "end_image", "image_references"] },
+    { name: "medias", type: "video", roles: ["video_references"] },
+  ],
+};
+
+/** models_explore handler serving the live Seedance 2.5 shape. */
+function exploreSeedance25() {
+  return (args: Record<string, unknown>) => {
+    if (args.action === "list") {
+      const items = args.type === "video" ? [SEEDANCE25_MODEL] : [IMG_MODEL];
+      return JSON.stringify({ items });
+    }
+    if (args.action === "get") {
+      const all = [IMG_MODEL, SEEDANCE25_MODEL];
+      const found = all.find((m) => m.id === args.model_id);
+      return found ? JSON.stringify(found) : "no such model";
+    }
+    throw new Error(`unexpected explore action ${String(args.action)}`);
+  };
+}
+
 /** models_explore handler serving list (per type) + get (per id) with trailing prose. */
 function exploreHandler(extraImageModels: HiggsModel[] = []) {
   const imageModels = [IMG_MODEL, ...extraImageModels];
   return (args: Record<string, unknown>) => {
     if (args.action === "list") {
-      const items = args.type === "video" ? [VID_MODEL, PLAIN_VID_MODEL] : imageModels;
+      const items = args.type === "video" ? [VID_MODEL, PLAIN_VID_MODEL, OMNI_VID_MODEL] : imageModels;
       return JSON.stringify({ items }) + "\nFree-trial unlim: not spendable right now.";
     }
     if (args.action === "get") {
-      const all = [...imageModels, VID_MODEL, PLAIN_VID_MODEL];
+      const all = [...imageModels, VID_MODEL, PLAIN_VID_MODEL, OMNI_VID_MODEL];
       const found = all.find((m) => m.id === args.model_id);
       return found ? JSON.stringify(found) + "\nUnlim configs: none sent." : "no such model";
     }
@@ -293,15 +330,50 @@ describe("HiggsfieldProvider.imageGenFn", () => {
     });
   });
 
-  it("falls back to the house default for foreign or unknown model ids", async () => {
+  it("falls back to the house default for auto, and fails loudly on a stale pick", async () => {
     stubFetch(Buffer.from("x"));
-    for (const model of ["higgsfield:unknown_xyz", "some-openart-id", "auto"]) {
+    // "auto" still resolves to the house default.
+    {
       const { mcp, seen } = captureImageMcp();
-      const gen = new HiggsfieldProvider(mcp).imageGenFn(makeProduction({ openArt: { model, resolution: "2k" } }))!;
+      const gen = new HiggsfieldProvider(mcp).imageGenFn(makeProduction({ openArt: { model: "auto", resolution: "2k" } }))!;
       await gen("prompt", []);
       expect((seen.params as Record<string, unknown>).model).toBe("cinematic_studio_2_5");
       expect((seen.params as Record<string, unknown>).resolution).toBe("2k");
     }
+    // An explicit pick that isn't in the vendor's catalog must never silently
+    // bill another model (live 2026-09-11: a stale OpenArt id submitted to
+    // seedance_2_5 and 500'd while the dropdown showed something else).
+    for (const model of ["higgsfield:unknown_xyz", "some-openart-id"]) {
+      const { mcp } = captureImageMcp();
+      const gen = new HiggsfieldProvider(mcp).imageGenFn(makeProduction({ openArt: { model, resolution: "2k" } }))!;
+      await expect(gen("prompt", [])).rejects.toThrow(/isn't a Higgsfield image model/);
+    }
+  });
+
+  it("declines a preset-matcher notice and generates the image literally", async () => {
+    stubFetch(Buffer.from("fake-png-bytes"));
+    const PRESET = "24bae836-2c4a-48e0-89b6-49fcc0b21612";
+    const notice =
+      `Notice: This prompt looks like the Higgsfield preset "IN THE DARK". Ask the user whether to use that preset or generate literally.\n\n` +
+      `Preset id: ${PRESET}\n` +
+      `To generate literally, retry with declined_preset_id: "${PRESET}".`;
+    const submits: Record<string, unknown>[] = [];
+    const notices: string[] = [];
+    const base = fakeMcp({
+      generate_image: (a: Record<string, unknown>) => {
+        submits.push(a.params as Record<string, unknown>);
+        return submits.length === 1 ? notice : `Submitted 1 job.\n- ${JOB} "a probe"`;
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}\n[resource_link]`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const gen = new HiggsfieldProvider(base).imageGenFn(makeProduction(), undefined, undefined, (m) => { notices.push(m); })!;
+    await expect(gen("moody airship", [])).resolves.toEqual(Buffer.from("fake-png-bytes"));
+    expect(submits).toHaveLength(2);
+    expect(submits[1]).toMatchObject({ declined_preset_id: PRESET });
+    expect(notices.some((m) => /IN THE DARK/.test(m))).toBe(true);
   });
 
   it("anchors multi-ref tokens to their submitted positions and renumbers around failures", async () => {
@@ -512,6 +584,435 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
       provider.generateVideoClip(makeProduction(), makeShot(), { model: "auto", resolution: "720p", durationSec: 5, prompt: "x" }, () => {})
     ).rejects.toThrow(/No source frame/);
   });
+
+  it("uploads a @[tag]-cited video reference from its media file", async () => {
+    // Live 2026-09-11: video refs cited in the video prompt never uploaded —
+    // resolvePromptRefs ran without includeVideo, so a mediaPath-only
+    // reference had no artwork candidate and the tag never resolved.
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const seen: { params?: Record<string, unknown> } = {};
+    const base = fakeMcp({
+      generate_video: () => `Submitted 1 job.\n- ${JOB} "clip"`,
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const orig = base.callRaw.bind(base);
+    (base as { callRaw: unknown }).callRaw = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "generate_video") seen.params = a.params as Record<string, unknown>;
+      return orig(s, t, a);
+    };
+    const prod = makeProduction({
+      references: [{ id: "r1", name: "Clip", media: "video", mediaPath: "references/clip.mp4" }],
+    });
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.mkdirSync(path.join(prod.meta.folder, "references"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    fs.writeFileSync(path.join(prod.meta.folder, "references", "clip.mp4"), Buffer.from("fake-mp4-bytes"));
+    await new HiggsfieldProvider(base).generateVideoClip(
+      prod,
+      makeShot(),
+      { model: "higgsfield:omni_vid", resolution: "1080p", durationSec: 5, prompt: "animate @[Clip]" },
+      () => {},
+      "videos/src.jpg"
+    );
+    expect(seen.params?.medias).toEqual([
+      { value: UPLOAD_ID, role: "image_references" },
+      { value: UPLOAD_ID, role: "video" },
+    ]);
+    expect(seen.params?.prompt).toContain("Clip (reference image 2)");
+  });
+
+  it("names the reason when a reference upload fails", async () => {
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const emits: string[] = [];
+    const base = fakeMcp({
+      generate_video: () => `Submitted 1 job.\n- ${JOB} "clip"`,
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => { throw new Error("boom"); },
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    const { rel } = await new HiggsfieldProvider(base).generateVideoClip(
+      prod,
+      makeShot(),
+      { model: "higgsfield:seedance_2_5", resolution: "720p", durationSec: 5, prompt: "drift" },
+      (m) => { emits.push(m); },
+      "videos/src.jpg"
+    );
+    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(emits.some((m) => /couldn't be uploaded \(boom\)/.test(m))).toBe(true);
+  });
+
+  it("reports a moderation-blocked job readably instead of 'no video'", async () => {
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    let submitted = false;
+    const base = fakeMcp({
+      generate_video: () => { submitted = true; return `Submitted 1 job.\n- ${JOB} "clip"`; },
+      job_status: () => `Job ${JOB} — nsfw`,
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    await expect(
+      new HiggsfieldProvider(base).generateVideoClip(
+        prod,
+        makeShot(),
+        { model: "higgsfield:seedance_2_5", resolution: "720p", durationSec: 5, prompt: "drift" },
+        () => {},
+        "videos/src.jpg"
+      )
+    ).rejects.toThrow(/generation nsfw/);
+    expect(submitted).toBe(true);
+  });
+
+  it("declines a preset-matcher notice and generates the prompt literally", async () => {
+    // Live 2026-09-11: the airship prompt matched the "IN THE DARK" preset, so
+    // generate_video returned a notice (no job). The loose UUID match took the
+    // preset id for a job id and job_status 500'd ("Something went wrong").
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const PRESET = "24bae836-2c4a-48e0-89b6-49fcc0b21612";
+    const notice =
+      `Notice: This prompt looks like the Higgsfield preset "IN THE DARK". Ask the user whether to use that preset or generate literally.\n\n` +
+      `Preset id: ${PRESET}\n` +
+      `To use the preset, retry with model: "higgsfield_preset" and preset_id: "${PRESET}".\n` +
+      `To generate literally, retry with declined_preset_id: "${PRESET}".`;
+    const submits: Record<string, unknown>[] = [];
+    const emits: string[] = [];
+    const base = fakeMcp({
+      generate_video: (a: Record<string, unknown>) => {
+        submits.push(a.params as Record<string, unknown>);
+        return submits.length === 1 ? notice : `Submitted 1 job.\n- ${JOB} "clip"`;
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const onGeneration = vi.fn();
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    const { rel } = await new HiggsfieldProvider(base, { onGeneration }).generateVideoClip(
+      prod,
+      makeShot(),
+      { model: "higgsfield:seedance_2_5", resolution: "1080p", durationSec: 5, prompt: "airship holds still" },
+      (m) => { emits.push(m); },
+      "videos/src.jpg"
+    );
+    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    // First submit carried no bypass; the retry declined the preset.
+    expect(submits).toHaveLength(2);
+    expect(submits[0]).not.toHaveProperty("declined_preset_id");
+    expect(submits[1]).toMatchObject({ model: "seedance_2_5", declined_preset_id: PRESET });
+    expect(emits.some((m) => /IN THE DARK/.test(m))).toBe(true);
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails loudly on a stale video pick instead of billing another model", async () => {
+    // Live 2026-09-11: a stale OpenArt id ("byte-plus-seedance-2_0") submitted
+    // while Higgsfield was active silently fell back to seedance_2_5.
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    let submitted = false;
+    const base = fakeMcp({
+      generate_video: () => { submitted = true; return `Submitted 1 job.\n- ${JOB} "clip"`; },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    await expect(
+      new HiggsfieldProvider(base).generateVideoClip(
+        makeProduction(),
+        makeShot(),
+        { model: "byte-plus-seedance-2_0", resolution: "1080p", durationSec: 5, prompt: "drift" },
+        () => {},
+        undefined,
+        [],
+        { start: { name: "A", dataUrl: PIXEL } }
+      )
+    ).rejects.toThrow(/isn't a Higgsfield video model/);
+    expect(submitted).toBe(false);
+  });
+
+  it("submits the node-graph video node's refs as references, not keyframes", async () => {
+    // Live 2026-09-11: the video node's source frame rode the start_image slot
+    // and got rejected by Seedance 2.0. Ordinary (non-tween) submissions ride
+    // the reference path: the frame in the image-reference role, dropped video
+    // clips in the model's video element role.
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const seen: { params?: Record<string, unknown> } = {};
+    const base = fakeMcp({
+      generate_video: () => `Submitted 1 job.\n- ${JOB} "clip"`,
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const orig = base.callRaw.bind(base);
+    (base as { callRaw: unknown }).callRaw = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "generate_video") seen.params = a.params as Record<string, unknown>;
+      return orig(s, t, a);
+    };
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    const videoRefDataUrl = `data:video/mp4;base64,${Buffer.from("fake-video-bytes").toString("base64")}`;
+    const { rel } = await new HiggsfieldProvider(base).generateVideoClip(
+      prod,
+      makeShot(),
+      { model: "higgsfield:omni_vid", resolution: "1080p", durationSec: 5, prompt: "drift" },
+      () => {},
+      "videos/src.jpg",
+      [
+        { name: "clip ref", dataUrl: videoRefDataUrl },
+        { name: "still ref", dataUrl: PIXEL },
+      ]
+    );
+    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(seen.params?.medias).toEqual([
+      { value: UPLOAD_ID, role: "image_references" }, // source frame — a reference, never a start keyframe
+      { value: UPLOAD_ID, role: "video" }, // video ref → the model's video element role
+      { value: UPLOAD_ID, role: "image_references" }, // extra image ref → the reference role
+    ]);
+  });
+
+  it("retries once with the source frame as start_image when the backend rejects t2v+references", async () => {
+    // Live 2026-09-11: Seedance 2.5 inferred mode 't2v' for an
+    // [image_references, video_references] submission and 422'd ("mode 't2v'
+    // does not accept reference media"). The adapter retries once with the
+    // source frame rebound to start_image, reusing the uploaded media ids.
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const submits: Record<string, unknown>[] = [];
+    const emits: string[] = [];
+    const base = fakeMcp({
+      generate_video: (a: Record<string, unknown>) => {
+        // Snapshot: the adapter mutates the same params object on retry.
+        submits.push(JSON.parse(JSON.stringify(a.params)) as Record<string, unknown>);
+        if (submits.length === 1) {
+          throw new Error(
+            `MCP error: Error starting generation: seedance_2_5 backend request failed (422): ` +
+            `params failed validation [{"type":"value_error","loc":[],"msg":"Value error, mode 't2v' does not accept reference media","input":{}}]`
+          );
+        }
+        return `Submitted 1 job.\n- ${JOB} "clip"`;
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreSeedance25(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    const videoRefDataUrl = `data:video/mp4;base64,${Buffer.from("fake-video-bytes").toString("base64")}`;
+    const onGeneration = vi.fn();
+    const { rel } = await new HiggsfieldProvider(base, { onGeneration }).generateVideoClip(
+      prod,
+      makeShot(),
+      { model: "higgsfield:seedance_2_5", resolution: "1080p", durationSec: 5, prompt: "follow the camera move" },
+      (m) => { emits.push(m); },
+      "videos/src.jpg",
+      [{ name: "Playblast", dataUrl: videoRefDataUrl }]
+    );
+    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(submits).toHaveLength(2);
+    // First attempt rode the reference path (the shape the backend 422'd).
+    expect(submits[0].medias).toEqual([
+      { value: UPLOAD_ID, role: "image_references" },
+      { value: UPLOAD_ID, role: "video_references" },
+    ]);
+    // Retry keeps the prompt + uploaded ids, reanchoring the source frame.
+    expect(submits[1].medias).toEqual([
+      { value: UPLOAD_ID, role: "start_image" },
+      { value: UPLOAD_ID, role: "video_references" },
+    ]);
+    expect(submits[1].prompt).toBe(submits[0].prompt);
+    expect(emits.some((m) => /rejected references in text-to-video mode — retrying/.test(m))).toBe(true);
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the 422 as-is when the model declares no start_image to reanchor to", async () => {
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    let submitted = 0;
+    const base = fakeMcp({
+      generate_video: () => {
+        submitted++;
+        throw new Error(`backend request failed (422): mode 't2v' does not accept reference media`);
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    // omni_vid declares no start_image — there is nothing to reanchor to.
+    await expect(
+      new HiggsfieldProvider(base).generateVideoClip(
+        prod,
+        makeShot(),
+        { model: "higgsfield:omni_vid", resolution: "1080p", durationSec: 5, prompt: "drift" },
+        () => {},
+        "videos/src.jpg"
+      )
+    ).rejects.toThrow(/does not accept reference media — submitted:/);
+    expect(submitted).toBe(1);
+  });
+
+  it("does not reanchor tween submissions (keyframes already bind start/end slots)", async () => {
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    let submitted = 0;
+    const base = fakeMcp({
+      generate_video: () => {
+        submitted++;
+        throw new Error(`backend request failed (422): mode 't2v' does not accept reference media`);
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreSeedance25(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    await expect(
+      new HiggsfieldProvider(base).generateVideoClip(
+        makeProduction(),
+        makeShot(),
+        { model: "higgsfield:seedance_2_5", resolution: "1080p", durationSec: 5, prompt: "drift" },
+        () => {},
+        undefined,
+        [],
+        { start: { name: "A", dataUrl: PIXEL }, end: { name: "B", dataUrl: PIXEL } }
+      )
+    ).rejects.toThrow(/does not accept reference media — submitted:/);
+    expect(submitted).toBe(1);
+  });
+
+  it("reports both attempts when the reanchored retry also fails", async () => {
+    stubFetch(Buffer.from("fake-mp4-bytes"));
+    const seen: string[] = [];
+    const base = fakeMcp({
+      generate_video: () => {
+        seen.push("submit");
+        throw new Error(`backend request failed (422): mode 't2v' does not accept reference media`);
+      },
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreSeedance25(),
+      media_upload: () => uploadReply(),
+      media_confirm: () => `Confirmed 1 upload.\n- ${UPLOAD_ID} (uploaded)`,
+    });
+    const prod = makeProduction();
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "videos", "src.jpg"), Buffer.from("fake-jpeg"));
+    const videoRefDataUrl = `data:video/mp4;base64,${Buffer.from("fake-video-bytes").toString("base64")}`;
+    await expect(
+      new HiggsfieldProvider(base).generateVideoClip(
+        prod,
+        makeShot(),
+        { model: "higgsfield:seedance_2_5", resolution: "1080p", durationSec: 5, prompt: "drift" },
+        () => {},
+        "videos/src.jpg",
+        [{ name: "Playblast", dataUrl: videoRefDataUrl }]
+      )
+    ).rejects.toThrow(/first attempt:/);
+    expect(seen).toHaveLength(2);
+  });
+});
+
+describe("HiggsfieldProvider image quality + submit notice", () => {
+  const JOB = "97c832be-9228-4ed6-95ee-36281116092b";
+  const RESULT_URL = "https://cdn.example/hf_job.png";
+
+  const QUALITY_IMG = {
+    ...IMG_MODEL,
+    id: "seedream_4_5",
+    name: "Seedream 4.5",
+    parameters: [
+      { name: "resolution", required: "optional", type: "string", description: "Output resolution", default: "1k", options: ["1k", "2k", "4k"] },
+      { name: "quality", required: "optional", type: "string", description: "Quality tier", default: "basic", options: ["basic", "high"] },
+    ],
+  };
+
+  function qualityMcp(seen: { params?: Record<string, unknown> }, notices: string[]) {
+    const base = fakeMcp({
+      generate_image: () => `Submitted 1 job.\n- ${JOB} "p"`,
+      job_status: () => ({ text: `Job ${JOB} — completed\n${RESULT_URL}`, uris: [RESULT_URL] }),
+      models_explore: exploreHandler([QUALITY_IMG]),
+    });
+    const orig = base.callRaw.bind(base);
+    (base as { callRaw: unknown }).callRaw = async (s: string, t: string, a: Record<string, unknown>) => {
+      if (t === "generate_image") seen.params = a.params as Record<string, unknown>;
+      return orig(s, t, a);
+    };
+    return base;
+  }
+
+  it("reads quality tiers + default from the catalog detail; null when undeclared", async () => {
+    const provider = new HiggsfieldProvider(fakeMcp({ models_explore: exploreHandler([QUALITY_IMG]) }));
+    expect(await provider.imageModelOptions("higgsfield:seedream_4_5")).toEqual({
+      qualities: ["basic", "high"],
+      defaultQuality: "basic",
+    });
+    // The house default declares no quality param — no dropdown, vendor default applies.
+    expect(await provider.imageModelOptions("higgsfield:cinematic_studio_2_5")).toBeNull();
+    expect(await provider.imageModelOptions("auto")).toBeNull();
+    expect(await provider.imageModelOptions("openart:whatever")).toBeNull();
+    expect(await provider.imageModelOptions("higgsfield:nope")).toBeNull();
+  });
+
+  it("submits params.quality only for a declared tier (case-insensitive), else omits it", async () => {
+    stubFetch(Buffer.from("x"));
+    // Declared tier, any case → the catalog's own spelling is submitted.
+    {
+      const seen: { params?: Record<string, unknown> } = {};
+      const gen = new HiggsfieldProvider(qualityMcp(seen, [])).imageGenFn(
+        makeProduction({ openArt: { model: "higgsfield:seedream_4_5", resolution: "2k", quality: "HIGH" } })
+      )!;
+      await gen("prompt", []);
+      expect(seen.params).toMatchObject({ model: "seedream_4_5", quality: "high" });
+    }
+    // Undeclared tier → omitted (vendor default applies), never guessed.
+    {
+      const seen: { params?: Record<string, unknown> } = {};
+      const gen = new HiggsfieldProvider(qualityMcp(seen, [])).imageGenFn(
+        makeProduction({ openArt: { model: "higgsfield:seedream_4_5", resolution: "2k", quality: "ultra" } })
+      )!;
+      await gen("prompt", []);
+      expect(seen.params).not.toHaveProperty("quality");
+    }
+    // Model without a quality param → omitted even when configured.
+    {
+      const seen: { params?: Record<string, unknown> } = {};
+      const gen = new HiggsfieldProvider(qualityMcp(seen, [])).imageGenFn(
+        makeProduction({ openArt: { model: "auto", resolution: "1k", quality: "high" } })
+      )!;
+      await gen("prompt", []);
+      expect((seen.params as Record<string, unknown>).model).toBe("cinematic_studio_2_5");
+      expect(seen.params).not.toHaveProperty("quality");
+    }
+  });
+
+  it("emits a submit notice naming the exact model + params", async () => {
+    stubFetch(Buffer.from("x"));
+    const seen: { params?: Record<string, unknown> } = {};
+    const notices: string[] = [];
+    const gen = new HiggsfieldProvider(qualityMcp(seen, notices)).imageGenFn(
+      makeProduction({ openArt: { model: "higgsfield:seedream_4_5", resolution: "2k", quality: "high" } }),
+      undefined,
+      undefined,
+      (m) => { notices.push(m); }
+    )!;
+    await gen("prompt", []);
+    expect(notices.some((m) => /Submitting image job via seedream_4_5/.test(m))).toBe(true);
+    expect(notices.some((m) => /quality="high"/.test(m))).toBe(true);
+  });
 });
 
 describe("HiggsfieldProvider options + recheck + project", () => {
@@ -571,16 +1072,22 @@ describe("providers/refs + registry", () => {
 
   it("resolveProviderId coerces unknown values to openart", () => {
     expect(resolveProviderId("higgsfield")).toBe("higgsfield");
+    expect(resolveProviderId("higgsfield-cli")).toBe("higgsfield-cli");
+    expect(resolveProviderId("openart-cli")).toBe("openart-cli");
     expect(resolveProviderId("openart")).toBe("openart");
     expect(resolveProviderId("bogus")).toBe("openart");
     expect(resolveProviderId(undefined)).toBe("openart");
     expect(PROVIDER_META.higgsfield.displayName).toBe("Higgsfield");
+    expect(PROVIDER_META["higgsfield-cli"].displayName).toBe("Higgsfield CLI");
+    expect(PROVIDER_META["openart-cli"].displayName).toBe("OpenArt CLI");
   });
 
-  it("createProviders builds both vendors over the same seam", () => {
+  it("createProviders builds all vendors over the same seam", () => {
     const mcp = fakeMcp({}, []);
     const providers = createProviders(mcp);
     expect(providers.openart.id).toBe("openart");
     expect(providers.higgsfield.id).toBe("higgsfield");
+    expect(providers["higgsfield-cli"].id).toBe("higgsfield-cli");
+    expect(providers["openart-cli"].id).toBe("openart-cli");
   });
 });

@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, isImageModel, isVideoModel, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
@@ -305,9 +305,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!mediaDefaultsReady || !prod || !imageModelIdsKey) return;
     const ids = imageModelIdsKey.split(",");
     if (prod.openArt?.model && ids.includes(prod.openArt.model)) return;
+    // Keep an explicit cross-vendor pick (e.g. `higgsfield:…` while the
+    // active vendor is OpenArt): it routes to its own vendor at submit time,
+    // so overwriting it here would silently lose the user's choice.
+    if (prod.openArt?.model && prod.openArt.model.startsWith("higgsfield:")) return;
     const model = rememberedModel("image", ids, prod.openArt?.model ?? "") || ids[0];
     if (model === prod.openArt?.model) return;
-    saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k" } });
+    saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prod?.meta.id, imageModelIdsKey, mediaDefaultsReady]);
 
@@ -1572,14 +1576,30 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  image input. Independent of the output feed — both can be wired at once. */
   function pipeImageToVideo(shotId: string) {
     if (!prod) return;
-    saveGraphShotFields(shotId, { graphImageToVideo: true });
+    saveGraphShotFields(shotId, { graphImageToVideo: true, graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined, graphVideoSourceRefId: undefined });
   }
 
-  /** Step 3 node graph: unpin the image node from the video node's image
+  /** Step 3 node graph: pipe an edit-image node's output into the video
+   *  node's image input (the frame the clip animates from). The video node's
+   *  source input takes one image at a time, so this displaces the image-node
+   *  pipe. Independent of the output feed. */
+  function pipeEditToVideo(shotId: string, nodeId: string) {
+    if (!prod) return;
+    saveGraphShotFields(shotId, { graphEditToVideo: true, graphVideoSourceEditNodeId: nodeId, graphImageToVideo: undefined, graphVideoSourceRefId: undefined });
+  }
+
+  /** Step 3 node graph: pipe a reference image into the video node's source
+   *  input, displacing either generation-node feed. */
+  function pipeRefToVideo(shotId: string, refId: string) {
+    if (!prod) return;
+    saveGraphShotFields(shotId, { graphVideoSourceRefId: refId, graphImageToVideo: undefined, graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined });
+  }
+
+  /** Step 3 node graph: unpin whatever image node feeds the video node's image
    *  input (the output feed, if any, is untouched). */
   function unpipeImageToVideo(shotId: string) {
     if (!prod) return;
-    saveGraphShotFields(shotId, { graphImageToVideo: undefined });
+    saveGraphShotFields(shotId, { graphImageToVideo: undefined, graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined, graphVideoSourceRefId: undefined });
   }
 
   /** Step 3 node graph: pipe the image node's output into the output — binds
@@ -1645,11 +1665,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    // The image node's output also feeds any in-betweener keyframe wired to it.
+    // The image node's output also feeds any in-betweener keyframe wired to it,
+    // and any edit node whose source is the image node.
     const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_IMGGEN);
+    const editNodes = (shot.graphEditNodes ?? []).map((n) => (n.source?.kind === "imagegen" ? { ...n, source: undefined } : n));
     saveGraphShotFields(shotId, {
       graphImageToVideo: undefined,
-      graphEditImageSource: undefined,
+      ...(editNodes.some((n, i) => n !== (shot.graphEditNodes ?? [])[i]) ? { graphEditNodes: editNodes } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
       ...(shot.graphOutputSource === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
     });
@@ -1776,35 +1798,40 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 3 node graph: pipe the edit-image node's output into the output —
+  /** Step 3 node graph: pipe one edit-image node's output into the output —
    *  binds it as the feed and applies its currently selected edit. The
    *  storyboard mirrors the output node: a leftover video path is cleared, and
    *  an empty edit node leaves the frame blank. */
-  function pipeEditToOutput(shotId: string) {
+  function pipeEditToOutput(shotId: string, nodeId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const path = shot.graphEditGens?.[shot.graphEditGenIndex ?? 0]?.path;
+    const node = (shot.graphEditNodes ?? []).find((n) => n.id === nodeId);
+    const path = node?.gens?.[node.genIndex ?? 0]?.path;
     saveGraphShotFields(shotId, {
       graphOutputSource: "editgen",
+      graphOutputEditNodeId: nodeId,
       graphOutputRefId: undefined,
       videoPath: undefined,
       artwork: path,
     });
   }
 
-  /** Step 3 node graph: unbind the edit-image node's output feed (the edited
+  /** Step 3 node graph: unbind one edit-image node's output feed (the edited
    *  frame lives in the node's history; the storyboard goes blank until a
    *  generation is piped back in). */
-  function unpipeEditGen(shotId: string) {
+  function unpipeEditGen(shotId: string, nodeId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
     // The edit node's output also feeds any in-betweener keyframe wired to it.
-    const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_EDITGEN);
+    const keys = new Set([`${TWEEN_KEY_EDITGEN_PREFIX}${nodeId}`, ...(nodeId === "edit0" ? [TWEEN_KEY_EDITGEN] : [])]);
+    const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => !keys.has(id));
     saveGraphShotFields(shotId, {
+      // The edit node's output may also feed the video node's source input.
+      ...(shot.graphEditToVideo && shot.graphVideoSourceEditNodeId === nodeId ? { graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
-      ...(shot.graphOutputSource === "editgen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
+      ...(shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === nodeId ? { graphOutputSource: undefined, graphOutputEditNodeId: undefined, artwork: undefined } : {}),
     });
   }
 
@@ -1846,7 +1873,20 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      const sourcePath = cur?.graphImageToVideo ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path : undefined;
+      // Source frame: the named edit node when it feeds the video source, then
+      // the image node, then a reference image (any may be absent — main then
+      // falls back to the shot's own frame).
+      const refSource = cur?.graphVideoSourceRefId
+        ? [...prod.characters, ...prod.products, ...(prod.references ?? [])].find((r) => r.id === cur.graphVideoSourceRefId)
+        : undefined;
+      const feedEdit = cur?.graphEditToVideo && cur.graphVideoSourceEditNodeId
+        ? (cur.graphEditNodes ?? []).find((n) => n.id === cur.graphVideoSourceEditNodeId)
+        : undefined;
+      const sourcePath = feedEdit
+        ? feedEdit.gens?.[feedEdit.genIndex ?? 0]?.path
+        : cur?.graphImageToVideo
+          ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path
+          : refSource?.imagePath;
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [] });
       setProd(next);
       bustOne(shotId);
@@ -1860,60 +1900,84 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 3 node graph: AI-edit an image for the edit-image node (prompt = the
-   *  edit-prompt node; source = piped frame/ref or the shot's frame). */
-  async function runEditGenNode(shotId: string, model: string, resolution: string) {
-    if (!prod || nodeEditBusyIds.has(shotId)) return;
-    setNodeEditBusyIds((prev) => new Set(prev).add(shotId));
+  /** Step 3 node graph: AI-edit an image for one edit node (prompt = that
+   *  node's edit-prompt node; source = its pipe or the shot's frame). */
+  async function runEditGenNode(shotId: string, nodeId: string, model: string, resolution: string) {
+    const key = `${shotId}:${nodeId}`;
+    if (!prod || nodeEditBusyIds.has(key)) return;
+    setNodeEditBusyIds((prev) => new Set(prev).add(key));
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { prompt: cur?.graphEditPrompt ?? "", model, resolution });
+      const node = (cur?.graphEditNodes ?? []).find((n) => n.id === nodeId);
+      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: node?.prompt ?? "", model, resolution });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
       setNodeEditBusyIds((prev) => {
         const n = new Set(prev);
-        n.delete(shotId);
+        n.delete(key);
         return n;
       });
     }
   }
 
+  /** Step 3 node graph: update one edit node's prompt text. */
+  function setEditNodePrompt(shotId: string, nodeId: string, text: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const shot = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    saveGraphShotFields(shotId, { graphEditNodes: (shot.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, prompt: text } : n)) });
+  }
+
   /** Step 3 node graph: select a generation node's stored output by index;
    *  the piped node's selection becomes the shot's primary output. */
-  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit", index: number) {
+  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit", index: number, nodeId?: string) {
     if (!prod) return;
     const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : shot.graphEditGens;
+    const editNode = kind === "edit" && nodeId ? (shot.graphEditNodes ?? []).find((n) => n.id === nodeId) : undefined;
+    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : editNode?.gens;
     if (!items || !items[index]) return;
-    const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : kind === "video" ? shot.graphOutputSource === "videogen" : shot.graphOutputSource === "editgen";
-    saveGraphShotFields(shotId, {
-      ...(kind === "image" ? { graphImageGenIndex: index } : kind === "video" ? { graphVideoGenIndex: index } : { graphEditGenIndex: index }),
-      ...(bound ? kind === "video" ? { videoPath: items[index].path } : { artwork: items[index].path, videoPath: undefined } : {}),
-    });
+    const bound = kind === "image" ? shot.graphOutputSource === "imagegen" : kind === "video" ? shot.graphOutputSource === "videogen" : (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === nodeId);
+    if (kind === "edit" && nodeId) {
+      saveGraphShotFields(shotId, {
+        graphEditNodes: (shot.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, genIndex: index } : n)),
+        ...(bound ? { artwork: items[index].path, videoPath: undefined } : {}),
+      });
+    } else {
+      saveGraphShotFields(shotId, {
+        ...(kind === "image" ? { graphImageGenIndex: index } : { graphVideoGenIndex: index }),
+        ...(bound ? kind === "video" ? { videoPath: items[index].path } : { artwork: items[index].path, videoPath: undefined } : {}),
+      });
+    }
   }
 
   /** Step 3 node graph: cycle a generation node's stored outputs; the piped
    *  node's selection becomes the shot's primary output. */
-  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit", dir: 1 | -1) {
+  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit", dir: 1 | -1, nodeId?: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : shot.graphEditGens;
+    const editNode = kind === "edit" && nodeId ? (shot.graphEditNodes ?? []).find((n) => n.id === nodeId) : undefined;
+    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : editNode?.gens;
     if (!items || items.length === 0) return;
-    const cur = (kind === "image" ? shot.graphImageGenIndex : kind === "video" ? shot.graphVideoGenIndex : shot.graphEditGenIndex) ?? 0;
-    selectGraphGen(shotId, kind, (cur + dir + items.length) % items.length);
+    const cur = (kind === "image" ? shot.graphImageGenIndex : kind === "video" ? shot.graphVideoGenIndex : editNode?.genIndex) ?? 0;
+    selectGraphGen(shotId, kind, (cur + dir + items.length) % items.length, nodeId);
   }
 
   /** Step 3: persist the node graph's canvas state for a shot (node positions
-   *  and/or viewport), merged into whatever was saved before. */
+   *  and/or viewport), merged into whatever was saved before. Reads
+   *  `prodRef.current` (not the render closure) — a graph mutation (adding an
+   *  edit node) saves its shot fields just before the layout save, and a stale
+   *  `prod` here would clobber the new node. */
   function saveGraphLayout(shotId: string, layout: GraphLayout) {
-    if (!prod) return;
+    const current = prodRef.current;
+    if (!current) return;
     saveField({
-      scenes: prod.scenes.map((sc) => ({
+      scenes: current.scenes.map((sc) => ({
         ...sc,
         shots: sc.shots.map((s) => s.id === shotId ? { ...s, graphLayout: { ...s.graphLayout, ...layout } } : s),
       })),
@@ -2081,6 +2145,58 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     });
   }
 
+  const imageModels = mediaModels.filter(isImageModel);
+  // Storyboard model dropdown: never display a model different from the one
+  // that will run. A stored pick missing from the active vendor's list stays
+  // selectable as an explicitly-marked stale entry (submitting with it fails
+  // loudly with a re-pick message instead of billing another model).
+  // (Defined before the !prod early return below — hooks can't live past it.)
+  const storedBoardModel = prod?.openArt?.model ?? "";
+  const boardModelStale =
+    storedBoardModel !== "" &&
+    storedBoardModel !== "auto" &&
+    !imageModels.some((m) => m.id === storedBoardModel);
+  const boardModelOptions: OpenArtModelChoice[] = boardModelStale
+    ? [...imageModels, {
+      id: storedBoardModel,
+      displayName: `${storedBoardModel} (unavailable — re-pick)`,
+      description: "This saved pick isn't offered by the active media provider. Pick another model — submitting with this value errors instead of billing a different model.",
+      imageInput: true,
+      videoInput: false,
+      cost: null,
+    }]
+    : imageModels;
+  const boardModelValue =
+    (imageModels.some((m) => m.id === storedBoardModel) || boardModelStale) && storedBoardModel
+      ? storedBoardModel
+      : (imageModels[0]?.id ?? "");
+  // Quality tiers for the model that will run (Higgsfield catalog probe).
+  // Null while loading; empty when the model declares none (dropdown hidden,
+  // vendor default applies).
+  const [boardQualities, setBoardQualities] = useState<string[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    setBoardQualities(null);
+    if (!boardModelValue) {
+      setBoardQualities([]);
+      return () => { live = false; };
+    }
+    window.cascade.imageModelOptions(boardModelValue)
+      .then((o) => { if (live) setBoardQualities(o?.qualities ?? []); })
+      .catch(() => { if (live) setBoardQualities([]); });
+    return () => { live = false; };
+  }, [boardModelValue]);
+  // Drop a saved quality the current model doesn't declare (model switch or
+  // catalog change) so submits never carry a stale tier.
+  useEffect(() => {
+    if (boardQualities === null || !prod) return;
+    const q = prod.openArt?.quality;
+    if (q && !boardQualities.includes(q)) {
+      saveField({ openArt: { model: prod.openArt?.model ?? boardModelValue, resolution: prod.openArt?.resolution ?? "1k" } });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardQualities]);
+
   if (!prod) {
     return (
       <div className="prod-welcome">
@@ -2135,7 +2251,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
-  const imageModels = mediaModels.filter(isImageModel);
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
@@ -2430,24 +2545,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             <p className="hint">
               One frame per shot — the master style and character keys from Step 2 are baked into every prompt.
               Frames are saved to <code>{prod.assets.boardsDir}/</code> in the production folder.
-              {mediaOk === true && ` In-app generation uses the connected ${mediaProviderName} MCP server.`}
+              {mediaOk === true && ` In-app generation uses the connected ${mediaProviderName}${mediaProviderId.endsWith("-cli") ? " CLI" : " MCP server"}.`}
               {mediaOk === false && (
-                <> {mediaProviderName} MCP isn't connected, so use <strong>Export prompts</strong> to generate frames externally.</>
+                <> {mediaProviderName}{mediaProviderId.endsWith("-cli") ? " CLI isn't set up" : " MCP isn't connected"}, so use <strong>Export prompts</strong> to generate frames externally.</>
               )}
             </p>
             <div className="prod-boards-controls">
               <label className="prod-openart-label">Model
                 <select
                   className="prod-openart-select"
-                   value={imageModels.some((m) => m.id === prod.openArt?.model) ? prod.openArt?.model : (imageModels[0]?.id ?? "")}
+                  value={boardModelValue}
                   onChange={(e) => {
-                    saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" } });
+                    saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
                     rememberMediaDefault("image", { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" });
                   }}
                   title="Model for in-app generation"
-                  disabled={imageModels.length === 0}
+                  disabled={boardModelOptions.length === 0}
                 >
-                  {imageModels.map((m) => (
+                  {boardModelOptions.map((m) => (
                     <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
                   ))}
                 </select>
@@ -2457,7 +2572,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   className="prod-openart-select"
                   value={prod.openArt?.resolution ?? "1k"}
                   onChange={(e) => {
-                    saveField({ openArt: { model: prod.openArt?.model ?? imageModels[0]?.id ?? "", resolution: e.target.value as "1k" | "2k" | "4k" } });
+                    saveField({ openArt: { model: boardModelValue, resolution: e.target.value as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
                     rememberMediaDefault("image", { resolution: e.target.value });
                   }}
                   title="Output resolution for image generation"
@@ -2467,6 +2582,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   <option value="4k">4k</option>
                 </select>
               </label>
+              {boardQualities !== null && boardQualities.length > 0 && (
+                <label className="prod-openart-label">Quality
+                  <select
+                    className="prod-openart-select"
+                    value={boardQualities.includes(prod.openArt?.quality ?? "") ? (prod.openArt?.quality as string) : ""}
+                    onChange={(e) => {
+                      const quality = e.target.value || undefined;
+                      saveField({ openArt: { model: boardModelValue, resolution: prod.openArt?.resolution ?? "1k", ...(quality ? { quality } : {}) } });
+                    }}
+                    title="Quality tier for this image model (from its live catalog options)"
+                  >
+                    <option value="">Default</option>
+                    {boardQualities.map((q) => (
+                      <option key={q} value={q}>{q}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button className="primary" disabled={boardsBusy || importBusy || !shotCount} onClick={() => void genBoards()}>
                 {boardsBusy ? "Generating…" : boardsDone ? "Generate missing frames" : "Generate Storyboard"}
               </button>
@@ -2631,30 +2764,33 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
-                  onRunEditGen={(model, resolution) => graphShotId ? runEditGenNode(graphShotId, model, resolution) : Promise.resolve()}
+                  onRunEditGen={(nodeId, model, resolution) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution) : Promise.resolve()}
                   onRunTweenBlock={(blockId, durationSec, model) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyIds.has(graphShotId) : false}
                   videoGenBusy={graphShotId ? nodeVideoBusyIds.has(graphShotId) : false}
-                  editGenBusy={graphShotId ? nodeEditBusyIds.has(graphShotId) : false}
+                  editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyIds.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   busyTweenBlock={graphShotId ? tweenBusyByShot[graphShotId] ?? null : null}
                   tweenStitching={graphShotId ? tweenStitchingIds.has(graphShotId) : false}
-                  onSelectGraphGen={(kind, index) => { if (graphShotId) selectGraphGen(graphShotId, kind, index); }}
-                  onCycleGraphGen={(kind, dir) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir); }}
+                  onSelectGraphGen={(kind, index, nodeId) => { if (graphShotId) selectGraphGen(graphShotId, kind, index, nodeId); }}
+                  onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
+                  onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
+                  onPipeEditToVideo={(nodeId) => { if (graphShotId) pipeEditToVideo(graphShotId, nodeId); }}
+                  onPipeRefToVideo={(refId) => { if (graphShotId) pipeRefToVideo(graphShotId, refId); }}
                   onPipeImageToOutput={() => { if (graphShotId) pipeImageToOutput(graphShotId); }}
                   onPipeVideoToOutput={() => { if (graphShotId) pipeVideoToOutput(graphShotId); }}
                   onPipeTweenToOutput={() => { if (graphShotId) pipeTweenToOutput(graphShotId); }}
-                  onPipeEditToOutput={() => { if (graphShotId) pipeEditToOutput(graphShotId); }}
+                  onPipeEditToOutput={(nodeId) => { if (graphShotId) pipeEditToOutput(graphShotId, nodeId); }}
                   onPipeRefToOutput={(refId) => { if (graphShotId) void pipeRefToOutput(graphShotId, refId); }}
                   onTweenRefs={(refIds) => { if (graphShotId) setTweenRefs(graphShotId, refIds); }}
                   onUnpipeImageGen={() => { if (graphShotId) unpipeImageGen(graphShotId); }}
                   onUnpipeImageToVideo={() => { if (graphShotId) unpipeImageToVideo(graphShotId); }}
                   onUnpipeVideoGen={() => { if (graphShotId) unpipeVideoGen(graphShotId); }}
                   onUnpipeTweenGen={() => { if (graphShotId) unpipeTweenGen(graphShotId); }}
-                  onUnpipeEditGen={() => { if (graphShotId) unpipeEditGen(graphShotId); }}
+                  onUnpipeEditGen={(nodeId) => { if (graphShotId) unpipeEditGen(graphShotId, nodeId); }}
                   onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
                   onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
                   onClose={() => setGraphShotId(null)}
@@ -2667,6 +2803,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <EditBoardModal
                   shotNumber={es.number}
                   models={mediaModels}
+                  savedModel={es.graphEditNodes?.find((n) => n.id === (es.graphOutputSource === "editgen" ? es.graphOutputEditNodeId : undefined))?.model}
+                  onSavedModelChange={(m) => {
+                    if (es.graphOutputSource === "editgen" && es.graphOutputEditNodeId) {
+                      saveGraphShotFields(es.id, {
+                        graphEditNodes: (es.graphEditNodes ?? []).map((n) => (n.id === es.graphOutputEditNodeId ? { ...n, model: m } : n)),
+                      });
+                    }
+                  }}
                   prompt={es.graphEditPrompt ?? ""}
                   onPromptChange={(text) => saveGraphShotFields(es.id, { graphEditPrompt: text })}
                   onSubmit={(model, prompt) => {
@@ -2686,6 +2830,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   prod={prod}
                   models={mediaModels}
                   prompt={vs.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT}
+                  onShotField={(patch) => saveGraphShotFields(vs.id, patch)}
                   onPromptChange={(text) => saveGraphShotFields(vs.id, { graphVideoPrompt: text })}
                   onClose={() => setVideoShotId(null)}
                   onSubmit={(opts) => {

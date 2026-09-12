@@ -19,7 +19,16 @@ import { assetPath, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { citePrompt, resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, ProviderEmit } from "./providers/types.js";
 import { uploadDataUrlReference } from "./openart-upload.js";
-import { resizeVideoRefToHeight } from "./video-ref.js";
+import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "./video-ref.js";
+import {
+  describeOpenArtDurations,
+  extractOpenArtVideoOptions,
+  openArtDurationNumber as durationNumber,
+  openArtLooksLikeResolution,
+  parseOpenArtFormProperties,
+  parseOpenArtModels,
+  shapeOpenArtModelChoices,
+} from "./providers/openart-core.js";
 import {
   IMAGE_URI_EXT_RX,
   IMAGE_URL_RX,
@@ -30,6 +39,7 @@ import {
 } from "../shared/prompt-grammar.js";
 import type {
   ImageGenAspectRatio,
+  ImageModelOptions,
   LedgerGenMeta,
   OpenArtBoardConfig,
   OpenArtModelChoice,
@@ -109,20 +119,6 @@ export function referenceArrayKey(props: Record<string, unknown>): string | null
     if (p.type === "array" || p.items) return key;
   }
   return null;
-}
-
-/** The maximum input-video height a model's form allows, read from any
- *  resolution constraint in the schema text (e.g. Seedance's "Video resolution
- *  must be between 480p and 720p"). Defaults to 720p when unspecified — a safe
- *  ceiling for video *elements*, whose detail matters far less than the output.
- *  Returns 0 (no resize) only for a non-positive/NaN cap. */
-export function videoRefMaxHeight(props: Record<string, unknown>): number {
-  const text = JSON.stringify(props);
-  const between = /video\s+resolution[^.]{0,40}?between\s*(\d{3,4})p\s*and\s*(\d{3,4})p/i.exec(text);
-  if (between) return Number(between[2]);
-  const bounded = /video\s+resolution[^.]{0,60}?(?:up to|max(?:imum)?|at most|no (?:more|higher) than)\s*(\d{3,4})p/i.exec(text);
-  if (bounded) return Number(bounded[1]);
-  return 720;
 }
 
 /** The form key `videoRefsAssign` would fill with the end keyframe (first
@@ -224,14 +220,6 @@ export function videoRefsAssign(
   return Object.keys(out).length ? out : null;
 }
 
-/** Extract the first signed number from a duration label ("5s"→5, "5 sec"→5,
- *  "-1"→-1, "auto"→NaN). Preserves the sign so OpenArt's -1 "auto/random"
- *  sentinel is never misread as a positive 1s length. */
-const durationNumber = (v: unknown): number => {
-  const m = String(v).match(/-?\d+(?:\.\d+)?/);
-  return m ? Number(m[0]) : NaN;
-};
-
 export class OpenArtClient implements MediaProvider {
   readonly id = "openart" as const;
   readonly displayName = "OpenArt";
@@ -245,13 +233,13 @@ export class OpenArtClient implements MediaProvider {
 
   /** A recorder (the expenses ledger) that observes every successful
    *  generation with its resolved metadata. Injected so the tally is testable
-   *  at the same seam as the McpManager fake. `resizeVideoRef` downscales an
-   *  oversized video reference to a model's allowed input height; injected so
+   *  at the same seam as the McpManager fake. `resizeVideoRef` downscales a
+   *  video reference to the universal 720p ceiling; injected so
    *  the ffmpeg-backed implementation stays out of unit tests. */
   constructor(
     private readonly mcp: McpManager,
     private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void },
-    private readonly resizeVideoRef: (dataUrl: string, maxHeight: number) => Promise<string> = resizeVideoRefToHeight
+    private readonly resizeVideoRef: (dataUrl: string) => Promise<string> = defaultResizeVideoRef
   ) {}
 
   /** Fire the generation recorder; a tally write must never break a
@@ -279,87 +267,12 @@ export class OpenArtClient implements MediaProvider {
 
   /** Parse the OpenArt model-list reply into dropdown choices. */
   private parseOpenArtModels(raw: string): Array<Record<string, unknown>> {
-    const arr = parseJsonLooseArray(raw);
-    if (arr) {
-      return arr.filter((m) => m && typeof m === "object") as Array<Record<string, unknown>>;
-    }
-    const obj = parseJsonLooseObject(raw);
-    if (obj) {
-      // OpenAI-style / list envelopes: { data: [...] }, { items: [...] },
-      // { models: [...] }, { list: [...] }, { results: [...] }.
-      for (const key of ["data", "items", "models", "list", "results"]) {
-        const v = obj[key];
-        if (Array.isArray(v)) return v.filter((m) => m && typeof m === "object") as Array<Record<string, unknown>>;
-      }
-      // Some servers return a plain map { modelId: {…}, … }. Only trust it when
-      // EVERY value is an object (so an { error: "…" } envelope isn't misread).
-      const vals = Object.values(obj);
-      if (vals.length && vals.every((v) => v && typeof v === "object")) {
-        return vals as Array<Record<string, unknown>>;
-      }
-    }
-    return [];
+    return parseOpenArtModels(raw);
   }
 
   /** Shape the OpenArt model list into dropdown choices. */
   private shapeModelChoices(raw: string): OpenArtModelChoice[] {
-    const out: OpenArtModelChoice[] = [];
-    for (const m of this.parseOpenArtModels(raw)) {
-      const id = String(m.model ?? m.id ?? m.model_id ?? m.name ?? "").trim();
-      if (!id) continue;
-      const displayName = String(m.displayName ?? m.display_name ?? m.name ?? id);
-      const description = String(m.description ?? m.summary ?? m.recommendedFor ?? "");
-      // Capability signals. Descriptions are marketing copy that routinely
-      // mention both modalities, so they are only a LAST resort: structured
-      // fields (media/modes/output-kind) decide whenever they carry any
-      // image/video signal, and the description only fills in when they're
-      // silent. This keeps image models whose copy mentions "video" out of
-      // the video lists without dropping models whose structured fields carry
-      // no modality tokens at all.
-      const mediaList = Array.isArray(m.media) ? (m.media as unknown[]).map(String) : [];
-      const modesList = Array.isArray(m.modes) ? (m.modes as unknown[]).map(String) : [];
-      // The modern model list exposes `modes` as an OBJECT keyed by output
-      // media: `{ image: [{mode,description}], video: [{mode,…}] }`. Parse the
-      // video-mode spellings so generation can submit in the mode that
-      // actually carries references (e.g. `element2video`), and so an
-      // image-only model whose description merely mentions "video" is never
-      // offered in the video dropdowns.
-      const modesByMedia: Record<string, string[]> = {};
-      if (m.modes && typeof m.modes === "object" && !Array.isArray(m.modes)) {
-        for (const [media, list] of Object.entries(m.modes as Record<string, unknown>)) {
-          if (!Array.isArray(list)) continue;
-          modesByMedia[media.toLowerCase()] = list
-            .map((e) => String((e as { mode?: unknown } | null)?.mode ?? e ?? ""))
-            .filter(Boolean);
-        }
-      }
-      const videoModes = modesByMedia.video ?? [];
-      const imageModes = modesByMedia.image ?? [];
-      const kindField = String(m.output_type ?? m.outputType ?? m.type ?? m.category ?? "").toLowerCase();
-      const structuredVideo =
-        /video/.test(kindField) ||
-        modesList.some((s) => /video/i.test(s)) ||
-        videoModes.length > 0 ||
-        mediaList.some((s) => /video/i.test(s));
-      const structuredImage =
-        /image/.test(kindField) ||
-        modesList.some((s) => /image/i.test(s)) ||
-        imageModes.length > 0 ||
-        mediaList.some((s) => /image/i.test(s));
-      const videoOutput = structuredVideo || (!structuredVideo && !structuredImage && /video/i.test(description));
-      const imageOutput = structuredImage || (!structuredVideo && !structuredImage && /image/i.test(description));
-      // Credit cost: OpenArt sometimes reports it on the model entry — take the
-      // first plausible number; otherwise null (unknown).
-      const costRaw = m.cost ?? m.price ?? m.credit_cost ?? m.base_cost;
-      let cost: number | null = null;
-      if (typeof costRaw === "number" && Number.isFinite(costRaw)) cost = costRaw;
-      else if (costRaw && typeof costRaw === "object") {
-        const v = (costRaw as Record<string, unknown>).base_cost ?? (costRaw as Record<string, unknown>).amount;
-        if (typeof v === "number" && Number.isFinite(v)) cost = v;
-      }
-      out.push({ id, displayName, description, imageInput: imageOutput, videoInput: videoOutput, cost, videoModes });
-    }
-    return out;
+    return shapeOpenArtModelChoices(raw);
   }
 
   /** The OpenArt model dropdown, resolved from the connected server. */
@@ -375,13 +288,18 @@ export class OpenArtClient implements MediaProvider {
     return typeof credits === "number" && Number.isFinite(credits) ? Math.round(credits) : null;
   }
 
-  /** Turn a stored choice into the id to actually call. "auto" (or empty) is
-   *  legacy from the removed synthetic pick — resolve to the first eligible
-   *  model. A foreign-provider id (`higgsfield:…`, left over from a provider
-   *  switch) is treated the same — never submitted to the OpenArt server. */
+  /** Turn a stored choice into the id to actually call. "auto" (or empty)
+   *  resolves to the first eligible model. An EXPLICIT pick that isn't in the
+   *  vendor's list fails loudly instead of silently generating on a different
+   *  model — a stale pick left over from a media-provider switch once billed
+   *  a job to the wrong model. */
   private resolveOpenArtModel(choice: string, refsPresent: boolean, models: OpenArtModelChoice[]): string {
     void refsPresent;
-    if (choice && choice !== "auto" && !choice.startsWith("higgsfield:")) return choice;
+    const trimmed = (choice ?? "").trim();
+    if (trimmed && models.some((m) => m.id === trimmed)) return trimmed;
+    if (trimmed && trimmed !== "auto" && models.length) {
+      throw new Error(`"${trimmed}" isn't an OpenArt model (the active media provider is OpenArt) — re-pick the model and retry; switching media providers can strand a stale pick.`);
+    }
     const withInput = models.filter((m) => m.imageInput);
     const pool = withInput.length ? withInput : models;
     return pool[0]?.id ?? "";
@@ -394,89 +312,23 @@ export class OpenArtClient implements MediaProvider {
    *  numbers like "1080", and "HD"/"FHD"/"QHD"/"UHD"/"Full HD" — plus annotated
    *  labels like "4K Ultra HD (3840x2160)" that contain a resolution token. */
   private looksLikeResolution(s: string): boolean {
-    const t = s.trim();
-    if (/\d+(?:\.\d+)?\s*k|\d{3,4}\s*p|\d+\s*[x×]\s*\d+/i.test(t)) return true;
-    if (/^\d{3,4}$/.test(t)) return true;
-    return /^(?:full\s+hd|fhd|qhd|uhd|hd)$/i.test(t);
+    return openArtLooksLikeResolution(s);
   }
 
   /** Extract the field map out of an OpenArt open_model_form_get reply. */
   private parseModelFormProperties(raw: string): Record<string, unknown> | null {
-    const j = parseJsonLooseObject(raw);
-    if (!j) return null;
-    const schema = j.jsonSchema as Record<string, unknown> | undefined;
-    const allOf = Array.isArray(schema?.allOf) ? (schema.allOf as Record<string, unknown>[]) : [];
-    // Merge every schema block (open_model_form_get splits a form across
-    // allOf entries); a later block can carry the reference array even when
-    // the first only has the prompt/duration fields.
-    const merged: Record<string, unknown> = {};
-    let found = false;
-    const absorb = (props: unknown) => {
-      if (props && typeof props === "object") {
-        Object.assign(merged, props as Record<string, unknown>);
-        found = true;
-      }
-    };
-    for (const entry of allOf) absorb(entry?.properties);
-    absorb(schema?.properties);
-    return found ? merged : null;
+    return parseOpenArtFormProperties(raw);
   }
 
   /** Pull the resolution/duration options out of a model form's props map. */
   private extractVideoOptions(props: Record<string, unknown>): VideoModelOptions {
-    const out: VideoModelOptions = { resolutions: [], durations: [] };
-    for (const key of Object.keys(props)) {
-      const p = props[key] as {
-        type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown; oneOf?: unknown[]; anyOf?: unknown[];
-      } | undefined;
-      if (!p) continue;
-      if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
-        for (const v of p.enum) {
-          const s = String(v).trim();
-          if (this.looksLikeResolution(s)) out.resolutions.push(s);
-        }
-      }
-      if (/duration|length|seconds|clip|frames|time/i.test(key)) {
-        const nums = new Set<number>();
-        if (Array.isArray(p.enum)) {
-          for (const v of p.enum) {
-            const n = durationNumber(v);
-            if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
-          }
-        }
-        // oneOf/anyOf const choices (e.g. [{const:-1,"Auto"},{const:5},{const:8}])
-        // — the sentinel const (-1/0/auto) is filtered out by the n > 0 check.
-        for (const c of [...(p.oneOf ?? []), ...(p.anyOf ?? [])]) {
-          const cand = (c as { const?: unknown } | null | undefined)?.const;
-          if (cand === undefined) continue;
-          const n = durationNumber(cand);
-          if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
-        }
-        // Numeric bounds as a range (integer/number, or type-less min/max).
-        if ((p.minimum !== undefined || p.maximum !== undefined) &&
-            (p.type === undefined || p.type === "integer" || p.type === "number")) {
-          const min = Number(p.minimum) > 0 ? Math.ceil(Number(p.minimum)) : 1;
-          const max = Number(p.maximum) > 0 ? Math.floor(Number(p.maximum)) : min + 15;
-          for (let n = min; n <= max && n <= 120; n++) nums.add(n);
-        }
-        for (const n of nums) out.durations.push(n);
-      }
-    }
-    out.resolutions = Array.from(new Set(out.resolutions));
-    out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
-    return out;
+    return extractOpenArtVideoOptions(props);
   }
 
   /** Human-readable summary of accepted clip lengths ("4–15s" for a
    *  contiguous range, "5, 10s" for discrete picks) for validation errors. */
   private static describeDurations(durations: number[]): string {
-    const sorted = [...durations].sort((a, b) => a - b);
-    let contiguous = sorted.length > 2;
-    for (let i = 1; i < sorted.length; i++) {
-      if (sorted[i] !== sorted[i - 1] + 1) { contiguous = false; break; }
-    }
-    if (contiguous) return `${sorted[0]}–${sorted[sorted.length - 1]}s`;
-    return `${sorted.join(", ")}s`;
+    return describeOpenArtDurations(durations);
   }
 
   /** Resolve a video model's live form props (first image2video or
@@ -536,6 +388,14 @@ export class OpenArtClient implements MediaProvider {
   videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
     if (modelId.startsWith("higgsfield:")) return Promise.resolve(null);
     return this.resolveVideoOptions(modelId, withImage);
+  }
+
+  /** Image models expose no standalone quality selector on OpenArt: quality
+   *  already rides the resolution tier (resolutionAssign maps 1k/2k/4k onto
+   *  the model's sizing/quality fields). Always null so the storyboard
+   *  quality dropdown stays hidden for this vendor. */
+  imageModelOptions(_modelId: string): Promise<ImageModelOptions | null> {
+    return Promise.resolve(null);
   }
 
   /** Warm the per-model option cache for every video-capable model in both
@@ -1156,6 +1016,9 @@ private videoRefsAssign = videoRefsAssign;
         projectId = await this.resolveProject(p, onNotice).catch(() => null);
       }
       const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps, aspectRatio);
+      // Diagnostics: name the resolved model + mode so a wrong-model
+      // suspicion can be settled from the log (mirrors Higgsfield's submit line).
+      onNotice?.(`Submitting image job via ${modelId || "(model resolution failed)"} (mode=${mode}${hasRefs ? ` refs x${uploaded.length}` : " no refs"})`);
       const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
 
       // Ledger metadata is in scope on every success path below — model and
@@ -1269,8 +1132,15 @@ text.match(IMAGE_URL_RX)?.[0] ??
     // so a slow/failed form lookup for one spelling doesn't drop the refs.
     // In-betweening ("auto" + an end keyframe) prefers a model with a
     // dedicated end-frame slot; anything else falls back to the first video
-    // model (both frames still ride the array fallback).
-    let modelId = opts.model && opts.model !== "auto" && !opts.model.startsWith("higgsfield:") ? opts.model : "";
+    // model (both frames still ride the array fallback). An explicit pick
+    // that isn't in the vendor's list fails loudly — silently substituting a
+    // different model once billed a stale cross-vendor pick to the wrong
+    // model. (An empty list proves nothing, so it still falls through.)
+    const picked = (opts.model ?? "").trim();
+    if (picked && picked !== "auto" && models.length && !models.some((m) => m.id === picked)) {
+      throw new Error(`"${picked}" isn't an OpenArt model (the active media provider is OpenArt) — re-pick the model and retry; switching media providers can strand a stale pick.`);
+    }
+    let modelId = picked && picked !== "auto" && !picked.startsWith("higgsfield:") ? picked : "";
     if (!modelId) {
       const video = models.filter((m) => m.videoInput);
       if (frameRefs?.end && video.length > 1) {
@@ -1304,7 +1174,18 @@ text.match(IMAGE_URL_RX)?.[0] ??
         // Prefer a mode whose form actually declares an array reference field
         // when references were uploaded. Fall back to the first parsing mode
         // when no mode advertises a reference array.
+        //
+        // In-betweening overrides that: the first refy mode's form may carry
+        // only the visualReferences array — with no startFrame/endFrame object
+        // slots — so the keyframe pair would ride the array as plain
+        // references and the interpolation would be wrong. When the caller
+        // supplies an end keyframe, keep probing and prefer a mode whose form
+        // declares BOTH frame slots (the startFrame slot is what fills pass
+        // 1a; `endFrameSlotKey` is the same probe the submit path and the
+        // capability test share).
+        const wantFrames = !!frameRefs?.end;
         let refMode: { mode: string; props: Record<string, unknown> } | null = null;
+        let frameMode: { mode: string; props: Record<string, unknown> } | null = null;
         for (const m of orderedModes) {
           let raw = "";
           try {
@@ -1316,30 +1197,41 @@ text.match(IMAGE_URL_RX)?.[0] ??
             continue;
           }
           if (formProps === null) { formProps = props; mode = m; }
-          if (refs.length && referenceArrayKey(props)) { refMode = { mode: m, props }; break; }
           if (!refs.length) break;
+          if (wantFrames) {
+            const hasStart = Object.keys(props).some((k) => {
+              if (!START_FRAME_KEY_RX.test(k)) return false;
+              const fld = props[k] as { type?: string; items?: unknown } | undefined;
+              return !!fld && fld.type !== "array" && !fld.items;
+            });
+            if (hasStart && endFrameSlotKey(props)) { frameMode = { mode: m, props }; break; }
+            // A ref-array-only mode is still a fallback — keep probing for a
+            // frame-slot mode before settling on it.
+            if (referenceArrayKey(props) && !refMode) refMode = { mode: m, props };
+            continue;
+          }
+          if (referenceArrayKey(props)) { refMode = { mode: m, props }; break; }
         }
-        if (refMode) { formProps = refMode.props; mode = refMode.mode; }
+        const chosen = frameMode ?? refMode;
+        if (chosen) { formProps = chosen.props; mode = chosen.mode; }
       }
     }
 
     // Uploads ride the same positional binding as images (probed live); the
     // sign request uses purpose "create-video" — using the image purpose can
-    // make OpenArt reject the upload and silently drop the reference. Video
-    // references are downscaled first when the model caps input video
-    // resolution (e.g. Seedance element2video rejects anything above 720p),
-    // so an oversized clip doesn't fail the whole submission.
-    const maxVideoH = videoRefMaxHeight(formProps ?? {});
+    // make OpenArt reject the upload and silently drop the reference. Every
+    // video reference is downscaled to the 720p ceiling first, regardless of
+    // model, so an oversized clip doesn't fail the whole submission.
     const uploaded: Record<string, unknown>[] = [];
     const submitted: (string | null)[] = [];
     for (const [i, r] of refs.entries()) {
       try {
         let dataUrl = r.dataUrl;
         if (/^data:video\//i.test(dataUrl)) {
-          const resized = await this.resizeVideoRef(dataUrl, maxVideoH);
+          const resized = await this.resizeVideoRef(dataUrl);
           if (resized !== dataUrl) {
             dataUrl = resized;
-            emit(`Shot ${shot.number}: resized video reference "${r.name}" to ${maxVideoH}p for this model.`);
+            emit(`Shot ${shot.number}: resized video reference "${r.name}" to ${VIDEO_REF_MAX_HEIGHT}p for this model.`);
           }
         }
         const vr = await uploadDataUrlReference(this.mcp, dataUrl, r.name, "create-video");

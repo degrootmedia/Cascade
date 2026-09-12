@@ -116,8 +116,14 @@ export interface McpStatusIpc {
   error?: string;
 }
 
-/** Which MCP vendor serves image/video generation (global setting). */
-export type MediaProviderId = "openart" | "higgsfield";
+/** Which vendor serves image/video generation (global setting). `higgsfield-cli`
+ *  is the same Higgsfield account driven through the local `higgsfield` CLI
+ *  binary instead of the MCP server; its model ids are namespaced
+ *  `higgsfield-cli:<job_type>` so the two transports never collide.
+ *  `openart-cli` is likewise the OpenArt account via the local `openart`
+ *  CLI binary (`openart-cli:<id>`); it cannot send end frames or multiple
+ *  video references, so those requests fail loudly with an MCP redirect. */
+export type MediaProviderId = "openart" | "higgsfield" | "higgsfield-cli" | "openart-cli";
 
 /** One generation vendor for the Settings picker. */
 export interface MediaProviderInfo {
@@ -125,6 +131,30 @@ export interface MediaProviderInfo {
   displayName: string;
   /** Whether the vendor's generation tools are currently connected. */
   available: boolean;
+}
+
+/** The Higgsfield CLI transport status (Settings → Media generation). */
+export interface HiggsfieldCliStatus {
+  /** Resolved binary path, or null when no `higgsfield` binary was found. */
+  binary: string | null;
+  /** `higgsfield version` output, or null when the binary is missing. */
+  version: string | null;
+  /** Whether `account status` succeeds (signed in with a workspace). */
+  authenticated: boolean;
+  /** The signed-in account email, when known. */
+  account: string | null;
+}
+
+/** The OpenArt CLI transport status (Settings → Media generation). */
+export interface OpenArtCliStatus {
+  /** Resolved binary path, or null when no `openart` binary was found. */
+  binary: string | null;
+  /** `openart version` output, or null when the binary is missing. */
+  version: string | null;
+  /** Whether `account` succeeds (signed in). */
+  authenticated: boolean;
+  /** The signed-in account email, when known. */
+  account: string | null;
 }
 
 export interface AgentMeta {
@@ -166,10 +196,35 @@ export interface ProductionMeta {
 export interface GraphLayout {
   /** Node positions keyed by graph node id (ref/composer/style/brand/output). */
   positions?: Record<string, { x: number; y: number }>;
-  /** Node sizes keyed by graph node id (currently the frame output node). */
+  /** Node sizes keyed by graph node id (the frame output plus the resizable
+   *  image/edit/video generation nodes). */
   sizes?: Record<string, { width: number; height: number }>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
+}
+
+/** One node-graph edit-image node. A shot may hold several and daisy-chain
+ *  them (an edit node's output feeds another's source). The list is the source
+ *  of truth; the legacy flat `graphEdit*` fields migrate into `edit0`. */
+export interface GraphEditNode {
+  /** Stable identity within the shot: "edit0", "edit1", …. */
+  id: string;
+  /** The node's own edit instructions (its `editprompt` node's text). */
+  prompt: string;
+  /** Stored edits (newest first) + the selected index. */
+  gens?: GraphGenItem[];
+  genIndex?: number;
+  /** What feeds this node's source input. Absent = the shot's current frame. */
+  source?:
+    | { kind: "imagegen" }
+    | { kind: "editgen"; nodeId: string }
+    | { kind: "ref"; refId: string };
+  /** Whether the style node is plugged into this node's prompt node. */
+  styleConnected?: boolean;
+  /** The node's own model/resolution picks (per-node, win over the global
+   *  media-default; unset falls back to it). */
+  model?: string;
+  resolution?: string;
 }
 
 export interface ProductionShot {
@@ -236,16 +291,32 @@ graphImageGenIndex?: number;
   graphVideoGenIndex?: number;
   /** The video-prompt node's text (motion prompt for the video gen node). */
   graphVideoPrompt?: string;
-  /** Node graph edit-image node: stored edits (newest first) + index. */
+  /** Per-shot video-gen selections (the classic modal and the graph's video
+   *  node both read/write them; they win over the global media-default, so a
+   *  change in one shot never propagates to the others). */
+  graphVideoModel?: string;
+  graphVideoResolution?: string;
+  graphVideoDurationSec?: number;
+  /** Node graph edit-image nodes (zero or more, daisy-chainable). The list is
+   *  the source of truth; the legacy flat `graphEdit*` fields below migrate
+   *  into a single `edit0` entry on load. */
+  graphEditNodes?: GraphEditNode[];
+  /** Which edit node feeds the output when `graphOutputSource === "editgen"`. */
+  graphOutputEditNodeId?: string;
+  /** Which edit node feeds the video node's image input when
+   *  `graphEditToVideo` is set. */
+  graphVideoSourceEditNodeId?: string;
+  /** @deprecated Migrated into `graphEditNodes[0].gens`. */
   graphEditGens?: GraphGenItem[];
+  /** @deprecated Migrated into `graphEditNodes[0].genIndex`. */
   graphEditGenIndex?: number;
-  /** The edit-prompt node's text (edit instructions for the edit-image node). */
+  /** The classic Edit-frame popup's draft prompt. Seeds `graphEditNodes[0]`
+   *  on migration; afterwards it is the text for the NEXT classic edit, which
+   *  appends a new node to the chain. */
   graphEditPrompt?: string;
-  /** Whether the image generation node's output feeds the edit-image node's
-   *  source input (the image being edited). */
+  /** @deprecated Migrated into `graphEditNodes[0].source`. */
   graphEditImageSource?: boolean;
-  /** A reference feeding the edit-image node's source input (single source —
-   *  connecting one displaces the other). Only image refs connect. */
+  /** @deprecated Migrated into `graphEditNodes[0].source`. */
   graphEditSourceRefId?: string;
   /** Reference ids feeding the video gen node's extra reference inputs (beyond
    *  the main image pipe), in connection order. Only image refs connect. */
@@ -254,6 +325,16 @@ graphImageGenIndex?: number;
    *  image input. Independent of the output feed — the image node can pipe to
    *  the video node AND the output simultaneously. */
   graphImageToVideo?: boolean;
+  /** Whether an edit-image node's output feeds the video node's image input
+   *  (the frame the clip is animated from). Which node is named by
+   *  `graphVideoSourceEditNodeId`. Mutually exclusive with `graphImageToVideo`
+   *  — the video node's source input accepts any image output, and connecting
+   *  one replaces the other. */
+  graphEditToVideo?: boolean;
+  /** A reference feeding the video node's image input (the frame the clip is
+   *  animated from). Mutually exclusive with `graphImageToVideo` /
+   *  `graphEditToVideo` — the source input accepts one image at a time. */
+  graphVideoSourceRefId?: string;
   /** Keyframe source ids wired into the in-betweener node's keyframe sockets,
    *  in timeline order (2–5). Each is a bare reference id OR a generation-node
    *  sentinel (`TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN`), so keyframes can be
@@ -283,7 +364,7 @@ graphImageGenIndex?: number;
   graphStyleConnected?: boolean;
   /** Whether the style node is plugged into the video-prompt node. */
   graphVideoStyleConnected?: boolean;
-  /** Whether the style node is plugged into the edit-prompt node. */
+  /** @deprecated Migrated into the edit node's `styleConnected`. */
   graphEditStyleConnected?: boolean;
   /** Which node is piped into the output (becomes the shot's primary
    *  artwork/videoPath): an image/video generation node, the in-betweener
@@ -305,15 +386,29 @@ graphImageGenIndex?: number;
  *  `graphTweenRefIds` (and `TweenBlock.startRefId`/`endRefId`) alongside bare
  *  reference ids — a reference id (base36 timestamp + random suffix, see
  *  `store.newId`) can never equal these node ids, so the two are
- *  unambiguous. The image node is structural and always present; the edit
- *  node is optional but both resolve to their selected generation. */
+ *  unambiguous. The image node is structural and always present; each edit
+ *  node is addressed as `editgen:<nodeId>` (the bare `"editgen"` is the legacy
+ *  single-node form migrated to `editgen:edit0`). */
 export const TWEEN_KEY_IMGGEN = "imagegen";
 export const TWEEN_KEY_EDITGEN = "editgen";
+export const TWEEN_KEY_EDITGEN_PREFIX = "editgen:";
+
+/** The in-betweener keyframe source id for an edit node. */
+export function editNodeKeyframe(nodeId: string): string {
+  return `${TWEEN_KEY_EDITGEN_PREFIX}${nodeId}`;
+}
+
+/** The edit node id a keyframe source refers to, or null. Handles the legacy
+ *  bare `"editgen"` as `"edit0"` so pre-migration wiring keeps resolving. */
+export function parseEditNodeKeyframe(id: string): string | null {
+  if (id === TWEEN_KEY_EDITGEN) return "edit0";
+  return id.startsWith(TWEEN_KEY_EDITGEN_PREFIX) ? id.slice(TWEEN_KEY_EDITGEN_PREFIX.length) : null;
+}
 
 /** True when an in-betweener keyframe source id refers to a generation node's
  *  output rather than a production reference. */
 export function isTweenGenKeyframe(id: string): boolean {
-  return id === TWEEN_KEY_IMGGEN || id === TWEEN_KEY_EDITGEN;
+  return id === TWEEN_KEY_IMGGEN || id === TWEEN_KEY_EDITGEN || id.startsWith(TWEEN_KEY_EDITGEN_PREFIX);
 }
 
 /** One stored output of a node-graph generation node. */
@@ -460,6 +555,10 @@ export interface OpenArtBoardConfig {
   model: string;
   /** Output resolution bucket fed to the generate tool's sizing param. */
   resolution: "1k" | "2k" | "4k";
+  /** Quality tier fed to the generate tool's quality param (Higgsfield models
+   *  that declare one, e.g. Seedream basic/high). Omitted when the model
+   *  declares no quality options — the vendor default then applies. */
+  quality?: string;
 }
 
 /** One named visual style in the Step 2 style set. A production keeps up to 5.
@@ -516,6 +615,7 @@ export function shotHasContent(s: ProductionShot): boolean {
   if ((s.graphImageGens?.length ?? 0) > 0) return true;
   if ((s.graphVideoGens?.length ?? 0) > 0) return true;
   if ((s.graphEditGens?.length ?? 0) > 0) return true;
+  if (s.graphEditNodes?.some((n) => n.prompt?.trim() || (n.gens?.length ?? 0) > 0 || n.source)) return true;
   if ((s.refIds?.length ?? 0) > 0) return true;
   if ((s.graphTweenRefIds?.length ?? 0) > 0) return true;
   if (s.graphTweenBlocks?.some((b) => b.prompt?.trim() || (b.gens?.length ?? 0) > 0)) return true;
@@ -562,6 +662,16 @@ export interface VideoModelOptions {
   resolutions: string[];
   /** Clip lengths in seconds the model accepts. */
   durations: number[];
+}
+
+/** The quality options an image model actually accepts, read from its live
+ *  catalog detail. Used to populate the storyboard quality dropdown per
+ *  model. Null when the model (or its options) can't be read. */
+export interface ImageModelOptions {
+  /** Quality labels the model accepts (e.g. ["basic","high"]). */
+  qualities: string[];
+  /** The model's declared default quality, when it names one we recognize. */
+  defaultQuality?: string | null;
 }
 
 /** A discovered media model with its pricing ladder baked — the read model for
@@ -932,14 +1042,17 @@ export interface CascadeApi {
   /** The user's saved media model arrangement (dropdowns follow it). */
   getMediaModelOrder(): Promise<string[]>;
   setMediaModelOrder(ids: string[]): Promise<void>;
-  /** Show the native image context menu (Save image as / Copy / Edit externally) at the given page coords. */
-  showImageMenu(opts: { src: string; x: number; y: number; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
+  /** Show the native media context menu (Save as / Copy image / Edit externally / Open file folder) at the given page coords. */
+  showImageMenu(opts: { src: string; x: number; y: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Download an image URL via the native save dialog (same as the native menu's "Save image as…"). */
   saveImage(src: string): Promise<void>;
   /** Copy the image under the given page coords to the clipboard (same as the native menu's "Copy image"). */
   copyImage(x: number, y: number): Promise<void>;
   /** Open an image in the external editor (same as the native menu's "Edit externally"). */
   editImageExternally(opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
+  /** Reveal a production image/video file in the OS file manager. Accepts an
+   *  explicit `productionId`+`relPath` or a `cascade-media://` src. */
+  showInFolder(opts: { productionId?: string; relPath?: string; src?: string }): Promise<void>;
   /** Fired when the user picks File → Settings… from the native menu. */
   onOpenSettings(cb: () => void): () => void;
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
@@ -980,6 +1093,18 @@ export interface CascadeApi {
   /** Which vendor serves image/video generation (global setting). */
   getMediaProvider(): Promise<MediaProviderId>;
   setMediaProvider(id: MediaProviderId): Promise<void>;
+  /** Remaining credit balances per media vendor (null per vendor when unconnected). */
+  getMediaCredits(): Promise<Record<MediaProviderId, number | null>>;
+  /** Custom path to the `higgsfield` CLI binary (null = resolve from PATH). */
+  getHiggsfieldCliBinary(): Promise<string | null>;
+  setHiggsfieldCliBinary(path: string | null): Promise<void>;
+  /** The Higgsfield CLI transport status (binary, version, auth). */
+  getHiggsfieldCliStatus(): Promise<HiggsfieldCliStatus>;
+  /** Custom path to the `openart` CLI binary (null = resolve from PATH). */
+  getOpenArtCliBinary(): Promise<string | null>;
+  setOpenArtCliBinary(path: string | null): Promise<void>;
+  /** The OpenArt CLI transport status (binary, version, auth). */
+  getOpenArtCliStatus(): Promise<OpenArtCliStatus>;
 
   listAgents(): Promise<AgentMeta[]>;
   getAgent(id: string): Promise<AgentDetail | null>;
@@ -1222,12 +1347,13 @@ export interface CascadeApi {
    */
   unstitchTween(productionId: string, shotId: string): Promise<Production>;
   /**
-   * Step 3 node graph: AI-edit one image for the edit-image node. The source
-   * image is the node's source pipe (image node selection, else a reference),
-   * falling back to the shot's current frame. The result is stored on the
-   * edit-image node. Returns the updated production.
+   * Step 3 node graph: AI-edit one image for an edit-image node. The source
+   * image is that node's source pipe (another edit node's selection, the image
+   * node's selection, or a reference), falling back to the shot's current
+   * frame. The result is stored on the named edit node (`nodeId`; the first
+   * node when omitted). Returns the updated production.
    */
-  generateEditNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string }): Promise<Production>;
+  generateEditNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string }): Promise<Production>;
   /**
    * Step 3 node graph: make a generation node's selected output the shot's
    * primary output (artwork for frames, videoPath for clips). Returns the
@@ -1248,6 +1374,11 @@ export interface CascadeApi {
   /** Step 4: the resolution / length options a video model accepts (from its
    *  live form schema). Null when the model form can't be read. */
   videoModelOptions(modelId: string, withImage?: boolean): Promise<VideoModelOptions | null>;
+  /** Step 3: the quality options an image model accepts (from its live
+   *  catalog detail). Null when the model declares none or can't be read —
+   *  the storyboard quality dropdown hides itself and the vendor default
+   *  applies. */
+  imageModelOptions(modelId: string): Promise<ImageModelOptions | null>;
   /** Step 3 in-betweener: ids of the video-capable models that accept a
    *  dedicated end-frame slot (live form/schema probe) unioned with the
    *  user's manual allowlist (Settings → Media generation). The tween model

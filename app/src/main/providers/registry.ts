@@ -8,6 +8,8 @@
 import type { McpManager } from "../mcp.js";
 import { OpenArtClient } from "../openart.js";
 import { HiggsfieldProvider } from "./higgsfield.js";
+import { HiggsfieldCliProvider } from "./higgsfield-cli.js";
+import { OpenArtCliProvider } from "./openart-cli.js";
 import type { GenerationRecorder, MediaProvider, MediaProviderId } from "./types.js";
 import { FALLBACK_VIDEO_DURATIONS, FALLBACK_VIDEO_RESOLUTIONS, IMAGE_RESOLUTIONS } from "../ledger.js";
 import type { MediaModelLadder, OpenArtModelChoice } from "../../shared/ipc.js";
@@ -17,29 +19,35 @@ export type { MediaProviderId };
 export const PROVIDER_META: Record<MediaProviderId, { displayName: string }> = {
   openart: { displayName: "OpenArt" },
   higgsfield: { displayName: "Higgsfield" },
+  "higgsfield-cli": { displayName: "Higgsfield CLI" },
+  "openart-cli": { displayName: "OpenArt CLI" },
 };
 
-export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield"];
+export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
 
 /** Coerce a stored/foreign value to a known provider id (unknown → openart). */
 export function resolveProviderId(raw: unknown): MediaProviderId {
-  return raw === "higgsfield" ? "higgsfield" : "openart";
+  if (raw === "higgsfield" || raw === "higgsfield-cli" || raw === "openart-cli") return raw;
+  return "openart";
 }
 
 /**
  * Which vendor owns an explicit model pick. A `higgsfield:…` id always
- * belongs to Higgsfield (ids leave that provider namespaced); "auto",
- * empty, and unprefixed OpenArt ids defer to the caller's active provider
- * (null = use active). Callers use this so a saved cross-vendor pick (e.g. a
- * Seedance tween chosen under Higgsfield) still submits to its own vendor
- * after the global provider flips — instead of silently falling back to the
- * active vendor's first model (the Seedance→Gemini bug).
+ * belongs to Higgsfield, `higgsfield-cli:…` to the Higgsfield CLI, and
+ * `openart-cli:…` to the OpenArt CLI (ids leave each provider namespaced);
+ * "auto", empty, and unprefixed OpenArt ids defer to the caller's active
+ * provider (null = use active). Callers use this so a saved cross-vendor
+ * pick (e.g. a Seedance tween chosen under Higgsfield) still submits to its
+ * own vendor after the global provider flips — instead of silently falling
+ * back to the active vendor's first model (the Seedance→Gemini bug).
  */
 export function providerOfModelId(model?: string): MediaProviderId | null {
   if (typeof model !== "string") return null;
   const m = model.trim();
   if (!m || m === "auto") return null;
+  if (m.startsWith("higgsfield-cli:")) return "higgsfield-cli";
   if (m.startsWith("higgsfield:")) return "higgsfield";
+  if (m.startsWith("openart-cli:")) return "openart-cli";
   return null;
 }
 
@@ -53,11 +61,37 @@ export function mediaForModel(
   return providers[providerOfModelId(model) ?? activeId] ?? providers[activeId];
 }
 
-export function createProviders(mcp: McpManager, recorder?: GenerationRecorder): Record<MediaProviderId, MediaProvider> {
+export function createProviders(
+  mcp: McpManager,
+  recorder?: GenerationRecorder,
+  /** Lazy resolvers for the CLI binaries (null = not installed). Lazy so a
+   *  Settings path change applies without rebuilding providers. */
+  higgsCliBinary?: () => string | null,
+  openArtCliBinary?: () => string | null
+): Record<MediaProviderId, MediaProvider> {
   return {
     openart: new OpenArtClient(mcp, recorder),
     higgsfield: new HiggsfieldProvider(mcp, recorder),
+    "higgsfield-cli": new HiggsfieldCliProvider({ binary: higgsCliBinary ?? (() => null), recorder }),
+    "openart-cli": new OpenArtCliProvider({ binary: openArtCliBinary ?? (() => null), recorder }),
   };
+}
+
+/** Every vendor's remaining credit balance at once (top-bar dial). Each
+ *  vendor is isolated — one down or unconnected resolves to null without
+ *  blanking the others. */
+export async function getMediaCredits(
+  providers: Record<MediaProviderId, MediaProvider>
+): Promise<Record<MediaProviderId, number | null>> {
+  const one = async (id: MediaProviderId): Promise<number | null> => {
+    try {
+      return await providers[id].getCredits();
+    } catch {
+      return null;
+    }
+  };
+  const entries = await Promise.all(PROVIDER_IDS.map(async (id) => [id, await one(id)] as const));
+  return Object.fromEntries(entries) as Record<MediaProviderId, number | null>;
 }
 
 /** Force model choices to the user's manual kind assignments (Settings →

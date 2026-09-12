@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
+import type { ChangeEvent, DragEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CustomRef, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { isImageModel } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
@@ -30,13 +31,14 @@ function RefSection({ title, items, emptyHint, onAttach, onRemove, onAdd, addKin
   const [adding, setAdding] = useState(false);
   const [addName, setAddName] = useState("");
   const [addKey, setAddKey] = useState("");
-  const withArt = items.filter((i) => i.artwork);
-  const withoutArt = items.filter((i) => !i.artwork);
-  const submit = () => {
+  // Perf 1.5: derive the split lists once per items identity, not per render.
+  const withArt = useMemo(() => items.filter((i) => i.artwork), [items]);
+  const withoutArt = useMemo(() => items.filter((i) => !i.artwork), [items]);
+  const submit = useCallback(() => {
     if (!addName.trim()) return;
     onAdd(addName, addKey);
     setAddName(""); setAddKey(""); setAdding(false);
-  };
+  }, [addName, addKey, onAdd]);
   return (
     <div className="prod-refs">
       <label className="prod-label">{title}</label>
@@ -161,13 +163,25 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [rescanning, setRescanning] = useState(false);
-  const rescan = async () => {
+  const rescan = useCallback(async () => {
     if (rescanning) return;
     setRescanning(true);
     try { await onRescan(); } finally { setRescanning(false); }
-  };
-  const add = () => { if (name.trim()) { onAddReference(name, categoryId || undefined); setName(""); } };
-  const groups = [{ id: "", name: "Uncategorized" }, ...categories];
+  }, [rescanning, onRescan]);
+  const add = useCallback(() => { if (name.trim()) { onAddReference(name, categoryId || undefined); setName(""); } }, [name, categoryId, onAddReference]);
+  // Perf 1.5: stable group list per categories identity; per-category item
+  // slices are memoized below so a rename keystroke doesn't rebuild them.
+  const groups = useMemo(() => [{ id: "", name: "Uncategorized" }, ...categories], [categories]);
+  const itemsByCategory = useMemo(() => {
+    const map = new Map<string, CustomRef[]>();
+    for (const g of groups) map.set(g.id, []);
+    for (const r of items) {
+      const key = r.categoryId ?? "";
+      const list = map.get(key) ?? map.get("")!;
+      list.push(r);
+    }
+    return map;
+  }, [groups, items]);
   return (
     <div className="prod-refs">
       <label className="prod-label">Reference images</label>
@@ -181,7 +195,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={items.filter((r) => (r.categoryId ?? "") === category.id)} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onGenerate={onGenerate} onEditRef={onEditRef} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onGenerate={onGenerate} onEditRef={onEditRef} />
         ))}
       </div>
       <div className="prod-ref-new form">
@@ -195,8 +209,12 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
 
 
 /** One collapsible category panel in the reference grid. Drop targets accept
- *  existing references (move) or pasted/dropped image files (create). */
-function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onGenerate, onEditRef }: {
+ *  existing references (move) or pasted/dropped image files (create).
+ *
+ *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
+ *  inline callbacks every render, so function identity is ignored and only
+ *  prodId + category fields + per-item data decide re-render. */
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onGenerate, onEditRef }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
@@ -242,9 +260,46 @@ function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRe
       )}
     </section>
   );
+}, areCategoryPanelsEqual);
+
+/** Data-only equality for a category panel: function identities are ignored
+ *  (the parent recreates them per render); only visible data matters. */
+function areCategoryPanelsEqual(
+  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[] },
+  next: { prodId: string; category: ReferenceCategory; items: CustomRef[] },
+): boolean {
+  if (prev.prodId !== next.prodId) return false;
+  if (prev.category.id !== next.category.id || prev.category.name !== next.category.name) return false;
+  return areRefItemListsEqual(prev.items, next.items);
 }
 
-function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }: {
+function areRefItemListsEqual(a: CustomRef[], b: CustomRef[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!areRefItemsEqual(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function areRefItemsEqual(a: CustomRef, b: CustomRef): boolean {
+  return (
+    a.id === b.id &&
+    a.name === b.name &&
+    (a.imagePath ?? null) === (b.imagePath ?? null) &&
+    (a.artwork ?? null) === (b.artwork ?? null) &&
+    (a.media ?? null) === (b.media ?? null) &&
+    (a.mediaPath ?? null) === (b.mediaPath ?? null) &&
+    (a.categoryId ?? "") === (b.categoryId ?? "")
+  );
+}
+
+/** Perf 1.5 + 2.4: one reference tile. Memoized on data (never on callback
+ *  identity) so a rename keystroke re-renders O(1) tile, not O(all). Zoom is
+ *  fully local state so it never bubbles to the parent. `contentVisibility`
+ *  bounds off-screen layout cost without a virtualization dependency, and
+ *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
+ *  open N media elements + metadata loads. */
+const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }: {
   prodId: string;
   refItem: CustomRef;
   onAttach: (id: string) => void;
@@ -257,28 +312,41 @@ function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }:
   const isVideo = r.media === "video" && !!r.mediaPath;
   const hasImage = !!imgUrl && !isVideo;
   const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
+  // Perf 2.4: video element mounts only on first hover/expand; before that a
+  // static glyph stands in (no metadata fetch storm for large libraries).
+  const [videoActive, setVideoActive] = useState(false);
+  const activateVideo = useCallback(() => setVideoActive(true), []);
   const menu = useImageContextMenu({
     src: imgUrl ?? undefined,
     productionId: r.imagePath ? prodId : undefined,
     relPath: r.imagePath ?? undefined,
     dataUrl: r.imagePath ? undefined : (r.artwork ?? undefined),
   });
+  const handleZoom = useCallback(() => setZoom({ name: r.name, url: imgUrl! }), [r.name, imgUrl]);
+  const handleCloseZoom = useCallback(() => setZoom(null), []);
+  const handleAttach = useCallback(() => void onAttach(r.id), [onAttach, r.id]);
+  const handleRemove = useCallback(() => onRemove(r.id), [onRemove, r.id]);
+  const handleRename = useCallback((e: ChangeEvent<HTMLInputElement>) => onRename(r.id, e.target.value), [onRename, r.id]);
+  const handleEditRef = useCallback(() => onEditRef?.(r), [onEditRef, r]);
+  const handleDragStart = useCallback((e: DragEvent) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }, [r.id]);
   return (
-    <figure className="prod-ref">
+    <figure className="prod-ref" style={{ contentVisibility: "auto", containIntrinsicSize: "220px 240px" }}>
       {imgUrl
-        ? <img src={imgUrl} alt={r.name} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }} onContextMenu={hasImage ? menu.onContextMenu : undefined} />
+        ? <img src={imgUrl} alt={r.name} draggable onDragStart={handleDragStart} onContextMenu={hasImage ? menu.onContextMenu : undefined} />
         : isVideo
-          ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }} />
+          ? (videoActive
+            ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="none" autoPlay onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={handleDragStart} />
+            : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>)
           : <div className="prod-ref-blank">＋</div>}
       <div className="prod-ref-actions">
-        {hasImage && <button className="prod-ref-zoom" title="Enlarge this reference" onClick={() => setZoom({ name: r.name, url: imgUrl! })}><MagnifyIcon size={12} /></button>}
-        {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(r.id)}><ImportIcon size={12} /></button>}
-        {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={() => onEditRef(r)}><EditIcon size={12} /></button>}
-        <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(r.id)}><XIcon size={12} /></button>
+        {hasImage && <button className="prod-ref-zoom" title="Enlarge this reference" onClick={handleZoom}><MagnifyIcon size={12} /></button>}
+        {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
+        {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
+        <button className="prod-ref-del" title="Delete this reference" onClick={handleRemove}><XIcon size={12} /></button>
       </div>
-      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={(e) => onRename(r.id, e.target.value)} /></figcaption>
+      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={handleRename} /></figcaption>
       {zoom && (
-        <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
+        <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
           <figure className="prod-ref-lightbox-card">
             <img src={zoom.url} alt={zoom.name} />
             <figcaption>{zoom.name} — click anywhere to close</figcaption>
@@ -287,7 +355,10 @@ function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }:
       )}
     </figure>
   );
-}
+}, (prev, next) =>
+  prev.prodId === next.prodId &&
+  areRefItemsEqual(prev.refItem, next.refItem) &&
+  (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0));
 
 export interface PromptReference {
   id: string;

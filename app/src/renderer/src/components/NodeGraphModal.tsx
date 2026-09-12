@@ -2240,6 +2240,27 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     });
   });
   const nodesRef = useRef(nodes);
+  // Perf 2.1: coalesce drag-tick position changes to one apply per frame.
+  // Pointer moves fire far faster than React can commit O(nodes) arrays, so
+  // pure dragging ticks accumulate here and flush on rAF; everything else
+  // (dragStop, select, remove, resize) flushes pending work synchronously
+  // first and takes the full path below.
+  const pendingPosChanges = useRef<Parameters<typeof applyNodeChanges<GraphNode>>[0]>([]);
+  const posRaf = useRef<number | null>(null);
+  const flushPosChanges = useCallback(() => {
+    posRaf.current = null;
+    const pending = pendingPosChanges.current;
+    if (pending.length === 0) return;
+    pendingPosChanges.current = [];
+    const next = applyNodeChanges(pending, nodesRef.current);
+    nodesRef.current = next;
+    setNodes(next);
+  }, []);
+  useEffect(() => () => {
+    if (posRaf.current !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(posRaf.current);
+    posRaf.current = null;
+    pendingPosChanges.current = [];
+  }, []);
   useEffect(() => {
     const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
     const derived = buildDerived();
@@ -2253,19 +2274,35 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       // re-renders with a fresh `references` array identity).
       const a = d.data as Record<string, unknown>;
       const b = old.data as Record<string, unknown>;
+      // Perf 2.2: element-wise identity for per-node lists. Length-only checks
+      // missed in-place edits (same count, changed item) AND rebuilt data on
+      // every pass; when nothing genuinely differs the OLD node (and its data
+      // reference) is reused verbatim so React Flow skips the re-render.
+      const sameGenItems = (x: unknown, y: unknown): boolean => {
+        const ax = x as { url: string; prompt: string }[];
+        const by = y as { url: string; prompt: string }[];
+        if (!Array.isArray(ax) || !Array.isArray(by) || ax.length !== by.length) return false;
+        return ax.every((it, i) => it.url === by[i]?.url && it.prompt === by[i]?.prompt);
+      };
+      const sameKeyframes = (x: unknown, y: unknown): boolean => {
+        const ax = x as { id: string; name: string; artwork: string }[];
+        const by = y as { id: string; name: string; artwork: string }[];
+        if (!Array.isArray(ax) || !Array.isArray(by) || ax.length !== by.length) return false;
+        return ax.every((k, i) => k.id === by[i]?.id && k.name === by[i]?.name && k.artwork === by[i]?.artwork);
+      };
       let equal = true;
       if (d.type !== old.type) equal = false;
       else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.magicActive as boolean) === (b.magicActive as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
-      else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && (a.keyframes as unknown[]).length === (b.keyframes as unknown[]).length && (a.keyframes as { artwork: string }[]).every((k, i) => k.artwork === (b.keyframes as { artwork: string }[])[i]?.artwork) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean);
-      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
+      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
+      else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && sameKeyframes(a.keyframes, b.keyframes) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean);
+      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
       else if (d.type === "videoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "editprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "style") equal = (a.value as string) === (b.value as string);
       else if (d.type === "brand") equal = (a.include as boolean) === (b.include as boolean);
       else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.missing as boolean) === (b.missing as boolean);
       else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
-      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && (a.items as unknown[]).length === (b.items as unknown[]).length && (a.busy as boolean) === (b.busy as boolean);
+      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
       if (equal) return old;
       changed = true;
       // A rebuilt node keeps its canvas geometry: position, selection, and —
@@ -2291,6 +2328,15 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     setNodes(next);
   }, [buildDerived]);
 
+  // Perf 2.3: stable references signature — the parent passes a fresh array
+  // identity on unrelated re-renders, which used to rebuild every edge. The
+  // edges memo depends on this value-string (compared by value) instead of
+  // raw identity; the body still reads the live array, so content changes
+  // always recompute while identity-only churn is ignored.
+  const referencesSig = useMemo(
+    () => references.map((r) => `${r.id}|${r.artwork ?? ""}|${r.media ?? ""}|${r.mediaPath ?? ""}`).sort().join("\n"),
+    [references],
+  );
   const edges = useMemo<Edge[]>(() => {
     // Style edges are freely pluggable — the edge shows whether the style node
     // is plugged into that prompt, independent of the dropdown value. Switching
@@ -2393,12 +2439,32 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       // The output is fed ONLY by the generation nodes or a reference — the
       // composer's classic straight-to-output pipe is gone.
     ];
-  }, [unionTagged, tagged, taggedVideo, taggedEditByNode, editNodes, editPromptValues, selectedEdges, prompt, videoPromptValue, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphVideoSourceRefId, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphTweenRefIds, references, hasVideoTool, hasTweenTool]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unionTagged, tagged, taggedVideo, taggedEditByNode, editNodes, editPromptValues, selectedEdges, prompt, videoPromptValue, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphVideoSourceRefId, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphTweenRefIds, referencesSig, hasVideoTool, hasTweenTool]);
 
   const onNodesChange = useCallback<OnNodesChange<GraphNode>>((changes) => {
     // Canonical controlled flow: apply every change (position, select,
     // dimension) to the persistent node state in one pass so React Flow's
     // internal selection bookkeeping and our state never diverge.
+    // Perf 2.1: pure drag ticks (position + dragging) coalesce to one apply
+    // per animation frame — O(changed) commits instead of O(nodes) per
+    // pointermove. Anything else flushes pending ticks first.
+    const onlyDragTick = changes.length > 0 && changes.every((c) => c.type === "position" && (c as { dragging?: boolean }).dragging === true);
+    if (onlyDragTick) {
+      pendingPosChanges.current.push(...changes);
+      if (posRaf.current === null) {
+        if (typeof requestAnimationFrame === "function") posRaf.current = requestAnimationFrame(flushPosChanges);
+        else flushPosChanges();
+      }
+      return;
+    }
+    if (pendingPosChanges.current.length > 0) {
+      if (posRaf.current !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(posRaf.current);
+      posRaf.current = null;
+      const pending = pendingPosChanges.current;
+      pendingPosChanges.current = [];
+      nodesRef.current = applyNodeChanges(pending, nodesRef.current);
+    }
     const dragStop = changes.some((c) => c.type === "position" && c.dragging !== true);
     let removed = changes.filter((c): c is { type: "remove"; id: string } => c.type === "remove");
 
@@ -2533,7 +2599,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
       });
     }
-  }, [videoGenActive, tweenActive, showHint]);
+  }, [videoGenActive, tweenActive, showHint, flushPosChanges]);
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     for (const c of changes) {

@@ -48,10 +48,29 @@ export function createStore<T>(config: DocumentStoreConfig<T>): DocumentStore<T>
   const docPath = (id: string) => path.join(dir(), `${id}.json`);
   const archiveDir = () => path.join(dir(), "archive");
 
+  // Perf (1.1): parsed-document cache keyed by absolute path. Single-writer
+  // app, so mtimeMs invalidation is correct: a hit skips JSON.parse entirely.
+  // The cached object graph is returned unchanged — callers must not mutate
+  // it without saving (the domain save paths mutate-then-save, which is the
+  // intended ownership flow).
+  const cache = new Map<string, { mtimeMs: number; data: T }>();
+
   function read(id: string): T | null {
+    const target = docPath(id);
+    let mtimeMs: number;
     try {
-      const raw = JSON.parse(fs.readFileSync(docPath(id), "utf8")) as T;
-      return config.decode ? config.decode(raw) : raw;
+      mtimeMs = fs.statSync(target).mtimeMs;
+    } catch {
+      cache.delete(target);
+      return null;
+    }
+    const hit = cache.get(target);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.data;
+    try {
+      const raw = JSON.parse(fs.readFileSync(target, "utf8")) as T;
+      const decoded = config.decode ? config.decode(raw) : raw;
+      cache.set(target, { mtimeMs, data: decoded });
+      return decoded;
     } catch {
       return null;
     }
@@ -66,6 +85,21 @@ export function createStore<T>(config: DocumentStoreConfig<T>): DocumentStore<T>
     const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
     fs.renameSync(tmp, target);
+    // The writer never pays a re-parse: cache what load() would decode to
+    // (not the raw pre-encode object) under the fresh mtime, so a cache hit
+    // is indistinguishable from a disk read + decode.
+    try {
+      const mtimeMs = fs.statSync(target).mtimeMs;
+      let cached: T;
+      try {
+        cached = config.decode ? config.decode(payload as T) : (payload as T);
+      } catch {
+        cached = doc;
+      }
+      cache.set(target, { mtimeMs, data: cached });
+    } catch {
+      cache.delete(target);
+    }
   }
 
   return {
@@ -92,6 +126,7 @@ export function createStore<T>(config: DocumentStoreConfig<T>): DocumentStore<T>
     remove(id) {
       try {
         fs.rmSync(docPath(id), { force: true });
+        cache.delete(docPath(id));
         config.sideFiles?.remove?.(id, dir());
         return true;
       } catch {
@@ -103,6 +138,7 @@ export function createStore<T>(config: DocumentStoreConfig<T>): DocumentStore<T>
       try {
         fs.mkdirSync(dst, { recursive: true });
         fs.renameSync(docPath(id), path.join(dst, `${id}.json`));
+        cache.delete(docPath(id));
         config.sideFiles?.archive?.(id, dst, dir());
         return true;
       } catch {

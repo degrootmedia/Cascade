@@ -941,6 +941,10 @@ export interface Production {
    */
   storyboardPdf?: StoryboardPdfSettings;
   assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string };
+  /** Schema version gating the one-time board-artwork migrations (perf 1.2):
+   *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk
+   *  entirely. Missing/older runs the idempotent migrations once, then stamps. */
+  schemaVersion?: number;
 }
 
 /** Remembered Step 3 storyboard-PDF export settings (see `Production.storyboardPdf`). */
@@ -1259,9 +1263,14 @@ export interface CascadeApi {
    *  `framePath` selects a frame from either generation node or legacy history;
    *  omit it for the current frame. */
   boardImage(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
-  /** Load a board frame at full resolution (no downscale) for the lightbox. */
+  /** Full-resolution board frame for the lightbox (perf 2.5): a
+   *  cascade-media:// URL streamed by media-protocol.ts, not a base64 blob.
+   *  Usable directly as an <img> src. */
   boardImageFull(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   boardThumbnail(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
+  /** Batch board thumbnails: one IPC for N shots (perf 1.4). Returns only the
+   *  shots that resolved to artwork; missing frames are omitted. */
+  boardThumbnails(productionId: string, shotIds: string[]): Promise<Record<string, string>>;
   /**
    * Step 3: re-link broken storyboard image paths — after board files were
    * moved/renamed externally (or a production folder was re-registered), a

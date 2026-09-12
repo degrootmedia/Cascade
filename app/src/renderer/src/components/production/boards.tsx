@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
-import { afterFirstPaint, queueBoardThumb } from "./board-thumbs.js";
+import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
@@ -100,7 +100,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
       if (!live) return;
       void afterFirstPaint().then(() => {
         if (!live) return;
-        void queueBoardThumb(() => window.cascade.boardThumbnail(prod.meta.id, shot.id))
+        // Perf 1.4: coalesced batch — N mounting cards collapse into one
+        // boardThumbnails IPC per production instead of N round-trips.
+        void batchedBoardThumb(prod.meta.id, shot.id)
           .then((d) => { if (live) setImg(d); })
           .catch(() => {});
       });

@@ -83,13 +83,23 @@ export function listProductions(): ProductionMeta[] {
   return store.list().map(summary);
 }
 
+/** Current production schema version. Bump when adding a one-time migration
+ *  to migrateBoardArtwork; loads with >= this value skip the board walk. */
+export const PRODUCTION_SCHEMA_VERSION = 1;
+
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
+  // Perf 1.2: post-migration loads skip the full-board walk entirely. The
+  // >= keeps a downgrade from silently stamping a newer document down.
+  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) return p;
   // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
   // node-graph generation nodes). Persist in place so the very next read
-  // sees the new layout.
-  if (migrateBoardArtwork(p)) store.save(p);
+  // sees the new layout. Always stamp, even when the walk reports no change,
+  // so the next load hits the fast path.
+  migrateBoardArtwork(p);
+  p.schemaVersion = PRODUCTION_SCHEMA_VERSION;
+  store.save(p);
   return p;
 }
 
@@ -105,6 +115,7 @@ export function referenceImagePaths(p: ProductionFile): string[] {
 export function saveProduction(p: ProductionFile): void {
   normalize(p);
   p.meta.updatedAt = new Date().toISOString();
+  p.schemaVersion ??= PRODUCTION_SCHEMA_VERSION;
   store.save(p);
 }
 
@@ -310,6 +321,7 @@ export function newProduction(name: string, parentFolder: string): ProductionFil
     status: {},
     assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
+    schemaVersion: PRODUCTION_SCHEMA_VERSION,
   };
   // Scaffold the asset folders inside the user's production folder.
   for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
@@ -373,6 +385,7 @@ export function importProduction(folder: string): ProductionFile {
     status: {},
     assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
+    schemaVersion: PRODUCTION_SCHEMA_VERSION,
   };
   // Scaffold only what's missing — never delete or overwrite.
   for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {

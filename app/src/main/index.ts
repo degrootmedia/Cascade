@@ -40,6 +40,47 @@ import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, P
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
 
+/** Perf 1.3: memoized 480px board thumbnails. Keyed by
+ *  productionId:shotId:framePath, validated by artworkPath:mtimeMs so a
+ *  re-generated frame naturally misses. Bounded LRU (~1k entries of tens-of-KB
+ *  base64) — repeat paints become string returns with no disk decode/resize. */
+const BOARD_THUMB_CACHE_MAX = 1000;
+const boardThumbCache = new Map<string, { key: string; dataUrl: string }>();
+function boardThumbGet(cacheKey: string, fileKey: string): string | null {
+  const hit = boardThumbCache.get(cacheKey);
+  if (!hit || hit.key !== fileKey) return null;
+  // LRU touch.
+  boardThumbCache.delete(cacheKey);
+  boardThumbCache.set(cacheKey, hit);
+  return hit.dataUrl;
+}
+function boardThumbSet(cacheKey: string, fileKey: string, dataUrl: string): void {
+  boardThumbCache.delete(cacheKey);
+  boardThumbCache.set(cacheKey, { key: fileKey, dataUrl });
+  while (boardThumbCache.size > BOARD_THUMB_CACHE_MAX) {
+    const oldest = boardThumbCache.keys().next().value;
+    if (oldest === undefined) break;
+    boardThumbCache.delete(oldest);
+  }
+}
+/** Resolve + validate a board frame request. Returns null for unknown shots
+ *  or paths outside the shot's history (same guard as the single handler). */
+function resolveBoardFrame(p: productions.ProductionFile, shotId: string, framePath?: string): { rel: string; abs: string } | null {
+  const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+  if (!shot) return null;
+  const rel = framePath ?? shot.artwork;
+  if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+  return { rel, abs: assetPath(p, rel) };
+}
+function renderBoardThumb(abs: string): string | null {
+  try {
+    const image = nativeImage.createFromPath(abs).resize({ width: 480 });
+    return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Custom scheme for streaming production assets (voiceover, music) to the
  * renderer. Registered privileged + streaming so <audio> can range-request
@@ -2072,35 +2113,64 @@ function registerIpc() {
     }
   });
 
-  // Full-resolution board frame for the zoom lightbox — the same file as
-  // boardImage, but without the 640px downscale.
+  // Full-resolution board frame for the zoom lightbox. Perf 2.5: returns a
+  // cascade-media:// URL (streamed + range-capable by media-protocol.ts),
+  // not a re-encoded base64 blob — no synchronous file read, no ~33% base64
+  // inflation, no giant IPC payload. The renderer uses it directly as <img>
+  // src. Base64 stays only for the tiny 480px thumbnails where the round-trip
+  // cost dominates.
   handle("production:boardImageFull", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
-    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot) return null;
-    const rel = framePath ?? shot.artwork;
-    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+    const resolved = resolveBoardFrame(p, shotId, framePath);
+    if (!resolved) return null;
     try {
-      const buf = fs.readFileSync(assetPath(p, rel));
-      const mime = rel.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
-      return `data:${mime};base64,${buf.toString("base64")}`;
+      if (!fs.statSync(resolved.abs).isFile()) return null;
     } catch {
       return null;
     }
+    return `cascade-media://${id}/${encodeURIComponent(resolved.rel)}`;
   });
 
 handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
-    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot) return null;
-    const rel = framePath ?? shot.artwork;
-    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+    const resolved = resolveBoardFrame(p, shotId, framePath);
+    if (!resolved) return null;
+    const cacheKey = `${id}:${shotId}:${framePath ?? ""}`;
     try {
-      const image = nativeImage.createFromPath(assetPath(p, rel)).resize({ width: 480 });
-      return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
+      const mtimeMs = fs.statSync(resolved.abs).mtimeMs;
+      const hit = boardThumbGet(cacheKey, `${resolved.abs}:${mtimeMs}`);
+      if (hit) return hit;
+      const dataUrl = renderBoardThumb(resolved.abs);
+      if (dataUrl) boardThumbSet(cacheKey, `${resolved.abs}:${mtimeMs}`, dataUrl);
+      return dataUrl;
     } catch { return null; }
+  });
+
+  // Perf 1.4: batch thumbnails — one loadProduction + one pass for N shots.
+  // The scheduler calls this in MAX_CONCURRENT_THUMBS-sized chunks, turning
+  // ~100 IPC round-trips into a handful. Per-shot handler stays for single
+  // refresh paths.
+  handle("production:boardThumbnails", (_e, id: string, shotIds: string[]) => {
+    const p = productions.loadProduction(id);
+    if (!p) return {};
+    const out: Record<string, string> = {};
+    const ids = Array.isArray(shotIds) ? shotIds.slice(0, 200) : [];
+    for (const shotId of ids) {
+      if (typeof shotId !== "string" || !shotId) continue;
+      const resolved = resolveBoardFrame(p, shotId);
+      if (!resolved) continue;
+      const cacheKey = `${id}:${shotId}:`;
+      try {
+        const mtimeMs = fs.statSync(resolved.abs).mtimeMs;
+        const hit = boardThumbGet(cacheKey, `${resolved.abs}:${mtimeMs}`);
+        if (hit) { out[shotId] = hit; continue; }
+        const dataUrl = renderBoardThumb(resolved.abs);
+        if (dataUrl) { boardThumbSet(cacheKey, `${resolved.abs}:${mtimeMs}`, dataUrl); out[shotId] = dataUrl; }
+      } catch { /* skip missing frames */ }
+    }
+    return out;
   });
 
   // Step 3: re-link broken storyboard image paths — after board files were

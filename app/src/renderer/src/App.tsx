@@ -196,11 +196,32 @@ export function App() {
     const onChange = () => void refreshMedia();
     window.addEventListener("cascade:media-provider-changed", onChange);
     window.addEventListener("focus", onChange);
-    const timer = window.setInterval(() => void refreshMedia(), 60_000);
+    // Perf 1.6: the 60s poll never fires while the tab is hidden — visibility
+    // resume triggers an immediate refresh instead. Long node-editor sessions
+    // stop paying a periodic main-thread stall in the background.
+    let timer: number | undefined;
+    const startPoll = () => {
+      if (timer !== undefined) return;
+      timer = window.setInterval(() => {
+        if (document.hidden) return;
+        void refreshMedia();
+      }, 60_000);
+    };
+    const stopPoll = () => {
+      if (timer !== undefined) { window.clearInterval(timer); timer = undefined; }
+    };
+    const onVisibility = () => {
+      if (document.hidden) { stopPoll(); return; }
+      startPoll();
+      void refreshMedia();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (!document.hidden) startPoll();
     return () => {
       window.removeEventListener("cascade:media-provider-changed", onChange);
       window.removeEventListener("focus", onChange);
-      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopPoll();
     };
   }, [refreshMedia]);
 

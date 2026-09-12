@@ -43,6 +43,7 @@ export const productionChannels = {
   "production:boardImage": { method: "boardImage", kind: "invoke" },
   "production:boardImageFull": { method: "boardImageFull", kind: "invoke" },
   "production:boardThumbnail": { method: "boardThumbnail", kind: "invoke" },
+  "production:boardThumbnails": { method: "boardThumbnails", kind: "invoke" },
   "production:refreshBoardLinks": { method: "refreshBoardLinks", kind: "invoke" },
   "production:deleteBoardImage": { method: "deleteBoardImage", kind: "invoke" },
   "production:editBoard": { method: "editBoard", kind: "invoke" },

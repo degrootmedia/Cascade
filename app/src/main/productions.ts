@@ -90,9 +90,19 @@ export const PRODUCTION_SCHEMA_VERSION = 1;
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
+  // The store caches parsed documents and hands out the cached object graph
+  // by reference. Every caller gets a private copy instead: long-running
+  // generation jobs hold shot/node references across awaits while the
+  // renderer keeps saving, and a mid-run `production:save` replaces the
+  // cached graph's scenes — silently detaching the job's references so its
+  // finished generation is recorded onto orphaned objects and never
+  // persisted (file on disk, nothing in history). Cloning here closes that
+  // whole class: holders can never share, and rebase merges by value.
+  // The file is small (tens of KB) so the copy is microseconds; the cache
+  // still skips the JSON.parse on hits.
   // Perf 1.2: post-migration loads skip the full-board walk entirely. The
   // >= keeps a downgrade from silently stamping a newer document down.
-  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) return p;
+  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) return structuredClone(p);
   // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
   // node-graph generation nodes). Persist in place so the very next read
   // sees the new layout. Always stamp, even when the walk reports no change,
@@ -100,7 +110,7 @@ export function loadProduction(id: string): ProductionFile | null {
   migrateBoardArtwork(p);
   p.schemaVersion = PRODUCTION_SCHEMA_VERSION;
   store.save(p);
-  return p;
+  return structuredClone(p);
 }
 
 /** Absolute paths of every artwork-bearing reference image (characters,

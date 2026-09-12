@@ -161,6 +161,34 @@ control chars ï¿½ only a byte-level scan found them.
   one event (field change then layout), the later must build on the former's
   result.
 
+## 2026-09-12 — Store cache aliasing silently drops finished generations
+
+- Symptom: an edit-image node run billed (ledger), wrote its files to
+  `boards/`, but the history entry never appeared. No error anywhere — the
+  job reported success. `script.md`'s mtime proved a renderer
+  `production:save` landed mid-generation.
+- Cause: `store.ts` hands out the cached document graph by reference, and
+  `loadProduction` passed it through. The job held shot/node refs across the
+  generation `await`; the mid-run renderer save (`applyRendererState`)
+  replaced the cached graph's `scenes`, detaching the job's refs. The job
+  then recorded onto orphaned objects and the rebase commit saved without
+  the new generation. File on disk, nothing in history, success emitted.
+- Fix: `loadProduction` returns `structuredClone(p)` — every holder gets a
+  private graph, rebase merges by value. File is tens of KB, so the copy is
+  microseconds; the cache still skips the JSON.parse on hits.
+- Rules:
+  1. Never hold a document object reference across an `await` in main — or
+     make sharing impossible (clone on load). A same-thread save cannot
+     interleave synchronous code, so the await is the only detachment
+     window; any save in that window must not pull the graph out from under
+     a holder.
+  2. "File written, no record, no error" means the record landed on a
+     detached object — check object identity (cache aliasing), not just the
+     record call.
+  3. Regression test must reproduce the interleaving through the real store
+     (job load → holder refs → renderer save → record → commit), not just the
+     pure record function.
+
 ## 2026-09-11 — Higgsfield t2v+refs 422: rebind, don't just surface
 
 - Symptom: Seedance 2.5 video generation with a board frame + playblast ref

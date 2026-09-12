@@ -26,7 +26,8 @@ vi.mock("../src/main/scripting.js", () => ({
 }));
 
 import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceImagePaths } from "../src/main/productions.js";
-import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
+import type { ProductionFile } from "../src/main/productions.js";
+import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
@@ -301,6 +302,71 @@ describe("board frame selection persistence", () => {
     expect(boardFrameHistory(incoming.scenes[0].shots[0])).toEqual([
       "boards/0100/edit-1.jpg", "boards/0100/image-0.jpg", "boards/0100/image-1.jpg",
     ]);
+  });
+});
+
+describe("loadProduction isolation", () => {
+  function jobDoc(id: string): Production {
+    return baseProduction({
+      meta: { ...baseProduction().meta, id, folder: path.join(dataDir, "assets") },
+      scenes: [
+        {
+          number: 1,
+          title: "S1",
+          shots: [
+            {
+              id: "shot1",
+              number: "0100",
+              audio: "",
+              visual: "Hero walks",
+              graphEditNodes: [{ id: "edit0", prompt: "old prompt", gens: [{ path: "boards/0100/a.jpg", prompt: "old prompt", model: "m", at: "" }], genIndex: 0 }],
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("hands out a private copy per load so holders can't alias the store cache", () => {
+    saveProduction(jobDoc("load-isolation") as unknown as ProductionFile);
+    const a = loadProduction("load-isolation")!;
+    const b = loadProduction("load-isolation")!;
+    expect(a).not.toBe(b);
+    expect(a.scenes).not.toBe(b.scenes);
+    expect(a.scenes[0].shots[0]).not.toBe(b.scenes[0].shots[0]);
+    expect(a).toEqual(b);
+    // Mutating one holder without saving is invisible to the next load.
+    a.scenes[0].shots[0].artwork = "boards/0100/mutated.jpg";
+    expect(loadProduction("load-isolation")!.scenes[0].shots[0].artwork).toBeUndefined();
+  });
+
+  it("a renderer save mid-generation can't detach the job's shot (lost edit history)", () => {
+    // The 2026-09-12 incident: an edit-image generation finished and its file
+    // landed on disk, but the history entry never persisted. The job held its
+    // shot/node references across the generation await; a renderer
+    // `production:save` in that window replaced the cached document's scenes,
+    // so the job recorded onto detached objects and the commit saved without
+    // the new generation — reporting success.
+    saveProduction(jobDoc("mid-job-save") as unknown as ProductionFile);
+    // Job starts and grabs its references, then awaits the generation.
+    const pq = loadProduction("mid-job-save")!;
+    const shot = pq.scenes[0].shots[0];
+    const node = shot.graphEditNodes![0];
+    // ...generation runs... the renderer saves (new prompt, stale gens).
+    const existing = loadProduction("mid-job-save")!;
+    const incoming = structuredClone(existing);
+    incoming.scenes[0].shots[0].graphEditNodes![0].prompt = "new prompt";
+    saveProduction(applyRendererState(existing, incoming));
+    // Job resumes on its held references: records the finished generation
+    // (mirroring the generateEditNode handler) and commits.
+    node.prompt = "new prompt";
+    recordGraphEditGen(shot, node.id, "boards/0100/b.jpg", "new prompt", "m");
+    saveProduction(pq);
+    const final = loadProduction("mid-job-save")!;
+    const restored = final.scenes[0].shots[0].graphEditNodes![0];
+    expect(restored.prompt).toBe("new prompt");
+    expect((restored.gens ?? []).map((g) => g.path)).toEqual(["boards/0100/b.jpg", "boards/0100/a.jpg"]);
+    expect(restored.genIndex).toBe(0);
   });
 });
 

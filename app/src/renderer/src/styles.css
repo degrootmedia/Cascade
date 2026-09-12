@@ -440,6 +440,30 @@ body {
   line-height: 1.45;
 }
 .prod-style-prompt:focus { outline: none; border-color: var(--accent); }
+.prod-style-frame {
+  flex-shrink: 0;
+  align-self: center;
+  width: 96px;
+  height: 54px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+.prod-style-frame-empty {
+  flex-shrink: 0;
+  align-self: center;
+  width: 96px;
+  height: 54px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+.prod-style-frame-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .prod-style-remove {
   flex-shrink: 0;
   align-self: center;

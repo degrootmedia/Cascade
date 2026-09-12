@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { McpManager } from "./mcp.js";
 import { assetPath, type ImageGenFn, type GenerationRef } from "./pipeline.js";
-import { citePrompt, resolvePromptRefs } from "./providers/refs.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./providers/refs.js";
 import type { MediaProvider, ProviderEmit } from "./providers/types.js";
 import { uploadDataUrlReference } from "./openart-upload.js";
 import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "./video-ref.js";
@@ -992,7 +992,7 @@ private videoRefsAssign = videoRefsAssign;
           submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
         } catch { /* non-fatal: ref falls back to text-only */ }
       }
-      const fullPrompt = citePrompt(prompt, refs, submitted);
+      const fullPrompt = citePrompt(prompt, refs, submitted, styleRefNames(p));
       const hasRefs = refs.length > 0;
       const mode = hasRefs ? "image2image" : "text2image";
 
@@ -1242,7 +1242,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
         emit(`Reference "${r.name}" couldn't be uploaded (${why}) — continuing without it.`, "error");
       }
     }
-    const fullPrompt = citePrompt(resolved, refs, submitted);
+    const fullPrompt = citePrompt(resolved, refs, submitted, styleRefNames(p));
 
     const projectId = await this.resolveProject(p, (m) => emit(m)).catch(() => null);
 

@@ -118,6 +118,22 @@ export function tweenSupportsDuration(
   return opts.durations.includes(Math.round(durationSec));
 }
 
+/** Filter video models to those whose durations cover `requiredSeconds`.
+ *  Unknown options (null/undefined, empty durations) pass through — the probe
+ *  is pending, so the list must not strand. Otherwise the block length
+ *  (rounded, as the timeline snaps) must be an accepted length. */
+export function filterTweenModelsByDuration(
+  videoModels: OpenArtModelChoice[],
+  optsById: Record<string, VideoModelOptions | null | undefined>,
+  requiredSeconds: number
+): OpenArtModelChoice[] {
+  return videoModels.filter((m) => {
+    const o = optsById[m.id];
+    if (o === undefined || o === null) return true;
+    return tweenSupportsDuration(o, requiredSeconds);
+  });
+}
+
 /** Human-readable summary of a model's accepted lengths ("4–15s" for a
  *  contiguous range, "4, 8s" for discrete picks, "" when unknown). */
 export function tweenSupportedLabel(durations: number[] | undefined): string {
@@ -445,6 +461,13 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
               const sel = tweenPreviewTake(b);
               const badLength = !tweenSupportsDuration(selectedOpts, b.durationSec);
               const supported = tweenSupportedLabel(selectedOpts?.durations);
+              // Per-block compatible set: end-frame list already applied
+              // upstream; here filter by this block's duration. Pending probes
+              // (null/undefined) pass through as "checking compatibility".
+              const compatible = filterTweenModelsByDuration(videoModels, allOpts, b.durationSec);
+              const probePending = videoModels.some((m) => allOpts[m.id] === undefined);
+              const noneFit = !probePending && videoModels.length > 0 && compatible.length === 0;
+              const blocked = badLength || noneFit;
               return (
                 <div
                   key={b.id}
@@ -454,7 +477,20 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   title={`${start?.name ?? ""} → ${keyframes.find((k) => k.id === b.endRefId)?.name ?? ""} · ${b.durationSec}s`}
                 >
                   <div className="prod-tween-block-label">{b.startSec.toFixed(0)}s → {(b.startSec + b.durationSec).toFixed(0)}s</div>
-                  {badLength && (
+                  {probePending && (
+                    <div className="prod-tween-block-warn" title="Duration options are still loading.">
+                      Checking compatibility…
+                    </div>
+                  )}
+                  {noneFit && (
+                    <div
+                      className="prod-tween-block-warn"
+                      title={`No listed model supports a ${b.durationSec}s block — retime the block or pick another model.`}
+                    >
+                      {`No model supports a ${b.durationSec}s block.`}
+                    </div>
+                  )}
+                  {badLength && !noneFit && (
                     <div
                       className="prod-tween-block-warn"
                       title={`The chosen model supports ${supported || "other lengths"} — retime the block or pick another model.`}
@@ -474,9 +510,9 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   <div className="prod-tween-block-row" onClick={(e) => e.stopPropagation()}>
                     <button
                       className="prod-btn primary prod-tween-go"
-                      disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || badLength}
+                      disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || blocked}
                       onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec, effectiveModel); }}
-                      title={badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
+                      title={noneFit ? `No model supports a ${b.durationSec}s block. Retime the block or pick another model.` : badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
                     >
                       {busyBlock === b.id ? "Generating…" : "Submit block"}
                     </button>

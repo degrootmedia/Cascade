@@ -60,7 +60,8 @@ import type {
   VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
-import { citePrompt, resolvePromptRefs } from "./refs.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { resizeVideoRef } from "../video-ref.js";
 
 /** Prefix marking model ids that belong to this provider (see types.ts).
  *  The raw id is the CLI/MCP job_type (`seedance_2_5`); the prefix keeps the
@@ -819,7 +820,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       // text-only, as on the MCP transports).
       const { paths, cleanup } = writeCliTempRefs(refs);
       const uploaded: (string | null)[] = [...paths];
-      const fullPrompt = citePrompt(prompt, refs, uploaded);
+      const fullPrompt = citePrompt(prompt, refs, uploaded, styleRefNames(p));
       try {
         const args = [modelId, "--prompt", fullPrompt];
         const imagePaths = paths.filter((f): f is string => !!f);
@@ -945,6 +946,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
     refs.push(...extras);
 
+    // Every video reference is downscaled to max 720p before upload (mirrors
+    // the MCP transports) — including the start/end frames when they are video.
+    for (const r of refs) {
+      if (/^data:video\//i.test(r.dataUrl)) {
+        try {
+          r.dataUrl = await resizeVideoRef(r.dataUrl);
+        } catch { /* fallback: original, logged as downscaled:false via wrapper */ }
+      }
+    }
+
     const modelId = await this.resolveVideoModel(opts.model, items, Boolean(frameRefs?.end));
     if (!modelId) throw new Error("The Higgsfield CLI listed no video models — sign in (`higgsfield auth login`) and retry.");
     const detail = await this.modelDetail(modelId).catch(() => null);
@@ -954,7 +965,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded);
+    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
       const args = [modelId, "--prompt", fullPrompt];
       // Start frame: `--start-image`, falling back to `--image` on models

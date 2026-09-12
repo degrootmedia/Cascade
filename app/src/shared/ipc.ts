@@ -534,11 +534,15 @@ export interface CustomRef {
   shotIds?: string[];
   /** User-created category; absent means uncategorized. */
   categoryId?: string;
+  /** Style-only override: auto-attaches with a style-only clause. */
+  styleOnly?: boolean;
 }
 
 export interface ReferenceCategory {
   id: string;
   name: string;
+  /** "style" refs auto-attach to every submission with a style-only clause. */
+  kind?: "content" | "style";
 }
 
 /** A character or prop found during ingest, awaiting explicit user approval. */
@@ -573,6 +577,13 @@ export interface ProductionStyle {
   name: string;
   /** The full generation prompt for this style. */
   prompt: string;
+  /** Workspace-relative path of the style frame (the look anchor reused on
+   *  every shot that resolves to this style). Absent = text-only behavior. */
+  imagePath?: string;
+  /** The seed reused for the board (defaults to the production lookSeed). */
+  seed?: number;
+  /** How the frame was authored — the UI only auto-regenerates generated frames. */
+  frameSource?: "upload" | "generated" | "reference" | "anchor";
 }
 
 /** An OpenArt model surfaced in the Step 3 model dropdown. */
@@ -926,6 +937,11 @@ export interface Production {
    *  remain separate. The original prompts stay in `shot.prompt` untouched. */
   magicPrompts?: Record<string, string>;
   magicEnabled?: boolean;
+  /** Board-wide storyboard seed: fixed once per production so the same style
+   *  frame + frozen model/resolution repeats as closely as the vendor allows. */
+  lookSeed?: number;
+  /** The approved hero frame the look was locked to (its file backs a style frame). */
+  anchorShotId?: string;
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Step 2: generated 3D models (design-page generator). Newest first. */
   models3d?: ProductionModel[];
@@ -1046,6 +1062,14 @@ export interface CascadeApi {
   /** The user's saved media model arrangement (dropdowns follow it). */
   getMediaModelOrder(): Promise<string[]>;
   setMediaModelOrder(ids: string[]): Promise<void>;
+  /** Dev Mode: verbose human-readable submission logging. */
+  getDevMode(): Promise<boolean>;
+  setDevMode(v: boolean): Promise<void>;
+  /** Credit-free dry run: build + log the request, throw before vendor call. */
+  getSubmissionDryRun(): Promise<boolean>;
+  setSubmissionDryRun(v: boolean): Promise<void>;
+  /** Reveal the Dev Mode submission log in the OS file manager. */
+  openSubmissionLog(): Promise<void>;
   /** Show the native media context menu (Save as / Copy image / Edit externally / Open file folder) at the given page coords. */
   showImageMenu(opts: { src: string; x: number; y: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Download an image URL via the native save dialog (same as the native menu's "Save image as…"). */
@@ -1200,7 +1224,22 @@ export interface CascadeApi {
    * from it. The caller is responsible for checking the active model supports
    * image input first.
    */
-  styleFromImage(productionId: string, imageDataUrl: string): Promise<{ name: string; prompt: string }>;
+  styleFromImage(productionId: string, imageDataUrl: string): Promise<{ name: string; prompt: string; imagePath?: string }>;
+  /**
+   * Step 2: generate a style frame (look plate) for one style via the active
+   * media provider — fixed neutral-subject scaffold + the style's text —
+   * persist it to styles/ and point the style at it (frameSource "generated").
+   * Returns the updated production.
+   */
+  generateStyleFrame(productionId: string, styleId: string): Promise<Production>;
+  /**
+   * Step 2: attach an existing image (data URL) as one style's frame
+   * (frameSource "upload"). Returns the updated production.
+   */
+  setStyleFrame(productionId: string, styleId: string, imageDataUrl: string): Promise<Production>;
+  /** Step 3: lock the look — copy an approved shot frame to styles/ and point
+   *  the shot's style (or the master) at it (frameSource "anchor"). */
+  useShotAsStyleFrame(productionId: string, shotId: string, styleId?: string): Promise<Production>;
   /** Insert a shot (mid-numbered) before the given position; returns updated production. */
   insertShot(productionId: string, sceneNumber: number, index: number): Promise<Production>;
   /** Remove a shot by its stable id. */

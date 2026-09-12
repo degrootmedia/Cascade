@@ -13,7 +13,8 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { styleFramePrompt } from "../shared/look.js";
 import { McpManager } from "./mcp.js";
 import { resolveProductionFile } from "./media-menu.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection } from "./pipeline.js";
@@ -860,6 +861,26 @@ function registerIpc() {
     settings.setMediaModelOrder(Array.isArray(ids) ? ids.map(String) : []);
   });
 
+  handle("settings:getDevMode", () => settings.getDevMode());
+
+  handle("settings:setDevMode", (_e, v: boolean) => {
+    settings.setDevMode(v === true);
+  });
+
+  handle("settings:getSubmissionDryRun", () => settings.getSubmissionDryRun());
+
+  handle("settings:setSubmissionDryRun", (_e, v: boolean) => {
+    settings.setSubmissionDryRun(v === true);
+  });
+
+  handle("settings:openSubmissionLog", () => {
+    const dir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "submissions.md");
+    if (!fs.existsSync(file)) fs.writeFileSync(file, "# Cascade submissions\n", "utf8");
+    void shell.openPath(file);
+  });
+
   handle("settings:setModel", (_e, model: string) => {
     settings.setModel(model);
     resetAllAgents();
@@ -1390,7 +1411,8 @@ function registerIpc() {
   });
 
   // Step 2: look at a reference image and distill one named style from it.
-  // Returns { name, prompt }; the renderer appends it to the style set.
+  // Keeps the input image as the style's frame (the look anchor) instead of
+  // discarding it — the distilled text stays for text-only compatibility.
   handle("production:styleFromImage", async (_e, id: string, imageDataUrl: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
@@ -1403,13 +1425,87 @@ function registerIpc() {
     try {
       const excerpt = (p.scenes[0]?.shots ?? []).slice(0, 5).map((s) => s.visual).join(" ").slice(0, 800);
       const style = await stylePromptFromImage(imageDataUrl, excerpt, apiKey, settings.getModel(), settings.getBaseUrl());
+      // Persist the source image as the style frame (frameSource "reference").
+      let imagePath: string | undefined;
+      try {
+        imagePath = writeStyleFrame(p, `style-${Date.now().toString(36)}`, imageDataUrl);
+        productions.saveProduction(p);
+      } catch {
+        imagePath = undefined;
+      }
       productionEmit(id, `Style "${style.name}" generated from the image.`, "done");
-      return style;
+      return { ...style, ...(imagePath ? { imagePath } : {}) };
     } catch (e) {
       const msg = friendlyApiError(e);
       productionEmit(id, msg, "error");
       throw new Error(msg);
     }
+  });
+
+  // Step 2: generate a style frame (look plate) for one style via the active
+  // media provider — fixed neutral-subject scaffold + style text + brand.
+  handle("production:generateStyleFrame", (_e, id: string, styleId: string) =>
+    runProductionJob(id, "generating a style frame", async (p, emit) => {
+      const style = (p.styles ?? []).find((s) => s.id === styleId);
+      if (!style) throw new Error("Style not found.");
+      if (!style.prompt.trim() && !style.name.trim()) throw new Error("Write the style prompt first.");
+      const refMedia = mediaFor(undefined);
+      const gen = refMedia.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"), "16:9");
+      if (!gen) throw new Error(`${refMedia.displayName} isn't connected, so style frames can't be generated in-app.`);
+      const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p));
+      emit(`Generating a style frame for "${style.name || `Style ${style.index}`}” (16:9)…`);
+      const buf = await gen(prompt, []);
+      const ext = buf[0] === 0xff && buf[1] === 0xd8 ? "jpg" : "png";
+      const rel = writeStyleFrame(p, style.id, `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${buf.toString("base64")}`);
+      style.imagePath = rel;
+      style.frameSource = "generated";
+    })
+  );
+
+  // Step 2: attach an uploaded/pasted image as one style's frame.
+  handle("production:setStyleFrame", (_e, id: string, styleId: string, imageDataUrl: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const style = (p.styles ?? []).find((s) => s.id === styleId);
+    if (!style) throw new Error("Style not found.");
+    if (typeof imageDataUrl !== "string" || !imageDataUrl.startsWith("data:image/")) {
+      throw new Error("Pick or paste an image first.");
+    }
+    const rel = writeStyleFrame(p, style.id, imageDataUrl);
+    if (style.imagePath && style.imagePath !== rel) {
+      try { fs.unlinkSync(assetPath(p, style.imagePath)); } catch { /* old frame already gone */ }
+    }
+    style.imagePath = rel;
+    style.frameSource = "upload";
+    productions.saveProduction(p);
+    productionEmit(id, `Style frame set for "${style.name || `Style ${style.index}`}".`, "done");
+    return p;
+  });
+
+  // Step 3: lock the look — copy an approved shot frame to styles/ and point
+  // the shot's style (or the master) at it.
+  handle("production:useShotAsStyleFrame", (_e, id: string, shotId: string, styleId?: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const srcRel = shot.artwork;
+    if (!srcRel) throw new Error("That shot has no frame yet — generate it first.");
+    const target = (p.styles ?? []).find((s) => s.id === (styleId || shot.style)) ?? p.styles?.[0];
+    if (!target) throw new Error("No style to attach the frame to.");
+    const buf = fs.readFileSync(assetPath(p, srcRel));
+    const ext = path.extname(srcRel).slice(1).toLowerCase() || "jpg";
+    const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "png" ? "image/png" : "image/jpeg";
+    const rel = writeStyleFrame(p, target.id, `data:${mime};base64,${buf.toString("base64")}`);
+    if (target.imagePath && target.imagePath !== rel) {
+      try { fs.unlinkSync(assetPath(p, target.imagePath)); } catch { /* old frame already gone */ }
+    }
+    target.imagePath = rel;
+    target.frameSource = "anchor";
+    p.anchorShotId = shot.id;
+    productions.saveProduction(p);
+    productionEmit(id, `Locked the look to shot ${shot.number} for "${target.name || `Style ${target.index}`}".`, "done");
+    return p;
   });
 
   const mutateShots = (
@@ -2376,7 +2472,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!prompt) throw new Error("Describe the action first (e.g. \"she turns toward the window, coat trailing\").");
       const start = tweenKeyframeArtwork(p, shot, block.startRefId);
       const end = tweenKeyframeArtwork(p, shot, block.endRefId);
-      if (!start || !end) throw new Error("Both keyframes need images — pick references with artwork or generate a frame first.");
+      if (!start || !end) {
+        const missing = !start && !end ? "start and end frames" : !start ? "start frame" : "end frame";
+        throw new Error(`Block ${block.id}: missing ${missing} — pick references with artwork or generate a frame first. Nothing was submitted.`);
+      }
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",

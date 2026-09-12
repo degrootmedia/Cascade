@@ -25,6 +25,23 @@ export const PROVIDER_META: Record<MediaProviderId, { displayName: string }> = {
 
 export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
 
+/** Single source of truth for transport capabilities. Providers default to
+ *  the conservative value; a transport must opt in. Drives the tween
+ *  dropdown and pre-submit validation so UI and submission agree. */
+export interface ProviderCapabilities {
+  imageRefs: boolean;
+  videoRefs: boolean;
+  endFrame: boolean;
+  tween: boolean;
+}
+
+export const PROVIDER_CAPABILITIES: Record<MediaProviderId, ProviderCapabilities> = {
+  openart: { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
+  higgsfield: { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
+  "higgsfield-cli": { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
+  "openart-cli": { imageRefs: true, videoRefs: false, endFrame: false, tween: false },
+};
+
 /** Coerce a stored/foreign value to a known provider id (unknown → openart). */
 export function resolveProviderId(raw: unknown): MediaProviderId {
   if (raw === "higgsfield" || raw === "higgsfield-cli" || raw === "openart-cli") return raw;

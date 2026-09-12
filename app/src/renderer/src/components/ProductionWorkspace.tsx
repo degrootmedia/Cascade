@@ -69,6 +69,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [refiningStyleId, setRefiningStyleId] = useState<string | null>(null);
   // step 2: generating a style from an imported/pasted image (spinner on buttons)
   const [styleImgBusy, setStyleImgBusy] = useState(false);
+  // step 2: which style card is generating/uploading its frame (look anchor)
+  const [styleFrameBusy, setStyleFrameBusy] = useState<string | null>(null);
   // step 2: set when the active chat model can't see images (shows a popup)
   const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
   // step 3: board generation
@@ -692,7 +694,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 2: edit one style's field (persisted immediately). */
-  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number }>) {
+  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number; imagePath?: string; frameSource?: "upload" | "generated" | "reference" | "anchor" }>) {
     if (!prod) return;
     saveField({
       styles: (prod.styles ?? []).map((s, i) => (i === idx ? { ...s, ...patch } : s)),
@@ -734,12 +736,48 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const style = await window.cascade.styleFromImage(prod.meta.id, dataUrl);
       saveField({
-        styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: style.name, prompt: style.prompt }],
+        styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: style.name, prompt: style.prompt, ...(style.imagePath ? { imagePath: style.imagePath, frameSource: "reference" as const } : {}) }],
       });
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setStyleImgBusy(false);
+    }
+  }
+
+  /** Step 2: generate a style frame (look plate) for one style via IPC. */
+  function generateStyleFrame(styleId: string) {
+    if (!prod || styleFrameBusy) return;
+    setStyleFrameBusy(styleId);
+    setErr(null);
+    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId).finally(() => setStyleFrameBusy(null)));
+  }
+
+  /** Step 2: attach a picked file as one style's frame. */
+  async function uploadStyleFrame(styleId: string) {
+    if (!prod || styleFrameBusy) return;
+    const dataUrl = await window.cascade.pickReferenceImage();
+    if (!dataUrl) return;
+    setStyleFrameBusy(styleId);
+    setErr(null);
+    apply(window.cascade.setStyleFrame(prod.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
+  }
+
+  /** Step 2: drop files onto a style card to set its frame. */
+  async function dropStyleFrame(styleId: string, files: FileList | File[]) {
+    if (!prod || styleFrameBusy) return;
+    const file = Array.from(files).find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
+    setStyleFrameBusy(styleId);
+    setErr(null);
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      if (!prodRef.current) { setStyleFrameBusy(null); return; }
+      apply(window.cascade.setStyleFrame(prodRef.current.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      setStyleFrameBusy(null);
     }
   }
 
@@ -2356,6 +2394,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   {(prod.styles ?? []).map((s, i) => (
                     <div key={s.id} className="prod-style-card">
                       <span className="prod-style-index" title={`Style ${s.index} of up to ${MAX_STYLES}`}>{s.index}</span>
+                      {s.imagePath ? (
+                        <img
+                          className="prod-style-frame"
+                          src={cascadeMedia(prod.meta.id, s.imagePath)}
+                          alt={`Style frame for ${s.name || `Style ${s.index}`}`}
+                          title={s.frameSource === "generated" ? "Generated look plate — reused on every shot of this style" : s.frameSource === "anchor" ? "Locked look — from an approved frame" : "Style frame — reused on every shot of this style"}
+                        />
+                      ) : (
+                        <span className="prod-style-frame-empty" title="No style frame — boards generate from text only">no frame</span>
+                      )}
                       <div className="prod-style-fields">
                         <div className="prod-style-head">
                           {i === 0 && <span className="prod-style-master-tag" title="Default style for shots that haven't picked one">default</span>}
@@ -2373,6 +2421,39 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                           placeholder="Full generation prompt for this style"
                           onChange={(e) => setStyle(i, { prompt: e.target.value })}
                         />
+                        <div className="prod-style-frame-row">
+                          <button
+                            className="prod-btn"
+                            disabled={styleFrameBusy !== null || !s.prompt.trim()}
+                            onClick={() => void generateStyleFrame(s.id)}
+                            title="Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"
+                          >
+                            {styleFrameBusy === s.id ? "Working…" : s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}
+                          </button>
+                          <button
+                            className="prod-btn"
+                            disabled={styleFrameBusy !== null}
+                            onClick={() => void uploadStyleFrame(s.id)}
+                            onDragOver={(e) => { if (styleFrameBusy !== null) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+                            onDrop={(e) => { e.preventDefault(); void dropStyleFrame(s.id, e.dataTransfer.files); }}
+                            title="Use your own image as this style's frame — kept as the look anchor"
+                          >
+                            Upload frame
+                          </button>
+                          {s.imagePath && (
+                            <button
+                              className="prod-style-remove"
+                              disabled={styleFrameBusy !== null}
+                              title="Remove this style's frame (boards fall back to text only)"
+                              onClick={() => { setStyle(i, { imagePath: undefined, frameSource: undefined }); }}
+                            >
+                              <XIcon size={12} />
+                            </button>
+                          )}
+                        </div>
+                        {!s.imagePath && (
+                          <p className="hint">No frame — add one so every shot shares the same look (text-only otherwise).</p>
+                        )}
                       </div>
                       <button
                         className="prod-style-wand"

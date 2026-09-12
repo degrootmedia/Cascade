@@ -49,7 +49,7 @@ import type {
   VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
-import { citePrompt, resolvePromptRefs } from "./refs.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 
 const SERVER = "higgsfield";
 
@@ -613,7 +613,7 @@ export class HiggsfieldProvider implements MediaProvider {
       } else {
         for (let i = 0; i < refs.length; i++) uploaded.push(null);
       }
-      const fullPrompt = citePrompt(prompt, refs, uploaded);
+      const fullPrompt = citePrompt(prompt, refs, uploaded, styleRefNames(p));
 
       const params: Record<string, unknown> = { model: modelId, prompt: fullPrompt, count: 1 };
       const aspects = detail?.aspect_ratios ?? [];
@@ -846,7 +846,7 @@ export class HiggsfieldProvider implements MediaProvider {
         emit(`Reference "${r.name}" couldn't be uploaded (${why}) — continuing without it.`, "error");
       }
     }
-    const fullPrompt = citePrompt(resolved, refs, uploaded);
+    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
 
     const params: Record<string, unknown> = { model: modelId, prompt: fullPrompt, count: 1 };
     const durParam = detail ? HiggsfieldProvider.param(detail, "duration") : null;

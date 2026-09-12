@@ -4,8 +4,13 @@
  * provider-agnostic: gab advertises capabilities, OpenAI-compatible providers
  * (e.g. Cheaper Inference) usually don't, and must not be filtered out.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { API_PROVIDERS, extractModelList, getProvider, normalizeModelList } from "../src/shared/providers.js";
+
+vi.mock("../src/main/scripting.js", () => ({
+  extractScriptText: vi.fn(),
+  isGoogleDocUrl: vi.fn(() => false),
+}));
 
 describe("API_PROVIDERS", () => {
   it("registers gab, cheaperinference, and openai", () => {
@@ -177,5 +182,40 @@ describe("cost tiers (relative ranking)", () => {
     expect(out.map((m) => m.costKind)).toEqual(["unknown", "unknown"]);
     expect(out.map((m) => m.costTier)).toEqual([null, null]);
     expect(out.map((m) => m.costLabel)).toEqual(["—", "—"]);
+  });
+});
+
+describe("PROVIDER_CAPABILITIES", () => {
+  it("declares a conservative matrix (openart-cli: no video refs, no end frame)", async () => {
+    const { PROVIDER_CAPABILITIES, PROVIDER_IDS } = await import("../src/main/providers/registry.js");
+    expect(PROVIDER_IDS).toEqual(expect.arrayContaining(["openart", "higgsfield", "higgsfield-cli", "openart-cli"]));
+    expect(PROVIDER_CAPABILITIES["openart-cli"]).toEqual({ imageRefs: true, videoRefs: false, endFrame: false, tween: false });
+    expect(PROVIDER_CAPABILITIES["higgsfield-cli"].videoRefs).toBe(true);
+    expect(PROVIDER_CAPABILITIES["higgsfield-cli"].endFrame).toBe(true);
+  });
+});
+
+describe("style refs", () => {
+  it("auto-attaches style-only refs with a style-only clause; content refs get none", async () => {
+    const { resolvePromptRefs, citePrompt, styleRefNames } = await import("../src/main/providers/refs.js");
+    const p = {
+      characters: [],
+      products: [],
+      references: [
+        { id: "s1", name: "Noir", imagePath: undefined, artwork: "data:image/png;base64,AAAA", styleOnly: true },
+        { id: "c1", name: "Hero", imagePath: undefined, artwork: "data:image/png;base64,BBBB" },
+      ],
+      referenceCategories: [],
+    } as unknown as import("../src/shared/ipc.js").Production;
+    // No @[Noir] tag — style ref still attaches.
+    const { resolved, extras } = resolvePromptRefs(p, "a shot @[Hero]", 1, false);
+    expect(extras.map((e) => e.name)).toContain("Noir");
+    expect(extras.map((e) => e.name)).toContain("Hero");
+    const refs = [{ name: "Hero", dataUrl: "data:image/png;base64,BBBB" }, ...extras.filter((e) => e.name === "Noir").map((e) => ({ name: e.name, dataUrl: e.dataUrl }))];
+    const cited = citePrompt("a shot @image1 @image2", refs, refs.map(() => "x"), styleRefNames(p));
+    expect(cited).toContain("provided for style only");
+    // Content ref gets no clause.
+    expect(cited.match(/provided for style only/g)?.length).toBe(1);
+    expect(cited).not.toContain("Render consistently with the other shots in this production.");
   });
 });

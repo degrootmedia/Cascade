@@ -29,7 +29,7 @@ import {
   tweenSnapSec,
   unstitchTween,
 } from "../src/main/pipeline.js";
-import { applyKeyframeDrag, deriveTweenBlocksClient, filterTweenModels, tweenPreviewTake, tweenSupportedLabel, tweenSupportsDuration } from "../src/renderer/src/components/TweenTimelineModal.js";
+import { applyKeyframeDrag, deriveTweenBlocksClient, filterTweenModels, filterTweenModelsByDuration, tweenPreviewTake, tweenSupportedLabel, tweenSupportsDuration } from "../src/renderer/src/components/TweenTimelineModal.js";
 import { videoRefsAssign } from "../src/main/openart.js";
 import { assemblyPlan, buildEdl, edlReelFor } from "../src/main/assembly.js";
 
@@ -509,8 +509,7 @@ describe("assembly tween expansion", () => {
     expect(edl).not.toContain("stitched");
   });
 
-  it("falls back to the single-clip path when blocks are unready", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-asm2-"));
+  it("falls back to the single-clip path when blocks are unready", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-asm2-"));
     const videos = path.join(dir, "videos");
     fs.mkdirSync(videos, { recursive: true });
     fs.writeFileSync(path.join(videos, "stitched.mp4"), "stitched");
@@ -538,5 +537,20 @@ describe("assembly tween expansion", () => {
     const plan = assemblyPlan(p);
     expect(plan.events).toHaveLength(1);
     expect(plan.events[0].srcRel).toBe("videos/stitched.mp4");
+  });
+});
+
+describe("tween duration filtering", () => {
+  const models = [
+    { id: "m510", displayName: "M510", description: "", imageInput: true, videoInput: true, cost: null },
+    { id: "m5710", displayName: "M5710", description: "", imageInput: true, videoInput: true, cost: null },
+  ];
+  it("excludes a 7s block from a [5,10] model but keeps a [5,7,10] model", () => {
+    const opts = { m510: { resolutions: ["720p"], durations: [5, 10] }, m5710: { resolutions: ["720p"], durations: [5, 7, 10] } };
+    expect(filterTweenModelsByDuration(models, opts, 7).map((m) => m.id)).toEqual(["m5710"]);
+  });
+  it("passes pending probes through (checking compatibility)", () => {
+    expect(filterTweenModelsByDuration(models, {}, 7).map((m) => m.id)).toEqual(["m510", "m5710"]);
+    expect(filterTweenModelsByDuration(models, { m510: null }, 7).map((m) => m.id)).toEqual(["m510", "m5710"]);
   });
 });

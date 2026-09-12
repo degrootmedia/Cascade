@@ -27,7 +27,8 @@ import {
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
 import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, TweenBlock } from "../shared/ipc.js";
+import { styleFrameForShot, withLookClause, ensureLookSeed } from "../shared/look.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, TweenBlock, ProductionStyle } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -635,9 +636,12 @@ export function refToken(index: number): string {
  */
 export function refTokens(p: Production, shot: ProductionShot): Map<string, string> {
   const map = new Map<string, string>();
+  // The style frame (when the shot's style owns one) always occupies @image1 —
+  // content refs shift by one so @imageN tokens stay positional with uploads.
+  const offset = styleFrameForShot(p, shot) ? 1 : 0;
   shotReferences(p, shot)
     .filter((r) => r.artwork)
-    .forEach((r, i) => map.set(r.name, refToken(i)));
+    .forEach((r, i) => map.set(r.name, refToken(i + offset)));
   return map;
 }
 
@@ -825,7 +829,55 @@ export function effectivePromptContent(p: Production, shot: ProductionShot): str
  */
 export function openArtPrompt(p: Production, shot: ProductionShot): string {
   const base = resolveReferenceTags(p, shot, stripReferenceClause(effectivePrompt(p, shot)));
-  return base;
+  // The look anchor: one verbatim LOOK clause first on every shot whose style
+  // owns a frame — cited as a look, never as a subject.
+  return styleFrameForShot(p, shot) ? withLookClause(base) : base;
+}
+
+/** Workspace-relative styles dir for style frames (look plates). */
+export const STYLES_DIR = "styles";
+
+/** Relative path for one style's frame file (collision-safe per style id). */
+export function styleFrameRelPath(styleId: string, ext = "png"): string {
+  const safe = String(styleId || "style").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "style";
+  return `${STYLES_DIR}/${safe}.${ext}`;
+}
+
+/** Style-frame artwork as an uploadable data URL (on-disk imagePath). */
+export function styleFrameDataUrl(p: Production, style: ProductionStyle): string | undefined {
+  if (!style.imagePath?.trim()) return undefined;
+  try {
+    const buf = fs.readFileSync(assetPath(p, style.imagePath.trim()));
+    const ext = path.extname(style.imagePath).slice(1).toLowerCase() || "png";
+    const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/png";
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist a style-frame data URL to styles/ and return its workspace-relative
+ * path. Mirrors the referencesDir persist flow (extension from MIME,
+ * collision-handled) so frames survive as files, never inline JSON.
+ */
+export function writeStyleFrame(p: Production, styleId: string, dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1 || !dataUrl.startsWith("data:image/")) throw new Error("Not a data-URL image.");
+  const mime = dataUrl.slice(5, comma).split(";")[0];
+  const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
+  const buf = Buffer.from(dataUrl.slice(comma + 1), "base64");
+  if (!buf.length) throw new Error("The image is empty.");
+  fs.mkdirSync(assetPath(p, STYLES_DIR), { recursive: true });
+  let rel = styleFrameRelPath(styleId, ext);
+  let i = 2;
+  while (fs.existsSync(assetPath(p, rel))) {
+    const safe = String(styleId || "style").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 40) || "style";
+    rel = `${STYLES_DIR}/${safe} (${i}).${ext}`;
+    i++;
+  }
+  fs.writeFileSync(assetPath(p, rel), buf);
+  return rel;
 }
 
 /** A reference resolved for a specific shot: matched character/product, or a
@@ -913,6 +965,17 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   for (const { name } of refTagMatches(promptForTags)) {
     const ref = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
     if (ref) push(ref);
+  }
+  // Style-only refs auto-attach after content refs (no tag required).
+  // Per-ref `styleOnly` wins; otherwise the category `kind === "style"` flags it.
+  const styleCats = new Set(
+    (p.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id)
+  );
+  for (const r of p.references ?? []) {
+    if (r.styleOnly === true || (r.categoryId && styleCats.has(r.categoryId))) {
+      const ref = candidates.find((c) => c.name.toLowerCase() === r.name.toLowerCase());
+      if (ref) push(ref);
+    }
   }
   return out;
 }
@@ -1385,25 +1448,55 @@ export function relocateBoardsForRenumber(
  *  Returns the number of links repaired. */
 export function refreshBoardLinks(p: Production): number {
   let repaired = 0;
-  const fix = (shot: ProductionShot, rel: string | undefined): string | undefined => {
-    if (!rel) return rel;
-    try {
-      if (fs.existsSync(assetPath(p, rel))) return rel;
-    } catch { return rel; }
-    const dir = `${p.assets.boardsDir}/${shot.number}`;
-    let newest: { rel: string; mtime: number } | null = null;
-    try {
-      for (const f of fs.readdirSync(assetPath(p, dir))) {
-        if (!new RegExp(`^shot-${shot.number}-[^/]+\\.(?:jpg|jpeg)$`, "i").test(f)) continue;
+  const scanNewest = (shot: ProductionShot): string | undefined => {
+    const dirs = [`${p.assets.boardsDir}/${shot.number}`, `${p.assets.boardsDir}/${shot.number}/originals`];
+    let newest: { rel: string; mtime: number; name: string } | null = null;
+    const rx = new RegExp(`^shot-${shot.number}-[^/]+\\.(?:jpg|jpeg|png|webp)$`, "i");
+    for (const dir of dirs) {
+      let files: string[];
+      try {
+        files = fs.readdirSync(assetPath(p, dir));
+      } catch { continue; }
+      for (const f of files) {
+        if (!rx.test(f)) continue;
         try {
           const st = fs.statSync(path.join(assetPath(p, dir), f));
-          if (!newest || st.mtimeMs > newest.mtime) newest = { rel: `${dir}/${f}`, mtime: st.mtimeMs };
+          if (!st.isFile()) continue;
+          if (!newest || st.mtimeMs > newest.mtime || (st.mtimeMs === newest.mtime && f < newest.name)) {
+            newest = { rel: `${dir}/${f}`, mtime: st.mtimeMs, name: f };
+          }
         } catch { /* unreadable entry — skip */ }
       }
-    } catch { /* missing folder — nothing to relink to */ }
-    if (!newest) return rel;
+    }
+    return newest?.rel;
+  };
+  const fix = (shot: ProductionShot, rel: string | undefined): string | undefined => {
+    if (rel) {
+      try {
+        if (fs.existsSync(assetPath(p, rel))) return rel;
+      } catch { return rel; }
+    }
+    const found = scanNewest(shot);
+    if (!found) return rel;
     repaired++;
-    return newest.rel;
+    return found;
+  };
+  const newestValidHistoryPath = (paths: (string | undefined)[]): string | undefined => {
+    let best: { rel: string; mtime: number; name: string } | null = null;
+    for (const rel of paths) {
+      if (!rel) continue;
+      try {
+        const abs = assetPath(p, rel);
+        if (!fs.existsSync(abs)) continue;
+        const st = fs.statSync(abs);
+        if (!st.isFile()) continue;
+        const name = rel.split("/").pop() ?? rel;
+        if (!best || st.mtimeMs > best.mtime || (st.mtimeMs === best.mtime && name < best.name)) {
+          best = { rel, mtime: st.mtimeMs, name };
+        }
+      } catch { /* skip */ }
+    }
+    return best?.rel;
   };
 
   for (const sc of p.scenes) {
@@ -1415,6 +1508,21 @@ export function refreshBoardLinks(p: Production): number {
       for (const g of shot.graphImageGens ?? []) g.path = fix(shot, g.path) ?? g.path;
       for (const g of shot.graphEditGens ?? []) g.path = fix(shot, g.path) ?? g.path;
       for (const node of shot.graphEditNodes ?? []) for (const g of node.gens ?? []) g.path = fix(shot, g.path) ?? g.path;
+      // Adopt from node history: a recorded generation whose artwork was never
+      // set becomes visible without changing graphOutputSource (additive only).
+      if (!shot.artwork) {
+        const seeded = newestValidHistoryPath([
+          shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path,
+          ...(shot.graphImageGens ?? []).map((g) => g.path),
+          ...(shot.graphEditGens ?? []).map((g) => g.path),
+          ...(shot.graphEditNodes ?? []).flatMap((n) => (n.gens ?? []).map((g) => g.path)),
+          ...(shot.artworkHistory ?? []),
+        ]);
+        if (seeded) {
+          shot.artwork = seeded;
+          repaired++;
+        }
+      }
     }
   }
   return repaired;
@@ -1653,9 +1761,14 @@ export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallba
  *  When the image node is already piped, the new frame still auto-applies;
  *  a deliberate videogen/tween/ref pipe is never displaced. */
 export function hookImageGenToOutput(shot: ProductionShot): void {
-  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") return;
-  shot.graphOutputSource = "imagegen";
   const cur = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
+  // Additive only: never displace a deliberate videogen/tween/editgen/ref
+  // pipe, but always ensure artwork is set from the new generation when empty.
+  if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") {
+    if (!shot.artwork && cur?.path) recordBoardArtwork(shot, cur.path);
+    return;
+  }
+  shot.graphOutputSource = "imagegen";
   if (cur) recordBoardArtwork(shot, cur.path);
 }
 
@@ -1841,13 +1954,16 @@ export async function generateBoards(
   const targets = all.filter((s) =>
     opts.onlyShotId ? s.id === opts.onlyShotId
     : opts.shotIds?.length ? (opts.shotIds as string[]).includes(s.id)
-    : opts.regenerateAll || !(s.artwork || s.graphImageGens?.length)
+    : opts.regenerateAll || !(s.artwork && s.graphImageGens?.[0]?.path)
   ).slice(0, max);
   if (!targets.length) {
     emit(opts.onlyShotId ? "That shot wasn't found." : "Nothing to generate — every shot already has a board.", "error");
     return p;
   }
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 4, targets.length));
+  // Freeze the board-wide seed once per production — same frame + same seed +
+  // frozen model/resolution is the repeatability lever after the image anchor.
+  ensureLookSeed(p);
   emit(`Generating ${targets.length} storyboard frame(s)${concurrency > 1 ? ` (up to ${concurrency} in parallel)` : ""}${all.length > targets.length && !opts.onlyShotId ? ` (${all.length - targets.length} already have boards)` : ""}…`);
   fs.mkdirSync(assetPath(p, p.assets.boardsDir), { recursive: true });
 
@@ -1862,8 +1978,16 @@ export async function generateBoards(
         const refs = shotReferences(p, shot)
           .filter((r) => r.artwork)
           .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
+        // The style frame uploads unconditionally at @image1 (a
+        // production-level input, not a tag-driven content ref) so every shot
+        // shares the same visual anchor; content refs shift positionally.
+        const frameStyle = styleFrameForShot(p, shot);
+        const frameDataUrl = frameStyle ? styleFrameDataUrl(p, frameStyle) : undefined;
+        const genRefs = frameDataUrl
+          ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
+          : refs;
         const genPrompt = openArtPrompt(p, shot);
-        const png = await generate(genPrompt, refs, shot);
+        const png = await generate(genPrompt, genRefs, shot);
         const { jpegRel } = writeBoardFrame(p, shot, png, "png");
         recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
         // Classic flow: the storyboard frame comes from the output pipe — if
@@ -1915,20 +2039,28 @@ export function exportBoardPrompts(p: Production, emit: EmitFn): Production {
     "",
   ];
   for (const shot of all) {
-    lines.push(`## Shot ${shot.number}`, "", effectivePrompt(p, shot), "");
+    lines.push(`## Shot ${shot.number}`, "", openArtPrompt(p, shot), "");
     const refs = shotReferences(p, shot);
-    if (refs.length) {
+    const frameStyle = styleFrameForShot(p, shot);
+    const frameListed = frameStyle?.imagePath?.trim()
+      ? [`@image1 — Look (${frameStyle.name || "style"} style frame)`]
+      : [];
+    if (refs.length || frameListed.length) {
       // Number the references @image1, @image2, … in the same order the
       // in-app generator uploads them, so "@image1" in a prompt always means
-      // the same image. Attach each artwork file next to its token.
-      let n = 0;
-      const listed = refs.map((r) => {
-        const art = r.artwork ? refToken(n++) : null;
-        return `${art ? `${art} — ` : ""}${r.name}${art ? " (artwork attached)" : ""}`;
-      });
+      // the same image. The style frame (when present) is @image1; content
+      // refs shift by one. Attach each artwork file next to its token.
+      let n = frameListed.length;
+      const listed = [
+        ...frameListed,
+        ...refs.map((r) => {
+          const art = r.artwork ? refToken(n++) : null;
+          return `${art ? `${art} — ` : ""}${r.name}${art ? " (artwork attached)" : ""}`;
+        }),
+      ];
       lines.push(
         "",
-        "Reference" + (refs.length > 1 ? "s" : "") + ": " + listed.join("; "),
+        "Reference" + (listed.length > 1 ? "s" : "") + ": " + listed.join("; "),
         "",
       );
     }

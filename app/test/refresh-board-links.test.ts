@@ -112,4 +112,41 @@ describe("refreshBoardLinks", () => {
     expect(fixed).toBe(0);
     expect(p.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-gone.jpg");
   });
+
+  it("adopts a file on disk when artwork is undefined, incl. png/webp and originals/", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    const dir = path.join(root, "boards", "0100");
+    const origDir = path.join(dir, "originals");
+    fs.mkdirSync(origDir, { recursive: true });
+    const pngAbs = path.join(dir, "shot-0100-aaa.png");
+    const webpAbs = path.join(origDir, "shot-0100-bbb.webp");
+    fs.writeFileSync(pngAbs, "fake-png");
+    fs.writeFileSync(webpAbs, "fake-webp");
+    const now = Date.now() / 1000;
+    fs.utimesSync(pngAbs, now, 1_000_000_000);
+    fs.utimesSync(webpAbs, now, 1_000_000_100); // newest lives in originals/
+    const p = makeProduction(root, [makeShot("0100", { artwork: undefined })]);
+    const fixed = refreshBoardLinks(p);
+    expect(fixed).toBe(1);
+    expect(p.scenes[0].shots[0].artwork).toBe("boards/0100/originals/shot-0100-bbb.webp");
+    // Idempotent: a second run repairs nothing.
+    expect(refreshBoardLinks(p)).toBe(0);
+  });
+
+  it("seeds artwork from node history when no file match exists", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    const dir = path.join(root, "boards", "0100");
+    fs.mkdirSync(dir, { recursive: true });
+    // History file with a non-board name: the folder scan (shot-<n>-*.*)
+    // finds nothing, so the seed must come from node history.
+    fs.writeFileSync(path.join(dir, "custom-history.jpg"), "fake-jpeg");
+    const shot = makeShot("0100", {
+      artwork: undefined,
+      graphImageGens: [{ path: "boards/0100/custom-history.jpg", prompt: "", model: "", at: "" }],
+    });
+    const p = makeProduction(root, [shot]);
+    const fixed = refreshBoardLinks(p);
+    expect(fixed).toBeGreaterThanOrEqual(1);
+    expect(p.scenes[0].shots[0].artwork).toBe("boards/0100/custom-history.jpg");
+  });
 });

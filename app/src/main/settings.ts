@@ -79,6 +79,10 @@ interface SettingsFile {
    * main-side; models missing from the list keep discovery order after it.
    */
   mediaModelOrder: string[];
+  /** Dev Mode: when true, every generation submission is logged. */
+  devMode: boolean;
+  /** Credit-free dry run: build + log the real request, throw before vendor call. */
+  submissionDryRun: boolean;
   /** Last main-window bounds + maximized flag, restored on launch. */
   windowState: WindowState | null;
 }
@@ -120,6 +124,8 @@ const DEFAULTS: SettingsFile = {
   modelKindOverrides: {},
   mediaDefaults: {},
   mediaModelOrder: [],
+  devMode: false,
+  submissionDryRun: false,
   windowState: null,
 };
 const MAX_RECENT_WORKSPACES = 10;
@@ -443,7 +449,6 @@ export function setMediaDefault(ctx: string, patch: MediaDefaultChoice): void {
 export function getMediaModelOrder(): string[] {
   return load().mediaModelOrder ?? [];
 }
-
 export function setMediaModelOrder(ids: string[]): void {
   const seen = new Set<string>();
   const clean: string[] = [];
@@ -455,6 +460,26 @@ export function setMediaModelOrder(ids: string[]): void {
     clean.push(id);
   }
   load().mediaModelOrder = clean.slice(0, 500);
+  save();
+}
+
+/** Dev Mode: verbose human-readable submission logging (see submission-log). */
+export function getDevMode(): boolean {
+  return load().devMode === true;
+}
+
+export function setDevMode(v: boolean): void {
+  load().devMode = v === true;
+  save();
+}
+
+/** Credit-free dry run: build + log the request, throw DryRunError before spend. */
+export function getSubmissionDryRun(): boolean {
+  return load().submissionDryRun === true;
+}
+
+export function setSubmissionDryRun(v: boolean): void {
+  load().submissionDryRun = v === true;
   save();
 }
 

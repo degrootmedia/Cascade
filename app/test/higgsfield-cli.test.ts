@@ -532,8 +532,7 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     expect(submitted).toBe(false);
   });
 
-  it("sends a tween end frame through the reference array on models without an end slot", async () => {
-    const seen: string[][] = [];
+  it("sends a tween end frame through the reference array on models without an end slot", async () => {    const seen: string[][] = [];
     const jobId = "44444444-5555-6666-7777-888888888888";
     const { run } = fakeRun(
       baseHandler({
@@ -566,5 +565,35 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     expect(args).toContain("--image");
     expect(args).toContain("--image-references");
     expect(args).not.toContain("--end-image");
+  });
+
+  it("routes video refs through the 720p downscale into --video-references", async () => {
+    const { resizeVideoRef } = await import("../src/main/video-ref.js");
+    expect(typeof resizeVideoRef).toBe("function");
+    const seen: string[][] = [];
+    const jobId = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/clip.mp4" }])),
+      })
+    );
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7, 7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoClip(prodDir("prod-vidref"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 8, prompt: "animate",
+      }, () => {}, undefined, [{ name: "Clip", dataUrl: "data:video/mp4;base64,AAAA" }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen[0]).toContain("--video-references");
   });
 });

@@ -557,6 +557,9 @@ function MediaProviderSection() {
   const [providers, setProviders] = useState<MediaProviderInfo[]>([]);
   const [active, setActive] = useState<string>("openart");
   const [error, setError] = useState<string | null>(null);
+  /** Dev Mode: submission logging + dry run. */
+  const [devMode, setDevMode] = useState(false);
+  const [dryRun, setDryRun] = useState(false);
   /** Manual end-frame allowlist, edited one id per line. */
   const [endFrameText, setEndFrameText] = useState("");
   const [endFrameSaved, setEndFrameSaved] = useState(false);
@@ -583,6 +586,8 @@ function MediaProviderSection() {
     void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
     void window.cascade.getMediaProvider().then(setActive).catch(() => {});
     void window.cascade.getEndFrameModels().then((ids) => setEndFrameText(ids.join("\n"))).catch(() => {});
+    void window.cascade.getDevMode().then(setDevMode).catch(() => {});
+    void window.cascade.getSubmissionDryRun().then(setDryRun).catch(() => {});
     refreshCli();
     refreshOaCli();
   }, []);
@@ -710,6 +715,38 @@ function MediaProviderSection() {
         {endFrameSaved && <span className="hint">saved</span>}
       </div>
       <p className="hint">The in-betweener only offers video models with a dedicated end-frame slot (probed live, or listed above).</p>
+      <label style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={devMode}
+          onChange={(e) => {
+            const v = e.target.checked;
+            setDevMode(v);
+            void window.cascade.setDevMode(v).catch((err) => setError(String(err)));
+          }}
+        />
+        Dev Mode (log every generation submission)
+      </label>
+      {devMode && (
+        <>
+          <p className="hint">Submissions append to &lt;userData&gt;/logs/submissions.md (+ submissions.jsonl). Secrets are redacted.</p>
+          <div className="row">
+            <button onClick={() => void window.cascade.openSubmissionLog().catch((err) => setError(String(err)))}>Open submission log</button>
+          </div>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={dryRun}
+              onChange={(e) => {
+                const v = e.target.checked;
+                setDryRun(v);
+                void window.cascade.setSubmissionDryRun(v).catch((err) => setError(String(err)));
+              }}
+            />
+            Dry run (build + log submissions, spend no credits)
+          </label>
+        </>
+      )}
       {error && <p className="error-text">{error}</p>}
     </>
   );

@@ -54,7 +54,7 @@ import type {
   VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
-import { citePrompt, resolvePromptRefs } from "./refs.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 import {
   defaultCliRun,
   resolveCliOnPath,
@@ -614,7 +614,7 @@ export class OpenArtCliProvider implements MediaProvider {
       }
       const { paths, cleanup } = writeCliTempRefs(imageRefs);
       const uploaded: (string | null)[] = [...paths];
-      const fullPrompt = citePrompt(prompt, imageRefs, uploaded);
+      const fullPrompt = citePrompt(prompt, imageRefs, uploaded, styleRefNames(p));
       try {
         if (projectId === undefined) {
           projectId = await this.resolveProject(p, onNotice).catch(() => null);
@@ -754,7 +754,7 @@ export class OpenArtCliProvider implements MediaProvider {
 
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded);
+    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
       const projectId = await this.resolveProject(p, (m) => emit(m)).catch(() => null);
       const args = ["generate", "video", fullPrompt, "--model", modelId, "--async"];

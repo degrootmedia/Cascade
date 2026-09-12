@@ -35,6 +35,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), the `userData/ledger.json` singleton, and the human-readable `userData/expenses.csv` mirror. Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
 | Document store | `app/src/main/store.ts` | The generic JSON-document store (`createStore`) behind sessions, productions, and agents: atomic temp+rename writes, newest-first list, archive/ soft-deletes, decode/encode hooks, side-file hooks. Settings stays a bespoke singleton (encryption + memo cache). |
 | IPC contract | `app/src/shared/ipc.ts` | The single channel map (`ipcContract`) that derives the renderer API, drives the preload adapter, and validates every main-process handler. Adding a channel = one contract entry, not three files. |
+| Look contract | `app/src/shared/look.ts` | The storyboard-cohesion vocabulary every image path shares: the verbatim LOOK clause (`buildLookClause`/`withLookClause`), prompt assembly order (`assembleImagePrompt`), per-shot style resolution (`resolveShotStyleEntry`/`styleFrameForShot`), board seed (`ensureLookSeed`), the neutral-subject frame prompt (`styleFramePrompt`), and the adapter-level `GenerationRequest` (frame at index 0, 16:9, frozen model/resolution). Adapters do transport only — no private LOOK copies. |
 | Production views | `app/src/renderer/src/components/production/` | The workspace's extracted panels — `animatic.tsx` (Step 4 playback engine + timeline), `boards.tsx` (board cards + gen modals), `prompt-panel.tsx`, `references.tsx`, `brand.tsx`, `hex.ts`, `assembly.tsx` (Step 5 export package + render) — orchestrated by `ProductionWorkspace.tsx`. |
 
 ## Core domain terms
@@ -68,6 +69,14 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   and every generated sheet is mirrored into the references panel's **Characters**
   category (`upsertCharacterSheetRef`) so it's citable as `@[name]`.
 - **Style** — a named generation prompt (up to 5); `styles[0]` is the master.
+- **Style frame** — a style's look anchor: one conditioning image on disk
+  (`ProductionStyle.imagePath` under `styles/`, with `frameSource`
+  upload/generated/reference/anchor) reused at reference index 0 on every shot
+  that resolves to the style, cited by the verbatim LOOK clause as a look
+  (never a subject). Authored in Design (generated look plate, upload, kept
+  from style-from-image, or locked from an approved frame via `anchorShotId`);
+  the board-wide `lookSeed` + frozen model/resolution make it repeatable.
+  Styles without a frame keep the text-only behavior.
 - **Brand** — palette swatches + optional font appended to every board prompt.
 - **Board** — a shot's generated frame (`artwork` on the shot, in `boardsDir`).
 - **Expense rule** — a pricing rule (kind + model → min/max dollar range) the

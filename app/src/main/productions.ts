@@ -116,6 +116,12 @@ export function saveProduction(p: ProductionFile): void {
   normalize(p);
   p.meta.updatedAt = new Date().toISOString();
   p.schemaVersion ??= PRODUCTION_SCHEMA_VERSION;
+  // Monotonic write revision for the renderer's stale-snapshot guard: every
+  // persisted write (insert/delete/prompt save/…) stamps a higher rev so an
+  // older whole-object snapshot can never overwrite newer structural state.
+  // Persisted in the JSON so the counter survives restarts (never decreases).
+  const cur = typeof p.rev === "number" && Number.isFinite(p.rev) ? p.rev : 0;
+  p.rev = cur + 1;
   store.save(p);
 }
 

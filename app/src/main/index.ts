@@ -1532,27 +1532,35 @@ function registerIpc() {
   };
 
   handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number) =>
-    mutateShots(id, (p) => {
-      const oldNumbers = new Map<string, string>();
-      for (const scene of p.scenes) for (const shot of scene.shots) oldNumbers.set(shot.id, shot.number);
-      shotter.insertShotAt(p.scenes, sceneNumber, index);
-      // A front insert (or an exhausted mid-number gap) re-derives the whole
-      // 100-grid; relocate board folders so files follow their shots.
-      relocateBoardsForRenumber(p, oldNumbers);
-    })
+    // Serialized per production (Fix B): insert/delete/prompt saves each
+    // return whole-Production snapshots, so production order must match
+    // request order — otherwise a prompt-save response produced before a
+    // structural edit can resolve after it and overwrite newer state.
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        const oldNumbers = new Map<string, string>();
+        for (const scene of p.scenes) for (const shot of scene.shots) oldNumbers.set(shot.id, shot.number);
+        shotter.insertShotAt(p.scenes, sceneNumber, index);
+        // A front insert (or an exhausted mid-number gap) re-derives the whole
+        // 100-grid; relocate board folders so files follow their shots.
+        relocateBoardsForRenumber(p, oldNumbers);
+      })
+    )
   );
 
   handle("production:deleteShot", (_e, id: string, shotId: string) =>
-    mutateShots(id, (p) => {
-      for (const scene of p.scenes) {
-        const i = scene.shots.findIndex((s) => s.id === shotId);
-        if (i !== -1) {
-          scene.shots.splice(i, 1); // numbers keep their gaps — standard practice
-          return;
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        for (const scene of p.scenes) {
+          const i = scene.shots.findIndex((s) => s.id === shotId);
+          if (i !== -1) {
+            scene.shots.splice(i, 1); // numbers keep their gaps — standard practice
+            return;
+          }
         }
-      }
-      throw new Error("Shot not found.");
-    })
+        throw new Error("Shot not found.");
+      })
+    )
   );
 
   handle("production:updateShot", (_e, id: string, shotId: string, patch: { audio?: string; visual?: string }) =>
@@ -1969,42 +1977,45 @@ function registerIpc() {
   // Step 3: persist a shot's editable board-prompt override (empty clears it).
   // When Magic Prompt is enabled, edits target the magicPrompts map (content-only)
   // instead of the normal shot.prompt field; the original prompts stay untouched.
-  handle("production:updateBoardPrompt", (_e, id: string, shotId: string, prompt: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot) throw new Error("Shot not found.");
-    const text = typeof prompt === "string" ? prompt.trim() : "";
-    const clean = text ? stripReferenceClause(text) : "";
-    if (p.magicEnabled) {
-      p.magicPrompts ??= {};
+  handle("production:updateBoardPrompt", (_e, id: string, shotId: string, prompt: string) =>
+    // Serialized per production (Fix B): see insertShot/deleteShot above.
+    enqueueProduction(id, async () => {
+      const p = productions.loadProduction(id);
+      if (!p) throw new Error("Production not found.");
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const text = typeof prompt === "string" ? prompt.trim() : "";
+      const clean = text ? stripReferenceClause(text) : "";
+      if (p.magicEnabled) {
+        p.magicPrompts ??= {};
+        if (clean) {
+          // Persist only the content box — Style/Brand stay derived from the style system
+          const content = parsePromptBoxes(clean).content.trim() || stripMagicLeakage(clean);
+          if (content) p.magicPrompts[shotId] = content.slice(0, 2000);
+          else delete p.magicPrompts[shotId];
+        } else if (text && !clean) {
+          delete p.magicPrompts[shotId];
+        } else {
+          delete p.magicPrompts[shotId];
+        }
+        productions.saveProduction(p);
+        return p;
+      }
       if (clean) {
-        // Persist only the content box — Style/Brand stay derived from the style system
-        const content = parsePromptBoxes(clean).content.trim() || stripMagicLeakage(clean);
-        if (content) p.magicPrompts[shotId] = content.slice(0, 2000);
-        else delete p.magicPrompts[shotId];
+        shot.prompt = clean;
+        shot.promptManual = true; // manual: survives re-ingestion & design changes
       } else if (text && !clean) {
-        delete p.magicPrompts[shotId];
+        // User erased everything except the auto-appended clause — treat as cleared.
+        delete shot.prompt;
+        shot.promptManual = false;
       } else {
-        delete p.magicPrompts[shotId];
+        delete shot.prompt;
+        shot.promptManual = false; // cleared → auto-derived prompt applies again
       }
       productions.saveProduction(p);
       return p;
-    }
-    if (clean) {
-      shot.prompt = clean;
-      shot.promptManual = true; // manual: survives re-ingestion & design changes
-    } else if (text && !clean) {
-      // User erased everything except the auto-appended clause — treat as cleared.
-      delete shot.prompt;
-      shot.promptManual = false;
-    } else {
-      delete shot.prompt;
-      shot.promptManual = false; // cleared → auto-derived prompt applies again
-    }
-    productions.saveProduction(p);
-    return p;
-  });
+    })
+  );
 
   // Step 3: refresh — discard a shot's manual prompt and re-derive it from the
   // current design (style, brand, references) + script text.

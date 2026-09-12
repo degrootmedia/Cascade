@@ -229,6 +229,104 @@ function foldName(s: string): string {
   return s.toLowerCase().replace(/[_-]+/g, "");
 }
 
+// ---- model family labels ---------------------------------------------------------
+
+/** A catalogue family: same-named CLI entries are distinct catalogue items
+ *  (not quality tiers of one model), so the dropdown annotates each row with
+ *  its family + capability instead of showing bare duplicates. */
+export interface HiggsfieldCliModelFamily {
+  label: string;
+  kind: "image" | "video" | "upscale";
+  note: string;
+}
+
+/** Classify a raw CLI job_type into its model family (case-insensitive,
+ *  separator-folded). Null when unrecognized — the row keeps its bare label
+ *  and the raw-id dedupe below still keeps it distinguishable. */
+export function classifyFamily(rawId: string): HiggsfieldCliModelFamily | null {
+  const id = foldName(rawId);
+  if (id.includes("topaz") || id.includes("upscale")) {
+    return { label: "Upscale", kind: "upscale", note: "enhances an existing image — does not generate from a prompt" };
+  }
+  if (id.includes("nano") && id.includes("banana")) {
+    return { label: "Nano Banana (Google)", kind: "image", note: "text-to-image generator" };
+  }
+  if (id.includes("grok") && id.includes("image")) {
+    return { label: "Grok Image", kind: "image", note: "text-to-image generator" };
+  }
+  if (id.includes("grok") && (id.includes("video") || id.includes("imagine"))) {
+    return { label: "Grok Imagine", kind: "video", note: "text-to-video generator" };
+  }
+  return null;
+}
+
+/** Variant tokens that distinguish same-family catalogue rows, read from the
+ *  list item's own fields (data-driven — new models label themselves). */
+function variantTokens(m: CliListItem, label: string): string[] {
+  const out: string[] = [];
+  const lower = label.toLowerCase();
+  for (const key of ["resolution", "resolutions", "quality", "mode", "variant", "version", "tier", "speed", "size", "tag"]) {
+    const v = m[key];
+    const cands = Array.isArray(v) ? v : [v];
+    for (const c of cands) {
+      if (typeof c !== "string" && typeof c !== "number") continue;
+      const s = String(c).trim();
+      if (!s || s.length > 24) continue;
+      if (/^(auto|default|none)$/i.test(s)) continue;
+      if (lower.includes(s.toLowerCase())) continue;
+      if (out.some((o) => o.toLowerCase() === s.toLowerCase())) continue;
+      out.push(s);
+      if (out.length >= 2) return out;
+    }
+  }
+  return out;
+}
+
+/** Pure catalogue shaping (exported for tests): ids are untouched
+ *  (`higgsfield-cli:` + raw id — generation routing depends on them); only
+ *  `displayName`/`description` gain family + variant annotations, and no two
+ *  distinct ids ever share a label (raw-id fallback as a last resort). */
+export function shapeHiggsfieldCliChoices(items: CliListItem[], kind: "image" | "video"): OpenArtModelChoice[] {
+  const out: OpenArtModelChoice[] = [];
+  const seenLabel = new Map<string, string>();
+  for (const m of items) {
+    const rawId = strField(m, "job_type", "jobType", "job_set_type", "id", "model", "name");
+    if (!rawId || rawId === "auto") continue;
+    const displayName = strField(m, "display_name", "displayName", "title", "label") || strField(m, "name") || rawId;
+    const name = strField(m, "name");
+    const base = name && name !== rawId && name !== displayName ? `${displayName} — ${name}` : displayName;
+    const family = classifyFamily(rawId);
+    const suffixParts: string[] = [];
+    if (family) suffixParts.push(family.label);
+    suffixParts.push(...variantTokens(m, base));
+    let label = suffixParts.length ? `${base} — ${suffixParts.join(" · ")}` : base;
+    const firstId = seenLabel.get(label);
+    if (firstId !== undefined && firstId !== rawId) {
+      // Two distinct ids still render identically — disambiguate with the raw id.
+      label = `${label} (${rawId})`;
+    }
+    seenLabel.set(label, rawId);
+    const description = strField(m, "description", "summary", "recommendedFor");
+    const provider = strField(m, "provider_name", "provider", "vendor");
+    let fullDescription = provider ? `${description}${description ? " " : ""}— ${provider}` : description;
+    if (family) {
+      if (!fullDescription) fullDescription = family.note;
+      else if (!fullDescription.toLowerCase().includes(family.note.toLowerCase())) {
+        fullDescription = `${fullDescription} — ${family.note}`;
+      }
+    }
+    out.push({
+      id: `${HIGGSFIELD_CLI_ID_PREFIX}${rawId}`,
+      displayName: label,
+      description: fullDescription,
+      imageInput: kind === "image",
+      videoInput: kind === "video",
+      cost: null, // per-model cost needs a `generate cost` preflight; unknown here
+    });
+  }
+  return out;
+}
+
 function parseCliModelDetail(stdout: string): CliModelDetail | null {
   const obj = parseJsonLooseObject(stdout);
   if (!obj) return null;
@@ -499,24 +597,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
   }
 
   private shapeChoices(items: CliListItem[], kind: "image" | "video"): OpenArtModelChoice[] {
-    const out: OpenArtModelChoice[] = [];
-    for (const m of items) {
-      const rawId = strField(m, "job_type", "jobType", "job_set_type", "id", "model", "name");
-      if (!rawId || rawId === "auto") continue;
-      const displayName = strField(m, "display_name", "displayName", "title", "label") || strField(m, "name") || rawId;
-      const name = strField(m, "name");
-      const description = strField(m, "description", "summary", "recommendedFor");
-      const provider = strField(m, "provider_name", "provider", "vendor");
-      out.push({
-        id: `${HIGGSFIELD_CLI_ID_PREFIX}${rawId}`,
-        displayName: name && name !== rawId && name !== displayName ? `${displayName} — ${name}` : displayName,
-        description: provider ? `${description}${description ? " " : ""}— ${provider}` : description,
-        imageInput: kind === "image",
-        videoInput: kind === "video",
-        cost: null, // per-model cost needs a `generate cost` preflight; unknown here
-      });
-    }
-    return out;
+    return shapeHiggsfieldCliChoices(items, kind);
   }
 
   /** The model dropdowns. Image and video lists are fetched separately so

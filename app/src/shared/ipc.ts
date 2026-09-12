@@ -983,6 +983,11 @@ export interface Production {
    *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk
    *  entirely. Missing/older runs the idempotent migrations once, then stamps. */
   schemaVersion?: number;
+  /** Monotonic write revision stamped by saveProduction. Never set by the
+   *  renderer — the renderer's applySnapshot guard uses it to reject stale
+   *  whole-object snapshots (a prompt-save response produced before an
+   *  insert/delete must not overwrite the newer structural state). */
+  rev?: number;
 }
 
 /** Remembered Step 3 storyboard-PDF export settings (see `Production.storyboardPdf`). */

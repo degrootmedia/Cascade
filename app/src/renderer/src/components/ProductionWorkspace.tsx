@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
+import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
@@ -164,6 +165,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const promptSaveQueue = useRef(Promise.resolve());
   const latestPromptRef = useRef<Record<string, string>>({});
   const promptCacheRef = useRef<Record<string, string>>({});
+  /** Newest Production.rev applied so far. Whole-object IPC snapshots with an
+   *  older rev are stale (e.g. a prompt save produced before an insert/delete
+   *  resolving after it) and must not overwrite newer structural state — that
+   *  stale overwrite resurrected deleted "ghost" shots and broke prompt editing
+   *  until restart. */
+  const prodRevRef = useRef(0);
+  /** Consecutive prompt-refetch failures per shot (Fix D retry cap). Reset on
+   *  success so a persistently-missing shot can't bust in a tight loop. */
+  const promptRetryRef = useRef<Record<string, number>>({});
   // Latest production kept in a ref (updated every render) so effect-registered
   // listeners — the Ctrl+V paste handlers — never write stale field state back
   // over newer saves (e.g. dismissing a suggestion, then pasting an image used
@@ -275,6 +285,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           const hit = next.scenes.flatMap((sc) => sc.shots).find((s) => s.artwork === e.jpegRel);
           if (hit) bustOne(hit.id);
           else bustAll();
+          prodRevRef.current = Math.max(prodRevRef.current, revOf(next));
           setProd(next);
         } else {
           bustAll();
@@ -439,10 +450,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   useEffect(() => {
     if (!promptShotId) return;
     let live = true;
+    const shotId = promptShotId;
     void promptSaveQueue.current.then(async () => {
       for (let attempt = 0; attempt < 3; attempt++) {
-        const next = await window.cascade.getBoardPrompt(prod?.meta.id ?? "", promptShotId);
+        const next = await window.cascade.getBoardPrompt(prod?.meta.id ?? "", shotId);
         if (next != null) {
+          delete promptRetryRef.current[shotId];
           if (live) {
             // While the user is typing in this shot's editor, never clobber the
             // live value: a just-fired save changes focusedSig, re-runs this
@@ -451,11 +464,29 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             const el = document.activeElement;
             if (el instanceof HTMLTextAreaElement
               && (el.classList.contains("prod-board-prompt") || el.classList.contains("prod-prompt-drawer-text"))) return;
-            promptCacheRef.current[promptShotId] = next; setFocusedPrompt(next);
+            promptCacheRef.current[shotId] = next; setFocusedPrompt(next);
           }
           return;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+      // Fix D: don't give up permanently. A null after 3 tries can be a
+      // transient race (structural snapshot still in flight) rather than a
+      // ghost id — schedule one more refetch via the bust map when the shot
+      // is still present. Capped so a genuinely-missing shot can't loop: the
+      // dangling-focus cleanup above clears focus for ids absent from prod,
+      // which unmounts this effect and ends the chain.
+      if (!live) return;
+      const failures = (promptRetryRef.current[shotId] ?? 0) + 1;
+      promptRetryRef.current[shotId] = failures;
+      if (failures > 3) { delete promptRetryRef.current[shotId]; return; }
+      const stillThere = prodRef.current?.scenes.flatMap((s) => s.shots).some((s) => s.id === shotId);
+      if (stillThere) {
+        window.setTimeout(() => {
+          if (prodRef.current?.scenes.flatMap((s) => s.shots).some((s) => s.id === shotId)) bustOne(shotId);
+        }, 500);
+      } else {
+        delete promptRetryRef.current[shotId];
       }
     }).catch(() => {});
     return () => { live = false; };
@@ -476,6 +507,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setCreating(true); setErr(null);
     try {
       const p = await window.cascade.createProduction(newName, newFolder);
+      prodRevRef.current = revOf(p);
       setProd(p);
       setNewName(""); setNewFolder(null);
       await refreshList();
@@ -492,6 +524,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setImporting(true); setErr(null);
     try {
       const p = await window.cascade.importProduction(dir);
+      prodRevRef.current = revOf(p);
       setProd(p);
       setNewName(""); setNewFolder(null);
       await refreshList();
@@ -506,7 +539,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setErr(null);
     try {
       const p = await window.cascade.loadProduction(id);
-      if (p) { setProd(p); setLog([]); await refreshList(); }
+      if (p) { prodRevRef.current = revOf(p); setProd(p); setLog([]); await refreshList(); }
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -514,22 +547,58 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   async function remove(id: string) {
     try { await window.cascade.removeProduction(id, "delete"); } catch { return; }
-    if (prod?.meta.id === id) setProd(null);
+    if (prod?.meta.id === id) { prodRevRef.current = 0; setProd(null); }
     await refreshList();
   }
 
   function close() {
+    prodRevRef.current = 0;
     setProd(null);
     void refreshList();
   }
 
+  /** Guarded whole-snapshot apply: rejects stale IPC snapshots (Fix A) and
+   *  drops dangling focus + dead prompt cache entries (Fix C). Returns true
+   *  when the snapshot was applied. */
+  const applySnapshot = useCallback((next: Production): boolean => {
+    const rev = revOf(next);
+    if (!isFresh(rev, prodRevRef.current)) return false;
+    prodRevRef.current = rev;
+    prodRef.current = next;
+    setProd(next);
+    const ids = new Set(next.scenes.flatMap((s) => s.shots).map((s) => s.id));
+    for (const k of Object.keys(promptCacheRef.current)) {
+      if (!ids.has(k)) delete promptCacheRef.current[k];
+    }
+    return true;
+  }, []);
+
+  // Dangling-focus cleanup (Fix C): whenever the production's shot set changes,
+  // clear sidebar/graph focus that points at a shot id no longer present and
+  // prune its cache entry — otherwise the sidebar keeps a dead editor whose
+  // boardPrompt lookup returns null forever.
+  useEffect(() => {
+    if (!prod) return;
+    const ids = new Set(prod.scenes.flatMap((s) => s.shots).map((s) => s.id));
+    if (promptShotId && !ids.has(promptShotId)) {
+      setPromptShotId(null);
+      setFocusedPrompt("");
+      delete promptCacheRef.current[promptShotId];
+      delete latestPromptRef.current[promptShotId];
+    }
+    if (graphShotId && !ids.has(graphShotId)) setGraphShotId(null);
+    for (const k of Object.keys(promptCacheRef.current)) {
+      if (!ids.has(k)) delete promptCacheRef.current[k];
+    }
+  }, [prod, promptShotId, graphShotId]);
+
   /** Apply a mutation promise coming back from main with fresh state. */
   const apply = useCallback((p: Promise<Production>) => {
     setBusy(true); setErr(null);
-    p.then((next) => { setProd(next); void refreshList(); })
+    p.then((next) => { applySnapshot(next); void refreshList(); })
       .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
       .finally(() => setBusy(false));
-  }, [refreshList]);
+  }, [refreshList, applySnapshot]);
 
   function setStep(n: 1 | 2 | 3 | 4 | 5) {
     if (showExpenses) setShowExpenses(false);
@@ -615,7 +684,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setErr(null);
     try {
       const next = await window.cascade.scanReferencesFolder(prod.meta.id);
-      setProd(next);
+      applySnapshot(next);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -627,7 +696,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     setErr(null);
     const next = await window.cascade.generateReferenceImage(prod.meta.id, opts);
-    setProd(next);
+    applySnapshot(next);
     void refreshList();
   }
   /** Step 2: generate a character-sheet reference via the media provider (the character
@@ -636,7 +705,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     setErr(null);
     const next = await window.cascade.generateCharacterSheet(prod.meta.id, opts);
-    setProd(next);
+    applySnapshot(next);
     void refreshList();
   }
   /** Add a person/product the script-detection missed. */
@@ -1497,7 +1566,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       if (latest !== prompt) return;
       try {
         const next = await window.cascade.updateBoardPrompt(prod.meta.id, shotId, prompt);
-        if (latestPromptRef.current[shotId] === prompt) setProd(next);
+        if (latestPromptRef.current[shotId] === prompt) applySnapshot(next);
       } catch (e) {
         setErr(String(e).replace(/^Error:\s*/, ""));
       }
@@ -1552,7 +1621,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         ? window.cascade.setMagicEnabled(prod.meta.id, true)
         : window.cascade.generateMagicPrompts(prod.meta.id);
     void run.then((next) => {
-      setProd(next); void refreshList();
+      applySnapshot(next); void refreshList();
       void refreshPromptAfterMagic(next);
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
   }
@@ -1562,7 +1631,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod || magicBusy) return;
     setMagicBusy(true); setErr(null);
     void window.cascade.generateMagicPrompts(prod.meta.id).then((next) => {
-      setProd(next); void refreshList();
+      applySnapshot(next); void refreshList();
       void refreshPromptAfterMagic(next);
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
   }
@@ -1575,7 +1644,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     try {
       const next = await window.cascade.updateShot(prod.meta.id, shotId, patch);
-      setProd(next);
+      applySnapshot(next);
       if (promptShotId === shotId) {
         const updated = await window.cascade.getBoardPrompt(next.meta.id, shotId);
         if (updated != null) {

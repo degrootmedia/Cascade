@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { sortByModelOrder, type ExpensePriceRule, type MediaProviderInfo, type ModelInfo, type SettingsView } from "../../../shared/ipc.js";
 import { API_PROVIDERS } from "../../../shared/providers.js";
 import { McpSection } from "./McpSection.js";
+import { TRANSPORT_CHANGED, isProviderVisible, readTransportMode, writeTransportMode, type ProviderTransportMode } from "./media-transport.js";
 import { applyAccent } from "../theme.js";
 import { uid } from "./production/hex.js";
 import { DragHandleIcon, EyeIcon, EyeOffIcon, ExpensesIcon, ImportIcon } from "./icons.js";
@@ -557,6 +558,8 @@ function MediaProviderSection() {
   const [providers, setProviders] = useState<MediaProviderInfo[]>([]);
   const [active, setActive] = useState<string>("openart");
   const [error, setError] = useState<string | null>(null);
+  /** Transport toggle (MCP vs CLI), shared with the top bar via persisted mode. */
+  const [transport, setTransport] = useState<ProviderTransportMode>(() => readTransportMode());
   /** Dev Mode: submission logging + dry run. */
   const [devMode, setDevMode] = useState(false);
   const [dryRun, setDryRun] = useState(false);
@@ -590,6 +593,10 @@ function MediaProviderSection() {
     void window.cascade.getSubmissionDryRun().then(setDryRun).catch(() => {});
     refreshCli();
     refreshOaCli();
+    // A transport flip in the top bar applies here too (same persisted mode).
+    const onTransport = () => setTransport(readTransportMode());
+    window.addEventListener(TRANSPORT_CHANGED, onTransport);
+    return () => window.removeEventListener(TRANSPORT_CHANGED, onTransport);
   }, []);
 
   const saveEndFrame = async () => {
@@ -645,7 +652,40 @@ function MediaProviderSection() {
   return (
     <>
       <label>Media generation</label>
-      {providers.map((p) => (
+      <div className="row" style={{ alignItems: "center" }}>
+        <div
+          className="media-toggle"
+          role="radiogroup"
+          aria-label="Media transport"
+          title="MCP servers or local CLI binaries drive image/video generation"
+        >
+          {(["mcp", "cli"] as const).map((m) => (
+            <button
+              key={m}
+              role="radio"
+              aria-checked={transport === m}
+              aria-label={m === "mcp" ? "MCP transport" : "CLI transport"}
+              title={m === "mcp" ? "Generate via MCP servers" : "Generate via local CLI binaries"}
+              className={"media-half" + (transport === m ? " active" : "")}
+              onClick={() => {
+                if (m === transport) return;
+                writeTransportMode(m);
+                setTransport(m);
+                // Reconcile like the top bar: never leave the active provider
+                // on the hidden transport.
+                if (!providers.some((p) => p.id === active && isProviderVisible(p.id, m))) {
+                  const target = providers.filter((p) => isProviderVisible(p.id, m)).find((p) => p.available);
+                  if (target) void change(target.id);
+                }
+              }}
+            >
+              {m === "mcp" ? "MCP" : "CLI"}
+            </button>
+          ))}
+        </div>
+        <span className="hint">{transport === "mcp" ? "Generate via MCP servers" : "Generate via local CLI binaries"}</span>
+      </div>
+      {providers.filter((p) => isProviderVisible(p.id, transport)).map((p) => (
         <div className="row" key={p.id}>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <input type="radio" name="media-provider" checked={active === p.id} onChange={() => void change(p.id)} />
@@ -659,6 +699,8 @@ function MediaProviderSection() {
         </div>
       ))}
       <p className="hint">Which service generates storyboard frames, clips, and reference images. Applies to every production.</p>
+      {transport === "cli" && (
+      <>
       <label style={{ marginTop: 8 }}>Higgsfield CLI binary <span className="hint">(optional — blank resolves `higgsfield` from PATH)</span></label>
       <div className="row">
         <input
@@ -702,6 +744,8 @@ function MediaProviderSection() {
         </p>
       )}
       <p className="hint">OpenArt CLI video takes a single start-frame image — no end frames or extra references. In-betweening and multi-reference video need the OpenArt MCP transport.</p>
+      </>
+      )}
       <label style={{ marginTop: 8 }}>In-betweener end-frame models</label>
       <textarea
         rows={3}

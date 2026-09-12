@@ -7,6 +7,7 @@ import { SettingsPanel } from "./components/SettingsPanel.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
 import { MediaProviderToggle, type MediaCredits } from "./components/MediaProviderToggle.js";
+import { TRANSPORT_CHANGED, firstVisibleAvailable, hasStoredTransportMode, isProviderVisible, readTransportMode, writeTransportMode, type ProviderTransportMode } from "./components/media-transport.js";
 import { FolderPicker } from "./components/FolderPicker.js";
 import { AgentPicker } from "./components/AgentPicker.js";
 import { AgentsPanel } from "./components/AgentsPanel.js";
@@ -41,6 +42,9 @@ export function App() {
   const [mediaCredits, setMediaCredits] = useState<MediaCredits>({ openart: null, higgsfield: null, "higgsfield-cli": null, "openart-cli": null });
   const [mediaAvailable, setMediaAvailable] = useState<Record<MediaProviderId, boolean>>({ openart: true, higgsfield: true, "higgsfield-cli": true, "openart-cli": true });
   const [mediaProviderList, setMediaProviderList] = useState<MediaProviderInfo[]>([]);
+  /** Transport toggle (MCP vs CLI): which provider family the top bar and
+   *  Settings show. Persisted; defaults to MCP. */
+  const [transportMode, setTransportMode] = useState<ProviderTransportMode>(() => readTransportMode());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
@@ -181,6 +185,13 @@ export function App() {
       setMediaProvider(id);
       setMediaCredits(credits);
       setMediaProviderList(list);
+      // First-run migration: existing CLI users (active provider on the CLI
+      // transport, no stored mode) start in CLI mode instead of being
+      // silently switched to MCP.
+      if (!hasStoredTransportMode() && id.endsWith("-cli")) {
+        writeTransportMode("cli");
+        setTransportMode("cli");
+      }
       setMediaAvailable((prev) => {
         const next = { ...prev };
         for (const p of list) next[p.id] = p.available;
@@ -235,6 +246,26 @@ export function App() {
       return id;
     });
   }, [refreshMedia]);
+
+  /** Transport flip: persist the mode first, then reconcile the active
+   *  provider so it never points at the hidden transport. When nothing is
+   *  visible+available under the new mode, the active provider is left
+   *  untouched (and no change event fires) — the toggle tooltip says so. */
+  const selectTransport = useCallback((mode: ProviderTransportMode) => {
+    writeTransportMode(mode);
+    setTransportMode(mode);
+    if (!mediaProviderList.some((p) => p.id === mediaProvider && isProviderVisible(p.id, mode))) {
+      const target = firstVisibleAvailable(mediaProviderList, mode);
+      if (target) selectMedia(target);
+    }
+  }, [mediaProvider, mediaProviderList, selectMedia]);
+
+  // A transport flip in Settings applies here too (same persisted mode).
+  useEffect(() => {
+    const onTransport = () => setTransportMode(readTransportMode());
+    window.addEventListener(TRANSPORT_CHANGED, onTransport);
+    return () => window.removeEventListener(TRANSPORT_CHANGED, onTransport);
+  }, []);
 
   // First-run: open settings if there's no API key yet (workspace is optional — pure chat works without one).
   useEffect(() => {
@@ -451,13 +482,43 @@ export function App() {
               }}
             />
             <span className="view-tabs-divider" aria-hidden="true" />
-            <MediaProviderToggle
-              active={mediaProvider}
-              credits={mediaCredits}
-              available={mediaAvailable}
-              providers={mediaProviderList}
-              onSelect={selectMedia}
-            />
+            {(() => {
+              const visibleProviders = mediaProviderList.filter((p) => isProviderVisible(p.id, transportMode));
+              const noneAvailable = visibleProviders.length > 0 && visibleProviders.every((p) => !p.available);
+              return (
+                <>
+                  <div
+                    className="media-toggle"
+                    role="radiogroup"
+                    aria-label="Media transport"
+                    title={noneAvailable
+                      ? `No ${transportMode === "cli" ? "CLI" : "MCP"} provider is available — switch transport or connect one in Settings → Media generation`
+                      : "MCP servers or local CLI binaries drive image/video generation"}
+                  >
+                    {(["mcp", "cli"] as const).map((m) => (
+                      <button
+                        key={m}
+                        role="radio"
+                        aria-checked={transportMode === m}
+                        aria-label={m === "mcp" ? "MCP transport" : "CLI transport"}
+                        title={m === "mcp" ? "Generate via MCP servers" : "Generate via local CLI binaries"}
+                        className={"media-half" + (transportMode === m ? " active" : "")}
+                        onClick={() => { if (m !== transportMode) selectTransport(m); }}
+                      >
+                        {m === "mcp" ? "MCP" : "CLI"}
+                      </button>
+                    ))}
+                  </div>
+                  <MediaProviderToggle
+                    active={mediaProvider}
+                    credits={mediaCredits}
+                    available={mediaAvailable}
+                    providers={visibleProviders}
+                    onSelect={selectMedia}
+                  />
+                </>
+              );
+            })()}
           </>
         }
       />

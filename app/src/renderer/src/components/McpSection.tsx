@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { McpStatusIpc } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
+import { TRANSPORT_CHANGED, readTransportMode, type ProviderTransportMode } from "./media-transport.js";
 
 const PLACEHOLDER = `{
   "mcpServers": {
@@ -18,11 +19,16 @@ export function McpSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  /** MCP-specific block: hidden while the CLI transport is selected. */
+  const [transport, setTransport] = useState<ProviderTransportMode>(() => readTransportMode());
 
   useEffect(() => {
     void window.cascade.getMcpConfig().then(setConfig);
     void window.cascade.getMcpStatus().then(setStatuses);
     void window.cascade.getMcpOnDemand().then(setOnDemand);
+    const onTransport = () => setTransport(readTransportMode());
+    window.addEventListener(TRANSPORT_CHANGED, onTransport);
+    return () => window.removeEventListener(TRANSPORT_CHANGED, onTransport);
   }, []);
 
   async function toggleOnDemand(name: string, clicked: boolean) {
@@ -56,6 +62,8 @@ export function McpSection() {
 
   return (
     <>
+      {transport === "cli" ? null : (
+      <>
       <label>MCP servers</label>
       <p className="hint">
         Same format as Claude Desktop's config — paste an "mcpServers" block. Connected tools require your
@@ -106,6 +114,8 @@ export function McpSection() {
             </li>
           ))}
         </ul>
+      )}
+      </>
       )}
     </>
   );

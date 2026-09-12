@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
@@ -21,7 +21,7 @@ import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
-import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
+import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
@@ -71,6 +71,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [styleImgBusy, setStyleImgBusy] = useState(false);
   // step 2: which style card is generating/uploading its frame (look anchor)
   const [styleFrameBusy, setStyleFrameBusy] = useState<string | null>(null);
+  // step 2: enlarged style-frame image (lightbox), or null when closed
+  const [styleZoom, setStyleZoom] = useState<string | null>(null);
   // step 2: set when the active chat model can't see images (shows a popup)
   const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
   // step 3: board generation
@@ -694,7 +696,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 2: edit one style's field (persisted immediately). */
-  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number; imagePath?: string; frameSource?: "upload" | "generated" | "reference" | "anchor" }>) {
+  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number; imagePath?: string; frameSource?: "upload" | "generated" | "reference" | "anchor"; model?: string; resolution?: "1k" | "2k" | "4k" }>) {
     if (!prod) return;
     saveField({
       styles: (prod.styles ?? []).map((s, i) => (i === idx ? { ...s, ...patch } : s)),
@@ -745,12 +747,22 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
-  /** Step 2: generate a style frame (look plate) for one style via IPC. */
+  /** Step 2: generate a style frame (look plate) for one style via IPC,
+   *  forwarding its per-style model/resolution overrides ("auto"/absent =
+   *  inherit the production default). */
   function generateStyleFrame(styleId: string) {
     if (!prod || styleFrameBusy) return;
+    const style = (prod.styles ?? []).find((s) => s.id === styleId);
+    // A stored pick missing from the active vendor's list falls back to the
+    // production default instead of billing (or failing on) a stale slug.
+    const liveModel = style?.model && style.model !== "auto" && imageModels.some((m) => m.id === style.model)
+      ? style.model
+      : undefined;
+    const model = styleFrameOverride(liveModel);
+    const resolution = styleFrameOverride(style?.resolution);
     setStyleFrameBusy(styleId);
     setErr(null);
-    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId).finally(() => setStyleFrameBusy(null)));
+    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution).finally(() => setStyleFrameBusy(null)));
   }
 
   /** Step 2: attach a picked file as one style's frame. */
@@ -2395,14 +2407,32 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     <div key={s.id} className="prod-style-card">
                       <span className="prod-style-index" title={`Style ${s.index} of up to ${MAX_STYLES}`}>{s.index}</span>
                       {s.imagePath ? (
-                        <img
-                          className="prod-style-frame"
-                          src={cascadeMedia(prod.meta.id, s.imagePath)}
-                          alt={`Style frame for ${s.name || `Style ${s.index}`}`}
-                          title={s.frameSource === "generated" ? "Generated look plate — reused on every shot of this style" : s.frameSource === "anchor" ? "Locked look — from an approved frame" : "Style frame — reused on every shot of this style"}
-                        />
+                        <span className="prod-style-frame-wrap" style={{ position: "relative", flexShrink: 0, alignSelf: "center" }}>
+                          <img
+                            className="prod-style-frame"
+                            src={cascadeMedia(prod.meta.id, s.imagePath)}
+                            alt={`Style frame for ${s.name || `Style ${s.index}`}`}
+                            title={s.frameSource === "generated" ? "Generated look plate — reused on every shot of this style" : s.frameSource === "anchor" ? "Locked look — from an approved frame" : "Style frame — reused on every shot of this style"}
+                          />
+                          <button
+                            className="prod-style-zoom"
+                            style={{ position: "absolute", right: 2, bottom: 2, width: 22, height: 22, borderRadius: "50%", border: "1px solid var(--border)", background: "var(--bg-raised)", color: "var(--text-dim)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                            title="Enlarge this style frame"
+                            onClick={() => setStyleZoom(s.id)}
+                          >
+                            <MagnifyIcon size={12} />
+                          </button>
+                        </span>
                       ) : (
                         <span className="prod-style-frame-empty" title="No style frame — boards generate from text only">no frame</span>
+                      )}
+                      {styleZoom === s.id && s.imagePath && (
+                        <div className="prod-ref-lightbox" onClick={() => setStyleZoom(null)}>
+                          <figure className="prod-ref-lightbox-card">
+                            <img src={cascadeMedia(prod.meta.id, s.imagePath)} alt={`Style frame for ${s.name || `Style ${s.index}`}`} />
+                            <figcaption>{s.name || `Style ${s.index}`} — click anywhere to close</figcaption>
+                          </figure>
+                        </div>
                       )}
                       <div className="prod-style-fields">
                         <div className="prod-style-head">
@@ -2450,6 +2480,40 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                               <XIcon size={12} />
                             </button>
                           )}
+                        </div>
+                        <div className="prod-style-frame-row">
+                          <label className="prod-openart-label">Model
+                            <select
+                              className="prod-openart-select"
+                              value={s.model && (s.model === "auto" || imageModels.some((m) => m.id === s.model)) ? s.model : "auto"}
+                              disabled={styleFrameBusy !== null || imageModels.length === 0}
+                              onChange={(e) => setStyle(i, { model: e.target.value === "auto" ? undefined : e.target.value })}
+                              title="Model for this style's frame — Auto inherits the production default"
+                            >
+                              <option value="auto">
+                                {s.model && s.model !== "auto" && !imageModels.some((m) => m.id === s.model)
+                                  ? "Auto (previously selected model unavailable)"
+                                  : "Auto (production default)"}
+                              </option>
+                              {imageModels.map((m) => (
+                                <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="prod-openart-label">Resolution
+                            <select
+                              className="prod-openart-select"
+                              value={s.resolution ?? "auto"}
+                              disabled={styleFrameBusy !== null}
+                              onChange={(e) => setStyle(i, { resolution: e.target.value === "auto" ? undefined : (e.target.value as "1k" | "2k" | "4k") })}
+                              title="Resolution for this style's frame — Auto inherits the production default"
+                            >
+                              <option value="auto">Auto ({prod.openArt?.resolution ?? "1k"})</option>
+                              <option value="1k">1k</option>
+                              <option value="2k">2k</option>
+                              <option value="4k">4k</option>
+                            </select>
+                          </label>
                         </div>
                         {!s.imagePath && (
                           <p className="hint">No frame — add one so every shot shares the same look (text-only otherwise).</p>

@@ -149,4 +149,52 @@ describe("refreshBoardLinks", () => {
     expect(fixed).toBeGreaterThanOrEqual(1);
     expect(p.scenes[0].shots[0].artwork).toBe("boards/0100/custom-history.jpg");
   });
+
+  it("populates the image-generation node when artwork is repaired from disk", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    const { newerRel } = boardFolder(root, "0100", [["aaa", 1_000_000_000], ["bbb", 1_000_000_100]]);
+    const shot = makeShot("0100", { artwork: "boards/0100/shot-0100-gone.jpg" });
+    const p = makeProduction(root, [shot]);
+    const fixed = refreshBoardLinks(p);
+    expect(fixed).toBe(1);
+    expect(shot.artwork).toBe(newerRel);
+    expect(shot.graphImageGens).toHaveLength(1);
+    expect(shot.graphImageGens![0].path).toBe(newerRel);
+    expect(shot.graphImageGens![0].prompt).toBe("");
+    expect(shot.graphImageGens![0].model).toBe("refresh");
+    expect(shot.graphOutputSource).toBe("imagegen");
+  });
+
+  it("is idempotent: a second identical refresh adds no graph entry", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    boardFolder(root, "0100", [["aaa", 1_000_000_000], ["bbb", 1_000_000_100]]);
+    const shot = makeShot("0100", { artwork: "boards/0100/shot-0100-gone.jpg" });
+    const p = makeProduction(root, [shot]);
+    expect(refreshBoardLinks(p)).toBe(1);
+    expect(shot.graphImageGens).toHaveLength(1);
+    expect(refreshBoardLinks(p)).toBe(0);
+    expect(shot.graphImageGens).toHaveLength(1);
+  });
+
+  it("never displaces an already-piped output when recording a refresh", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    boardFolder(root, "0100", [["aaa", 1_000_000_000], ["bbb", 1_000_000_100]]);
+    const shot = makeShot("0100", {
+      artwork: "boards/0100/shot-0100-gone.jpg",
+      graphOutputSource: "videogen",
+      graphVideoGens: [{ path: "boards/0100/shot-0100-aaa.jpg", prompt: "", model: "", at: "" }],
+    });
+    const p = makeProduction(root, [shot]);
+    refreshBoardLinks(p);
+    expect(shot.graphOutputSource).toBe("videogen");
+  });
+
+  it("records nothing when no file can be recovered", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-relink-"));
+    const shot = makeShot("0100", { artwork: "boards/0100/shot-0100-gone.jpg" });
+    const p = makeProduction(root, [shot]);
+    expect(refreshBoardLinks(p)).toBe(0);
+    expect(shot.graphImageGens ?? []).toHaveLength(0);
+    expect(shot.graphOutputSource).toBeUndefined();
+  });
 });

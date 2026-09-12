@@ -1501,6 +1501,7 @@ export function refreshBoardLinks(p: Production): number {
 
   for (const sc of p.scenes) {
     for (const shot of sc.shots) {
+      const artworkBefore = shot.artwork;
       shot.artwork = fix(shot, shot.artwork);
       if (shot.artworkHistory?.length) {
         shot.artworkHistory = shot.artworkHistory.map((rel) => fix(shot, rel) ?? rel);
@@ -1521,6 +1522,21 @@ export function refreshBoardLinks(p: Production): number {
         if (seeded) {
           shot.artwork = seeded;
           repaired++;
+        }
+      }
+      // Surface a disk-recovered frame in the image-generation node: when this
+      // run actually repaired/adopted the artwork (not merely re-read a valid
+      // path), record it as the node's newest output — same order as the
+      // import path (record then hook). The head guard makes repeat refreshes
+      // no-ops; hookImageGenToOutput stays additive-only (never displaces a
+      // videogen/tween/editgen/ref pipe). Prompt is empty (recovered from disk,
+      // not generated) and the model sentinel marks refresh provenance, as
+      // "import" does for imported frames.
+      if (shot.artwork && shot.artwork !== artworkBefore) {
+        const head = shot.graphImageGens?.[0];
+        if (!head || head.path !== shot.artwork) {
+          recordGraphImageGen(shot, shot.artwork, "", "refresh");
+          hookImageGenToOutput(shot);
         }
       }
     }

@@ -31,7 +31,7 @@ import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, san
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sortByModelOrder, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sortByModelOrder, styleFrameOverride, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
@@ -1444,13 +1444,17 @@ function registerIpc() {
 
   // Step 2: generate a style frame (look plate) for one style via the active
   // media provider — fixed neutral-subject scaffold + style text + brand.
-  handle("production:generateStyleFrame", (_e, id: string, styleId: string) =>
+  handle("production:generateStyleFrame", (_e, id: string, styleId: string, model?: string, resolution?: string) =>
     runProductionJob(id, "generating a style frame", async (p, emit) => {
       const style = (p.styles ?? []).find((s) => s.id === styleId);
       if (!style) throw new Error("Style not found.");
       if (!style.prompt.trim() && !style.name.trim()) throw new Error("Write the style prompt first.");
       const refMedia = mediaFor(undefined);
-      const gen = refMedia.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"), "16:9");
+      // Per-style overrides ride straight through; "auto"/blank means the
+      // production default (the provider treats undefined and "auto" alike).
+      const modelOverride = styleFrameOverride(model);
+      const resolutionOverride = styleFrameOverride(resolution);
+      const gen = refMedia.imageGenFn(p, modelOverride, resolutionOverride, (m) => emit(m, "info"), "16:9");
       if (!gen) throw new Error(`${refMedia.displayName} isn't connected, so style frames can't be generated in-app.`);
       const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p));
       emit(`Generating a style frame for "${style.name || `Style ${style.index}`}” (16:9)…`);

@@ -125,6 +125,22 @@ export interface McpStatusIpc {
  *  video references, so those requests fail loudly with an MCP redirect. */
 export type MediaProviderId = "openart" | "higgsfield" | "higgsfield-cli" | "openart-cli";
 
+/** Which transport the media-provider pickers show: MCP servers or CLI binaries. */
+export type ProviderTransportMode = "mcp" | "cli";
+
+/** Single shared predicate for the transport toggle: the `-cli` suffix is the
+ *  source of truth — CLI ids show in "cli" mode, the rest in "mcp" mode. */
+export function isProviderVisible(id: MediaProviderId, mode: ProviderTransportMode): boolean {
+  return mode === "cli" ? id.endsWith("-cli") : !id.endsWith("-cli");
+}
+
+/** Canonicalize a per-style model/resolution override for generation:
+ *  absent, blank, or "auto" inherits the production default (sent as
+ *  undefined — the provider treats undefined and "auto" alike). */
+export function styleFrameOverride(value: string | undefined): string | undefined {
+  return value && value !== "auto" ? value : undefined;
+}
+
 /** One generation vendor for the Settings picker. */
 export interface MediaProviderInfo {
   id: MediaProviderId;
@@ -584,6 +600,12 @@ export interface ProductionStyle {
   seed?: number;
   /** How the frame was authored — the UI only auto-regenerates generated frames. */
   frameSource?: "upload" | "generated" | "reference" | "anchor";
+  /** Per-style image-model override for style-frame generation. Absent (or
+   *  "auto") = inherit the production default (`prod.openArt`). */
+  model?: string;
+  /** Per-style resolution override for style-frame generation. Absent =
+   *  inherit the production default. */
+  resolution?: "1k" | "2k" | "4k";
 }
 
 /** An OpenArt model surfaced in the Step 3 model dropdown. */
@@ -1231,7 +1253,7 @@ export interface CascadeApi {
    * persist it to styles/ and point the style at it (frameSource "generated").
    * Returns the updated production.
    */
-  generateStyleFrame(productionId: string, styleId: string): Promise<Production>;
+  generateStyleFrame(productionId: string, styleId: string, model?: string, resolution?: string): Promise<Production>;
   /**
    * Step 2: attach an existing image (data URL) as one style's frame
    * (frameSource "upload"). Returns the updated production.

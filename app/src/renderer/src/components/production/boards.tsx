@@ -317,10 +317,11 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             muted
             loop
             playsInline
-            // Clips load on demand: every card preloading metadata at page
-            // open was N parallel media fetches racing the icons. The first
-            // hover play() pulls the stream, so the delay is one hover only.
-            preload="none"
+            // Eager metadata: fetch only the container header (duration, first
+            // frame) at mount so hover preview starts instantly. "metadata"
+            // never buffers media, so many boards on screen stay cheap; the
+            // first hover play() pulls the stream.
+            preload="metadata"
             onLoadedMetadata={(e) => {
               // Nudge past 0 so the first frame renders while paused.
               try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {}

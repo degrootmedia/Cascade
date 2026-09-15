@@ -18,6 +18,7 @@ import {
   HiggsfieldCliProvider,
   higgsfieldCliRawId,
   HIGGSFIELD_CLI_ID_PREFIX,
+  emitSchemaField,
   resolveHiggsfieldCliBinary,
   type CliRun,
   type CliRunResult,
@@ -55,6 +56,7 @@ const fail = (stderr: string): CliRunResult => ({ code: 1, stdout: "", stderr })
 const IMAGE_LIST = JSON.stringify([
   { job_type: "cinematic_studio_2_5", name: "Cinematic Studio 2.5", description: "Stills." },
   { job_type: "nano_banana_2", name: "Nano Banana Pro", description: "Reference work." },
+  { job_type: "gpt_image_2_5", name: "GPT Image 2.5", description: "Newest GPT image model." },
 ]);
 const VIDEO_LIST = JSON.stringify([
   { job_type: "seedance_2_0", name: "Seedance 2.0", description: "Video." },
@@ -123,6 +125,26 @@ const veoGet = () =>
     ],
   });
 
+/** gpt_image_2_5's full parameter surface (the plan's worked example):
+ *  quality/resolution/variant/aspect_ratio/background enums, a repeatable
+ *  reference array capped at 16, a bounded integer, and a required prompt. */
+const gptImageGet = () =>
+  JSON.stringify({
+    display_name: "GPT Image 2.5",
+    job_type: "gpt_image_2_5",
+    type: "image",
+    parameters: [
+      { name: "quality", type: "string", options: ["low", "medium", "high", "xhigh", "max"], default: "low" },
+      { name: "resolution", type: "string", options: ["1k", "2k", "4k"], default: "1k" },
+      { name: "variant", type: "string", options: ["flare", "sunburst"], default: "flare" },
+      { name: "aspect_ratio", type: "string", options: ["auto", "1:1", "16:9"], default: "1:1" },
+      { name: "background", type: "string", options: ["auto", "opaque", "transparent"], default: "auto" },
+      { name: "image_references", type: "array", default: null },
+      { name: "seed", type: "integer", default: 0, min: 0, max: 1000000 },
+      { name: "prompt", type: "string", required: true },
+    ],
+  });
+
 const studioImageGet = () =>
   JSON.stringify({
     aspect_ratios: ["1:1", "16:9", "9:16"],
@@ -152,6 +174,7 @@ function baseHandler(extra: Record<string, Handler> = {}): Handler {
       if (args[2] === "veo3") return ok(veoGet());
       if (args[2] === "veo3_1_lite") return ok(veoLiteGet());
       if (args[2] === "cinematic_studio_2_5") return ok(studioImageGet());
+      if (args[2] === "gpt_image_2_5") return ok(gptImageGet());
       return fail(`Unknown model: ${args[2]}`);
     }
     if (verb === "account status") return ok(JSON.stringify({ credits: 1388.74 }));
@@ -241,6 +264,7 @@ describe("HiggsfieldCliProvider.listModelChoices", () => {
     expect(choices.map((c) => c.id)).toEqual([
       `${HIGGSFIELD_CLI_ID_PREFIX}cinematic_studio_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2`,
+      `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`,
       `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}kling3_0`,
@@ -249,7 +273,7 @@ describe("HiggsfieldCliProvider.listModelChoices", () => {
     ]);
     expect(choices.some((c) => c.id === "auto")).toBe(false);
     expect(choices[0]).toMatchObject({ imageInput: true, videoInput: false });
-    expect(choices[2]).toMatchObject({ imageInput: false, videoInput: true });
+    expect(choices[3]).toMatchObject({ imageInput: false, videoInput: true });
   });
 
   it("tolerates envelope replies and isolates one list's failure", async () => {
@@ -280,12 +304,13 @@ describe("HiggsfieldCliProvider.videoModelOptions", () => {
     const p = provider(run);
     // Live seedance_2_0: closed resolution enum, open integer duration.
     const first = await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, true);
-    expect(first).toEqual({ resolutions: ["480p", "720p", "1080p", "4k"], durations: [] });
+    expect(first).toMatchObject({ resolutions: ["480p", "720p", "1080p", "4k"], durations: [] });
+    expect(first!.aspectRatios).toEqual(["auto", "16:9", "9:16"]);
     await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, true);
     expect(calls.filter((a) => a[0] === "model" && a[1] === "get").length).toBe(1); // cached
     // Closed string duration enums parse to numbers.
     const lite = await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}veo3_1_lite`, true);
-    expect(lite).toEqual({ resolutions: ["720p"], durations: [4, 6, 8] });
+    expect(lite).toMatchObject({ resolutions: ["720p"], durations: [4, 6, 8] });
   });
 
   it("returns null for foreign ids and unknown models", async () => {
@@ -301,7 +326,13 @@ describe("HiggsfieldCliProvider.imageModelOptions", () => {
   it("reads quality tiers + default from model get", async () => {
     const { run } = fakeRun(baseHandler());
     const o = await provider(run).imageModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}cinematic_studio_2_5`);
-    expect(o).toEqual({ qualities: ["basic", "high"], defaultQuality: "basic" });
+    expect(o).toMatchObject({
+      qualities: ["basic", "high"],
+      defaultQuality: "basic",
+      aspectRatios: ["1:1", "16:9", "9:16"],
+      resolutions: ["1k", "2k", "4k"],
+      defaultResolution: "1k",
+    });
   });
 
   it("returns null when the model declares no quality", async () => {
@@ -320,6 +351,59 @@ describe("HiggsfieldCliProvider.videoEndFrameModels", () => {
       `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}veo3_1_lite`,
     ]);
+  });
+});
+
+describe("HiggsfieldCliProvider.videoEditModels / generateVideoEdit", () => {
+  it("lists models declaring a video input role", async () => {
+    const { run } = fakeRun(baseHandler());
+    const ids = await provider(run).videoEditModels();
+    expect(ids).toEqual([
+      `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`,
+      `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`,
+    ]);
+  });
+
+  it("submits the source clip via --video-references", async () => {
+    const seen: string[][] = [];
+    const jobId = "99999999-aaaa-bbbb-cccc-dddddddddddd";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", video_url: "https://example.invalid/edit.mp4" }])),
+      })
+    );
+    const folder = path.join(dataDir, "prod-edit");
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "videos", "source.mp4"), Buffer.from("video-bytes"));
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "T", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([8]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoEdit(
+        prod,
+        shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 0, prompt: "replace the sky" },
+        () => {},
+        "videos/source.mp4"
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    const vIdx = args.indexOf("--video-references");
+    expect(vIdx).toBeGreaterThan(-1);
+    expect(args[vIdx + 1]).toMatch(/\.mp4$/);
   });
 });
 
@@ -377,7 +461,9 @@ describe("HiggsfieldCliProvider.imageGenFn", () => {
     let finished = false;
     const { run } = fakeRun(
       baseHandler({
-        "generate create cinematic_studio_2_5": () => ok(JSON.stringify([jobId])),
+        // makeProduction() has no model → the house default (gpt_image_2_5,
+        // now present in the fixture list) resolves.
+        "generate create gpt_image_2_5": () => ok(JSON.stringify([jobId])),
         "generate wait 22222222-3333-4444-5555-666666666666": () =>
           ok(JSON.stringify([{ id: jobId, status: "running" }])),
         "generate get 22222222-3333-4444-5555-666666666666": () =>
@@ -595,5 +681,152 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
       globalThis.fetch = realFetch;
     }
     expect(seen[0]).toContain("--video-references");
+  });
+});
+
+describe("HiggsfieldCliProvider.modelOptions (schema normalization)", () => {
+  it("normalizes gpt_image_2_5's full parameter surface", async () => {
+    const { run } = fakeRun(baseHandler());
+    const s = await provider(run).modelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`);
+    expect(s).not.toBeNull();
+    expect(s!.jobType).toBe("gpt_image_2_5");
+    const byName = (n: string) => s!.fields.find((f) => f.flag === n || f.name === n)!;
+    const quality = byName("quality");
+    expect(quality.kind).toBe("enum");
+    expect(quality.values).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(quality.default).toBe("low");
+    expect(byName("resolution").default).toBe("1k");
+    expect(byName("resolution").values).toEqual(["1k", "2k", "4k"]);
+    expect(byName("variant").values).toEqual(["flare", "sunburst"]);
+    expect(byName("aspect_ratio").values).toContain("auto");
+    expect(byName("background").group).toBe("control");
+    const refs = byName("image_references");
+    expect(refs.group).toBe("reference");
+    expect(refs.maxItems).toBe(16);
+    expect(byName("seed").kind).toBe("integer");
+    expect(byName("seed").group).toBe("advanced");
+    expect(s!.fields.some((f) => f.name === "prompt")).toBe(false);
+  });
+
+  it("caches the schema and returns null for foreign/unknown ids", async () => {
+    const { run, calls } = fakeRun(baseHandler());
+    const p = provider(run);
+    await p.modelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`);
+    await p.modelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`);
+    expect(calls.filter((a) => a[0] === "model" && a[1] === "get").length).toBe(1);
+    expect(await p.modelOptions("openart:foo")).toBeNull();
+    expect(await p.modelOptions("auto")).toBeNull();
+    expect(await p.modelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}nope`)).toBeNull();
+  });
+});
+
+describe("emitSchemaField", () => {
+  const enumField = { name: "quality", flag: "quality", aliases: [], kind: "enum" as const, group: "core" as const, values: ["low", "high"], emit: "value" as const, source: "parameters" as const };
+  it("matches enum values case-insensitively and rejects unlisted ones", () => {
+    const args: string[] = [];
+    expect(emitSchemaField(enumField, "HIGH", args)).toBe(true);
+    expect(args).toEqual(["--quality", "high"]);
+    expect(emitSchemaField(enumField, "nope", [])).toBe(false);
+  });
+  it("clamps integers to min/max", () => {
+    const seed = { name: "seed", flag: "seed", aliases: [], kind: "integer" as const, group: "advanced" as const, min: 0, max: 100, emit: "value" as const, source: "parameters" as const };
+    const args: string[] = [];
+    emitSchemaField(seed, 999, args);
+    expect(args).toEqual(["--seed", "100"]);
+  });
+  it("emits booleans explicitly and repeats arrays up to maxItems", () => {
+    const bool = { name: "enhance_prompt", flag: "enhance_prompt", aliases: [], kind: "boolean" as const, group: "advanced" as const, emit: "boolean-flag" as const, source: "parameters" as const };
+    const args: string[] = [];
+    emitSchemaField(bool, true, args);
+    emitSchemaField(bool, "false", args);
+    expect(args).toEqual(["--enhance_prompt", "true", "--enhance_prompt", "false"]);
+    const arr = { name: "image_references", flag: "image-references", aliases: [], kind: "array" as const, group: "reference" as const, maxItems: 2, emit: "repeat" as const, source: "parameters" as const };
+    const a2: string[] = [];
+    emitSchemaField(arr, ["a", "b", "c"], a2);
+    expect(a2).toEqual(["--image-references", "a", "--image-references", "b"]);
+  });
+});
+
+describe("HiggsfieldCliProvider schema-driven arg emission", () => {
+  it("emits board params (variant/background/seed) for gpt_image_2_5", async () => {
+    const seen: string[][] = [];
+    const jobId = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create gpt_image_2_5": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/g.png" }])),
+      })
+    );
+    const p = provider(run);
+    const gen = p.imageGenFn(
+      makeProduction({
+        openArt: {
+          model: `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`,
+          resolution: "2k",
+          quality: "high",
+          params: { quality: "high", resolution: "2k", variant: "sunburst", aspect_ratio: "16:9", background: "auto", seed: 999 },
+        },
+      })
+    )!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([4]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await gen("A castle", []);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args[args.indexOf("--quality") + 1]).toBe("high");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("2k");
+    expect(args[args.indexOf("--variant") + 1]).toBe("sunburst");
+    expect(args[args.indexOf("--aspect_ratio") + 1]).toBe("16:9");
+    expect(args[args.indexOf("--background") + 1]).toBe("auto");
+    expect(args[args.indexOf("--seed") + 1]).toBe("999");
+  });
+
+  it("honors an explicit mode over the seedance omni_reference special case", async () => {
+    const seen: string[][] = [];
+    const jobId = "88888888-9999-aaaa-bbbb-cccccccccccc";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_5": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify([jobId]));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", video_url: "https://example.invalid/m.mp4" }])),
+      })
+    );
+    const p = provider(run);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([5]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "T", folder: path.join(dataDir, "prod-mode"), createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    fs.mkdirSync(path.join(prod.meta.folder, "boards"), { recursive: true });
+    fs.mkdirSync(path.join(prod.meta.folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg"));
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    try {
+      await p.generateVideoClip(prod, shot, {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, resolution: "1080p", durationSec: 8, prompt: "animate",
+        params: { mode: "t2v" },
+      }, () => {});
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args.filter((a) => a === "--mode")).toHaveLength(1);
+    expect(args[args.indexOf("--mode") + 1]).toBe("t2v");
   });
 });

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, MediaProviderId, MediaProviderInfo, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
 import { Transcript } from "./components/Transcript.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { ModelCustomizer } from "./components/ModelCustomizer.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
 import { MediaProviderToggle, type MediaCredits } from "./components/MediaProviderToggle.js";
@@ -34,8 +35,9 @@ export function App() {
   const [approval, setApproval] = useState<ApprovalRequestIpc | null>(null);
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showModelCustomizer, setShowModelCustomizer] = useState(false);
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
-  const [credits, setCredits] = useState<number | null>(null);
+  const [credits, setCredits] = useState<ChatBalance | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   /** Top-bar media dial: active vendor, per-vendor balances + availability. */
   const [mediaProvider, setMediaProvider] = useState<MediaProviderId>("openart");
@@ -672,8 +674,10 @@ export function App() {
             void refreshMeta();
           }}
           onOpenAgents={() => { setShowSettings(false); setShowAgents(true); }}
+          onOpenModelCustomizer={() => { setShowSettings(false); setShowModelCustomizer(true); }}
         />
       )}
+      {showModelCustomizer && <ModelCustomizer onClose={() => setShowModelCustomizer(false)} />}
       {showAgents && <AgentsPanel onClose={() => { setShowAgents(false); void refreshAgents(); void refreshActiveAgent(currentId); }} models={models} />}
     </div>
   );

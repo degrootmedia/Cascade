@@ -7,7 +7,6 @@ import type { ReactNode } from "react";
 export function ViewTabs({ value, onChange, rightContent }: { value: AppView; onChange: (v: AppView) => void; rightContent?: ReactNode }) {
   return (
     <nav className="view-tabs" role="tablist">
-      <span className="view-tabs-brand">Cascade</span>
       <button
         role="tab"
         aria-selected={value === "home"}

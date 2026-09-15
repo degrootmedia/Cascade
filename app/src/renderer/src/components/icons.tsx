@@ -22,6 +22,7 @@ import regenerateUrl from "../assets/icons/regenerate.svg";
 import searchUrl from "../assets/icons/search.svg";
 import stopButtonUrl from "../assets/icons/stop-button.svg";
 import tokenUrl from "../assets/icons/token.svg";
+import videoEditingUrl from "../assets/icons/video-editing.svg";
 import xUrl from "../assets/icons/X.svg";
 
 interface IconProps {
@@ -74,6 +75,8 @@ export const ImportIcon = (p: IconProps) => <Icon src={importUrl} {...p} />;
 export const InbetweenIcon = (p: IconProps) => <Icon src={inbetweenUrl} {...p} />;
 /** Film strip — animatic / video timeline. */
 export const FilmStripIcon = (p: IconProps) => <Icon src={filmStripUrl} {...p} />;
+/** Blue film frame with a pencil — the edit-video node. */
+export const EditVideoIcon = (p: IconProps) => <Icon src={videoEditingUrl} {...p} />;
 /** Wallet/receipt — expenses ledger. */
 export const ExpensesIcon = (p: IconProps) => <Icon src={expensesUrl} {...p} />;
 /** Open blue eye — show the models hidden from the dropdowns. */

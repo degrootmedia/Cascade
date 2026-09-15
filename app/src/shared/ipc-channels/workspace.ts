@@ -18,8 +18,6 @@ export const settingsChannels = {
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
   "settings:set3daiApiKey": { method: "set3daiApiKey", kind: "invoke" },
-  "settings:getEndFrameModels": { method: "getEndFrameModels", kind: "invoke" },
-  "settings:setEndFrameModels": { method: "setEndFrameModels", kind: "invoke" },
   "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },
   "settings:setHiddenMediaModels": { method: "setHiddenMediaModels", kind: "invoke" },
   "settings:getModelKindOverrides": { method: "getModelKindOverrides", kind: "invoke" },

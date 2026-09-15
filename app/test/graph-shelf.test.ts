@@ -303,14 +303,14 @@ describe("node-graph shelf at scale", () => {
 });
 
 describe("node-graph tool panel", () => {
-  it("does not auto-populate the video/edit/tween nodes when unused", async () => {
+  it("does not auto-populate the video/edit/tween/edit-video nodes when unused", async () => {
     savedLayouts = [];
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(toolNodeCount(host)).toBe(0);
     const tiles = host.querySelectorAll(".prod-graph-tools-item");
-    expect(tiles.length).toBe(3);
+    expect(tiles.length).toBe(4);
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 
     await act(async () => { root.unmount(); });

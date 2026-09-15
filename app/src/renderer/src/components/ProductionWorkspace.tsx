@@ -4,17 +4,18 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { ShotTable } from "./ShotTable.js";
-import { NodeGraphModal, VIDEO_PROMPT_DEFAULT } from "./NodeGraphModal.js";
+import { NodeGraphModal, VIDEO_PROMPT_DEFAULT, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
+import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
 import { BrandSwatchRow } from "./production/brand.js";
@@ -22,6 +23,7 @@ import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
+import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -147,6 +149,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // "Generating…". Sets survive step switches and shot switches.
   const [nodeImageBusyIds, setNodeImageBusyIds] = useState<Set<string>>(new Set());
   const [nodeVideoBusyIds, setNodeVideoBusyIds] = useState<Set<string>>(new Set());
+  const [nodeEditVideoBusyIds, setNodeEditVideoBusyIds] = useState<Set<string>>(new Set());
   const [nodeEditBusyIds, setNodeEditBusyIds] = useState<Set<string>>(new Set());
   /** In-betweener block currently generating, keyed by shot id → block id. */
   const [tweenBusyByShot, setTweenBusyByShot] = useState<Record<string, string>>({});
@@ -306,9 +309,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   // Keep the rename draft in sync when switching productions.
   useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
 
-  // Warm the dropdowns' remembered last choices once (media-defaults.ts).
+  // Warm the dropdowns' remembered last choices once (media-defaults.ts) and
+  // the per-surface parameter defaults (model-param-defaults.ts).
   useEffect(() => {
     void primeMediaDefaults().then(() => setMediaDefaultsReady(true));
+    void primeModelParamDefaults();
   }, []);
 
   // The Step-3 image dropdown starts at the user's last chosen model: a
@@ -326,7 +331,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (prod.openArt?.model && prod.openArt.model.startsWith("higgsfield:")) return;
     const model = rememberedModel("image", ids, prod.openArt?.model ?? "") || ids[0];
     if (model === prod.openArt?.model) return;
-    saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
+    saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}), ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prod?.meta.id, imageModelIdsKey, mediaDefaultsReady]);
 
@@ -824,7 +829,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const style = (prod.styles ?? []).find((s) => s.id === styleId);
     // A stored pick missing from the active vendor's list falls back to the
     // production default instead of billing (or failing on) a stale slug.
-    const liveModel = style?.model && style.model !== "auto" && imageModels.some((m) => m.id === style.model)
+    const liveModel = style?.model && style.model !== "auto" && imageMasterModels.some((m) => m.id === style.model)
       ? style.model
       : undefined;
     const model = styleFrameOverride(liveModel);
@@ -1003,11 +1008,17 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   useEffect(() => {
     if (!graphShotId) return;
     let live = true;
-    setEndFrameModelIds(null);
-    window.cascade.videoEndFrameModels()
-      .then((ids) => { if (live) setEndFrameModelIds(ids); })
-      .catch(() => { if (live) setEndFrameModelIds([]); });
-    return () => { live = false; };
+    const load = () => {
+      setEndFrameModelIds(null);
+      window.cascade.videoEndFrameModels()
+        .then((ids) => { if (live) setEndFrameModelIds(ids); })
+        .catch(() => { if (live) setEndFrameModelIds([]); });
+    };
+    load();
+    // The dev customizer declares end-frame capability by assigning the
+    // `video:tween` surface; refresh so the tween list follows without a reopen.
+    window.addEventListener("cascade:media-provider-changed", load);
+    return () => { live = false; window.removeEventListener("cascade:media-provider-changed", load); };
   }, [graphShotId, prod?.meta.id, mediaProviderId]);
 
   /** Step 2: remove a style and renumber the rest. */
@@ -1428,10 +1439,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Create/reuse a reference, optionally recording its shot association.
  *  Returns the new references array (undefined when the production is gone). */
   function upsertReference(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }, shotId?: string): Production["references"] | undefined {
-    if (!prod) return undefined;
-    const existing = (prod.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
+    const current = prodRef.current;
+    if (!current) return undefined;
+    const existing = (current.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
     if (existing) {
-      return (prod.references ?? []).map((r) => r.id === existing.id ? {
+      return (current.references ?? []).map((r) => r.id === existing.id ? {
         ...r,
         artwork: r.artwork ?? ref.artwork,
         imagePath: r.imagePath ?? ref.imagePath,
@@ -1440,7 +1452,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         ...(shotId ? { shotIds: Array.from(new Set([...(r.shotIds ?? []), shotId])) } : {}),
       } : r);
     }
-    return [...(prod.references ?? []), { id: uid("ref"), name, artwork: ref.artwork, imagePath: ref.imagePath, media: ref.media, mediaPath: ref.mediaPath, ...(shotId ? { shotIds: [shotId] } : {}) }];
+    return [...(current.references ?? []), { id: uid("ref"), name, artwork: ref.artwork, imagePath: ref.imagePath, media: ref.media, mediaPath: ref.mediaPath, ...(shotId ? { shotIds: [shotId] } : {}) }];
   }
 
   /** Step 3: attach a reference (image file, or an on-disk video/audio file)
@@ -1483,8 +1495,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  drops just add the reference node, and connecting it to the prompt is an
    *  explicit socket action. Returns the reference id for canvas placement. */
   function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): string | undefined {
-    if (!prod) return undefined;
-    const existing = (prod.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
+    const current = prodRef.current;
+    if (!current) return undefined;
+    const existing = (current.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
     const references = upsertReference(name, ref);
     if (references) saveField({ references });
     if (existing) return existing.id;
@@ -1523,11 +1536,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  referencesDir on disk. The reference is NOT tagged into the prompt —
    *  connecting it to the prompt node is an explicit socket action.
    *  Returns the created reference so the graph can place its node. */
-  async function addFileReference(shotId: string, file: File): Promise<{ id: string; name: string; artwork: string; media?: "video" | "audio"; mediaPath?: string } | null> {
+  async function addFileReference(shotId: string, file: File, forcedName?: string): Promise<GraphRef | null> {
     if (!prod) return null;
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
     if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return null; }
-    const name = file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference";
+    const name = forcedName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
     try {
       if (kind === "image") {
         const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -1552,6 +1565,20 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       setErr(String(e).replace(/^Error:\s*/, ""));
       return null;
     }
+  }
+
+  /** Pasted files become auto-numbered references (Ref-001, Ref-002, …) so a
+   *  batch of clipboard images never collides on a generic file name — the same
+   *  naming the Design page's paste uses. Returns the created refs so the node
+   *  graph can place a node for each. */
+  async function addPastedReferences(shotId: string, files: File[]): Promise<GraphRef[]> {
+    const names = batchRefNames(files.length);
+    const refs: GraphRef[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const ref = await addFileReference(shotId, files[i], names[i]);
+      if (ref) refs.push(ref);
+    }
+    return refs;
   }
 
   /** Step 3: persist a shot's editable board-prompt override (empty clears it).
@@ -1848,7 +1875,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  listed one. durationSec is the block's displayed length (it can be newer
    *  than the last save after a keyframe drag); main clamps it to the 1–15s
    *  grid as a backstop. */
-  async function runTweenBlock(shotId: string, blockId: string, durationSec?: number, modelOverride?: string) {
+  async function runTweenBlock(shotId: string, blockId: string, durationSec?: number, modelOverride?: string, params?: Record<string, string>) {
     if (!prod) return;
     if (tweenBusyByShot[shotId]) return;
     setTweenBusyByShot((prev) => ({ ...prev, [shotId]: blockId }));
@@ -1859,10 +1886,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const saved = (shot?.graphTweenModel ?? "").trim();
       const model = (modelOverride && modelOverride.trim()) ||
         (saved && list.some((m) => m.id === saved) ? saved : (list[0]?.id ?? ""));
+      const tweenParams = params ?? shot?.graphTweenParams;
       const next = await window.cascade.generateTweenBlock(prod.meta.id, shotId, blockId, {
         model: model || undefined,
         resolution: shot?.graphTweenResolution,
         ...(Number(durationSec) > 0 ? { durationSec: Number(durationSec) } : {}),
+        ...(tweenParams && Object.keys(tweenParams).length ? { params: tweenParams } : {}),
       });
       setProd(next);
       bustOne(shotId);
@@ -1966,12 +1995,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: run the image generation node (prompt = the
    *  composer's text; result stored on the node, applied when piped). */
-  async function runImageGenNode(shotId: string, model: string, resolution: string) {
+  async function runImageGenNode(shotId: string, model: string, resolution: string, params?: Record<string, string>) {
     if (!prod || nodeImageBusyIds.has(shotId)) return;
     setNodeImageBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
-      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution });
+      const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      const frameParams = params ?? cur?.graphImageParams;
+      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -1986,7 +2017,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: run the video generation node (prompt = the
    *  video-prompt node; source = piped frame or the shot's frame). */
-  async function runVideoGenNode(shotId: string, model: string, resolution: string, durationSec: number) {
+  async function runVideoGenNode(shotId: string, model: string, resolution: string, durationSec: number, params?: Record<string, string>) {
     if (!prod || nodeVideoBusyIds.has(shotId)) return;
     setNodeVideoBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
@@ -2006,7 +2037,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
         : cur?.graphImageToVideo
           ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path
           : refSource?.imagePath;
-      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [] });
+      const videoParams = params ?? cur?.graphVideoParams;
+      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [], ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2019,9 +2051,52 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
+  /** Step 3 node graph: run the edit-video node (mandatory source clip +
+   *  prompt + references). `sourceKey` names the chosen source. */
+  async function runEditVideoNode(shotId: string, model: string, prompt: string, params?: Record<string, string>) {
+    if (!prod || nodeEditVideoBusyIds.has(shotId)) return;
+    setNodeEditVideoBusyIds((prev) => new Set(prev).add(shotId));
+    setErr(null);
+    try {
+      const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      // Source: the video node's selected clip, a wired video reference, or
+      // the shot's own video (the default when the source socket is empty).
+      let sourcePath: string | undefined;
+      if (cur?.graphVideoToEditVideo) sourcePath = cur?.graphVideoGens?.[cur?.graphVideoGenIndex ?? 0]?.path;
+      else if (cur?.graphEditVideoSourceRefId) {
+        const ref = (prod.references ?? []).find((r) => r.id === cur.graphEditVideoSourceRefId);
+        sourcePath = ref?.mediaPath ?? ref?.imagePath;
+      } else sourcePath = cur?.videoPath;
+      if (!sourcePath) { setErr("The edit-video node needs a source video — wire a clip into its source socket or generate one first."); return; }
+      const editParams = params ?? cur?.graphEditVideoParams;
+      // References are cited by the prompt node's @[name] tags and resolved
+      // main-side inside the provider (like the video node), so no refIds here.
+      const next = await window.cascade.generateEditVideoNode(prod.meta.id, shotId, {
+        prompt,
+        model,
+        resolution: cur?.graphEditVideoResolution ?? "",
+        sourcePath,
+        ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}),
+      });
+      setProd(next);
+      bustOne(shotId);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+    finally {
+      setNodeEditVideoBusyIds((prev) => { const n = new Set(prev); n.delete(shotId); return n; });
+    }
+  }
+
+  /** Pipe the edit-video node's selected clip into the output. */
+  function pipeEditVideoToOutput(shotId: string) {
+    const cur = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    const sel = cur?.graphEditVideoGens?.[cur?.graphEditVideoGenIndex ?? 0];
+    if (!sel) return;
+    saveGraphShotFields(shotId, { graphOutputSource: "editvideo", videoPath: sel.path });
+  }
+
   /** Step 3 node graph: AI-edit an image for one edit node (prompt = that
    *  node's edit-prompt node; source = its pipe or the shot's frame). */
-  async function runEditGenNode(shotId: string, nodeId: string, model: string, resolution: string) {
+  async function runEditGenNode(shotId: string, nodeId: string, model: string, resolution: string, params?: Record<string, string>) {
     const key = `${shotId}:${nodeId}`;
     if (!prod || nodeEditBusyIds.has(key)) return;
     setNodeEditBusyIds((prev) => new Set(prev).add(key));
@@ -2029,7 +2104,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphEditNodes ?? []).find((n) => n.id === nodeId);
-      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: node?.prompt ?? "", model, resolution });
+      const editParams = params ?? node?.params;
+      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: node?.prompt ?? "", model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2053,10 +2129,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: select a generation node's stored output by index;
    *  the piped node's selection becomes the shot's primary output. */
-  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit", index: number, nodeId?: string) {
+  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo", index: number, nodeId?: string) {
     if (!prod) return;
     const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
+    if (kind === "editvideo") {
+      const items = shot.graphEditVideoGens;
+      if (!items || !items[index]) return;
+      saveGraphShotFields(shotId, {
+        graphEditVideoGenIndex: index,
+        ...(shot.graphOutputSource === "editvideo" ? { videoPath: items[index].path } : {}),
+      });
+      return;
+    }
     const editNode = kind === "edit" && nodeId ? (shot.graphEditNodes ?? []).find((n) => n.id === nodeId) : undefined;
     const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : editNode?.gens;
     if (!items || !items[index]) return;
@@ -2076,10 +2161,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: cycle a generation node's stored outputs; the piped
    *  node's selection becomes the shot's primary output. */
-  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit", dir: 1 | -1, nodeId?: string) {
+  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo", dir: 1 | -1, nodeId?: string) {
     if (!prod) return;
-    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
+    if (kind === "editvideo") {
+      const items = shot.graphEditVideoGens;
+      if (!items || items.length === 0) return;
+      selectGraphGen(shotId, "editvideo", ((shot.graphEditVideoGenIndex ?? 0) + dir + items.length) % items.length, nodeId);
+      return;
+    }
     const editNode = kind === "edit" && nodeId ? (shot.graphEditNodes ?? []).find((n) => n.id === nodeId) : undefined;
     const items = kind === "image" ? shot.graphImageGens : kind === "video" ? shot.graphVideoGens : editNode?.gens;
     if (!items || items.length === 0) return;
@@ -2265,6 +2356,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   const imageModels = mediaModels.filter(isImageModel);
+  const videoModels = mediaModels.filter(isVideoModel);
+  // Surface-filtered lists: each picker offers only the models the user
+  // assigned to that surface (unassigned = every applicable surface).
+  const imageMasterModels = imageModels.filter((m) => modelOnSurface(m, "image:generate"));
+  const imageReferenceModels = imageModels.filter((m) => modelOnSurface(m, "image:generate"));
+  const imageCharacterModels = imageModels.filter((m) => modelOnSurface(m, "image:generate"));
+  const imageEditModels = imageModels.filter((m) => modelOnSurface(m, "image:edit"));
+  const videoModalModels = videoModels.filter((m) => modelOnSurface(m, "video:generate"));
   // Storyboard model dropdown: never display a model different from the one
   // that will run. A stored pick missing from the active vendor's list stays
   // selectable as an explicitly-marked stale entry (submitting with it fails
@@ -2274,9 +2373,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const boardModelStale =
     storedBoardModel !== "" &&
     storedBoardModel !== "auto" &&
-    !imageModels.some((m) => m.id === storedBoardModel);
+    !imageMasterModels.some((m) => m.id === storedBoardModel);
   const boardModelOptions: OpenArtModelChoice[] = boardModelStale
-    ? [...imageModels, {
+    ? [...imageMasterModels, {
       id: storedBoardModel,
       displayName: `${storedBoardModel} (unavailable — re-pick)`,
       description: "This saved pick isn't offered by the active media provider. Pick another model — submitting with this value errors instead of billing a different model.",
@@ -2284,11 +2383,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       videoInput: false,
       cost: null,
     }]
-    : imageModels;
+    : imageMasterModels;
   const boardModelValue =
-    (imageModels.some((m) => m.id === storedBoardModel) || boardModelStale) && storedBoardModel
+    (imageMasterModels.some((m) => m.id === storedBoardModel) || boardModelStale) && storedBoardModel
       ? storedBoardModel
-      : (imageModels[0]?.id ?? "");
+      : (imageMasterModels[0]?.id ?? "");
   // Quality tiers for the model that will run (Higgsfield catalog probe).
   // Null while loading; empty when the model declares none (dropdown hidden,
   // vendor default applies).
@@ -2311,10 +2410,56 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (boardQualities === null || !prod) return;
     const q = prod.openArt?.quality;
     if (q && !boardQualities.includes(q)) {
-      saveField({ openArt: { model: prod.openArt?.model ?? boardModelValue, resolution: prod.openArt?.resolution ?? "1k" } });
+      saveField({ openArt: { model: prod.openArt?.model ?? boardModelValue, resolution: prod.openArt?.resolution ?? "1k", ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardQualities]);
+  // Full option schema for the model that will run (Higgsfield `model get`
+  // detail). Null while loading or when the provider has no schema — the
+  // form hides itself and the ladder dropdowns above stay authoritative.
+  const [boardSchema, setBoardSchema] = useState<CliModelSchema | null>(null);
+  useEffect(() => {
+    let live = true;
+    setBoardSchema(null);
+    if (!boardModelValue) return () => { live = false; };
+    window.cascade.modelOptions(boardModelValue)
+      .then((s) => { if (live) setBoardSchema(s); })
+      .catch(() => { if (live) setBoardSchema(null); });
+    return () => { live = false; };
+  }, [boardModelValue]);
+  // Reconcile the persisted params with the new model's schema: prune keys the
+  // model doesn't declare (stale on a model switch) AND seed the configured
+  // per-surface defaults for keys the user never set.
+  useEffect(() => {
+    if (!boardSchema || !prod) return;
+    const cur = prod.openArt?.params ?? {};
+    const next = seedModelOptionValues(boardSchema, boardModelValue, "image:generate", pruneModelOptionValues(boardSchema, cur));
+    const changed = Object.keys(next).length !== Object.keys(cur).length || Object.keys(next).some((k) => next[k] !== cur[k]);
+    if (changed) {
+      saveField({
+        openArt: {
+          model: prod.openArt?.model ?? boardModelValue,
+          resolution: prod.openArt?.resolution ?? "1k",
+          ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}),
+          ...(Object.keys(next).length ? { params: next } : {}),
+        },
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardSchema]);
+  /** Persist the board model's advanced option values (used by both the
+   *  exposed-controls row and the Advanced panel, which share one value). */
+  const setBoardParams = (next: ModelOptionValues) => {
+    if (!prod) return;
+    saveField({
+      openArt: {
+        model: boardModelValue,
+        resolution: prod.openArt?.resolution ?? "1k",
+        ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}),
+        ...(Object.keys(next).length ? { params: next } : {}),
+      },
+    });
+  };
 
   if (!prod) {
     return (
@@ -2420,7 +2565,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
       <div className="prod-body">
         {showExpenses ? (
-          <ExpensesPanel />
+          <ExpensesPanel productionId={prod.meta.id} />
         ) : (
           <>
         {prod.currentStep === 1 && (
@@ -2554,17 +2699,17 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                           <label className="prod-openart-label">Model
                             <select
                               className="prod-openart-select"
-                              value={s.model && (s.model === "auto" || imageModels.some((m) => m.id === s.model)) ? s.model : "auto"}
-                              disabled={styleFrameBusy !== null || imageModels.length === 0}
+                              value={s.model && (s.model === "auto" || imageMasterModels.some((m) => m.id === s.model)) ? s.model : "auto"}
+                              disabled={styleFrameBusy !== null || imageMasterModels.length === 0}
                               onChange={(e) => setStyle(i, { model: e.target.value === "auto" ? undefined : e.target.value })}
-                              title="Model for this style's frame — Auto inherits the production default"
+                              title="Model for this style's frame — the same image-generation list as the master picker; Auto inherits the production default"
                             >
                               <option value="auto">
-                                {s.model && s.model !== "auto" && !imageModels.some((m) => m.id === s.model)
+                                {s.model && s.model !== "auto" && !imageMasterModels.some((m) => m.id === s.model)
                                   ? "Auto (previously selected model unavailable)"
                                   : "Auto (production default)"}
                               </option>
-                              {imageModels.map((m) => (
+                              {imageMasterModels.map((m) => (
                                 <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
                               ))}
                             </select>
@@ -2667,7 +2812,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               <CharacterBuilderSection
                 prodId={prod.meta.id}
                 characters={prod.characters}
-                models={mediaModels}
+                models={imageCharacterModels}
                 onGenerate={runCharacterGen}
               />
             </DesignSection>
@@ -2714,7 +2859,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             {refGen && (
               <RefGenModal
                 prodId={prod.meta.id}
-                models={mediaModels}
+                models={imageReferenceModels}
+                editModels={imageEditModels}
                 categories={prod.referenceCategories ?? []}
                 references={prod.references ?? []}
                 promptRefs={allPromptRefs(prod)}
@@ -2765,73 +2911,95 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               )}
             </p>
             <div className="prod-boards-controls">
-              <label className="prod-openart-label">Model
-                <select
-                  className="prod-openart-select"
-                  value={boardModelValue}
-                  onChange={(e) => {
-                    saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
-                    rememberMediaDefault("image", { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" });
-                  }}
-                  title="Model for in-app generation"
-                  disabled={boardModelOptions.length === 0}
-                >
-                  {boardModelOptions.map((m) => (
-                    <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="prod-openart-label">Resolution
-                <select
-                  className="prod-openart-select"
-                  value={prod.openArt?.resolution ?? "1k"}
-                  onChange={(e) => {
-                    saveField({ openArt: { model: boardModelValue, resolution: e.target.value as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}) } });
-                    rememberMediaDefault("image", { resolution: e.target.value });
-                  }}
-                  title="Output resolution for image generation"
-                >
-                  <option value="1k">1k</option>
-                  <option value="2k">2k</option>
-                  <option value="4k">4k</option>
-                </select>
-              </label>
-              {boardQualities !== null && boardQualities.length > 0 && (
-                <label className="prod-openart-label">Quality
-                  <select
-                    className="prod-openart-select"
-                    value={boardQualities.includes(prod.openArt?.quality ?? "") ? (prod.openArt?.quality as string) : ""}
-                    onChange={(e) => {
-                      const quality = e.target.value || undefined;
-                      saveField({ openArt: { model: boardModelValue, resolution: prod.openArt?.resolution ?? "1k", ...(quality ? { quality } : {}) } });
-                    }}
-                    title="Quality tier for this image model (from its live catalog options)"
-                  >
-                    <option value="">Default</option>
-                    {boardQualities.map((q) => (
-                      <option key={q} value={q}>{q}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              <button className="primary" disabled={boardsBusy || importBusy || !shotCount} onClick={() => void genBoards()}>
-                {boardsBusy ? "Generating…" : boardsDone ? "Generate missing frames" : "Generate Storyboard"}
-              </button>
-              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setShowBoardText((v) => !v)} title="Show or hide the Audio/Visual direction boxes under each frame">
-                {showBoardText ? "Hide direction" : "Show direction"}
-              </button>
-              <span className="prod-boards-sep" />
-              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void exportPrompts()} title={`Write every shot's prompt to ${prod.assets.boardsDir}/prompts.md`}>
-                Export prompts
-              </button>
-              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setPdfOpen(true)} title="Export the storyboard (frames + Audio/Visual) to a landscape PDF">
-                Export storyboard PDF
-              </button>
-              <span className="prod-boards-sep" />
-              <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
-                Refresh Storyboard Images
-              </button>
-              <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
+              <div className="prod-boards-config-row">
+                  <label className="prod-openart-label">Model
+                    <select
+                      className="prod-openart-select"
+                      value={boardModelValue}
+                      onChange={(e) => {
+                        saveField({ openArt: { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}), ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
+                        rememberMediaDefault("image", { model: e.target.value, resolution: prod.openArt?.resolution ?? "1k" });
+                      }}
+                      title="Model for in-app generation"
+                      disabled={boardModelOptions.length === 0}
+                    >
+                      {boardModelOptions.map((m) => (
+                        <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="prod-openart-label">Resolution
+                    <select
+                      className="prod-openart-select"
+                      value={prod.openArt?.resolution ?? "1k"}
+                      onChange={(e) => {
+                        saveField({ openArt: { model: boardModelValue, resolution: e.target.value as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}), ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
+                        rememberMediaDefault("image", { resolution: e.target.value });
+                      }}
+                      title="Output resolution for image generation"
+                    >
+                      <option value="1k">1k</option>
+                      <option value="2k">2k</option>
+                      <option value="4k">4k</option>
+                    </select>
+                  </label>
+                  {boardQualities !== null && boardQualities.length > 0 && (
+                    <label className="prod-openart-label">Quality
+                      <select
+                        className="prod-openart-select"
+                        value={boardQualities.includes(prod.openArt?.quality ?? "") ? (prod.openArt?.quality as string) : ""}
+                        onChange={(e) => {
+                          const quality = e.target.value || undefined;
+                          saveField({ openArt: { model: boardModelValue, resolution: prod.openArt?.resolution ?? "1k", ...(quality ? { quality } : {}), ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
+                        }}
+                        title="Quality tier for this image model (from its live catalog options)"
+                      >
+                        <option value="">Default</option>
+                        {boardQualities.map((q) => (
+                          <option key={q} value={q}>{q}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <ModelOptionsForm
+                    schema={boardSchema}
+                    value={(prod.openArt?.params ?? {}) as ModelOptionValues}
+                    exclude={["resolution", "quality"]}
+                    persistKey="cascade.modelOptions.advanced.board"
+                    render="exposed"
+                    onChange={setBoardParams}
+                  />
+                  <div className="prod-boards-advanced">
+                    <ModelOptionsForm
+                      schema={boardSchema}
+                      value={(prod.openArt?.params ?? {}) as ModelOptionValues}
+                      exclude={["resolution", "quality"]}
+                      persistKey="cascade.modelOptions.advanced.board"
+                      render="advanced"
+                      onChange={setBoardParams}
+                    />
+                  </div>
+                </div>
+              <div className="prod-boards-actions">
+                <button className="primary" disabled={boardsBusy || importBusy || !shotCount} onClick={() => void genBoards()}>
+                  {boardsBusy ? "Generating…" : boardsDone ? "Generate missing frames" : "Generate Storyboard"}
+                </button>
+                <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setShowBoardText((v) => !v)} title="Show or hide the Audio/Visual direction boxes under each frame">
+                  {showBoardText ? "Hide direction" : "Show direction"}
+                </button>
+                <span className="prod-boards-sep" />
+                <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void exportPrompts()} title={`Write every shot's prompt to ${prod.assets.boardsDir}/prompts.md`}>
+                  Export prompts
+                </button>
+                <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setPdfOpen(true)} title="Export the storyboard (frames + Audio/Visual) to a landscape PDF">
+                  Export storyboard PDF
+                </button>
+                <span className="prod-boards-sep" />
+                <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
+                  Refresh Storyboard Images
+                </button>
+                <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
+              </div>
             </div>
             {err && <p className="error-text">{err}</p>}
             {shotCount > 0 && (
@@ -2970,20 +3138,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onStyleChange={(style) => setGraphStyle(graphShotId!, style)}
                   onToggleBrand={(include) => { if (graphShotId) void setBrandForShot(graphShotId, include); }}
                   onDropFile={(file) => graphShotId ? addFileReference(graphShotId, file) : Promise.resolve(null)}
+                  onPasteFiles={(files) => graphShotId ? addPastedReferences(graphShotId, files) : Promise.resolve([])}
                   onStyleDetached={() => { if (graphShotId) detachGraphStyle(graphShotId); }}
                   imageModels={imageModels}
-                  videoModels={mediaModels.filter(isVideoModel)}
+                  videoModels={videoModels}
                   endFrameModelIds={endFrameModelIds}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
-                  onRunImageGen={(model, resolution) => graphShotId ? runImageGenNode(graphShotId, model, resolution) : Promise.resolve()}
-                  onRunVideoGen={(model, resolution, durationSec) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec) : Promise.resolve()}
-                  onRunEditGen={(nodeId, model, resolution) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution) : Promise.resolve()}
-                  onRunTweenBlock={(blockId, durationSec, model) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model) : Promise.resolve()}
+                  onRunImageGen={(model, resolution, params) => graphShotId ? runImageGenNode(graphShotId, model, resolution, params) : Promise.resolve()}
+                  onRunVideoGen={(model, resolution, durationSec, params) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec, params) : Promise.resolve()}
+                  onRunEditGen={(nodeId, model, resolution, params) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution, params) : Promise.resolve()}
+                  onRunEditVideo={(model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, model, editPrompt, params) : Promise.resolve()}
+                  onPipeEditVideoToOutput={() => { if (graphShotId) pipeEditVideoToOutput(graphShotId); }}
+                  onRunTweenBlock={(blockId, durationSec, model, params) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model, params) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyIds.has(graphShotId) : false}
                   videoGenBusy={graphShotId ? nodeVideoBusyIds.has(graphShotId) : false}
+                  editVideoBusy={graphShotId ? nodeEditVideoBusyIds.has(graphShotId) : false}
                   editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyIds.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   busyTweenBlock={graphShotId ? tweenBusyByShot[graphShotId] ?? null : null}
                   tweenStitching={graphShotId ? tweenStitchingIds.has(graphShotId) : false}
@@ -3016,7 +3188,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               return es ? (
                 <EditBoardModal
                   shotNumber={es.number}
-                  models={mediaModels}
+                  models={imageEditModels}
                   savedModel={es.graphEditNodes?.find((n) => n.id === (es.graphOutputSource === "editgen" ? es.graphOutputEditNodeId : undefined))?.model}
                   onSavedModelChange={(m) => {
                     if (es.graphOutputSource === "editgen" && es.graphOutputEditNodeId) {
@@ -3042,7 +3214,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <VideoGenModal
                   shot={vs}
                   prod={prod}
-                  models={mediaModels}
+                  models={videoModalModels}
                   prompt={vs.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT}
                   onShotField={(patch) => saveGraphShotFields(vs.id, patch)}
                   onPromptChange={(text) => saveGraphShotFields(vs.id, { graphVideoPrompt: text })}

@@ -1031,6 +1031,37 @@ export function writeBoardFrame(
   return { jpegRel, originalRel };
 }
 
+/** Directory holding a shot's generated clips: `<boardsDir>/<number>/video`,
+ *  beside that shot's frames. */
+export function shotVideoDir(p: Production, shot: ProductionShot): string {
+  return `${p.assets.boardsDir}/${shot.number}/video`;
+}
+
+/** Relative path for a freshly generated clip in the shot's `video/` folder.
+ *  `variant` distinguishes edit clips (`edit`) and stitched tweens (`tween`);
+ *  a random tag keeps every take. */
+export function shotVideoRelPath(p: Production, shot: ProductionShot, ext = "mp4", variant?: string): string {
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  const mid = variant ? `-${variant}` : "";
+  return `${shotVideoDir(p, shot)}/shot-${shot.number}${mid}-${tag}.${ext}`;
+}
+
+/** Write generated clip bytes into the shot's `video/` folder and return the
+ *  workspace-relative path. Every provider routes its finished clip through
+ *  here so the layout can't drift. */
+export function writeShotVideo(
+  p: Production,
+  shot: ProductionShot,
+  bytes: Buffer,
+  ext = "mp4",
+  variant?: string
+): string {
+  const rel = shotVideoRelPath(p, shot, ext, variant);
+  fs.mkdirSync(assetPath(p, shotVideoDir(p, shot)), { recursive: true });
+  fs.writeFileSync(assetPath(p, rel), bytes);
+  return rel;
+}
+
 /** Derive the expected JPEG path for an original, or null when it isn't a
  *  board original (`boards/<shot>/originals/shot-<shot>-<tag>.<ext>`). */
 export function jpegForOriginalRel(p: Production, originalRel: string): string | null {
@@ -1176,6 +1207,67 @@ export function relocateBoardLayout(p: Production, shot: ProductionShot): boolea
       }
     }
   } catch { /* best-effort */ }
+  return changed;
+}
+
+/** Move a legacy flat clip rel (`<videosDir>/shot-<number>-...`, edit and tween
+ *  variants included) into the shot's own `video/` folder. Returns the original
+ *  rel when it isn't a legacy clip for this shot, so the migration is
+ *  idempotent. */
+function relocateVideoRel(p: Production, shot: ProductionShot, rel: string | undefined): string | undefined {
+  if (!rel) return rel;
+  const legacyDir = (p.assets as { videosDir?: string }).videosDir || "videos";
+  const esc = legacyDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`^${esc}/shot-(\\d{4})-[^/]+$`).exec(rel);
+  if (!m || m[1] !== shot.number) return rel;
+  const newRel = `${shotVideoDir(p, shot)}/${path.basename(rel)}`;
+  try {
+    const abs = assetPath(p, rel);
+    if (!fs.existsSync(abs)) return rel;
+    fs.mkdirSync(assetPath(p, shotVideoDir(p, shot)), { recursive: true });
+    fs.renameSync(abs, assetPath(p, newRel));
+    return newRel;
+  } catch {
+    return rel;
+  }
+}
+
+/** One-time layout migration: generated clips used to live flat in the
+ *  production's `videos/` folder (`videos/shot-0100-<tag>.mp4`). They now live
+ *  in the shot's own board folder under `video/`
+ *  (`boards/0100/video/shot-0100-<tag>.mp4`), beside that shot's frames. Moves
+ *  every referenced clip (videoPath, node-graph video/edit-video gens, tween
+ *  block gens, stitched tween output) and rewrites the paths. Idempotent —
+ *  already-relocated paths no longer match the flat pattern. */
+export function relocateVideoLayout(p: Production, shot: ProductionShot): boolean {
+  let changed = false;
+  // Memoize old→new so a legacy path referenced by several fields (e.g.
+  // `videoPath` AND a `graphVideoGens` entry, or `graphTweenOutput`) is only
+  // moved once — the second lookup would otherwise see the source gone and
+  // leave that field pointing at the old flat path.
+  const moved = new Map<string, string>();
+  const move = (rel: string | undefined): string | undefined => {
+    if (!rel) return rel;
+    const cached = moved.get(rel);
+    if (cached) return cached;
+    const next = relocateVideoRel(p, shot, rel);
+    if (next !== rel && next) {
+      changed = true;
+      moved.set(rel, next);
+    }
+    return next;
+  };
+  if (shot.videoPath) shot.videoPath = move(shot.videoPath);
+  if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
+  if (shot.graphEditVideoGens?.length) {
+    shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
+  }
+  if (shot.graphTweenOutput) shot.graphTweenOutput = move(shot.graphTweenOutput);
+  if (shot.graphTweenBlocks?.length) {
+    shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) =>
+      b.gens?.length ? { ...b, gens: b.gens.map((g) => ({ ...g, path: move(g.path)! })) } : b
+    );
+  }
   return changed;
 }
 
@@ -1333,19 +1425,49 @@ export function selectBoardFrame(shot: ProductionShot, rel: string): void {
 }
 
 /**
+ * Every workspace-relative media path a shot can hold (frames, histories,
+ * node-generation entries, clips). The relocation below moves each backing
+ * file and rewrites exactly these fields — one list so a new path-bearing
+ * field can't silently stop following its shot on reorder.
+ */
+function shotMediaRefs(shot: ProductionShot): string[] {
+  const refs: string[] = [];
+  const push = (rel: string | undefined) => { if (typeof rel === "string" && rel) refs.push(rel); };
+  push(shot.artwork);
+  for (const r of shot.artworkHistory ?? []) push(r);
+  for (const g of shot.graphImageGens ?? []) push(g.path);
+  for (const g of shot.graphVideoGens ?? []) push(g.path);
+  for (const g of shot.graphEditGens ?? []) push(g.path);
+  for (const node of shot.graphEditNodes ?? []) for (const g of node.gens ?? []) push(g.path);
+  push(shot.videoPath);
+  for (const g of shot.graphEditVideoGens ?? []) push(g.path);
+  push(shot.graphTweenOutput);
+  for (const b of shot.graphTweenBlocks ?? []) for (const g of b.gens ?? []) push(g.path);
+  return [...new Set(refs)];
+}
+
+/**
  * Relocate storyboard board folders/files when shots are renumbered (e.g.
- * drag-reorder). For every shot whose number changed (old→new), rename the
- * per-shot directory boards/<old> → boards/<new> (via temp to avoid
- * collisions), rename inner filenames shot-<old>- → shot-<new>-, and patch
- * every board-related path stored on the shot. promptOverrides (keyed by
- * number) follows the shot as well.
+ * drag-reorder). For every shot whose number changed (old→new), move its
+ * per-shot directory boards/<old> → boards/<new> (via temp, so permuted
+ * numbers can't collide), rename inner filenames shot-<old>- →
+ * shot-<new>-, move referenced files that live outside the numbered folders
+ * individually, and patch every media path stored on the shot. Stored paths
+ * whose files are missing (dangling links from an earlier failure) are left
+ * untouched — a reorder must never manufacture new broken links.
+ * promptOverrides (keyed by number) follows the shot as well.
+ *
+ * Every filesystem mutation is journaled; on any failure the journal is
+ * rolled back and an error is thrown BEFORE the caller persists, so disk and
+ * JSON stay consistent (the reorder surfaces as an error banner instead of
+ * silently cross-wiring frames between shots).
  */
 export function relocateBoardsForRenumber(
   p: Production,
   oldNumbers: Map<string, string>
 ): void {
   const boardsDir = p.assets.boardsDir;
-  // Build list of shots that actually changed number and whose old folder exists
+  // Shots that actually changed number.
   const moves: Array<{ shot: ProductionShot; oldNum: string; newNum: string }> = [];
   for (const sc of p.scenes) {
     for (const shot of sc.shots) {
@@ -1355,71 +1477,201 @@ export function relocateBoardsForRenumber(
   }
   if (!moves.length) return;
 
-  // Phase 1: move each old dir → temp dir (avoid collisions where new dirs already exist)
-  const tempMap = new Map<string, string>(); // oldNum → tempRel
+  const existsRel = (rel: string): boolean => {
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const journal: Array<{ from: string; to: string }> = [];
+  const createdDirs: string[] = [];
+  const rollback = () => {
+    for (let i = journal.length - 1; i >= 0; i--) {
+      try { fs.renameSync(journal[i].to, journal[i].from); } catch { /* best-effort */ }
+    }
+    for (const d of createdDirs) {
+      try { fs.rmdirSync(d); } catch { /* non-empty or gone — leave it */ }
+    }
+  };
+  const fail = (msg: string): never => {
+    rollback();
+    throw new Error(msg);
+  };
+  const mkdirs = (abs: string) => {
+    try {
+      if (!fs.existsSync(abs)) {
+        fs.mkdirSync(abs, { recursive: true });
+        createdDirs.push(abs);
+      }
+    } catch (e) {
+      fail(`Shot reorder failed: cannot create folder ${abs} (${e instanceof Error ? e.message : e})`);
+    }
+  };
+  const rename = (fromAbs: string, toAbs: string, label: string) => {
+    try {
+      fs.renameSync(fromAbs, toAbs);
+      journal.push({ from: fromAbs, to: toAbs });
+    } catch (e) {
+      fail(`Shot reorder failed: cannot move ${label} (${e instanceof Error ? e.message : e})`);
+    }
+  };
+
+  // Where a stored path lands after its shot moves oldNum→newNum: the numbered
+  // folder prefix swaps, and a shot-<old>- filename swaps (flat files keep
+  // their folder — grouping them is the layout migration's job, not reorder's).
+  const relocatedRel = (rel: string, oldNum: string, newNum: string): string => {
+    const dirPrefix = `${boardsDir}/${oldNum}/`;
+    if (rel.startsWith(dirPrefix)) {
+      return `${boardsDir}/${newNum}/` + rel.slice(dirPrefix.length).split(`shot-${oldNum}-`).join(`shot-${newNum}-`);
+    }
+    const slash = rel.lastIndexOf("/");
+    const dir = slash >= 0 ? rel.slice(0, slash) : "";
+    const base = slash >= 0 ? rel.slice(slash + 1) : rel;
+    if (base.startsWith(`shot-${oldNum}-`)) {
+      const newBase = `shot-${newNum}-` + base.slice(`shot-${oldNum}-`.length);
+      return dir ? `${dir}/${newBase}` : newBase;
+    }
+    return rel;
+  };
+
+  // Snapshot which referenced files exist BEFORE touching disk, so per-file
+  // moves and path patches agree on what actually moved.
+  const oldExists = new Map<string, boolean>();
+  for (const { shot } of moves) {
+    for (const rel of shotMediaRefs(shot)) {
+      if (!oldExists.has(rel)) oldExists.set(rel, existsRel(rel));
+    }
+  }
+
+  // Sweep stale temp dirs from an interrupted earlier reorder (ours alone —
+  // the .tmp-reorder- prefix is unique to this function).
+  try {
+    const boardsAbs = assetPath(p, boardsDir);
+    if (fs.existsSync(boardsAbs)) {
+      for (const entry of fs.readdirSync(boardsAbs)) {
+        if (entry.startsWith(".tmp-reorder-")) {
+          try { fs.rmSync(path.join(boardsAbs, entry), { recursive: true, force: true }); } catch { /* keep going */ }
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+
+  // Phase 1: each old dir → temp dir (permuted numbers can't collide while
+  // every source folder is parked aside).
+  const tempByOld = new Map<string, string>(); // oldNum → tempRel
   for (const { oldNum } of moves) {
+    if (tempByOld.has(oldNum)) continue; // two shots sharing one old number (pre-broken) — move once
     const oldRel = `${boardsDir}/${oldNum}`;
     let oldAbs: string;
     try { oldAbs = assetPath(p, oldRel); } catch { continue; }
-    if (!fs.existsSync(oldAbs)) continue;
-    const tmpRel = `${boardsDir}/.tmp-reorder-${oldNum}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`;
-    try {
-      fs.renameSync(oldAbs, assetPath(p, tmpRel));
-      tempMap.set(oldNum, tmpRel);
-    } catch { /* best-effort */ }
+    let st: fs.Stats;
+    try { st = fs.statSync(oldAbs); } catch { continue; }
+    if (!st.isDirectory()) continue; // a stray file — handled per-file in phase 3
+    if (!existsRel(oldRel)) continue;
+    const tmpRel = `${boardsDir}/.tmp-reorder-${oldNum}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    rename(oldAbs, assetPath(p, tmpRel), `board folder ${oldRel}`);
+    tempByOld.set(oldNum, tmpRel);
   }
 
-  // Phase 2: temp → final new dir, renaming inner filenames to use new number
+  // Phase 2: temp → final new dir, renaming inner shot-<old>- filenames.
+  // A pre-existing new dir would mean clobbering another shot's frames, so
+  // fail (rolling back) instead of deleting it.
+  const renameInDir = (dirRel: string, oldNum: string, newNum: string) => {
+    let dirAbs: string;
+    try { dirAbs = assetPath(p, dirRel); } catch { return; }
+    let entries: string[];
+    try { entries = fs.readdirSync(dirAbs); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dirAbs, entry);
+      try {
+        const st = fs.statSync(full);
+        if (st.isDirectory()) {
+          renameInDir(`${dirRel}/${entry}`, oldNum, newNum);
+        } else if (entry.includes(`shot-${oldNum}-`)) {
+          const newEntry = entry.split(`shot-${oldNum}-`).join(`shot-${newNum}-`);
+          rename(full, path.join(dirAbs, newEntry), `board file ${dirRel}/${entry}`);
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("Shot reorder failed:")) throw e;
+        // Unreadable entry — leave it; verification below reports it.
+      }
+    }
+  };
   for (const { oldNum, newNum } of moves) {
-    const tmpRel = tempMap.get(oldNum);
+    const tmpRel = tempByOld.get(oldNum);
     if (!tmpRel) continue;
     const newRel = `${boardsDir}/${newNum}`;
-    try {
-      fs.mkdirSync(path.dirname(assetPath(p, newRel)), { recursive: true });
-      // Remove existing new dir if it already exists (should be empty after temp dance, but handle)
-      const newAbs = assetPath(p, newRel);
-      if (fs.existsSync(newAbs)) {
-        try { fs.rmSync(newAbs, { recursive: true, force: true }); } catch {}
-      }
-      fs.renameSync(assetPath(p, tmpRel), newAbs);
-      // Rename filenames inside new dir that contain old number
-      const renameInDir = (dirRel: string) => {
-        let dirAbs: string;
-        try { dirAbs = assetPath(p, dirRel); } catch { return; }
-        if (!fs.existsSync(dirAbs)) return;
-        for (const entry of fs.readdirSync(dirAbs)) {
-          const full = path.join(dirAbs, entry);
-          try {
-            const st = fs.statSync(full);
-            if (st.isDirectory()) {
-              renameInDir(`${dirRel}/${entry}`);
-            } else if (entry.includes(`shot-${oldNum}-`)) {
-              const newEntry = entry.replace(`shot-${oldNum}-`, `shot-${newNum}-`);
-              fs.renameSync(full, path.join(dirAbs, newEntry));
-            }
-          } catch {}
-        }
-      };
-      renameInDir(newRel);
-    } catch { /* best-effort */ }
+    if (existsRel(newRel)) {
+      fail(`Shot reorder failed: ${newRel} already exists and is not part of this reorder — refusing to overwrite another shot's frames.`);
+    }
+    mkdirs(path.dirname(assetPath(p, newRel)));
+    rename(assetPath(p, tmpRel), assetPath(p, newRel), `board folder ${tmpRel}`);
+    renameInDir(newRel, oldNum, newNum);
   }
 
-  // Patch stored paths: replace boards/<old>/ → boards/<new>/ and shot-<old>- → shot-<new>-
-  const patchOne = (rel: string | undefined, oldNum: string, newNum: string): string | undefined => {
-    if (!rel) return rel;
-    return rel
-      .replace(`${boardsDir}/${oldNum}/`, `${boardsDir}/${newNum}/`)
-      .replace(`shot-${oldNum}-`, `shot-${newNum}-`);
-  };
+  // Phase 3: referenced files outside the numbered folders (legacy flat
+  // files) move individually to their relocated paths. A file that can't be
+  // moved (already broken link, external lock) keeps its stored path — the
+  // reorder still goes through for everything else, and refreshBoardLinks
+  // remains the repair tool. Only clobbering another shot's frames (phase 2)
+  // or losing a file we did move (phase 5) fails the reorder.
+  const newLanded = new Set<string>();
   for (const { shot, oldNum, newNum } of moves) {
-    if (shot.artwork) shot.artwork = patchOne(shot.artwork, oldNum, newNum)!;
-    if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => patchOne(r, oldNum, newNum)!);
-    if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
-    if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
-    if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
-    for (const node of shot.graphEditNodes ?? []) {
-      if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: patchOne(g.path, oldNum, newNum)! }));
+    for (const rel of shotMediaRefs(shot)) {
+      const next = relocatedRel(rel, oldNum, newNum);
+      if (next === rel) continue;
+      if (existsRel(next)) { newLanded.add(next); continue; }
+      if (!oldExists.get(rel)) continue; // dangling link — leave the path untouched
+      if (!existsRel(rel)) continue; // already moved by an earlier phase
+      let newAbs: string;
+      try { newAbs = assetPath(p, next); } catch { continue; }
+      mkdirs(path.dirname(newAbs));
+      let oldAbs: string;
+      try { oldAbs = assetPath(p, rel); } catch { continue; }
+      try {
+        fs.renameSync(oldAbs, newAbs);
+        journal.push({ from: oldAbs, to: newAbs });
+        newLanded.add(next);
+      } catch { /* leave the path untouched — see above */ }
     }
+  }
+
+  // Phase 4: patch stored paths exactly where files landed. Paths whose files
+  // never existed stay byte-identical (still dangling, still repairable via
+  // refreshBoardLinks) rather than pointing at a new non-existent location.
+  const patched: string[] = [];
+  const patchShotPaths = (shot: ProductionShot, oldNum: string, newNum: string) => {
+    const patchOne = (rel: string | undefined): string | undefined => {
+      if (!rel) return rel;
+      const next = relocatedRel(rel, oldNum, newNum);
+      if (next === rel) return rel;
+      if (newLanded.has(next) || existsRel(next)) { patched.push(next); return next; }
+      return rel;
+    };
+    if (shot.artwork) shot.artwork = patchOne(shot.artwork)!;
+    if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => patchOne(r)!);
+    if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
+    if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
+    if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
+    for (const node of shot.graphEditNodes ?? []) {
+      if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: patchOne(g.path)! }));
+    }
+    // Video clips live under boards/<number>/video/, so they move with the
+    // shot too — patch the clip paths alongside the frame paths.
+    if (shot.videoPath) shot.videoPath = patchOne(shot.videoPath)!;
+    if (shot.graphEditVideoGens?.length) shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
+    if (shot.graphTweenOutput) shot.graphTweenOutput = patchOne(shot.graphTweenOutput)!;
+    if (shot.graphTweenBlocks?.length) {
+      shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) =>
+        b.gens?.length ? { ...b, gens: b.gens.map((g) => ({ ...g, path: patchOne(g.path)! })) } : b
+      );
+    }
+  };
+  for (const { shot, oldNum, newNum } of moves) patchShotPaths(shot, oldNum, newNum);
+
+  // Phase 5: verify every patched path exists on disk. A missing file here
+  // means the move lost data — roll back and fail loudly instead of saving a
+  // production whose frames point at nothing.
+  const missing = patched.filter((rel) => !existsRel(rel));
+  if (missing.length) {
+    fail(`Shot reorder failed: ${missing.length} frame(s) went missing in transit (${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""}) — nothing was saved.`);
   }
 
   // promptOverrides is keyed by displayed number — move entries with the shot
@@ -1560,6 +1812,13 @@ export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: s
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
   shot.graphVideoGens = [item, ...(shot.graphVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
   shot.graphVideoGenIndex = 0;
+}
+
+/** Store an AI-edited video clip on the edit-video node (newest first). */
+export function recordGraphEditVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  shot.graphEditVideoGens = [item, ...(shot.graphEditVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  shot.graphEditVideoGenIndex = 0;
 }
 
 /** Store an AI-edited frame on the named edit node (newest first). */
@@ -1951,7 +2210,12 @@ export function migrateEditNodes(shot: ProductionShot): boolean {
  *  `shot` (when given) lets the generator record a pending async job on the
  *  shot if the generation outlives its wait — the frame can then be reclaimed
  *  later instead of being lost. */
-export type ImageGenFn = (prompt: string, refs: GenerationRef[], shot?: ProductionShot) => Promise<Buffer>;
+export type ImageGenFn = (
+  prompt: string,
+  refs: GenerationRef[],
+  shot?: ProductionShot,
+  params?: Record<string, string | number | boolean | string[]>
+) => Promise<Buffer>;
 
 /**
  * Step 3 — generate storyboard frames. Runs the image submissions in parallel

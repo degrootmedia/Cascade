@@ -66,9 +66,10 @@ describe("applyRendererState", () => {
     expect(merged.scriptSource).toBe("C:/script.md");
   });
 
-  it("never clobbers fields the renderer doesn't send", () => {
-    // The fresh doc carries node-graph + artwork state a long-running job wrote;
-    // the incoming renderer copy predates it and omits it — it must survive.
+  it("never clobbers scene structure the renderer doesn't own", () => {
+    // The fresh doc carries the post-reorder scene order; the incoming
+    // renderer copy predates it (or simply echoes an empty list) — the fresh
+    // scenes must survive wholesale.
     const fresh = baseProduction({
       scenes: [
         {
@@ -89,12 +90,11 @@ describe("applyRendererState", () => {
     });
     const incoming = baseProduction({ scenes: [] });
     const merged = applyRendererState(fresh, incoming);
-    expect(merged.scenes).toEqual([]); // renderer owns scenes — it sent an empty list
-    // ...but anything NOT in the scenes whitelist that lives elsewhere survives:
+    expect(merged.scenes).toEqual(fresh.scenes); // fresh owns membership, order, numbers, paths
     expect(merged.meta.name).toBe("Prod");
   });
 
-  it("preserves concurrent shot fields when the renderer resends the same shots", () => {
+  it("keeps fresh media paths while applying the renderer's text edits", () => {
     const fresh = baseProduction({
       scenes: [
         {
@@ -113,38 +113,351 @@ describe("applyRendererState", () => {
         },
       ],
     });
-    // Renderer sends the same shot but from a stale snapshot without the video.
+    // Renderer sends the same shot from a stale snapshot (old artwork, no
+    // video gens) plus a fresh audio edit typed after the snapshot.
     const incoming = baseProduction({
       scenes: [
         {
           number: 1,
           title: "S1",
-          shots: [{ id: "shot1", number: "0100", audio: "", visual: "Hero walks", artwork: "boards/0100/shot-0100-old.jpg" }],
+          shots: [{ id: "shot1", number: "0100", audio: "New line", visual: "Hero walks", artwork: "boards/0100/shot-0100-old.jpg" }],
         },
       ],
     });
     const merged = applyRendererState(fresh, incoming);
-    // The renderer's snapshot is authoritative for the fields it owns — but
-    // per-shot generated state the renderer didn't resend is lost. (This is the
-    // documented trade-off of the whitelist merge; concurrent long-running jobs
-    // go through rebaseProduction, not this path.)
-    expect(merged.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-old.jpg");
+    // The audio edit applies; the stale media paths do not clobber the fresh ones.
+    expect(merged.scenes[0].shots[0].audio).toBe("New line");
+    expect(merged.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-new.jpg");
+    expect(merged.scenes[0].shots[0].graphVideoGens).toEqual(fresh.scenes[0].shots[0].graphVideoGens);
+  });
+
+  it("keeps fresh order, numbers, and media paths when the renderer save predates a shot reorder", () => {
+    // Pre-reorder: scene 1 holds A(0100), scene 2 holds B(0200). The user
+    // drags B before A: B joins scene 1 as 0100, A becomes 0200, and both
+    // shots' folders + stored paths follow their shots. An in-flight renderer
+    // save captured before the drag then lands — it must apply its text edit
+    // without reverting the order or cross-wiring the frames.
+    const shotA = {
+      id: "shotA",
+      number: "0200",
+      audio: "",
+      visual: "A visual",
+      artwork: "boards/0200/shot-0200-a-edit.jpg",
+      artworkHistory: ["boards/0200/shot-0200-a-pure.jpg"],
+      graphImageGens: [{ path: "boards/0200/shot-0200-a-pure.jpg", prompt: "pure", model: "m", at: "" }],
+      graphImageGenIndex: 0,
+      graphEditNodes: [{
+        id: "edit0",
+        prompt: "night",
+        gens: [{ path: "boards/0200/shot-0200-a-edit.jpg", prompt: "night", model: "m", at: "" }],
+        genIndex: 0,
+      }],
+      graphOutputSource: "editgen" as const,
+      graphOutputEditNodeId: "edit0",
+    };
+    const shotB = {
+      id: "shotB",
+      number: "0100",
+      audio: "",
+      visual: "B visual",
+      artwork: "boards/0100/shot-0100-b.jpg",
+      graphImageGens: [{ path: "boards/0100/shot-0100-b.jpg", prompt: "b", model: "m", at: "" }],
+      graphImageGenIndex: 0,
+      graphOutputSource: "imagegen" as const,
+    };
+    const fresh = baseProduction({
+      scenes: [
+        { number: 1, title: "S1", shots: [structuredClone(shotB), structuredClone(shotA)] },
+        { number: 2, title: "S2", shots: [] },
+      ],
+    });
+    const incoming = baseProduction({
+      scenes: [
+        {
+          number: 1,
+          title: "S1",
+          shots: [{
+            ...structuredClone(shotA),
+            number: "0100", // stale number
+            audio: "A new line", // typed after the snapshot
+            artwork: "boards/0100/shot-0100-a-pure.jpg", // stale path
+            artworkHistory: ["boards/0100/shot-0100-a-pure.jpg"],
+            graphImageGens: [{ path: "boards/0100/shot-0100-a-pure.jpg", prompt: "pure", model: "m", at: "" }],
+            graphEditNodes: [{
+              id: "edit0",
+              prompt: "night",
+              gens: [{ path: "boards/0100/shot-0100-a-edit.jpg", prompt: "night", model: "m", at: "" }],
+              genIndex: 0,
+            }],
+          }],
+        },
+        {
+          number: 2,
+          title: "S2",
+          shots: [{
+            ...structuredClone(shotB),
+            number: "0200", // stale number
+            artwork: "boards/0200/shot-0200-b.jpg", // stale path
+            graphImageGens: [{ path: "boards/0200/shot-0200-b.jpg", prompt: "b", model: "m", at: "" }],
+          }],
+        },
+      ],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    // Order, scene membership, and numbers stay exactly as the reorder left them.
+    expect(merged.scenes.map((s) => s.shots.map((x) => x.id))).toEqual([["shotB", "shotA"], []]);
+    expect(merged.scenes[0].shots.map((x) => x.number)).toEqual(["0100", "0200"]);
+    const mergedA = merged.scenes[0].shots[1];
+    const mergedB = merged.scenes[0].shots[0];
+    // Frames follow their shots — the edit stays on A, the pure gen stays on B.
+    expect(mergedA.artwork).toBe("boards/0200/shot-0200-a-edit.jpg");
+    expect(mergedA.artworkHistory).toEqual(["boards/0200/shot-0200-a-pure.jpg"]);
+    expect(mergedA.graphImageGens![0].path).toBe("boards/0200/shot-0200-a-pure.jpg");
+    expect(mergedA.graphEditNodes![0].gens![0].path).toBe("boards/0200/shot-0200-a-edit.jpg");
+    expect(mergedB.artwork).toBe("boards/0100/shot-0100-b.jpg");
+    expect(mergedB.graphImageGens![0].path).toBe("boards/0100/shot-0100-b.jpg");
+    // ...while the text edit typed after the snapshot still applies.
+    expect(mergedA.audio).toBe("A new line");
+  });
+
+  it("drops shots the fresh document no longer has but keeps edits to survivors", () => {
+    // The renderer snapshot predates a shot deletion: it still carries the
+    // deleted shot plus an audio edit to a surviving shot. The deletion wins;
+    // the surviving edit applies.
+    const fresh = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "keep", number: "0100", audio: "", visual: "Keep" }] }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [
+          { id: "keep", number: "0100", audio: "Keep talking", visual: "Keep" },
+          { id: "ghost", number: "0200", audio: "", visual: "Deleted after the snapshot" },
+        ],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots.map((s) => s.id)).toEqual(["keep"]);
+    expect(merged.scenes[0].shots[0].audio).toBe("Keep talking");
+  });
+
+  it("honours an explicit output unpipe from the renderer", () => {
+    // unpipeOutput sends source/artwork/videoPath as explicit nulls through
+    // the whole-document save — the storyboard frame must go blank.
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          artwork: "boards/0100/shot-0100-x.jpg",
+          graphImageGens: [{ path: "boards/0100/shot-0100-x.jpg", prompt: "p", model: "m", at: "" }],
+          graphImageGenIndex: 0,
+          graphOutputSource: "imagegen" as const,
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          artwork: undefined,
+          videoPath: undefined,
+          graphImageGens: [{ path: "boards/0100/shot-0100-x.jpg", prompt: "p", model: "m", at: "" }],
+          graphImageGenIndex: 0,
+          graphOutputSource: undefined,
+        }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots[0].graphOutputSource).toBeUndefined();
+    expect(merged.scenes[0].shots[0].artwork).toBeUndefined();
+    expect(merged.scenes[0].shots[0].videoPath).toBeUndefined();
+    // The generation history itself survives the unpipe.
+    expect(merged.scenes[0].shots[0].graphImageGens).toHaveLength(1);
+  });
+
+  it("keeps an edit-video clip path the renderer selects", () => {
+    // pipeEditVideoToOutput is a whole-document save with no follow-up
+    // channel, and no pipe sync derives the edit-video path — so the string
+    // must ride through the merge.
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          videoPath: "boards/0100/video/shot-0100-old.mp4",
+          graphEditVideoGens: [
+            { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
+            { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
+          ],
+          graphEditVideoGenIndex: 1,
+          graphOutputSource: "editvideo" as const,
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          videoPath: "boards/0100/video/shot-0100-new.mp4",
+          graphEditVideoGens: [
+            { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
+            { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
+          ],
+          graphEditVideoGenIndex: 0,
+          graphOutputSource: "editvideo" as const,
+        }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots[0].videoPath).toBe("boards/0100/video/shot-0100-new.mp4");
+    expect(merged.scenes[0].shots[0].graphEditVideoGenIndex).toBe(0);
+  });
+
+  it("adopts edit nodes created after the snapshot and keeps fresh histories", () => {
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          graphEditNodes: [{
+            id: "edit0",
+            prompt: "old prompt",
+            gens: [{ path: "boards/0100/shot-0100-e0.jpg", prompt: "old prompt", model: "m", at: "" }],
+            genIndex: 0,
+          }],
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          graphEditNodes: [
+            {
+              id: "edit0",
+              prompt: "new prompt",
+              gens: [{ path: "boards/0100/shot-0100-e0.jpg", prompt: "old prompt", model: "m", at: "" }],
+              genIndex: 0,
+            },
+            { id: "edit1", prompt: "second pass" },
+          ],
+        }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    const nodes = merged.scenes[0].shots[0].graphEditNodes!;
+    expect(nodes.map((n) => n.id)).toEqual(["edit0", "edit1"]);
+    expect(nodes[0].prompt).toBe("new prompt");
+    expect(nodes[0].gens).toEqual(fresh.scenes[0].shots[0].graphEditNodes![0].gens);
+    expect(nodes[1].prompt).toBe("second pass");
+  });
+
+  it("overlays tween block prompts by keyframe pair and keeps fresh histories", () => {
+    const block = {
+      id: "tw0",
+      startRefId: "imagegen",
+      endRefId: "editgen",
+      prompt: "old prompt",
+      startSec: 0,
+      durationSec: 2,
+      gens: [{ path: "boards/0100/video/shot-0100-b0.mp4", prompt: "old prompt", model: "m", at: "" }],
+      genIndex: 0,
+    };
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1", number: "0100", audio: "", visual: "Hero",
+          graphTweenRefIds: ["imagegen", "editgen"],
+          graphTweenBlocks: [structuredClone(block)],
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1", number: "0100", audio: "", visual: "Hero",
+          graphTweenRefIds: ["imagegen", "editgen"],
+          graphTweenBlocks: [{ ...structuredClone(block), prompt: "new prompt", durationSec: 3 }],
+        }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    const mergedBlock = merged.scenes[0].shots[0].graphTweenBlocks![0];
+    expect(mergedBlock.prompt).toBe("new prompt");
+    expect(mergedBlock.durationSec).toBe(3);
+    expect(mergedBlock.gens).toEqual(block.gens);
+  });
+
+  it("keeps the fresh generation index when histories diverged after the snapshot", () => {
+    const shots = (gens: { path: string; prompt: string; model: string; at: string }[], index: number) => [{
+      id: "shot1", number: "0100", audio: "", visual: "Hero",
+      artwork: gens[index]?.path,
+      graphImageGens: gens,
+      graphImageGenIndex: index,
+      graphOutputSource: "imagegen" as const,
+    }];
+    // A generation landed after the snapshot: the stale index 1 would select
+    // the wrong take on the fresh array, so the fresh index stands.
+    const diverged = applyRendererState(
+      baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "n", prompt: "", model: "", at: "" }, { path: "o", prompt: "", model: "", at: "" }], 0) }] }),
+      baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "o", prompt: "", model: "", at: "" }], 1) }] })
+    );
+    expect(diverged.scenes[0].shots[0].graphImageGenIndex).toBe(0);
+    expect(diverged.scenes[0].shots[0].artwork).toBe("n");
+    // Histories agree: the incoming selection applies and the frame follows it.
+    const agreed = applyRendererState(
+      baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "a", prompt: "", model: "", at: "" }, { path: "b", prompt: "", model: "", at: "" }], 0) }] }),
+      baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "a", prompt: "", model: "", at: "" }, { path: "b", prompt: "", model: "", at: "" }], 1) }] })
+    );
+    expect(agreed.scenes[0].shots[0].graphImageGenIndex).toBe(1);
+    expect(agreed.scenes[0].shots[0].artwork).toBe("b");
   });
 
   it("strips legacy per-shot fields (single-VO model, cuts-only timeline)", () => {
     const legacyShot = { id: "shot1", number: "0100", audio: "", visual: "Hero" } as unknown as Record<string, unknown>;
     legacyShot.voiceoverPath = "voiceover/legacy.mp3";
     legacyShot.transition = "cut";
-    const incoming = baseProduction({
-      scenes: [
-        {
-          number: 1,
-          title: "S1",
-          shots: [legacyShot as unknown as Production["scenes"][number]["shots"][number]],
-        },
-      ],
-    });
-    const merged = applyRendererState(baseProduction(), incoming);
+    const scenes = (shot: unknown) => [{
+      number: 1,
+      title: "S1",
+      shots: [shot as unknown as Production["scenes"][number]["shots"][number]],
+    }];
+    const fresh = baseProduction({ scenes: scenes(structuredClone(legacyShot)) });
+    const incoming = baseProduction({ scenes: scenes(structuredClone(legacyShot)) });
+    const merged = applyRendererState(fresh, incoming);
     const shot = merged.scenes[0].shots[0] as unknown as Record<string, unknown>;
     expect(shot.voiceoverPath).toBeUndefined();
     expect(shot.transition).toBeUndefined();
@@ -159,10 +472,24 @@ describe("applyRendererState", () => {
     expect(merged.brand?.font).toBe("Baskerville");
   });
 
-  it("drops blank promptOverrides entries", () => {
-    const incoming = baseProduction({ promptOverrides: { "0100": "valid prompt", "0200": "   " } });
-    const merged = applyRendererState(baseProduction(), incoming);
-    expect(merged.promptOverrides).toEqual({ "0100": "valid prompt" });
+  it("keeps the fresh promptOverrides map (renderer never edits it through a save)", () => {
+    // promptOverrides is keyed by displayed shot number and written main-side
+    // (ingest stashes manual prompts, reorder remaps them). A stale renderer
+    // snapshot must not reattach overrides to the wrong shots.
+    const fresh = baseProduction({ promptOverrides: { "0200": "kept prompt" } });
+    const incoming = baseProduction({ promptOverrides: { "0100": "stale prompt", "0200": "   " } });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.promptOverrides).toEqual({ "0200": "kept prompt" });
+  });
+
+  it("merges magicPrompts per key so stale snapshots can't wipe fresh entries", () => {
+    // The prompt drawer writes magicPrompts[shotId] through saves, so
+    // incoming non-blank entries win — but fresh-only keys (e.g. from a bulk
+    // generation that landed after the snapshot) survive.
+    const fresh = baseProduction({ magicPrompts: { shot1: "fresh generated", shot2: "untouched" } });
+    const incoming = baseProduction({ magicPrompts: { shot1: "typed edit", shot3: "   " } });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.magicPrompts).toEqual({ shot1: "typed edit", shot2: "untouched" });
   });
 
   it("clamps volume fields to [0, 1]", () => {
@@ -182,31 +509,23 @@ describe("applyRendererState", () => {
     // The renderer sends the shot with the edit-image node piped to the output
     // but a stale/empty `artwork` (the apply raced its save). The pipe owns the
     // frame, so the merged document must mirror the node graph's output node.
-    const incoming = baseProduction({
-      scenes: [
-        {
-          number: 1,
-          title: "S1",
-          shots: [
-            {
-              id: "shot1",
-              number: "0100",
-              audio: "",
-              visual: "Hero walks",
-              graphOutputSource: "editgen",
-              graphOutputEditNodeId: "edit0",
-              graphEditNodes: [{ id: "edit0", prompt: "make it night", gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" }], genIndex: 0 }],
-              artwork: undefined,
-              videoPath: "videos/stale.mp4",
-            },
-          ],
-        },
-      ],
-    });
-    const merged = applyRendererState(baseProduction(), incoming);
-    const shot = merged.scenes[0].shots[0];
-    expect(shot.artwork).toBe("boards/0100/shot-0100-edit.jpg");
-    expect(shot.videoPath).toBeUndefined();
+    const shot = {
+      id: "shot1",
+      number: "0100",
+      audio: "",
+      visual: "Hero walks",
+      graphOutputSource: "editgen" as const,
+      graphOutputEditNodeId: "edit0",
+      graphEditNodes: [{ id: "edit0", prompt: "make it night", gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "make it night", model: "auto", at: "" }], genIndex: 0 }],
+      artwork: undefined,
+      videoPath: "videos/stale.mp4",
+    };
+    const fresh = baseProduction({ scenes: [{ number: 1, title: "S1", shots: [structuredClone(shot)] }] });
+    const incoming = baseProduction({ scenes: [{ number: 1, title: "S1", shots: [structuredClone(shot)] }] });
+    const merged = applyRendererState(fresh, incoming);
+    const restored = merged.scenes[0].shots[0];
+    expect(restored.artwork).toBe("boards/0100/shot-0100-edit.jpg");
+    expect(restored.videoPath).toBeUndefined();
   });
 });
 
@@ -237,10 +556,15 @@ describe("board frame selection persistence", () => {
     selectBoardFrame(shot, rel);
     const selected = structuredClone(shot);
     const history = boardFrameHistory(shot);
+    // The fresh document already holds the selection (the select channel
+    // saved it); the incoming renderer save arrives with stale mirrors.
+    const fresh = baseProduction({
+      meta: { ...incoming.meta },
+      scenes: [{ number: 1, title: "S1", shots: [structuredClone(shot)] }],
+    });
     // A stale artwork mirror cannot replace the newly selected node output.
     shot.artwork = "boards/0100/current.jpg";
     shot.videoPath = "videos/clip.mp4";
-    const fresh = baseProduction({ meta: { ...incoming.meta } });
     const merged = applyRendererState(fresh, incoming);
     expect(merged.scenes[0].shots[0].artwork).toBe(rel);
     expect(merged.scenes[0].shots[0].videoPath).toBeUndefined();
@@ -281,7 +605,14 @@ describe("board frame selection persistence", () => {
     ] as const) {
       recordBoardEdit(incoming.scenes[0].shots[0], rel, prompt, "edit-model");
       const selected = structuredClone(incoming.scenes[0].shots[0]);
-      const merged = applyRendererState(baseProduction({ meta: { ...incoming.meta } }), incoming);
+      // The fresh document already holds the edit (the edit channel saved
+      // it); the incoming renderer save arrives with a stale frame mirror.
+      const fresh = baseProduction({
+        meta: { ...incoming.meta },
+        scenes: structuredClone(incoming.scenes),
+      });
+      incoming.scenes[0].shots[0].artwork = "boards/0100/stale.jpg";
+      const merged = applyRendererState(fresh, incoming);
       saveProduction(merged);
       const loaded = loadProduction(incoming.meta.id)!;
       const restored = loaded.scenes[0].shots[0];
@@ -367,6 +698,34 @@ describe("loadProduction isolation", () => {
     expect(restored.prompt).toBe("new prompt");
     expect((restored.gens ?? []).map((g) => g.path)).toEqual(["boards/0100/b.jpg", "boards/0100/a.jpg"]);
     expect(restored.genIndex).toBe(0);
+  });
+});
+
+describe("video layout migration", () => {
+  it("relocates a legacy flat clip into the shot's video/ folder and drops the videosDir field on load", () => {
+    const folder = path.join(dataDir, "video-migration");
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "videos", "shot-0100-clip.mp4"), "bytes");
+    const shot: ProductionShot = {
+      id: "shot1", number: "0100", audio: "", visual: "Hero walks",
+      graphOutputSource: "videogen", graphVideoGenIndex: 0,
+      videoPath: "videos/shot-0100-clip.mp4",
+      graphVideoGens: [{ path: "videos/shot-0100-clip.mp4", prompt: "p", model: "m", at: "" }],
+    };
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "video-migration", folder },
+      scenes: [{ number: 1, title: "S1", shots: [shot] }],
+      schemaVersion: 1,
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("video-migration")!;
+    const restored = loaded.scenes[0].shots[0];
+    expect(restored.graphVideoGens![0].path).toBe("boards/0100/video/shot-0100-clip.mp4");
+    expect(restored.videoPath).toBe("boards/0100/video/shot-0100-clip.mp4");
+    expect(fs.existsSync(path.join(folder, "boards", "0100", "video", "shot-0100-clip.mp4"))).toBe(true);
+    expect(fs.existsSync(path.join(folder, "videos", "shot-0100-clip.mp4"))).toBe(false);
+    expect((loaded.assets as { videosDir?: string }).videosDir).toBeUndefined();
+    expect(loaded.schemaVersion).toBe(2);
   });
 });
 

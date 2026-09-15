@@ -1,4 +1,23 @@
-﻿# Lessons
+﻿## 2026-09-14 — relocating an asset that several fields share
+
+- Moving a generated file into a new folder must UPDATE EVERY field that
+  points at it, and the move must be memoized per old path: the first field's
+  move deletes the source, so the next field's `existsSync` check sees the
+  source gone and leaves that reference on the old path. Clips are reached
+  through `videoPath`, `graphVideoGens`, `graphEditVideoGens`,
+  `graphTweenOutput`, and tween block `gens` — all of them, plus every future
+  renumber path-patch list.
+- When an asset moves into a folder that another mutation already relocates,
+  wire it into that mutation too. `relocateBoardsForRenumber` renames
+  `boards/<old>` → `boards/<new>` and renames inner `shot-<old>-` files, but
+  its stored-path patch loop only knew about frame fields — putting clips in
+  `boards/<n>/video/` silently orphaned them on shot reorder until the video
+  fields were added to the same loop.
+- A new one-time migration needs `PRODUCTION_SCHEMA_VERSION` bumped, or every
+  already-stamped document skips the walk (perf fast path) and the migration
+  never runs.
+
+# Lessons
 
 No session-specific lessons yet.
 

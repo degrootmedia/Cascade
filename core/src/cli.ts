@@ -75,9 +75,9 @@ const client = new ChatClient(apiKey, baseUrl);
 
 async function showBalance() {
   try {
-    const balance = await client.balance();
+    const balance = await client.balance({ path: "/credits", field: "total_available" });
     if (balance !== null) {
-      console.log(dim(`\n[credits remaining: ~${balance}]`));
+      console.log(dim(`\n[credits remaining: ~${Math.round(balance)}]`));
     }
   } catch {
     /* balance display is best-effort */

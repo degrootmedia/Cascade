@@ -15,7 +15,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { McpManager } from "./mcp.js";
-import { assetPath, type ImageGenFn, type GenerationRef } from "./pipeline.js";
+import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "./pipeline.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./providers/refs.js";
 import type { MediaProvider, ProviderEmit } from "./providers/types.js";
 import { uploadDataUrlReference } from "./openart-upload.js";
@@ -25,6 +25,7 @@ import {
   extractOpenArtVideoOptions,
   openArtDurationNumber as durationNumber,
   openArtLooksLikeResolution,
+  openArtSchemaFromProps,
   parseOpenArtFormProperties,
   parseOpenArtModels,
   shapeOpenArtModelChoices,
@@ -38,6 +39,7 @@ import {
   VIDEO_URL_RX,
 } from "../shared/prompt-grammar.js";
 import type {
+  CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
   LedgerGenMeta,
@@ -231,6 +233,11 @@ export class OpenArtClient implements MediaProvider {
   private readonly videoOptionsCache = new Map<string, { o: VideoModelOptions | null; at: number }>();
   private readonly VIDEO_OPTIONS_NULL_TTL_MS = 2 * 60_000;
 
+  /** Drop cached video-option probes (dev customizer refresh). */
+  refreshProbes(): void {
+    this.videoOptionsCache.clear();
+  }
+
   /** A recorder (the expenses ledger) that observes every successful
    *  generation with its resolved metadata. Injected so the tally is testable
    *  at the same seam as the McpManager fake. `resizeVideoRef` downscales a
@@ -396,6 +403,32 @@ export class OpenArtClient implements MediaProvider {
    *  quality dropdown stays hidden for this vendor. */
   imageModelOptions(_modelId: string): Promise<ImageModelOptions | null> {
     return Promise.resolve(null);
+  }
+
+  /** Broad form probe for the dev customizer: the first mode whose form
+   *  parses (image and video modes both tried). Null when the form tool is
+   *  missing or no mode parses. */
+  private async fetchAnyFormProps(modelId: string): Promise<Record<string, unknown> | null> {
+    const formRaw = this.findTool(/^openart_model_form_get$/);
+    if (!formRaw) return null;
+    if (typeof modelId !== "string" || !modelId || modelId === "auto") return null;
+    const modes = ["image2video", "text2video", "image2image", "text2image", "img2video", "element2video", "video2video"];
+    for (const mode of modes) {
+      try {
+        const props = this.parseModelFormProperties(await this.mcp.callRaw(SERVER, formRaw, { model: modelId, mode }));
+        if (props) return props;
+      } catch { /* try the next mode spelling */ }
+    }
+    return null;
+  }
+
+  /** The full normalized option schema for a model (dev customizer probe).
+   *  Null for foreign (`higgsfield:…`) ids and when no form parses. */
+  async modelOptions(modelId: string): Promise<CliModelSchema | null> {
+    const raw = (modelId ?? "").trim();
+    if (!raw || raw === "auto" || raw.startsWith("higgsfield")) return null;
+    const props = await this.fetchAnyFormProps(raw).catch(() => null);
+    return props ? openArtSchemaFromProps(raw, props) : null;
   }
 
   /** Warm the per-model option cache for every video-capable model in both
@@ -773,7 +806,7 @@ private videoRefsAssign = videoRefsAssign;
    *  submission or a successful recheck clears it. */
   private recordPendingImage(
     shot: ProductionShot | undefined,
-    rec: { historyId?: string; url?: string; prompt: string; model: string }
+    rec: { historyId?: string; url?: string; prompt: string; model: string; resolution?: string; aspectRatio?: string }
   ): void {
     if (!shot) return;
     shot.pendingImageGen = { ...rec, at: new Date().toISOString() };
@@ -1049,7 +1082,7 @@ private videoRefsAssign = videoRefsAssign;
             // The wait cap passed but the job keeps rendering server-side —
             // don't lose it. Record the historyId as pending so the finished
             // frame can be rechecked and downloaded without paying twice.
-            this.recordPendingImage(shot, { historyId, prompt, model: modelId ?? "auto" });
+            this.recordPendingImage(shot, { historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
           }
           throw e;
         }
@@ -1068,7 +1101,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
           // recheck can retry the download without regenerating.
-          this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto" });
+          this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
           throw e;
         }
       }
@@ -1081,10 +1114,10 @@ text.match(IMAGE_URL_RX)?.[0] ??
   /**
    * Generate one video clip for a shot. The shot's current frame (full
    * resolution) is always the first visual reference; any @[name] tags in the
-   * prompt add more. Writes the finished clip into the production's videosDir
-   * and returns its workspace-relative path (the caller owns what happens with
-   * the clip — the classic flow makes it the shot's videoPath; the node graph
-   * stores it on its generation node).
+   * prompt add more. Writes the finished clip into the shot's board folder
+   * under `video/` and returns its workspace-relative path (the caller owns
+   * what happens with the clip — the classic flow makes it the shot's
+   * videoPath; the node graph stores it on its generation node).
    */
   async generateVideoClip(
     p: Production,
@@ -1344,11 +1377,8 @@ text.match(IMAGE_URL_RX)?.[0] ??
       return { buf: Buffer.from(await res.arrayBuffer()), ext };
     })();
 
-    const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
     const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
-    const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
-    fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
-    fs.writeFileSync(assetPath(p, rel), done.buf);
+    const rel = writeShotVideo(p, shot, done.buf, safeExt);
 
     this.fireGeneration({
       kind: "video",

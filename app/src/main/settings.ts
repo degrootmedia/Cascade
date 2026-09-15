@@ -9,6 +9,7 @@ import { app, safeStorage } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProvider } from "../shared/providers.js";
+import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface } from "../shared/ipc.js";
 
 interface SettingsFile {
   /** Selected LLM API provider id (see shared/providers.ts). */
@@ -47,13 +48,6 @@ interface SettingsFile {
   /** base64-encrypted 3D AI Studio API key (separate from the LLM keys). */
   encrypted3daiApiKey: string | null;
   /**
-   * Manual allowlist of video model ids the user has declared end-frame
-   * capable (the in-betweener's start→end submit path). Merged with the
-   * providers' live capability probe in production:videoEndFrameModels —
-   * the union is what the tween node's dropdown offers.
-   */
-  endFrameModels: string[];
-  /**
    * Media model ids the user hides from the generation model dropdowns
    * (Settings → Models & expenses toggles). Filtered main-side so every
    * dropdown — boards, video modal, node graph, tween, references — excludes
@@ -79,6 +73,27 @@ interface SettingsFile {
    * main-side; models missing from the list keep discovery order after it.
    */
   mediaModelOrder: string[];
+  /**
+   * Per-parameter placement from the dev Model Customizer, keyed by
+   * `<namespaced model id>::<flag>` → core/advanced/hidden. Applied main-side
+   * to `production:modelOptions` so every options form follows it. Dedicated
+   * (owned) flags are never overridable. Absent = the schema's default group.
+   */
+  modelOptionExposure: Record<string, "core" | "advanced" | "hidden">;
+  /**
+   * Per-model surface assignments from the dev Model Customizer: which
+   * pickers (master image picker, generate/edit nodes, video modal, tween,
+   * edit-video node, …) offer a model. Absent/empty = every applicable
+   * surface (the default).
+   */
+  modelSurfaces: Record<string, ModelSurface[]>;
+  /**
+   * Per-surface parameter defaults from the dev Model Customizer, keyed by
+   * `<namespaced model id>::<surface>::<flag>` → value. Seeded into a surface's
+   * params when that model loads (the user's saved per-shot/per-node value
+   * always wins). Absent = no default (the vendor's own default applies).
+   */
+  modelParamDefaults: Record<string, ModelParamDefaultValue>;
   /** Dev Mode: when true, every generation submission is logged. */
   devMode: boolean;
   /** Credit-free dry run: build + log the real request, throw before vendor call. */
@@ -119,11 +134,13 @@ const DEFAULTS: SettingsFile = {
   accent: "#4f8ef7",
   externalEditor: null,
   encrypted3daiApiKey: null,
-  endFrameModels: [],
   hiddenMediaModels: [],
   modelKindOverrides: {},
   mediaDefaults: {},
   mediaModelOrder: [],
+  modelOptionExposure: {},
+  modelSurfaces: {},
+  modelParamDefaults: {},
   devMode: false,
   submissionDryRun: false,
   windowState: null,
@@ -366,25 +383,6 @@ export function set3daiApiKey(key: string): void {
   save();
 }
 
-/** The user's manual end-frame model allowlist (see endFrameModels). */
-export function getEndFrameModels(): string[] {
-  return load().endFrameModels ?? [];
-}
-
-export function setEndFrameModels(ids: string[]): void {
-  const seen = new Set<string>();
-  const clean: string[] = [];
-  for (const raw of Array.isArray(ids) ? ids : []) {
-    if (typeof raw !== "string") continue;
-    const id = raw.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    clean.push(id);
-  }
-  load().endFrameModels = clean.slice(0, 200);
-  save();
-}
-
 /** Media model ids hidden from the generation dropdowns (see hiddenMediaModels). */
 export function getHiddenMediaModels(): string[] {
   return load().hiddenMediaModels ?? [];
@@ -422,9 +420,16 @@ export function setModelKindOverrides(overrides: Record<string, unknown>): void 
   save();
 }
 
-/** The dropdowns' remembered last choices (see mediaDefaults). */
+/** The dropdowns' remembered last choices (see mediaDefaults). Aspect ratio
+ *  is normalized to the shared 16:9 default so every surface seeds 16:9 even
+ *  when the remembered choice is absent or empty. */
 export function getMediaDefaults(): Record<string, MediaDefaultChoice> {
-  return load().mediaDefaults ?? {};
+  const raw = load().mediaDefaults ?? {};
+  const out: Record<string, MediaDefaultChoice> = {};
+  for (const [ctx, choice] of Object.entries(raw)) {
+    out[ctx] = { ...choice, aspectRatio: resolveAspectRatio(choice?.aspectRatio) };
+  }
+  return out;
 }
 
 const MEDIA_DEFAULT_CTXS = new Set(["image", "video", "edit", "reference", "character", "tween"]);
@@ -460,6 +465,102 @@ export function setMediaModelOrder(ids: string[]): void {
     clean.push(id);
   }
   load().mediaModelOrder = clean.slice(0, 500);
+  save();
+}
+
+/** Per-parameter placement from the dev Model Customizer (see
+ *  modelOptionExposure). Key: `<namespaced model id>::<flag>`. */
+export function getModelOptionExposure(): Record<string, "core" | "advanced" | "hidden"> {
+  return load().modelOptionExposure ?? {};
+}
+
+/** Set (or clear, with null) one parameter's placement. */
+export function setModelOptionExposure(key: string, placement: "core" | "advanced" | "hidden" | null): void {
+  const k = typeof key === "string" ? key.trim() : "";
+  if (!k || k.length > 512 || k.includes("\0")) return;
+  const map = { ...(load().modelOptionExposure ?? {}) };
+  if (placement === null) delete map[k];
+  else if (placement === "core" || placement === "advanced" || placement === "hidden") map[k] = placement;
+  else return;
+  load().modelOptionExposure = map;
+  save();
+}
+
+/** Clear every parameter placement (dev customizer "Reset"). */
+export function resetModelOptionExposure(): void {
+  load().modelOptionExposure = {};
+  save();
+}
+
+/** Per-model surface assignments (see modelSurfaces). Legacy surface keys are
+ *  migrated to the collapsed pool keys on read, so an old stored map keeps
+ *  working without a destructive rewrite. */
+export function getModelSurfaces(): Record<string, ModelSurface[]> {
+  const raw = load().modelSurfaces ?? {};
+  const out: Record<string, ModelSurface[]> = {};
+  for (const [id, list] of Object.entries(raw)) {
+    const surfaces = normalizeModelSurfaces(list);
+    if (surfaces.length) out[id] = surfaces;
+  }
+  return out;
+}
+
+/** Replace the whole surface map (dev customizer writes it wholesale). */
+export function setModelSurfaces(map: Record<string, unknown>): void {
+  const clean: Record<string, ModelSurface[]> = {};
+  if (map && typeof map === "object") {
+    for (const [id, list] of Object.entries(map)) {
+      if (typeof id !== "string" || !id || id.length > 512 || id.includes("\0")) continue;
+      const surfaces = normalizeModelSurfaces(list);
+      if (surfaces.length) clean[id] = surfaces;
+    }
+  }
+  load().modelSurfaces = clean;
+  save();
+}
+
+/** Clear every surface assignment (dev customizer "Reset"). */
+export function resetModelSurfaces(): void {
+  load().modelSurfaces = {};
+  save();
+}
+
+/** Coerce a raw default to one of the scalar shapes the options form edits.
+ *  Empty/blank values (and unrecognized shapes) clear the default. */
+function sanitizeParamDefault(value: unknown): ModelParamDefaultValue | null {
+  if (typeof value === "string") {
+    const t = value.trim();
+    return t ? t : null;
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    const items = value.map((v) => String(v)).filter((s) => s.length > 0).slice(0, 200);
+    return items.length ? items : null;
+  }
+  return null;
+}
+
+/** Per-surface parameter defaults (see modelParamDefaults). */
+export function getModelParamDefaults(): Record<string, ModelParamDefaultValue> {
+  return load().modelParamDefaults ?? {};
+}
+
+/** Set (or clear, with null/blank) one `<model>::<surface>::<flag>` default. */
+export function setModelParamDefault(key: string, value: ModelParamDefaultValue | null): void {
+  const k = typeof key === "string" ? key.trim() : "";
+  if (!k || k.length > 512 || k.includes("\0")) return;
+  const map = { ...(load().modelParamDefaults ?? {}) };
+  const clean = value === null ? null : sanitizeParamDefault(value);
+  if (clean === null) delete map[k];
+  else if (k in map || Object.keys(map).length < 5000) map[k] = clean;
+  load().modelParamDefaults = map;
+  save();
+}
+
+/** Clear every parameter default (dev customizer "Reset"). */
+export function resetModelParamDefaults(): void {
+  load().modelParamDefaults = {};
   save();
 }
 

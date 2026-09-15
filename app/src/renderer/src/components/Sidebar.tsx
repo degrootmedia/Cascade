@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SessionMeta } from "../../../shared/ipc.js";
+import type { ChatBalance, SessionMeta } from "../../../shared/ipc.js";
 import { PlusIcon, SearchIcon, TokenIcon } from "./icons.js";
 
 type BucketKey = "today" | "yesterday" | "week" | "month" | "older";
@@ -41,6 +41,15 @@ function formatRowDate(iso: string, now: Date): string {
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+/** Footer balance label: whole credits for gab, dollars to the cent for
+ *  wallet-backed providers (Cheaper Inference). */
+function formatBalance(b: ChatBalance): string {
+  if (b.unit === "usd") {
+    return `~$${b.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  return `~${Math.round(b.amount).toLocaleString()} credits`;
+}
+
 export function Sidebar({
   sessions,
   onSelect,
@@ -57,7 +66,7 @@ export function Sidebar({
   onSettings: () => void;
   onRemove: (id: string, mode: "delete" | "archive") => void;
   onRename: (id: string) => void;
-  credits: number | null;
+  credits: ChatBalance | null;
   width?: number;
 }) {
   // Right-click context menu state (opened over a specific session).
@@ -211,7 +220,7 @@ export function Sidebar({
         </div>
       )}
       <div className="sidebar-footer">
-        {credits !== null && <div className="credits"><TokenIcon size={12} /> ~{credits} credits</div>}
+        {credits !== null && <div className="credits"><TokenIcon size={12} /> {formatBalance(credits)}</div>}
         <button className="link" onClick={onSettings}>
           Settings
         </button>

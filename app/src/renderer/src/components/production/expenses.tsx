@@ -6,9 +6,10 @@ function formatPrice(p: number): string {
   return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** The Expenses page (far-right tab): every AI generation priced against the
- *  user's rules plus manual "purchased asset" rows, tallied at the bottom. */
-export function ExpensesPanel() {
+/** The Expenses page (far-right tab): this production's AI generations priced
+ *  against the user's rules plus manual "purchased asset" rows, tallied at the
+ *  bottom. Entries are scoped (and saved) per project. */
+export function ExpensesPanel({ productionId }: { productionId: string }) {
   const [view, setView] = useState<LedgerView | null>(null);
   const [label, setLabel] = useState("");
   const [amount, setAmount] = useState("");
@@ -17,7 +18,7 @@ export function ExpensesPanel() {
 
   const load = async () => {
     try {
-      setView(await window.cascade.getLedger());
+      setView(await window.cascade.getLedger(productionId));
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -25,7 +26,8 @@ export function ExpensesPanel() {
 
   useEffect(() => {
     void load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productionId]);
 
   const addManual = async () => {
     const amt = Number(amount);
@@ -33,7 +35,7 @@ export function ExpensesPanel() {
     setBusy(true);
     setErr(null);
     try {
-      setView(await window.cascade.addManualExpense(label.trim(), amt));
+      setView(await window.cascade.addManualExpense(productionId, label.trim(), amt));
       setLabel("");
       setAmount("");
     } catch (e) {
@@ -47,7 +49,7 @@ export function ExpensesPanel() {
     setBusy(true);
     setErr(null);
     try {
-      setView(await window.cascade.removeLedgerEntry(id));
+      setView(await window.cascade.removeLedgerEntry(productionId, id));
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
@@ -59,7 +61,7 @@ export function ExpensesPanel() {
     setBusy(true);
     setErr(null);
     try {
-      setView(await window.cascade.repriceExpenses());
+      setView(await window.cascade.repriceExpenses(productionId));
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
@@ -73,8 +75,8 @@ export function ExpensesPanel() {
     <section className="prod-panel prod-expenses">
       <h3><ExpensesIcon size={18} className="prod-panel-title-icon" /> Expenses</h3>
       <p className="hint">
-        Every AI generation is priced against the rules in Settings → Expense pricing and tallied here.
-        Rows are mirrored to a CSV text file (expenses.csv) you can open anytime.
+        This project's AI generations, priced against the rules in Settings → Media generation and tallied here.
+        Rows are mirrored to a per-project CSV text file you can open anytime.
       </p>
 
       <div className="prod-expenses-toolbar">
@@ -89,7 +91,7 @@ export function ExpensesPanel() {
         >
           Recompute prices
         </button>
-        <button className="prod-btn" onClick={() => void window.cascade.openLedgerFile()} title="Open expenses.csv">
+        <button className="prod-btn" onClick={() => void window.cascade.openLedgerFile(productionId)} title="Open this project's expenses CSV">
           Open text file
         </button>
       </div>

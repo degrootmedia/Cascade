@@ -1,4 +1,89 @@
-﻿# OpenArt CLI provider (openart-cli transport)
+﻿# Per-shot video storage (boards/<shot>/video/)
+
+User report: every generated clip landed in one flat production `videos/`
+folder. Clips should live inside the shot that owns them, beside its frames:
+`boards/<number>/video/shot-<number>[-<variant>]-<tag>.<ext>`.
+
+## Plan
+
+- [x] `pipeline.ts`: `shotVideoDir`/`shotVideoRelPath`/`writeShotVideo`
+      centralize the layout; every provider routes its finished bytes through
+      `writeShotVideo` (edit clips use the `edit` variant).
+- [x] `index.ts` tween stitch writes through `shotVideoRelPath(…, "tween")`.
+- [x] One-time `relocateVideoLayout` migration moves legacy flat clips
+      (`videoPath`, `graphVideoGens`, `graphEditVideoGens`, `graphTweenOutput`,
+      tween block gens) and rewrites the paths; memoized so a path shared by
+      several fields is moved once. Runs from `migrateBoardArtwork`; schema
+      version bumped 1 → 2.
+- [x] `assets.videosDir` demoted to optional `@deprecated` — normalize no
+      longer recreates it, new/import no longer scaffold `videos/`, and the
+      migration drops it after relocating the last clip.
+- [x] Renumbering: `relocateBoardsForRenumber` now patches
+      `videoPath`/`graphEditVideoGens`/`graphTweenOutput`/tween block gens too
+      (the `video/` folder moves with the board folder).
+- [x] Tests: `video-layout.test.ts` (write path, relocation + idempotence,
+      other-shot/non-video untouched, renumber moves `video/`) plus a
+      `productions.test.ts` load-migration test; higgsfield clip-path
+      assertion updated.
+- [x] Verified: `npm run typecheck` clean, 698 pass + 1 skip, `npm run build`
+      clean.
+
+## Review
+
+Done. Self-caught: the migration originally moved a file once per field, so a
+clip referenced by both `videoPath` and `graphVideoGens` left the second field
+on the old flat path — memoized old→new within the pass. Also caught that
+`relocateBoardsForRenumber` only patched frame paths; since clips now live
+under the board folder, reordering a shot would have orphaned them — added the
+video fields to its patch list.
+
+---
+
+# Per-project expenses (ledger scoping)
+
+User report: one project's Expenses page listed many generations that
+weren't done for it. Root cause: the ledger was one global
+`userData/ledger.json` with `view()` returning every entry, and the
+Expenses page never scoped by production. Entries already carried
+`productionId` but nothing filtered on it; manual rows carried none.
+
+## Plan
+
+- [x] `ledger.ts`: entries move to per-production files
+      (`userData/ledger/<productionId>.json`) with per-project CSV mirrors;
+      `userData/ledger.json` keeps only the global price rules (`version: 2`).
+      One-time migration splits v1 entries by `productionId`, dropping
+      unattributable rows.
+- [x] `recordGeneration`/`addManualEntry`/`removeEntry`/`view`/
+      `openLedgerFile` take a production id; `repriceAll` walks every project;
+      new `removeProject`/`archiveProject` follow production delete/archive.
+- [x] IPC signatures scoped (`getLedger`/`repriceExpenses`/`addManualExpense`/
+      `removeLedgerEntry`/`openLedgerFile`), main handlers pass through.
+- [x] Renderer: `ProductionWorkspace` passes `prod.meta.id` to `ExpensesPanel`;
+      panel reloads on project change; hint + button copy say per-project.
+- [x] Accuracy fix: reclaimed pending frames bill once — `PendingImageGen`
+      keeps submit-time resolution/aspect (`openart`, `higgsfield`,
+      `higgsfield-cli`, `openart-cli` record them) and `production:recheckBoard`
+      calls `recordGeneration` on recovery.
+- [x] Tests: per-project isolation, no-production drop, migration split/discard,
+      per-project CSV, lifecycle remove/archive. `npm run typecheck` clean,
+      691 pass + 1 skip, `npm run build` clean.
+- [ ] Follow-up (out of scope): 3D-model (ModelgenClient) generations still
+      aren't billed to the ledger.
+
+## Review
+
+Done. Price rules stay global by design (per-model vendor pricing, not project
+data). Deferred 3D billing is noted. Self-caught: migration had to be triggered
+from `loadProject` (not just rules access) or a fresh app session opening an
+Expenses tab would never split the legacy file; guarded re-entrancy by setting
+the rules cache before migrating. `repriceAll` changed from returning a view to
+void since the view is now per-project; IPC reprice reprices all then returns
+the caller's project view.
+
+---
+
+# OpenArt CLI provider (openart-cli transport)
 
 User request: also implement OpenArt CLI; the top-right toggles switch
 between MCP and CLI. CLI v0.1.1 limits (probed locally): images take

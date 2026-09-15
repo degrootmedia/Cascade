@@ -1,7 +1,9 @@
 import { memo, useEffect, useRef, useState } from "react";
-import type { OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
+import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
+import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
+import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { closestResolution } from "../resolution.js";
@@ -608,6 +610,26 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     }
     return () => { live = false; };
   }, [model]);
+  // Full option schema for the picked model — extra flags (genre,
+  // speedramp, …) render below the Length row and ride `opts.params`.
+  const [modelSchema, setModelSchema] = useState<CliModelSchema | null>(null);
+  const [extraParams, setExtraParams] = useState<ModelOptionValues>({});
+  useEffect(() => {
+    let live = true;
+    setModelSchema(null);
+    if (model && model !== "auto") {
+      window.cascade.modelOptions(model)
+        .then((s) => {
+          if (!live) return;
+          setModelSchema(s);
+          setExtraParams((prev) => seedModelOptionValues(s, model, "video:generate", pruneModelOptionValues(s, prev)));
+        })
+        .catch(() => { if (live) setModelSchema(null); });
+    } else {
+      setExtraParams({});
+    }
+    return () => { live = false; };
+  }, [model]);
   const resolutions = modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"];
   const durations = modelOpts?.durations?.length ? modelOpts.durations : [5, 10, 15, 20];
   // Keep the current selection valid when the model's options arrive — or
@@ -675,6 +697,14 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
             </select>
           </label>
         </div>
+        <ModelOptionsForm
+          schema={modelSchema}
+          value={extraParams}
+          onChange={setExtraParams}
+          exclude={["resolution", "duration", "length", "seconds"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.video"
+        />
         <label className="prod-label">Prompt</label>
         <ReferencePromptEditor
           className="prod-video-prompt"
@@ -687,7 +717,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) onSubmit({ model, resolution, durationSec, prompt: prompt.trim() });
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) onSubmit({ model, resolution, durationSec, prompt: prompt.trim(), ...(Object.keys(extraParams).length ? { params: extraParams } : {}) });
             if (e.key === "Escape") onClose();
           }}
         />
@@ -697,7 +727,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
             {credits != null ? ` You have ~${credits.toLocaleString()} credits available.` : ""}
           </p>
         )}
-        <button className="prod-btn prod-edit-go" disabled={!prompt.trim()} onClick={() => onSubmit({ model, resolution, durationSec, prompt: prompt.trim() })}>
+        <button className="prod-btn prod-edit-go" disabled={!prompt.trim()} onClick={() => onSubmit({ model, resolution, durationSec, prompt: prompt.trim(), ...(Object.keys(extraParams).length ? { params: extraParams } : {}) })}>
           Generate video
         </button>
       </div>

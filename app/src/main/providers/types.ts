@@ -15,6 +15,7 @@
 import type { McpManager } from "../mcp.js";
 import type { ImageGenFn } from "../pipeline.js";
 import type {
+  CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
   LedgerGenMeta,
@@ -70,8 +71,8 @@ export interface MediaProvider {
    * Generate one video clip for a shot. The shot's current frame (full
    * resolution) is always the first visual reference unless a node-graph
    * pipe or explicit frameRefs supply other frames; @[name] tags and
-   * extraRefs add more. Writes the finished clip into the production's
-   * videosDir and returns its workspace-relative path.
+   * extraRefs add more. Writes the finished clip into the shot's board folder
+   * under `video/` and returns its workspace-relative path.
    */
   generateVideoClip(
     p: Production,
@@ -107,15 +108,41 @@ export interface MediaProvider {
    *  dropdown and the vendor default applies). */
   imageModelOptions(modelId: string): Promise<ImageModelOptions | null>;
 
+  /** The full normalized option schema for a model. Optional — providers
+   *  without a schema surface (OpenArt, MCP Higgsfield) omit it and
+   *  callers fall back to the ladder methods. */
+  modelOptions?(modelId: string): Promise<CliModelSchema | null>;
+
   /** Ids of the video-capable models that accept a dedicated end frame
    *  (the in-betweener's start→end submit path). Empty when none is proven —
    *  the caller unions this with the user's manual allowlist before the
    *  tween dropdown shows anything. */
   videoEndFrameModels(): Promise<string[]>;
 
+  /** Ids (namespaced) of models that accept a video input (the edit-video
+   *  node's capability probe). Optional — providers without video-edit
+   *  models omit it and the caller offers nothing. */
+  videoEditModels?(): Promise<string[]>;
+
+  /** Edit one video: the source video is mandatory; image/video references
+   *  ride along. Optional — callers surface a clear error when the active
+   *  provider doesn't implement it. */
+  generateVideoEdit?(
+    p: Production,
+    shot: ProductionShot,
+    opts: VideoGenOptions,
+    emit: ProviderEmit,
+    sourceVideoPath: string,
+    extraRefs?: { name: string; dataUrl: string }[]
+  ): Promise<{ rel: string }>;
+
   /** Warm any per-model caches after a successful model list.
    *  Fire-and-forget: never blocks the caller. */
   prewarm?(models: OpenArtModelChoice[]): void;
+
+  /** Drop cached catalog/option probes so the next probe refetches from the
+   *  vendor (dev Model Customizer "Refresh"). Fire-and-forget. */
+  refreshProbes?(): void;
 }
 
 /** The dependencies every provider is constructed with (the seam). */
@@ -126,6 +153,7 @@ export interface ProviderDeps {
 
 // Re-exported so vendor modules and tests share one vocabulary.
 export type {
+  CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
   LedgerGenMeta,

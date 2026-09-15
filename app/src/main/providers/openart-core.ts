@@ -13,7 +13,8 @@ import {
   parseJsonLooseArray,
   parseJsonLooseObject,
 } from "../../shared/prompt-grammar.js";
-import type { OpenArtModelChoice, VideoModelOptions } from "../../shared/ipc.js";
+import type { CliModelSchema, ModelParamOption, OpenArtModelChoice, VideoModelOptions } from "../../shared/ipc.js";
+import { buildModelSchema, type RawModelParam } from "./model-schema.js";
 
 /** Extract the first signed number from a duration label ("5s"→5, "5 sec"→5,
  *  "-1"→-1, "auto"→NaN). Preserves the sign so OpenArt's -1 "auto/random"
@@ -141,20 +142,23 @@ export function parseOpenArtFormProperties(raw: string): Record<string, unknown>
   return found ? merged : null;
 }
 
-/** Pull the resolution/duration options out of a model form's props map. */
+/** Pull the resolution/duration/quality/aspect options out of a model form's
+ *  props map. Resolution and quality are split so a quality enum no longer
+ *  pollutes the resolution ladder (and vice versa); aspect ratios and every
+ *  remaining enum land on the extended surface for the Advanced panel. */
 export function extractOpenArtVideoOptions(props: Record<string, unknown>): VideoModelOptions {
   const out: VideoModelOptions = { resolutions: [], durations: [] };
+  const ratios = new Set<string>();
+  const qualities = new Set<string>();
+  const params: ModelParamOption[] = [];
+  let defaultResolution: string | undefined;
+  let defaultQuality: string | undefined;
+  const asDefault = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
   for (const key of Object.keys(props)) {
     const p = props[key] as {
-      type?: string; enum?: unknown[]; minimum?: unknown; maximum?: unknown; oneOf?: unknown[]; anyOf?: unknown[];
+      type?: string; enum?: unknown[]; default?: unknown; minimum?: unknown; maximum?: unknown; oneOf?: unknown[]; anyOf?: unknown[];
     } | undefined;
     if (!p) continue;
-    if (/resolution|quality|definition|size/i.test(key) && Array.isArray(p.enum)) {
-      for (const v of p.enum) {
-        const s = String(v).trim();
-        if (openArtLooksLikeResolution(s)) out.resolutions.push(s);
-      }
-    }
     if (/duration|length|seconds|clip|frames|time/i.test(key)) {
       const nums = new Set<number>();
       if (Array.isArray(p.enum)) {
@@ -179,11 +183,90 @@ export function extractOpenArtVideoOptions(props: Record<string, unknown>): Vide
         for (let n = min; n <= max && n <= 120; n++) nums.add(n);
       }
       for (const n of nums) out.durations.push(n);
+      continue;
+    }
+    if (!Array.isArray(p.enum)) continue;
+    const vals = p.enum.map((v) => String(v).trim()).filter(Boolean);
+    if (!vals.length) continue;
+    if (/aspect/i.test(key)) {
+      for (const s of vals) ratios.add(s);
+    } else if (/resolution|size/i.test(key)) {
+      for (const s of vals) if (openArtLooksLikeResolution(s)) out.resolutions.push(s);
+      const d = asDefault(p.default);
+      if (d) defaultResolution = d;
+    } else if (/quality|definition/i.test(key)) {
+      // A quality-ish flag whose labels are really resolutions (Wan's
+      // 720p/1080p quality ladder) keeps them on the resolution ladder;
+      // otherwise the values become an explicit quality control.
+      for (const s of vals) {
+        if (openArtLooksLikeResolution(s)) out.resolutions.push(s);
+        else qualities.add(s);
+      }
+      const d = asDefault(p.default);
+      if (d && !openArtLooksLikeResolution(d)) defaultQuality = d;
+    } else if (!/prompt/i.test(key)) {
+      params.push({
+        flag: `--${key.replace(/_/g, "-")}`,
+        key,
+        values: vals,
+        ...(asDefault(p.default) ? { defaultValue: asDefault(p.default) } : {}),
+        exposure: "advanced",
+        label: key.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      });
     }
   }
   out.resolutions = Array.from(new Set(out.resolutions));
   out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
+  if (ratios.size) out.aspectRatios = [...ratios];
+  if (qualities.size) out.qualities = [...qualities];
+  if (defaultResolution) out.defaultResolution = defaultResolution;
+  if (defaultQuality) out.defaultQuality = defaultQuality;
+  if (params.length) out.params = params;
   return out;
+}
+
+/** Build the normalized option schema from an OpenArt form's props map. The
+ *  same grammar every provider shares (see model-schema.ts); OpenArt exposes
+ *  its parameters as JSON-Schema properties (enum / oneOf / anyOf consts). */
+export function openArtSchemaFromProps(
+  jobType: string,
+  props: Record<string, unknown>
+): CliModelSchema {
+  const params: RawModelParam[] = [];
+  for (const [key, raw] of Object.entries(props)) {
+    const p = raw as {
+      type?: string;
+      enum?: unknown[];
+      default?: unknown;
+      minimum?: unknown;
+      maximum?: unknown;
+      oneOf?: unknown[];
+      anyOf?: unknown[];
+    } | undefined;
+    if (!p) continue;
+    const options: string[] = [];
+    if (Array.isArray(p.enum)) for (const v of p.enum) options.push(String(v));
+    for (const c of [...(p.oneOf ?? []), ...(p.anyOf ?? [])]) {
+      const cv = (c as { const?: unknown } | null | undefined)?.const;
+      if (cv !== undefined) options.push(String(cv));
+    }
+    const num = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) ? v : undefined;
+    params.push({
+      name: key,
+      type: p.type,
+      options: options.length ? options : undefined,
+      default: p.default,
+      min: num(p.minimum),
+      max: num(p.maximum),
+    });
+  }
+  const aspect = params.find((p) => /aspect/i.test(p.name))?.options ?? [];
+  return buildModelSchema({
+    jobType,
+    params,
+    aspectRatios: aspect.map(String),
+  });
 }
 
 /** Human-readable summary of accepted clip lengths ("4–15s" for a

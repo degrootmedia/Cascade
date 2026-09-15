@@ -205,6 +205,20 @@ describe("OpenArtCliProvider.imageModelOptions / videoEndFrameModels", () => {
   });
 });
 
+describe("OpenArtCliProvider.modelOptions", () => {
+  it("builds a schema from the model form (first parsing mode wins)", async () => {
+    const { run } = fakeRun(baseHandler());
+    const p = provider(run);
+    const s = await p.modelOptions(`${OPENART_CLI_ID_PREFIX}nano-banana-2`);
+    expect(s).not.toBeNull();
+    const byFlag = (f: string) => s!.fields.find((x) => x.flag === f);
+    expect(byFlag("aspectRatio")!.values).toEqual(["16:9", "1:1"]);
+    expect(s!.aspectRatios).toEqual(["16:9", "1:1"]);
+    expect(await p.modelOptions("higgsfield:seedance_2_5")).toBeNull();
+    expect(await p.modelOptions("auto")).toBeNull();
+  });
+});
+
 describe("OpenArtCliProvider.imageGenFn", () => {
   it("submits with refs + project, waits, downloads, and records", async () => {
     const seen: string[][] = [];

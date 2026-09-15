@@ -8,23 +8,55 @@
  * endpoint) — cost semantics are derived from each model's own fields by
  * detectCost, never from the provider id.
  */
+/** How a provider's balance is denominated when displayed: account credits
+ *  (gab) or US dollars (Cheaper Inference). */
+export type BalanceUnit = "credits" | "usd";
+
+/**
+ * Balance endpoint semantics, when the provider exposes one: a GET under the
+ * base URL whose JSON response carries the balance in `field`. Providers
+ * without an entry never get a balance request (the UI hides the line).
+ */
+export interface BalanceSpec {
+  /** Path appended to the provider base URL, e.g. "/credits". */
+  path: string;
+  /** Numeric field in the JSON response carrying the balance. */
+  field: string;
+  /** Denomination for display ("12 credits" vs "$12.00"). */
+  unit: BalanceUnit;
+  /** Operator hint appended to the failure log when the fetch is rejected
+   *  (e.g. the key scope a balance read requires). */
+  errorHint?: string;
+}
+
 export interface ApiProvider {
   id: string;
   label: string;
   baseUrl: string;
   /** Model used when the provider has no per-provider model saved yet. */
   defaultModel: string;
-  /**
-   * Balance endpoint semantics, when the provider exposes one. "credits" =
-   * GET {baseUrl}/credits → { total_available: number }. Providers without an
-   * entry never get a balance request (the UI hides the balance line).
-   */
-  balance?: "credits";
+  /** Account balance endpoint, when the provider exposes one. */
+  balance?: BalanceSpec;
 }
 
 export const API_PROVIDERS: ApiProvider[] = [
-  { id: "gab", label: "Gab.ai", baseUrl: "https://gab.ai/v1", defaultModel: "arya", balance: "credits" },
-  { id: "cheaperinference", label: "Cheaper Inference", baseUrl: "https://api.cheaperinference.com/v1", defaultModel: "" },
+  {
+    id: "gab",
+    label: "Gab.ai",
+    baseUrl: "https://gab.ai/v1",
+    defaultModel: "arya",
+    balance: { path: "/credits", field: "total_available", unit: "credits" },
+  },
+  {
+    id: "cheaperinference",
+    label: "Cheaper Inference",
+    baseUrl: "https://api.cheaperinference.com/v1",
+    defaultModel: "",
+    // Wallet balance; `available_usd` is what can be spent right now
+    // (balance_usd minus in-flight reservations). Requires the account:read
+    // key scope — an inference/usage-only key gets an HTTP 403.
+    balance: { path: "/account/balance", field: "available_usd", unit: "usd", errorHint: "the API key needs the account:read scope" },
+  },
   { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "" },
 ];
 

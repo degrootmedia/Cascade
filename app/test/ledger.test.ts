@@ -21,12 +21,14 @@ vi.mock("electron", () => ({
 import {
   addManualEntry,
   applyModelOptions,
+  archiveProject,
   getPriceRules,
   matchPriceRule,
   parsePriceRulesCsv,
   priceRulesToCsv,
   recordGeneration,
   removeEntry,
+  removeProject,
   repriceAll,
   setLedgerUserDataDir,
   setPriceRules,
@@ -34,8 +36,10 @@ import {
 } from "../src/main/ledger.js";
 import type { ExpensePriceRule, LedgerGenMeta } from "../src/shared/ipc.js";
 
-const img = (over: Partial<LedgerGenMeta> = {}): LedgerGenMeta => ({ kind: "image", model: "flux-pro", resolution: "1k", at: 1000, ...over });
-const vid = (over: Partial<LedgerGenMeta> = {}): LedgerGenMeta => ({ kind: "video", model: "veo", resolution: "1080p", durationSec: 5, at: 2000, ...over });
+const P1 = "p1";
+const P2 = "p2";
+const img = (over: Partial<LedgerGenMeta> = {}): LedgerGenMeta => ({ kind: "image", model: "flux-pro", resolution: "1k", at: 1000, productionId: P1, ...over });
+const vid = (over: Partial<LedgerGenMeta> = {}): LedgerGenMeta => ({ kind: "video", model: "veo", resolution: "1080p", durationSec: 5, at: 2000, productionId: P1, ...over });
 
 /** A valid range rule with image defaults; override for video cases. */
 const rangeRule = (over: Partial<ExpensePriceRule> = {}): ExpensePriceRule => ({
@@ -147,7 +151,7 @@ describe("ledger records", () => {
     recordGeneration(img());
     recordGeneration(vid());
 
-    const v = view();
+    const v = view(P1);
     expect(v.entries).toHaveLength(2);
     expect(v.imageCount).toBe(1);
     expect(v.videoCount).toBe(1);
@@ -158,60 +162,91 @@ describe("ledger records", () => {
     expect(image).toMatchObject({ kind: "image", price: 0.1, aspectRatio: undefined });
   });
 
+  it("keeps one production's entries out of another's view", () => {
+    setPriceRules([rangeRule({ id: "r1", model: "*", minPrice: 0.25, maxPrice: 0.25 })]);
+    recordGeneration(img({ model: "a" })); // p1
+    recordGeneration(img({ model: "b", productionId: P2 }));
+    recordGeneration(img({ model: "c", productionId: P2 }));
+
+    expect(view(P1).entries.map((e) => e.model)).toEqual(["a"]);
+    expect(view(P1).total).toBeCloseTo(0.25);
+    expect(view(P2).entries.map((e) => e.model)).toEqual(["c", "b"]);
+    expect(view(P2).total).toBeCloseTo(0.5);
+    // Separate files on disk, not one shared ledger.
+    expect(fs.existsSync(path.join(dataDir, "ledger", `${P1}.json`))).toBe(true);
+    expect(fs.existsSync(path.join(dataDir, "ledger", `${P2}.json`))).toBe(true);
+  });
+
+  it("drops a generation with no productionId (cannot be attributed)", () => {
+    recordGeneration(img({ productionId: undefined }));
+    expect(view(P1).entries).toHaveLength(0);
+    expect(fs.existsSync(path.join(dataDir, "ledger", `${P1}.json`))).toBe(false);
+  });
+
   it("prices at $0 when no rule matches", () => {
     recordGeneration(img());
-    expect(view().entries[0].price).toBe(0);
+    expect(view(P1).entries[0].price).toBe(0);
   });
 
   it("persists across a memo-cache reset", () => {
     recordGeneration(img({ model: "persist-me" }));
     setLedgerUserDataDir(dataDir); // reloads from disk
-    expect(view().entries[0].model).toBe("persist-me");
+    expect(view(P1).entries[0].model).toBe("persist-me");
   });
 
   it("adds and removes manual rows with custom amounts", () => {
-    const v = addManualEntry("Stock audio pack", 12.5);
-    expect(v.entries[0]).toMatchObject({ kind: "manual", price: 12.5, label: "Stock audio pack" });
+    const v = addManualEntry(P1, "Stock audio pack", 12.5);
+    expect(v.entries[0]).toMatchObject({ kind: "manual", price: 12.5, label: "Stock audio pack", productionId: P1 });
     expect(v.total).toBeCloseTo(12.5);
 
-    const after = removeEntry(v.entries[0].id);
+    const after = removeEntry(P1, v.entries[0].id);
     expect(after.entries).toHaveLength(0);
     expect(after.total).toBe(0);
+  });
+
+  it("scopes manual rows to their production", () => {
+    addManualEntry(P1, "p1 asset", 5);
+    addManualEntry(P2, "p2 asset", 7);
+    expect(view(P1).entries.map((e) => e.label)).toEqual(["p1 asset"]);
+    expect(view(P2).entries.map((e) => e.label)).toEqual(["p2 asset"]);
   });
 
   it("re-prices existing generations when rules change, leaving manual rows alone", () => {
     setPriceRules([rangeRule({ id: "r1", model: "flux-pro", minPrice: 0.3, maxPrice: 0.3 })]);
     recordGeneration(img());
-    addManualEntry("Stock audio pack", 12.5);
-    expect(view().entries.find((e) => e.kind === "image")!.price).toBe(0.3);
+    addManualEntry(P1, "Stock audio pack", 12.5);
+    expect(view(P1).entries.find((e) => e.kind === "image")!.price).toBe(0.3);
 
     setPriceRules([rangeRule({ id: "r1", model: "flux-pro", minPrice: 0.9, maxPrice: 0.9 })]);
-    const v = view();
+    const v = view(P1);
     expect(v.entries.find((e) => e.kind === "image")!.price).toBe(0.9);
     expect(v.entries.find((e) => e.kind === "manual")!.price).toBe(12.5);
   });
 
-  it("repriceAll recomputes every generation from the current rules", () => {
+  it("repriceAll recomputes every production's generations from the current rules", () => {
     setPriceRules([rangeRule({ id: "r1", model: "flux-pro", minPrice: 0.1, maxPrice: 0.9 })]);
     recordGeneration(img({ resolution: "1k" })); // 0.1
-    recordGeneration(img({ resolution: "4k" })); // 0.9
-    // Corrupt one stamped price directly on disk, as if a legacy change never
-    // re-priced it.
-    const f = JSON.parse(fs.readFileSync(path.join(dataDir, "ledger.json"), "utf8"));
-    f.entries[0].price = 0;
-    fs.writeFileSync(path.join(dataDir, "ledger.json"), JSON.stringify(f), "utf8");
+    recordGeneration(img({ resolution: "4k", productionId: P2 })); // 0.9
+    // Corrupt stamped prices on disk, as if a legacy change never re-priced them.
+    for (const id of [P1, P2]) {
+      const file = path.join(dataDir, "ledger", `${id}.json`);
+      const f = JSON.parse(fs.readFileSync(file, "utf8"));
+      f.entries[0].price = 0;
+      fs.writeFileSync(file, JSON.stringify(f), "utf8");
+    }
+    setLedgerUserDataDir(dataDir); // drop caches so the corrupted disk is read
 
-    const v = repriceAll();
-    expect(v.entries.find((e) => e.resolution === "4k")!.price).toBeCloseTo(0.9);
-    expect(v.total).toBeCloseTo(1.0);
+    repriceAll();
+    expect(view(P1).entries[0].price).toBeCloseTo(0.1);
+    expect(view(P2).entries[0].price).toBeCloseTo(0.9);
   });
 
-  it("writes the CSV text mirror, quoted and chronological", () => {
+  it("writes a per-production CSV mirror, quoted and chronological", () => {
     setPriceRules([rangeRule({ id: "r1", kind: "video", model: "veo", minPrice: 0.5, maxPrice: 0.5 })]);
     recordGeneration(img({ model: "flux,pro" }));
     recordGeneration(vid());
 
-    const csv = fs.readFileSync(path.join(dataDir, "expenses.csv"), "utf8");
+    const csv = fs.readFileSync(path.join(dataDir, "ledger", `${P1}.csv`), "utf8");
     const lines = csv.split("\r\n").filter(Boolean);
     expect(lines[0]).toBe("date,kind,model,resolution,duration_sec,price,label");
     // Chronological order: the image (at=1000) precedes the video (at=2000).
@@ -220,6 +255,8 @@ describe("ledger records", () => {
     expect(lines[2]).toContain("video");
     expect(lines[2]).toContain("5");
     expect(lines[2]).toContain("0.50");
+    // Another production's CSV is untouched.
+    expect(fs.existsSync(path.join(dataDir, "ledger", `${P2}.csv`))).toBe(false);
   });
 
   it("normalizes rules (trims models, clamps prices, images drop duration ranges)", () => {
@@ -244,6 +281,60 @@ describe("ledger records", () => {
     expect(rules).toHaveLength(2);
     expect(rules[0]).toMatchObject({ kind: "image", model: "flux-pro", minPrice: 0.2, maxPrice: 0.8 });
     expect(rules[1]).toMatchObject({ kind: "video", model: "veo", minPrice: 1.0, maxPrice: 1.0 });
+  });
+});
+
+describe("legacy single-file ledger migration", () => {
+  it("splits scoped entries per production, drops unscoped rows, and keeps rules", () => {
+    const legacy = {
+      entries: [
+        { id: "e1", kind: "image", model: "flux-pro", resolution: "1k", price: 0.1, at: 1000, productionId: P1 },
+        { id: "e2", kind: "video", model: "veo", resolution: "1080p", durationSec: 5, price: 0.5, at: 2000, productionId: P2 },
+        // No productionId — pre-attribution generation and a manual row.
+        { id: "e3", kind: "image", model: "flux-pro", resolution: "1k", price: 0.1, at: 500 },
+        { id: "m1", kind: "manual", model: "", resolution: "", price: 9, at: 600, label: "old manual" },
+      ],
+      priceRules: [{ id: "r", kind: "image", model: "flux-pro", minPrice: 0.2, maxPrice: 0.2 }],
+      updatedAt: "2020-01-01T00:00:00.000Z",
+    };
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "ledger.json"), JSON.stringify(legacy), "utf8");
+    setLedgerUserDataDir(dataDir);
+
+    expect(view(P1).entries.map((e) => e.id)).toEqual(["e1"]);
+    expect(view(P2).entries.map((e) => e.id)).toEqual(["e2"]);
+    // Rules survive the split.
+    expect(getPriceRules()).toHaveLength(1);
+    expect(getPriceRules()[0]).toMatchObject({ model: "flux-pro", minPrice: 0.2 });
+
+    // ledger.json is rewritten rules-only (version 2, no entries).
+    const rewritten = JSON.parse(fs.readFileSync(path.join(dataDir, "ledger.json"), "utf8"));
+    expect(rewritten.version).toBe(2);
+    expect(rewritten.entries).toBeUndefined();
+  });
+});
+
+describe("production lifecycle", () => {
+  it("removes a project's ledger files on hard delete", () => {
+    recordGeneration(img());
+    addManualEntry(P1, "asset", 3);
+    const file = path.join(dataDir, "ledger", `${P1}.json`);
+    expect(fs.existsSync(file)).toBe(true);
+    const csv = path.join(dataDir, "ledger", `${P1}.csv`);
+    expect(fs.existsSync(csv)).toBe(true);
+
+    removeProject(P1);
+    expect(fs.existsSync(file)).toBe(false);
+    expect(fs.existsSync(csv)).toBe(false);
+    expect(view(P1).entries).toHaveLength(0);
+  });
+
+  it("archives a project's ledger out of the active dir", () => {
+    recordGeneration(img());
+    archiveProject(P1);
+    expect(fs.existsSync(path.join(dataDir, "ledger", `${P1}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(dataDir, "ledger", "archive", `${P1}.json`))).toBe(true);
+    expect(view(P1).entries).toHaveLength(0);
   });
 });
 

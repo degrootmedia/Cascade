@@ -1,13 +1,16 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ChangeEvent, DragEvent } from "react";
-import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CustomRef, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
-import { isImageModel } from "../../../../shared/ipc.js";
+import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
+import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
+import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
+import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 
 interface RefItem {
   id: string;
@@ -345,14 +348,13 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
         <button className="prod-ref-del" title="Delete this reference" onClick={handleRemove}><XIcon size={12} /></button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={handleRename} /></figcaption>
-      {zoom && (
+      {zoom && createPortal(
         <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
           <figure className="prod-ref-lightbox-card">
             <img src={zoom.url} alt={zoom.name} />
             <figcaption>{zoom.name} — click anywhere to close</figcaption>
           </figure>
-        </div>
-      )}
+        </div>, document.body)}
     </figure>
   );
 }, (prev, next) =>
@@ -589,9 +591,13 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
  *  / 16:9) plus a prompt; editing reuses a reference's current image as the
  *  visual source. The modal stays open while generating and reports errors
  *  inline; `onSubmit` resolves on success (the caller closes via onClose). */
-export function RefGenModal({ prodId, models, categories, references, promptRefs, defaultCategoryId, initialRefId, onClose, onSubmit }: {
+export function RefGenModal({ prodId, models, editModels, categories, references, promptRefs, defaultCategoryId, initialRefId, onClose, onSubmit }: {
   prodId: string;
+  /** Image-generation models (the `image:generate` surface). */
   models: OpenArtModelChoice[];
+  /** Image-edit models (the `image:edit` surface) — the Edit tab's pool, so it
+   *  matches the classic edit popup / edit node. Falls back to `models`. */
+  editModels?: OpenArtModelChoice[];
   categories: ReferenceCategory[];
   references: CustomRef[];
   /** Artwork-bearing references for the prompt box's @ autocomplete + tags. */
@@ -603,15 +609,60 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
   onClose: () => void;
   onSubmit: (opts: ReferenceImageGenOptions) => Promise<void>;
 }) {
-  const imageModels = models.filter(isImageModel);
+  const generateModels = models.filter(isImageModel);
+  const editImageModels = (editModels ?? models).filter(isImageModel);
   const editable = references.filter((r) => r.imagePath || r.artwork);
   const startInEdit = !!initialRefId && editable.some((r) => r.id === initialRefId);
   const [mode, setMode] = useState<"generate" | "edit">(startInEdit ? "edit" : "generate");
-  // Start where the user last left this dropdown (remembered globally).
-  const remembered = getMediaDefault("reference");
-  const [model, setModel] = useState(() => remembered?.model ?? imageModels[0]?.id ?? "");
-  const [resolution, setResolution] = useState(() => remembered?.resolution ?? "1k");
-  const [aspectRatio, setAspectRatio] = useState<ImageGenAspectRatio>(() => (remembered?.aspectRatio as ImageGenAspectRatio) ?? "16:9");
+  // Each tab has its own model pool and its own remembered choice: Generate
+  // rides the "reference" context, Edit rides the "edit" context (the same one
+  // the classic edit popup uses).
+  const activeModels = mode === "edit" ? editImageModels : generateModels;
+  const activeCtx = mode === "edit" ? "edit" : "reference";
+  const seedFor = (m: "generate" | "edit"): { model: string; resolution: string; aspectRatio: ImageGenAspectRatio } => {
+    const remembered = getMediaDefault(m === "edit" ? "edit" : "reference");
+    const ids = (m === "edit" ? editImageModels : generateModels).map((x) => x.id);
+    return {
+      model: remembered?.model && ids.includes(remembered.model) ? remembered.model : (ids[0] ?? ""),
+      resolution: remembered?.resolution ?? "1k",
+      aspectRatio: (resolveAspectRatio(remembered?.aspectRatio) as ImageGenAspectRatio) || (DEFAULT_ASPECT_RATIO as ImageGenAspectRatio),
+    };
+  };
+  const initial = seedFor(startInEdit ? "edit" : "generate");
+  const [model, setModel] = useState(() => initial.model);
+  const [resolution, setResolution] = useState(() => initial.resolution);
+  const [aspectRatio, setAspectRatio] = useState<ImageGenAspectRatio>(() => initial.aspectRatio);
+  /** Flip tabs, re-seeding the dropdowns from that tab's remembered choice. */
+  const switchMode = (next: "generate" | "edit") => {
+    if (next === mode) return;
+    setMode(next);
+    setError(null);
+    const seed = seedFor(next);
+    setModel(seed.model);
+    setResolution(seed.resolution);
+    setAspectRatio(seed.aspectRatio);
+  };
+  const [params, setParams] = useState<GenParams>({});
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
+  // Advanced/variant options for the picked model (schema-driven). Degrades
+  // to nothing when the provider exposes no schema.
+  useEffect(() => {
+    let live = true;
+    setSchema(null);
+    if (!model) return () => { live = false; };
+    const api = (window as unknown as { cascade?: { modelOptions?: (m: string) => Promise<CliModelSchema | null> } }).cascade;
+    if (!api || typeof api.modelOptions !== "function") return () => { live = false; };
+    api.modelOptions(model)
+      .then((s) => {
+        if (!live) return;
+        setSchema(s);
+        setParams((prev) =>
+          seedModelOptionValues(s, model, mode === "edit" ? "image:edit" : "image:generate", pruneModelOptionValues(s, prev)) as GenParams
+        );
+      })
+      .catch(() => { if (live) setSchema(null); });
+    return () => { live = false; };
+  }, [model]);
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState(defaultCategoryId ?? "");
@@ -633,6 +684,7 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
         resolution,
         aspectRatio,
         prompt: prompt.trim(),
+        ...(Object.keys(params).length ? { params } : {}),
         ...(mode === "edit"
           ? { sourceRefId }
           : { name: name.trim() || "Generated reference", categoryId: categoryId || undefined }),
@@ -652,42 +704,51 @@ export function RefGenModal({ prodId, models, categories, references, promptRefs
           <button className="prod-btn" onClick={onClose}>Cancel</button>
         </div>
         <div className="prod-refgen-tabs">
-          <button className={"prod-refgen-tab" + (mode === "generate" ? " active" : "")} onClick={() => { setMode("generate"); setError(null); }}>Generate</button>
-          <button className={"prod-refgen-tab" + (mode === "edit" ? " active" : "")} disabled={!editable.length} title={editable.length ? "Edit an existing reference image" : "No references with images to edit yet"} onClick={() => { setMode("edit"); setError(null); }}>Edit image</button>
+          <button className={"prod-refgen-tab" + (mode === "generate" ? " active" : "")} onClick={() => switchMode("generate")}>Generate</button>
+          <button className={"prod-refgen-tab" + (mode === "edit" ? " active" : "")} disabled={!editable.length} title={editable.length ? "Edit an existing reference image" : "No references with images to edit yet"} onClick={() => switchMode("edit")}>Edit image</button>
         </div>
 
         <label className="prod-label">Model</label>
         <select
           className="prod-openart-select"
-          value={imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "")}
-          onChange={(e) => { setModel(e.target.value); rememberMediaDefault("reference", { model: e.target.value }); }}
-          title="Image model"
-          disabled={imageModels.length === 0}
+          value={activeModels.some((m) => m.id === model) ? model : (activeModels[0]?.id ?? "")}
+          onChange={(e) => { setModel(e.target.value); rememberMediaDefault(activeCtx, { model: e.target.value }); }}
+          title={mode === "edit" ? "Image-edit model (same pool as the edit popup and edit node)" : "Image model"}
+          disabled={activeModels.length === 0}
         >
-          {imageModels.map((m) => (
+          {activeModels.map((m) => (
             <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
           ))}
         </select>
-        {imageModels.length === 0 && (
+        {activeModels.length === 0 && (
           <p className="hint">No image models reported — connect the media MCP server.</p>
         )}
 
         <div className="prod-video-row">
           <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault("reference", { resolution: e.target.value }); }}>
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault(activeCtx, { resolution: e.target.value }); }}>
               <option value="1k">1k</option>
               <option value="2k">2k</option>
               <option value="4k">4k</option>
             </select>
           </label>
           <label className="prod-label">Aspect ratio
-            <select className="prod-openart-select" value={aspectRatio} onChange={(e) => { setAspectRatio(e.target.value as ImageGenAspectRatio); rememberMediaDefault("reference", { aspectRatio: e.target.value }); }}>
+            <select className="prod-openart-select" value={aspectRatio} onChange={(e) => { setAspectRatio(e.target.value as ImageGenAspectRatio); rememberMediaDefault(activeCtx, { aspectRatio: e.target.value }); }}>
               <option value="1:1">1:1</option>
               <option value="4:3">4:3</option>
               <option value="16:9">16:9</option>
             </select>
           </label>
         </div>
+
+        <ModelOptionsForm
+          schema={schema}
+          value={params as ModelOptionValues}
+          onChange={(next) => setParams(next as GenParams)}
+          exclude={["resolution", "aspect_ratio"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.reference"
+        />
 
         {mode === "generate" ? (
           <>

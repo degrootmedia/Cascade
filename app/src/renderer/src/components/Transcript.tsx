@@ -3,6 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { DisplayItem } from "../types.js";
 import { AgentHoverCard } from "./AgentIdCard.js";
+import cascadeLogoLight from "../assets/brand/cascade-logo-light.svg";
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -39,7 +40,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
     <div className="transcript">
       {items.length === 0 && (
         <div className="empty">
-          <h2>Cascade</h2>
+          <img className="empty-brand" src={cascadeLogoLight} alt="Cascade" />
           {pureChat ? (
             <p>Plain chat — no file access. Pick a folder in the header to let Cascade create, edit, or organize files.</p>
           ) : (

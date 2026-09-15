@@ -40,28 +40,33 @@ import {
   type CliRun,
   type CliRunResult,
 } from "./cli-run.js";
-import { assetPath, type ImageGenFn } from "../pipeline.js";
+import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
 import {
   IMAGE_URL_RX,
   parseJsonLooseArray,
   parseJsonLooseObject,
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
-import type {
-  ImageGenAspectRatio,
-  ImageModelOptions,
-  LedgerGenMeta,
-  OpenArtBoardConfig,
-  OpenArtModelChoice,
-  PendingImageGen,
-  Production,
-  ProductionShot,
-  VideoGenOptions,
-  VideoModelOptions,
+import {
+  resolveAspectRatio,
+  type CliModelSchema,
+  type CliOptionField,
+  type ImageGenAspectRatio,
+  type ImageModelOptions,
+  type LedgerGenMeta,
+  type ModelParamOption,
+  type OpenArtBoardConfig,
+  type OpenArtModelChoice,
+  type PendingImageGen,
+  type Production,
+  type ProductionShot,
+  type VideoGenOptions,
+  type VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 import { resizeVideoRef } from "../video-ref.js";
+import { buildModelSchema, OWNED_FLAGS, type RawModelParam } from "./model-schema.js";
 
 /** Prefix marking model ids that belong to this provider (see types.ts).
  *  The raw id is the CLI/MCP job_type (`seedance_2_5`); the prefix keeps the
@@ -98,6 +103,9 @@ const DEFAULT_IMAGE_MODEL = "gpt_image_2_5";
 const DEFAULT_VIDEO_MODEL = "seedance_2_5";
 
 const CATALOG_TTL_MS = 10 * 60_000;
+/** Schema-cache TTL (10 min) + cap; last-good schemas survive past expiry. */
+const SCHEMA_TTL_MS = 10 * 60_000;
+const SCHEMA_CACHE_CAP = 64;
 const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
@@ -209,10 +217,21 @@ const strField = (o: CliListItem, ...keys: string[]): string => {
   return "";
 };
 
-/** One normalized model parameter: the accepted values plus the default. */
+/** One normalized model parameter: the accepted values plus the default.
+ *  Rich metadata (raw spelling, declared type, bounds) is retained so the
+ *  schema normalizer below can classify fields without re-parsing. */
 interface CliParam {
   values: string[];
   default: string;
+  /** Original spelling from `model get` (the emitted flag). */
+  rawName?: string;
+  /** Declared type string, e.g. "integer", "string", "array", "object|null". */
+  rawType?: string;
+  /** Whether the CLI marks the parameter required. */
+  required?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 /** Normalize a `model get --json` reply into a param map keyed by
@@ -331,13 +350,34 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
   const obj = parseJsonLooseObject(stdout);
   if (!obj) return null;
   const params = new Map<string, CliParam>();
-  const take = (name: string, values: unknown, def: unknown) => {
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const take = (name: string, values: unknown, def: unknown, rec?: Record<string, unknown>) => {
     const key = foldName(name);
     if (!key || params.has(key)) return;
     const list = Array.isArray(values)
       ? values.map((v) => String(v).trim()).filter(Boolean)
       : [];
-    params.set(key, { values: Array.from(new Set(list)), default: typeof def === "string" ? def.trim() : String(def ?? "") });
+    const entry: CliParam = {
+      values: Array.from(new Set(list)),
+      default: typeof def === "string" ? def.trim() : String(def ?? ""),
+    };
+    if (rec) {
+      if (typeof rec.name === "string" || typeof rec.flag === "string" || typeof rec.key === "string" || typeof rec.param === "string") {
+        entry.rawName = strField(rec, "name", "flag", "key", "param") || undefined;
+      }
+      const t = strField(rec, "type", "valueType", "kind");
+      if (t) entry.rawType = t;
+      if (rec.required === true) entry.required = true;
+      const lo = num(rec.min ?? rec.minimum ?? rec.minValue);
+      const hi = num(rec.max ?? rec.maximum ?? rec.maxValue);
+      const st = num(rec.step);
+      if (lo !== undefined) entry.min = lo;
+      if (hi !== undefined) entry.max = hi;
+      if (st !== undefined) entry.step = st;
+    }
+    if (!entry.rawName) entry.rawName = name.trim() || undefined;
+    params.set(key, entry);
   };
   const rawParams = obj.parameters ?? obj.params;
   if (Array.isArray(rawParams)) {
@@ -346,7 +386,7 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
       const rec = p as Record<string, unknown>;
       const name = strField(rec, "name", "flag", "key", "param");
       if (!name) continue;
-      take(name, rec.options ?? rec.enum ?? rec.values ?? rec.allowed, rec.default ?? rec.defaultValue);
+      take(name, rec.options ?? rec.enum ?? rec.values ?? rec.allowed, rec.default ?? rec.defaultValue, rec);
     }
   }
   // Top-level option ladders some replies carry outside `parameters`.
@@ -369,6 +409,151 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
     }
   }
   return { params, roles };
+}
+
+// ---- schema normalization ---------------------------------------------------------
+
+/**
+ * Normalize a parsed `model get` detail into the ordered, typed schema the
+ * options form renders and the generic arg builder emits. Delegates the
+ * grouping/classification grammar to `model-schema.ts` (shared by every
+ * provider); total — never throws on unrecognized shapes.
+ * Exported for tests.
+ */
+export function normalizeCliModelDetail(
+  detail: CliModelDetail,
+  raw: unknown,
+  jobType: string,
+  cliVersion: string | null
+): CliModelSchema {
+  const params: RawModelParam[] = [];
+  for (const [, p] of detail.params) {
+    params.push({
+      name: p.rawName ?? "",
+      type: p.rawType,
+      options: p.values,
+      default: p.default || undefined,
+      min: p.min,
+      max: p.max,
+      step: p.step,
+      required: p.required,
+    });
+  }
+  return buildModelSchema({
+    jobType,
+    cliVersion,
+    params,
+    roles: HiggsfieldCliProvider.roles(detail),
+    aspectRatios: HiggsfieldCliProvider.aspectRatios(detail),
+    durations: HiggsfieldCliProvider.numericOptions(
+      HiggsfieldCliProvider.param(detail, "duration", "length", "seconds")
+    ),
+    raw,
+  });
+}
+
+/** Look a user value up by flag, canonical name, then aliases. */
+function pickParamValue(
+  field: CliOptionField,
+  values: Record<string, string | number | boolean | string[]>
+): string | number | boolean | string[] | undefined {
+  const keys = [field.flag, field.name, ...field.aliases];
+  for (const k of keys) {
+    if (k in values) return values[k];
+  }
+  const lower = new Map(Object.keys(values).map((k) => [k.toLowerCase(), k]));
+  for (const k of keys) {
+    const hit = lower.get(k.toLowerCase());
+    if (hit !== undefined) return values[hit];
+  }
+  return undefined;
+}
+
+/**
+ * Emit one schema field's value into argv. Returns false when the value is
+ * absent or not allowed by the schema (never emits an unlisted enum value or
+ * non-finite number). Exported for tests.
+ */
+export function emitSchemaField(
+  field: CliOptionField,
+  value: string | number | boolean | string[],
+  args: string[]
+): boolean {
+  switch (field.kind) {
+    case "enum":
+    case "string": {
+      const s = String(value).trim();
+      if (!s) return false;
+      if (field.kind === "enum" && field.values?.length) {
+        const match = field.values.find((v) => v.toLowerCase() === s.toLowerCase());
+        if (!match) return false;
+        args.push(`--${field.flag}`, match);
+        return true;
+      }
+      args.push(`--${field.flag}`, s);
+      return true;
+    }
+    case "integer":
+    case "number": {
+      const n = typeof value === "number" ? value : Number(String(value).trim());
+      if (!Number.isFinite(n)) return false;
+      let out = field.kind === "integer" ? Math.round(n) : n;
+      if (field.min !== undefined) out = Math.max(field.min, out);
+      if (field.max !== undefined) out = Math.min(field.max, out);
+      args.push(`--${field.flag}`, String(out));
+      return true;
+    }
+    case "boolean": {
+      const truthy = value === true || value === "true" || value === 1 || value === "1";
+      args.push(`--${field.flag}`, truthy ? "true" : "false");
+      return true;
+    }
+    case "array": {
+      const items = (Array.isArray(value) ? value : [value])
+        .map((v) => String(v).trim())
+        .filter(Boolean)
+        .slice(0, field.maxItems ?? Infinity);
+      if (!items.length) return false;
+      for (const item of items) args.push(`--${field.flag}`, item);
+      return true;
+    }
+    case "json": {
+      const s = typeof value === "string" ? value.trim() : JSON.stringify(value);
+      if (!s) return false;
+      try {
+        JSON.parse(s);
+      } catch {
+        return false;
+      }
+      args.push(`--${field.flag}`, s);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Generic extra-params emission shared by the image and video submit paths.
+ * Iterates the model's schema and emits `--flag <value>` for each present
+ * `params` entry, skipping media roles (the reference router owns them) and
+ * flags the caller already emitted (resolution/quality/duration/aspect/mode).
+ * Unknown keys for the active model are ignored — switching models never
+ * carries stale selections into the next submission.
+ */
+function emitExtraParams(
+  schema: CliModelSchema | null,
+  values: Record<string, string | number | boolean | string[]> | undefined,
+  args: string[]
+): void {
+  if (!schema || !values) return;
+  for (const field of schema.fields) {
+    if (field.mediaRole) continue;
+    if (OWNED_FLAGS.has(foldName(field.flag)) || OWNED_FLAGS.has(field.name)) continue;
+    const v = pickParamValue(field, values);
+    if (v === undefined || v === null || v === "") continue;
+    emitSchemaField(field, v, args);
+  }
 }
 
 /** The job id out of a `generate create --json` reply (no --wait): the CLI
@@ -524,6 +709,10 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
   private listCache: { at: number; image: CliListItem[]; video: CliListItem[] } | null = null;
   private detailCache = new Map<string, { at: number; detail: CliModelDetail | null }>();
+  /** Normalized per-model schemas (TTL + LRU cap). Last-good entries are
+   *  kept past expiry so a transient `model get` failure degrades to
+   *  stale-but-usable instead of the old hardcoded path. */
+  private schemaCache = new Map<string, { at: number; schema: CliModelSchema | null }>();
 
   /** `binary` resolves the CLI path lazily (Settings override → PATH probe
    *  cached by the caller) so a path change applies without a restart.
@@ -634,6 +823,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return detail;
   }
 
+  /** Drop every cached catalog/detail/schema probe (dev customizer refresh). */
+  refreshProbes(): void {
+    this.listCache = null;
+    this.detailCache.clear();
+    this.schemaCache.clear();
+  }
+
   /** Warm the per-model detail cache for every video-capable model.
    *  Fire-and-forget: the caller returns immediately so listing models
    *  never waits on detail lookups. */
@@ -646,7 +842,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
     }
   }
 
-  private static param(detail: CliModelDetail, ...names: string[]): CliParam | null {
+  /** Internal (module-level normalizer shares it): first matching param. */
+  static param(detail: CliModelDetail, ...names: string[]): CliParam | null {
     for (const n of names) {
       const p = detail.params.get(foldName(n));
       if (p) return p;
@@ -657,8 +854,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
   /** Media roles a detail declares (lowercased, separator-folded). The live
    *  `model get` carries no `medias` block — start/end frames and reference
    *  arrays arrive as `params` (`start_image`, `end_image`,
-   *  `image_references`, …), so those param names count as accepted roles. */
-  private static roles(detail: CliModelDetail): string[] {
+   *  `image_references`, …), so those param names count as accepted roles.
+   *  Internal (module-level normalizer shares it). */
+  static roles(detail: CliModelDetail): string[] {
     const out: string[] = [];
     for (const r of detail.roles) {
       const f = foldName(r);
@@ -704,8 +902,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
   // ---- options ----------------------------------------------------------------------
 
-  /** Numeric values from a param's option list ("8s"/"8 sec" → 8). */
-  private static numericOptions(p: CliParam | null): number[] {
+  /** Numeric values from a param's option list ("8s"/"8 sec" → 8).
+   *  Internal (module-level normalizer shares it). */
+  static numericOptions(p: CliParam | null): number[] {
     if (!p) return [];
     const out: number[] = [];
     for (const v of p.values) {
@@ -715,8 +914,65 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return out;
   }
 
+  /** The full normalized option schema for a model, derived live from
+   *  `model get <job_type> --json` (cached, TTL + LRU cap, last-good
+   *  fallback on transient failures). Null for foreign ids, unknown models,
+   *  and unreadable details — callers fall back to the ladder adapters.
+   *  `cliVersion` is null: this transport doesn't probe `version` per
+   *  lookup (the header documents the probed v1.1.24 vocabulary). */
+  async modelOptions(modelId: string): Promise<CliModelSchema | null> {
+    const raw = rawJobType(modelId);
+    if (!raw || raw === "auto" || isForeignId(modelId)) return null;
+    const hit = this.schemaCache.get(raw);
+    if (hit?.schema && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.schema;
+    let stdout: string;
+    try {
+      stdout = await this.json(["model", "get", raw]);
+    } catch {
+      return hit?.schema ?? null;
+    }
+    const detail = parseCliModelDetail(stdout);
+    if (!detail || (!detail.params.size && !detail.roles.length)) {
+      return hit?.schema ?? null;
+    }
+    // Keep the detail cache warm from the same fetch (adapters read it).
+    this.detailCache.set(raw, { at: Date.now(), detail });
+    const schema = normalizeCliModelDetail(detail, stdout, raw, null);
+    this.schemaCache.set(raw, { at: Date.now(), schema });
+    if (this.schemaCache.size > SCHEMA_CACHE_CAP) {
+      const oldest = this.schemaCache.keys().next();
+      if (!oldest.done) this.schemaCache.delete(oldest.value);
+    }
+    return schema;
+  }
+
+  /** Project a schema's remaining enum params into the UI's
+   *  `ModelParamOption` shape (the advanced/variant knobs). Owned flags
+   *  (resolution/aspect/quality/duration) are handled by dedicated controls
+   *  and skipped; an exposed `variant` (GPT Image 2.5 submodel) is skipped
+   *  when `variantExposed`. */
+  static paramOptionsFromSchema(schema: CliModelSchema, opts: { variantExposed: boolean }): ModelParamOption[] {
+    const out: ModelParamOption[] = [];
+    for (const f of schema.fields) {
+      if (f.mediaRole || f.kind !== "enum" || !f.values?.length) continue;
+      if (OWNED_FLAGS.has(foldName(f.flag)) || OWNED_FLAGS.has(f.name)) continue;
+      if (f.name === "variant" && opts.variantExposed) continue;
+      out.push({
+        flag: `--${f.flag}`,
+        key: f.flag,
+        values: [...f.values],
+        ...(typeof f.default === "string" && f.default ? { defaultValue: f.default } : {}),
+        exposure: f.group === "core" ? "exposed" : "advanced",
+        label: f.flag.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      });
+    }
+    return out;
+  }
+
   /** The resolution / length options a video model accepts (from `model
-   *  get`). Null for foreign ids, unknown models, and image-only callers. */
+   *  get`). Null for foreign ids, unknown models, and image-only callers.
+   *  Deprecated: prefer `modelOptions()` (the full schema); this ladder
+   *  projection stays for one release for existing consumers. */
   async videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
     const raw = rawJobType(modelId);
     if (!raw || raw === "auto" || isForeignId(modelId)) return null;
@@ -738,13 +994,21 @@ export class HiggsfieldCliProvider implements MediaProvider {
     out.durations.push(...HiggsfieldCliProvider.numericOptions(durParam));
     out.resolutions = Array.from(new Set(out.resolutions));
     out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
+    // Extended surface: aspect ratios + advanced params, projected from the
+    // same detail. Additive — old consumers only read resolutions/durations.
+    const schema = normalizeCliModelDetail(detail, null, raw, null);
+    if (schema.aspectRatios.length) out.aspectRatios = schema.aspectRatios;
+    const advanced = HiggsfieldCliProvider.paramOptionsFromSchema(schema, { variantExposed: false });
+    if (advanced.length) out.params = advanced;
     return out;
   }
 
   /** The quality tier an image model accepts, from `model get` (a
    *  `quality`-named parameter with options, e.g. Seedream's basic/high).
    *  Null when the model declares none — the caller hides the quality
-   *  dropdown and the vendor default applies. */
+   *  dropdown and the vendor default applies.
+   *  Deprecated: prefer `modelOptions()` (the full schema); this ladder
+   *  projection stays for one release for existing consumers. */
   async imageModelOptions(modelId: string): Promise<ImageModelOptions | null> {
     const raw = rawJobType(modelId);
     if (!raw || raw === "auto" || isForeignId(modelId)) return null;
@@ -757,10 +1021,25 @@ export class HiggsfieldCliProvider implements MediaProvider {
     );
     if (!qualities.length) return null;
     const def = quality.default.trim();
-    return {
+    const schema = normalizeCliModelDetail(detail, null, raw, null);
+    const variantField = schema.fields.find((f) => f.name === "variant" && f.group === "core");
+    const resField = schema.fields.find((f) => f.name === "resolution" || f.name === "res");
+    const out: ImageModelOptions = {
       qualities,
       defaultQuality: def && qualities.some((q) => q.toLowerCase() === def.toLowerCase()) ? def : null,
     };
+    if (schema.aspectRatios.length) out.aspectRatios = schema.aspectRatios;
+    if (resField?.values?.length) {
+      out.resolutions = [...resField.values];
+      if (typeof resField.default === "string" && resField.default) out.defaultResolution = resField.default;
+    }
+    if (variantField?.values?.length) {
+      out.submodels = [...variantField.values];
+      if (typeof variantField.default === "string" && variantField.default) out.defaultSubmodel = variantField.default;
+    }
+    const advanced = HiggsfieldCliProvider.paramOptionsFromSchema(schema, { variantExposed: !!out.submodels });
+    if (advanced.length) out.params = advanced;
+    return out;
   }
 
   /** Ids (namespaced) of the video-capable models declaring an end-image
@@ -786,6 +1065,30 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return out.sort();
   }
 
+  /** Ids (namespaced) of the video models declaring a video input role — the
+   *  edit-video node's capability probe. Empty when none is proven. */
+  async videoEditModels(): Promise<string[]> {
+    let items: CliListItem[] = [];
+    try {
+      items = await this.listRaw("video");
+    } catch {
+      return [];
+    }
+    const ids = items
+      .map((m) => strField(m, "job_type", "jobType", "job_set_type", "id", "model", "name"))
+      .filter(Boolean);
+    const out: string[] = [];
+    await Promise.all(
+      ids.map(async (id) => {
+        const d = await this.modelDetail(id).catch(() => null);
+        if (d && HiggsfieldCliProvider.roles(d).some((r) => r === "video" || r === "videoreferences")) {
+          out.push(`${HIGGSFIELD_CLI_ID_PREFIX}${id}`);
+        }
+      })
+    );
+    return out.sort();
+  }
+
   /** No project concept on Higgsfield — generations always land in the
    *  account/workspace default, so there is nothing to resolve. */
   async resolveProject(_p: Production, _onNotice?: (msg: string) => void): Promise<string | null> {
@@ -797,7 +1100,15 @@ export class HiggsfieldCliProvider implements MediaProvider {
   private static fileDataUrl(p: Production, rel: string, label: string): { name: string; dataUrl: string } {
     const buf = fs.readFileSync(assetPath(p, rel));
     const ext = (path.extname(rel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-    const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+    const mime =
+      ext === "jpg" ? "image/jpeg"
+      : ext === "webp" ? "image/webp"
+      : ext === "gif" ? "image/gif"
+      : ext === "mp4" ? "video/mp4"
+      : ext === "webm" ? "video/webm"
+      : ext === "mov" ? "video/quicktime"
+      : ext === "m4v" ? "video/x-m4v"
+      : "image/png";
     return { name: label, dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
   }
 
@@ -882,7 +1193,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
     if (!this.isAvailable()) return null;
     void onNotice;
 
-    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot): Promise<Buffer> => {
+    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>): Promise<Buffer> => {
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let items: CliListItem[] = [];
@@ -910,8 +1221,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
             for (const f of imagePaths) args.push("--image", f);
           }
         }
+        // Aspect ratio: an explicit schema-driven pick (params.aspect_ratio)
+        // wins over the request default, but only when the model lists it.
+        const extraParams = genParams ?? p.openArt?.params;
+        const paramAspect = extraParams?.aspect_ratio;
+        const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : aspectRatio);
         const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
-        if (aspects.includes(aspectRatio)) args.push("--aspect_ratio", aspectRatio);
+        if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
         const resolution = resolutionOverride ?? p.openArt?.resolution ?? "1k";
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
         const resMatch = resValues.find((v) => v.toLowerCase() === String(resolution).toLowerCase());
@@ -921,6 +1237,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (quality) {
           const qMatch = qualities.find((v) => v.toLowerCase() === quality.toLowerCase());
           if (qMatch) args.push("--quality", qMatch);
+        }
+        // Schema-driven extras (variant, background, seed, mode, …) from
+        // the persisted params map (or the caller-supplied override, e.g. a
+        // reference-generation modal). Owned flags and media roles are
+        // skipped; unknown keys for this model are ignored.
+        if (detail && extraParams) {
+          emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), extraParams, args);
         }
         const genMeta: LedgerGenMeta = {
           kind: "image",
@@ -938,7 +1261,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
           // The job keeps rendering server-side — record it as pending so
           // the finished frame can be reclaimed instead of re-paid.
           if (shot && e instanceof HiggsfieldCliPendingError) {
-            shot.pendingImageGen = { historyId: e.jobId, prompt, model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, at: new Date().toISOString() };
+            shot.pendingImageGen = { historyId: e.jobId, prompt, model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, resolution, aspectRatio, at: new Date().toISOString() };
           }
           throw e;
         }
@@ -950,8 +1273,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
     };
   }
 
-  /** Aspect ratios a detail declares (aspect_ratios list or aspect_ratio param). */
-  private static aspectRatios(detail: CliModelDetail): string[] {
+  /** Aspect ratios a detail declares (aspect_ratios list or aspect_ratio param).
+   *  Internal (module-level normalizer shares it). */
+  static aspectRatios(detail: CliModelDetail): string[] {
     const p = HiggsfieldCliProvider.param(detail, "aspect_ratio", "aspectratio");
     return p ? p.values : [];
   }
@@ -1100,12 +1424,20 @@ export class HiggsfieldCliProvider implements MediaProvider {
         emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
       });
 
+      // Schema-driven extras (genre, speedramp, batch_size, an explicit
+      // mode, …) from the caller's params map. Runs before the seedance
+      // guard so an explicit `mode` is already on argv when it is checked.
+      if (detail && opts.params) {
+        emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);
+      }
+
       // seedance_2_5 only carries media in `omni_reference` mode (`t2v`
-      // accepts none) — select it whenever a media flag was attached.
+      // accepts none) — select it whenever a media flag was attached,
+      // unless the caller explicitly chose a mode.
       const hasMedia = args.some((a) =>
         ["--start-image", "--end-image", "--image", "--image-references", "--video", "--video-references", "--audio", "--audio-references"].includes(a)
       );
-      if (modelId === "seedance_2_5" && hasMedia) args.push("--mode", "omni_reference");
+      if (modelId === "seedance_2_5" && hasMedia && !args.includes("--mode")) args.push("--mode", "omni_reference");
 
       // Fail loudly when the detail proves the model can't do the requested
       // length — silently coercing once turned a 2s tween block into a
@@ -1129,24 +1461,149 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (match) args.push("--resolution", match);
       }
       const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
-      if (aspects.includes("16:9")) args.push("--aspect_ratio", "16:9");
+      const paramAspect = opts.params?.aspect_ratio;
+      const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : undefined);
+      if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (Higgsfield CLI)…`);
       const done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
         emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
       );
 
-      const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
-      const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
-      fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
-      fs.writeFileSync(assetPath(p, rel), done.buf);
+      const rel = writeShotVideo(p, shot, done.buf, safeExt);
 
       this.fireGeneration({
         kind: "video",
         model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
         resolution: opts.resolution || "",
         durationSec,
+        at: Date.now(),
+        productionId: p.meta.id,
+        shotId: shot.id,
+      });
+
+      return { rel };
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Edit one video: the source clip is mandatory and binds to the model's
+   * video role; image/video references ride their arrays. Mirrors
+   * `generateVideoClip`'s wait/save/record flow, but there is no start/end
+   * frame pair and no duration (an edit keeps the source's timing).
+   */
+  async generateVideoEdit(
+    p: Production,
+    shot: ProductionShot,
+    opts: VideoGenOptions,
+    emit: ProviderEmit,
+    sourceVideoPath: string,
+    extraRefs?: { name: string; dataUrl: string }[]
+  ): Promise<{ rel: string }> {
+    if (!this.isAvailable()) {
+      throw new Error("The Higgsfield CLI isn't installed (no `higgsfield` binary found), so videos can't be edited through it.");
+    }
+    const sourceRel = sourceVideoPath?.trim();
+    if (!sourceRel) throw new Error("The edit-video node needs a source video — pipe a clip in, pick a video reference, or generate a clip first.");
+
+    let items: CliListItem[] = [];
+    try {
+      items = await this.listRaw("video");
+    } catch {
+      items = [];
+    }
+
+    // The source video leads the reference array (cited as @video1), then the
+    // caller's extra refs, then any @[name] tags in the prompt.
+    const refs: { name: string; dataUrl: string }[] = [
+      HiggsfieldCliProvider.fileDataUrl(p, sourceRel, `Shot ${shot.number} source video`),
+    ];
+    refs.push(...(extraRefs ?? []));
+    const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
+    refs.push(...extras);
+
+    // Every video reference (including the source) is downscaled to max 720p
+    // before upload, the same ceiling the generate path uses.
+    for (const r of refs) {
+      if (/^data:video\//i.test(r.dataUrl)) {
+        try {
+          r.dataUrl = await resizeVideoRef(r.dataUrl);
+        } catch { /* fallback: original */ }
+      }
+    }
+
+    const modelId = await this.resolveVideoModel(opts.model, items, false);
+    if (!modelId) throw new Error("The Higgsfield CLI listed no video models — sign in (`higgsfield auth login`) and retry.");
+    const detail = await this.modelDetail(modelId).catch(() => null);
+    const roles = detail ? HiggsfieldCliProvider.roles(detail) : [];
+    const accepts = (cands: string[]): boolean => !roles.length || roles.some((r) => cands.includes(r));
+
+    const { paths, cleanup } = writeCliTempRefs(refs);
+    const uploaded: (string | null)[] = [...paths];
+    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
+    try {
+      const args = [modelId, "--prompt", fullPrompt];
+      const srcPath = paths[0];
+      if (!srcPath) throw new Error("Couldn't load the source video.");
+      if (accepts(["videoreferences", "video"])) args.push("--video-references", srcPath);
+      else throw new Error(`"${modelId}" doesn't accept a video input — pick an edit-video model.`);
+
+      refs.forEach((r, i) => {
+        if (i === 0) return;
+        const f = paths[i];
+        if (!f) return;
+        const isVideo = /^data:video\//i.test(r.dataUrl);
+        if (isVideo && accepts(["videoreferences", "video"])) args.push("--video-references", f);
+        else if (!isVideo && accepts(["imagereferences", "image"])) args.push("--image-references", f);
+        else {
+          uploaded[i] = null;
+          emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
+        }
+      });
+
+      if (detail && opts.params) {
+        emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);
+      }
+
+      const durationSec = Math.round(opts.durationSec) || 0;
+      const durParam = detail ? HiggsfieldCliProvider.param(detail, "duration", "length", "seconds") : null;
+      if (durParam && durParam.values.length && durationSec > 0) {
+        const nums = durParam.values
+          .map((v) => Math.round(Number(String(v).replace(/[^0-9.]/g, ""))))
+          .filter((n) => Number.isFinite(n) && n > 0);
+        if (nums.length && !nums.includes(durationSec)) {
+          const sorted = [...new Set(nums)].sort((a, b) => a - b);
+          throw new Error(`"${modelId}" doesn't support a ${durationSec}s clip (supports ${sorted.join(", ")}s).`);
+        }
+        args.push("--duration", String(durationSec));
+      }
+      const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
+      if (opts.resolution) {
+        const want = String(opts.resolution).replace(/\s+/g, "").toLowerCase();
+        const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        if (match) args.push("--resolution", match);
+      }
+      const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
+      const paramAspect = opts.params?.aspect_ratio;
+      const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : undefined);
+      if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
+
+      emit(`Shot ${shot.number}: submitting video-edit job via ${modelId} (Higgsfield CLI)…`);
+      const done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
+        emit(`Shot ${shot.number}: video edit ${status.toLowerCase()}… still rendering.`, "info")
+      );
+
+      const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
+      const rel = writeShotVideo(p, shot, done.buf, safeExt, "edit");
+
+      this.fireGeneration({
+        kind: "video",
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
+        resolution: opts.resolution || "",
+        durationSec: durationSec || undefined,
         at: Date.now(),
         productionId: p.meta.id,
         shotId: shot.id,

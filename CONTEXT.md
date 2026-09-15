@@ -18,7 +18,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Module | File | What it hides |
 |---|---|---|
 | Agent core | `core/src/` | The streaming agent loop (tool-calling, approval gating, undo journal, compaction). The deep, tested module. |
-| LLM provider registry | `app/src/shared/providers.ts` | The abstraction over OpenAI-compatible chat vendors (Gab, Cheaper Inference, OpenAI, …): each provider is one `ApiProvider` entry (base URL, default model, optional `balance` endpoint). Cost semantics are **derived, not hardcoded** — `detectCost` classifies a raw `/models` entry from its own fields (`credit_cost` → per-message credits, `pricing.*_per_million` → per-token USD, else unknown) and `assignCostTiers` ranks the list cheapest→priciest for providers that can't price a single message. `normalizeModelList` + `extractModelList` keep the `models:list` IPC provider-agnostic. Adding a provider = one registry entry, never UI code. |
+| LLM provider registry | `app/src/shared/providers.ts` | The abstraction over OpenAI-compatible chat vendors (Gab, Cheaper Inference, OpenAI, …): each provider is one `ApiProvider` entry (base URL, default model, optional `balance` endpoint). A `balance` entry is the endpoint path + JSON field + unit, so `ChatClient.balance(endpoint)` fetches generically (gab credits via `/credits` → `total_available`; Cheaper Inference's wallet via `/account/balance` → `available_usd`). Cost semantics are **derived, not hardcoded** — `detectCost` classifies a raw `/models` entry from its own fields (`credit_cost` → per-message credits, `pricing.*_per_million` → per-token USD, else unknown) and `assignCostTiers` ranks the list cheapest→priciest for providers that can't price a single message. `normalizeModelList` + `extractModelList` keep the `models:list` IPC provider-agnostic. Adding a provider = one registry entry, never UI code. |
 | ChatClient | `core/src/chat.ts` | The provider-agnostic OpenAI-compatible streaming client (`complete`/`completeOnce`/`balance`) every LLM call rides on; takes `apiKey` + `baseUrl` so the registry supplies the vendor. Background jobs (compaction, chat titles) use `AgentConfig.helperModel` — the cheapest discovered model, cached per provider in settings — never a hardcoded model id. |
 | Harness skills | `app/src/main/skills.ts` | The chat-side skill system: markdown instruction files the agent pulls in on demand via `read_skill`. Flat files or namespaced directories (`skills/spec/research.md` → `spec:research`); optional frontmatter (`kind: sequential|advisory|utility`, `triggers`, `namespace`) parsed by `parseFrontmatter`; advertised grouped-by-kind in the system prompt (`prompts.skillsPrompt`) so the model knows how to treat each. Bundled harness skills in `app/skills/` (`spec:` RPI, `oracle:` advisory, `code:` utilities) are seeded into `userData/skills/` on startup (`seedSkills`). |
 | Plan mode | `core/src/planmode.ts` + `app/src/shared/commands.ts` | The Research→Plan→Implement gate: `AgentConfig.planMode` turns on a system-prompt directive and `planGate` blocks `write_file`/`edit_file`/`run_command` in the loop until the plan is approved. Toggled per chat (persisted on the session), surfaced via a composer chip and `/plan-mode on|off`; `/research /plan /implement /finish /architect /challenge /review /commit` expand to skill instructions (`expandCommand`). |
@@ -32,7 +32,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Reference thumbnails | `app/src/main/thumbnails.ts` | The `?thumb=1` query on `cascade-media://` URLs: `loadRefThumbnail` resizes a reference image to a 256px long edge and compresses to JPEG (~65), served from a bounded memory cache then a versioned durable cache under `userData/thumb-cache/` (`<sha1>-<mtimeMs>-<size>.jpg` — valid exactly while its source is unchanged), then a fresh encode; any failure falls through to the full file. `regenerateRefThumbnails` pre-encodes every production's reference images (`referenceImagePaths` in `productions.ts`) from Settings → Regenerate thumbnail cache and prunes stale entries. Node-graph tiles use it (`refThumbUrl` in `NodeGraphModal.tsx`) — zoom/lightbox URLs keep the full-res file, and prompt sends read the original from disk, so nothing downstream sees the thumb. |
 | Production store | `app/src/main/productions.ts` | Production document persistence + migration. |
 | Shotter | `app/src/main/shotter.ts` | The 4-digit shot-numbering module: 100-grid derivation (`nextNumber`/`insertMid`/`renumber`), mid-numbered shot inserts with a full-renumber escape hatch, cross-scene reorder with board-folder relocation, and the manual `setShotNumber` override (one shot only — rejects malformed/sub-0100 numbers and any slot another shot already owns, since assembly keys `shots/<number>.*` filenames on it; board folder relocates to follow), and the scene-level surface (`blankScenes` — the 1-scene × 5-blank-shots skeleton for script-less productions — and `insertScene`, which splices an empty scene and renumbers later scene ordinals 1..N; scene ordinals are display-only, shot numbers untouched). |
-| Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), the `userData/ledger.json` singleton, and the human-readable `userData/expenses.csv` mirror. Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
+| Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), per-production entry files (`userData/ledger/<productionId>.json`, each with its own `userData/ledger/<productionId>.csv` mirror), and the global rules singleton (`userData/ledger.json`, `version: 2` — pricing is per-model, never per-project). Entries are scoped to the `productionId` that produced them; a generation with no production is dropped rather than shown everywhere, and hard-deleting/archiving a production removes/archives its ledger (`removeProject`/`archiveProject`). Loading a `version: 1` file splits its entries per production (unscoped legacy rows discarded). Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
 | Document store | `app/src/main/store.ts` | The generic JSON-document store (`createStore`) behind sessions, productions, and agents: atomic temp+rename writes, newest-first list, archive/ soft-deletes, decode/encode hooks, side-file hooks. Settings stays a bespoke singleton (encryption + memo cache). |
 | IPC contract | `app/src/shared/ipc.ts` | The single channel map (`ipcContract`) that derives the renderer API, drives the preload adapter, and validates every main-process handler. Adding a channel = one contract entry, not three files. |
 | Look contract | `app/src/shared/look.ts` | The storyboard-cohesion vocabulary every image path shares: the verbatim LOOK clause (`buildLookClause`/`withLookClause`), prompt assembly order (`assembleImagePrompt`), per-shot style resolution (`resolveShotStyleEntry`/`styleFrameForShot`), board seed (`ensureLookSeed`), the neutral-subject frame prompt (`styleFramePrompt`), and the adapter-level `GenerationRequest` (frame at index 0, 16:9, frozen model/resolution). Adapters do transport only — no private LOOK copies. |
@@ -114,6 +114,107 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   `CharacterSheet.builder`, `shot.graphTweenModel` wins when set) and writes
   back on change via the renderer's `production/media-defaults.ts` cache —
   so each dropdown starts where the user last left it, globally.
+- **Model options schema** — the live per-model option surface, derived from
+  the Higgsfield CLI's `model get <job_type> --json` (the
+  `HiggsfieldCliProvider.modelOptions()` → normalized `CliModelSchema` in
+  `higgsfield-cli.ts`, which `normalizeCliModelDetail` classifies into typed
+  `CliOptionField`s grouped core/reference/control/advanced, with an in-memory
+  TTL+LRU cache that keeps the last-good schema across transient fetch
+  failures). A single generic `emitExtraParams` pass emits each present
+  `params` entry, skipping media roles (the reference router owns them) and
+  the flags the legacy blocks already own (resolution/quality/duration/
+  aspect); `emitSchemaField` never emits an unlisted enum value or a
+  non-finite number. Selections persist additively on
+  `OpenArtBoardConfig.params` / `VideoGenOptions.params` (schema-agnostic,
+  no migration; unknown keys ignored, so switching models never carries stale
+  keys into the next submission). `<ModelOptionsForm>` organizes the schema
+  into **exposed** controls (group `core`: resolution, aspect ratio, quality,
+  and the GPT Image 2.5 `--variant` submodel) and a **collapsible, persisted
+  "Advanced" panel** (control/advanced: `--mode`, `--thinking`, `--variant`
+  for flux, background, seed, …), rendered as enum→select, integer/number→
+  number, boolean→toggle, string/array→text, json→textarea, with `exclude`
+  for fields a dedicated control already owns; the advanced toggle is a real
+  `<button aria-expanded aria-controls>` whose collapsed state persists via
+  `usePersistedCollapsed` (`persistKey`). A null schema renders nothing so the
+  callers fall back to the legacy `imageModelOptions`/`videoModelOptions`
+  ladders — the `production:modelOptions`   channel exposes it, and the ladder
+  adapters stay as projections over `modelOptions()`. The customizer's search
+  is fuzzy and also indexes each model's parameter surface (lazily, bounded),
+  with synonyms so natural terms find flag spellings ("end frame" →
+  `end_image`). Every generation surface
+  shares one aspect-ratio default (`DEFAULT_ASPECT_RATIO` / `resolveAspectRatio`
+  = `16:9`, overriding the vendor image default of `1:1`; never `16x9` on the
+  wire). Every node's advanced selections persist additively, keyed by
+  canonical flag (`GenParams`): `ProductionShot.graphImageParams` (image gen
+  node), `graphVideoParams` (video node), `graphTweenParams` (in-betweener),
+  and `GraphEditNode.params` (per edit node); reference generation carries
+  them on `ReferenceImageGenOptions.params` through the injected
+  `ImageGenFn`'s optional 4th argument. `scripts/export-model-options.mjs`
+  dumps every model's option surface to a CSV (read-only `model list`/`model
+  get`) for reviewing the exposed/advanced placement. `ImageModelOptions`/`VideoModelOptions`
+  gain optional `aspectRatios`/`qualities`/`submodels`/`params:
+  ModelParamOption[]` projections; OpenArt's `extractOpenArtVideoOptions`
+  splits quality/definition from resolution/size so a quality enum no longer
+  folds into the resolution ladder. Every provider (`openart`, `higgsfield`,
+  `higgsfield-cli`, `openart-cli`) implements `modelOptions(modelId)`: the CLI
+  and Higgsfield MCP build the schema from their `model get`/catalog details,
+  and both OpenArt transports build it from their form-schema properties
+  (`openArtSchemaFromProps`) — all through the shared `model-schema.ts`
+  grammar (`buildModelSchema`).
+- **Model Customizer** — the Dev Mode-only full-window page (`ModelCustomizer.tsx`,
+  opened from Settings → Media generation when Dev Mode is on) that probes
+  every media vendor (`modelCustomizer:probeModels` / `:probeOptions` /
+  `:refresh`, read-only) and customizes: model show/hide
+  (`settings.hiddenMediaModels`), image/video kind override
+  (`modelKindOverrides`), dropdown order (`mediaModelOrder` — the list is
+  grouped Image/Video and reordered by dragging a grip, with a resizable,
+  persisted model-list pane), and per-parameter placement
+  (`modelOptionExposure`, key `<namespaced model id>::<flag>` →
+  core/advanced/hidden, applied main-side to `production:modelOptions` via
+  `applyOptionExposure`). Dedicated fields (resolution/quality/aspect/
+  duration) and media roles are locked. It also sets **per-surface parameter
+  defaults** (`settings.modelParamDefaults`, key
+  `<namespaced model id>::<surface>::<flag>` → value): each model's params
+  table gains a typed editor per surface the model is actually assigned to
+  (unticking a "Where this model appears" checkbox drops that column), and
+  every generation surface seeds the defaults when the model loads via the renderer's
+  `production/model-param-defaults.ts` cache + `seedModelOptionValues` (the
+  user's saved per-shot/per-node value wins; media/reference roles are never
+  seeded). The page also owns **where each model
+  appears**: per-surface checkboxes (`settings.modelSurfaces`, key = model id →
+  `ModelSurface[]`), applied main-side by `applyModelSurfaces` in `registry.ts`
+  so every picker filters by `modelOnSurface`. Surfaces are deliberately coarse
+  — pickers that share a model pool share a key: `image:generate`
+  (Step 3 master picker, generate-image node, references, character sheets,
+  style frames),
+  `image:edit` (classic edit popup + edit-image node), `video:generate`
+  (video modal + video node), `video:tween` (in-betweener), and
+  `video:editnode` (edit-video node). `normalizeModelSurfaces` (`shared/ipc.ts`)
+  migrates the old per-picker keys (`image:master|node|reference|character`,
+  `image:editnode`, `video:modal|node`) onto their pools on read.
+  `video:tween` is **opt-in** (never in the default set):
+  assigning a model to it IS the user's end-frame capability declaration,
+  unioned with the live probe in `production:videoEndFrameModels` (there is
+  no separate manual allowlist). It also owns **pricing** (the former Settings → Models &
+  expenses tab, now removed): the model list shows a read-only price range
+  column and the details pane edits a model's min/max rule (re-priced on save
+  by `ledger.setPriceRules`) with CSV import/export. `settings.
+  hiddenMediaModels` remains the single visibility control.
+- **Edit-video node** — a node-graph node that edits one video. It has a
+  **source socket** (`in-video`: a video node output or a video reference, or
+  the shot's own video when nothing is wired); references ride the edit-video
+  prompt node's Reference sockets (cited as `@[name]` tags and resolved
+  main-side, exactly like the video node). Its model list is the intersection
+  of the `video:editnode`
+  surface and the provider's live video-input probe (`videoEditModels()`);
+  submission rides `MediaProvider.generateVideoEdit` (Higgsfield CLI builds
+  `--video-references` from the source). Persists `graphEditVideo*` on the
+  shot and pipes into the output via `graphOutputSource === "editvideo"`.
+  Its icon is `EditVideoIcon` (`assets/icons/video-editing.svg`). Like the
+  other generation nodes it has a dedicated **prompt node**
+  (`editvideoprompt`, the shared `PromptNodeView` body, writing
+  `graphEditVideoPrompt`) whose Style/Reference/Brand sockets work exactly
+  like the video/edit prompt nodes.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields. **Edit-image
   nodes** are a list (`graphEditNodes: GraphEditNode[]`), not a singleton: each

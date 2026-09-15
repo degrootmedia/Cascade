@@ -127,6 +127,14 @@ export interface ChatClientOptions {
   retryDelayMs?: number;
 }
 
+/** Where a provider exposes an account balance: a path appended to the base
+ *  URL and the numeric field in its JSON response. Provider data — the
+ *  registry supplies it; this client only fetches and extracts. */
+export interface BalanceEndpoint {
+  path: string;
+  field: string;
+}
+
 export class ChatClient {
   private maxRetries: number;
   private retryDelayMs: number;
@@ -324,16 +332,23 @@ export class ChatClient {
   }
 
   /**
-   * Account balance, when the provider exposes one (gab: /credits →
-   * total_available). Returns null for providers without a balance endpoint
-   * or an unrecognized response — callers hide the balance display then.
+   * Account balance, when the provider exposes one. The caller supplies the
+   * endpoint — a path under the base URL and the numeric field in its JSON
+   * response — because that shape is provider data (see the registry's
+   * `ApiProvider.balance`). Throws on an HTTP failure (the caller decides
+   * whether that is fatal); returns null when the response carries no numeric
+   * field — callers hide the balance display then.
    */
-  async balance(): Promise<number | null> {
-    const res = await fetch(`${this.baseUrl}/credits`, {
+  async balance(endpoint: BalanceEndpoint): Promise<number | null> {
+    const res = await fetch(`${this.baseUrl}${endpoint.path}`, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });
-    if (!res.ok) return null;
-    const c = (await res.json().catch(() => null)) as { total_available?: unknown } | null;
-    return typeof c?.total_available === "number" ? c.total_available : null;
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status} from ${endpoint.path}${text ? `: ${text.slice(0, 300)}` : ""}`);
+    }
+    const c = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    const v = c?.[endpoint.field];
+    return typeof v === "number" ? v : null;
   }
 }

@@ -531,7 +531,7 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
       [],
       { start: { name: "A", dataUrl: PIXEL }, end: { name: "B", dataUrl: PIXEL } }
     );
-    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(rel).toMatch(/^boards\/0100\/video\/shot-0100-.+\.mp4$/);
     expect(fs.existsSync(path.join(prod.meta.folder, rel))).toBe(true);
     // Auto + end keyframe prefers the end_image model; 5s sits inside its 4–30s range.
     expect(seen.params).toMatchObject({ model: "seedance_2_5", duration: 5, resolution: "1080p" });
@@ -644,7 +644,7 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
       (m) => { emits.push(m); },
       "videos/src.jpg"
     );
-    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(rel).toMatch(/^boards\/0100\/video\/shot-0100-.+\.mp4$/);
     expect(emits.some((m) => /couldn't be uploaded \(boom\)/.test(m))).toBe(true);
   });
 
@@ -707,7 +707,7 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
       (m) => { emits.push(m); },
       "videos/src.jpg"
     );
-    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(rel).toMatch(/^boards\/0100\/video\/shot-0100-.+\.mp4$/);
     // First submit carried no bypass; the retry declined the preset.
     expect(submits).toHaveLength(2);
     expect(submits[0]).not.toHaveProperty("declined_preset_id");
@@ -776,7 +776,7 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
         { name: "still ref", dataUrl: PIXEL },
       ]
     );
-    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(rel).toMatch(/^boards\/0100\/video\/shot-0100-.+\.mp4$/);
     expect(seen.params?.medias).toEqual([
       { value: UPLOAD_ID, role: "image_references" }, // source frame — a reference, never a start keyframe
       { value: UPLOAD_ID, role: "video" }, // video ref → the model's video element role
@@ -822,7 +822,7 @@ describe("HiggsfieldProvider.generateVideoClip", () => {
       "videos/src.jpg",
       [{ name: "Playblast", dataUrl: videoRefDataUrl }]
     );
-    expect(rel).toMatch(/^videos\/shot-0100-.+\.mp4$/);
+    expect(rel).toMatch(/^boards\/0100\/video\/shot-0100-.+\.mp4$/);
     expect(submits).toHaveLength(2);
     // First attempt rode the reference path (the shape the backend 422'd).
     expect(submits[0].medias).toEqual([
@@ -965,6 +965,20 @@ describe("HiggsfieldProvider image quality + submit notice", () => {
     expect(await provider.imageModelOptions("auto")).toBeNull();
     expect(await provider.imageModelOptions("openart:whatever")).toBeNull();
     expect(await provider.imageModelOptions("higgsfield:nope")).toBeNull();
+  });
+
+  it("modelOptions builds the normalized schema from catalog parameters + medias", async () => {
+    const provider = new HiggsfieldProvider(fakeMcp({ models_explore: exploreHandler() }));
+    const s = await provider.modelOptions("higgsfield:seedance_2_5");
+    expect(s).not.toBeNull();
+    const byFlag = (f: string) => s!.fields.find((x) => x.flag === f);
+    expect(byFlag("resolution")!.values).toEqual(["480p", "720p", "1080p"]);
+    expect(byFlag("duration")!.kind).toBe("number");
+    expect(s!.aspectRatios).toEqual(["16:9", "9:16"]);
+    // Media slots ride the reference group, never the options form.
+    expect(s!.fields.some((x) => x.mediaRole)).toBe(true);
+    expect(await provider.modelOptions("auto")).toBeNull();
+    expect(await provider.modelOptions("higgsfield:nope")).toBeNull();
   });
 
   it("submits params.quality only for a declared tier (case-insensitive), else omits it", async () => {

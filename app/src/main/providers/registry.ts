@@ -12,7 +12,38 @@ import { HiggsfieldCliProvider } from "./higgsfield-cli.js";
 import { OpenArtCliProvider } from "./openart-cli.js";
 import type { GenerationRecorder, MediaProvider, MediaProviderId } from "./types.js";
 import { FALLBACK_VIDEO_DURATIONS, FALLBACK_VIDEO_RESOLUTIONS, IMAGE_RESOLUTIONS } from "../ledger.js";
-import type { MediaModelLadder, OpenArtModelChoice } from "../../shared/ipc.js";
+import { isImageModel, isVideoModel, normalizeModelSurfaces, type MediaModelLadder, type ModelSurface, type OpenArtModelChoice } from "../../shared/ipc.js";
+
+/** Every surface an image / video model can be offered on. Pickers that must
+ *  share a model pool share a key (see ModelSurface). */
+const IMAGE_SURFACES: ModelSurface[] = ["image:generate", "image:edit"];
+const VIDEO_SURFACES: ModelSurface[] = ["video:generate", "video:tween", "video:editnode"];
+/** Default surfaces for an unassigned video model — `video:tween` is opt-in:
+ *  assigning it is the user's end-frame capability declaration. */
+const VIDEO_DEFAULT_SURFACES: ModelSurface[] = ["video:generate", "video:editnode"];
+
+/** Attach each choice's allowed surfaces from the user's per-model map. An
+ *  unassigned model gets every default surface its kind supports. Stored lists
+ *  are normalized, so a legacy key resolves to its collapsed surface. */
+export function applyModelSurfaces(
+  choices: OpenArtModelChoice[],
+  /** Values may carry legacy surface keys; `normalizeModelSurfaces` migrates. */
+  map: Record<string, readonly string[]>
+): OpenArtModelChoice[] {
+  const hasMap = map && Object.keys(map).length > 0;
+  return choices.map((c) => {
+    const isVideo = isVideoModel(c);
+    const isImage = isImageModel(c);
+    const applicable = isVideo ? VIDEO_SURFACES : isImage ? IMAGE_SURFACES : [];
+    const defaults = isVideo ? VIDEO_DEFAULT_SURFACES : applicable;
+    const explicit = normalizeModelSurfaces(map?.[c.id]);
+    const surfaces = explicit.length ? explicit.filter((s) => applicable.includes(s)) : defaults;
+    // No assignments at all → leave `surfaces` off so callers treat it as
+    // "everywhere" without allocating per-choice arrays.
+    if (!hasMap) return c;
+    return { ...c, surfaces };
+  });
+}
 
 export type { MediaProviderId };
 

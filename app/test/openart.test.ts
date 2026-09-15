@@ -216,6 +216,32 @@ describe("OpenArtClient.getCredits", () => {
   });
 });
 
+describe("OpenArtClient.modelOptions", () => {
+  it("builds a schema from the live form and rejects foreign ids", async () => {
+    const mcp = fakeMcp({
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              prompt: { type: "string" },
+              aspect_ratio: { type: "string", enum: ["16:9", "9:16"] },
+              resolution: { type: "string", enum: ["720p", "1080p"] },
+              cfg_scale: { type: "number", enum: [1, 2, 3] },
+            },
+          },
+        }),
+    });
+    const s = await new OpenArtClient(mcp).modelOptions("some-model");
+    expect(s).not.toBeNull();
+    expect(s!.aspectRatios).toEqual(["16:9", "9:16"]);
+    const byFlag = (f: string) => s!.fields.find((x) => x.flag === f);
+    expect(byFlag("resolution")!.values).toEqual(["720p", "1080p"]);
+    expect(byFlag("cfg_scale")!.group).toBe("control");
+    expect(await new OpenArtClient(mcp).modelOptions("higgsfield:seedance_2_5")).toBeNull();
+    expect(await new OpenArtClient(mcp).modelOptions("auto")).toBeNull();
+  });
+});
+
 describe("OpenArtClient.videoModelOptions", () => {
   it("resolves resolutions/durations from the live form schema and caches the result", async () => {
     let formCalls = 0;

@@ -28,7 +28,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { McpManager } from "../mcp.js";
-import { assetPath, type ImageGenFn } from "../pipeline.js";
+import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
 import { resizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 import {
   dataUrlToBytes,
@@ -37,6 +37,7 @@ import {
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
 import type {
+  CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
   LedgerGenMeta,
@@ -50,6 +51,7 @@ import type {
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { buildModelSchema, type RawModelParam } from "./model-schema.js";
 
 const SERVER = "higgsfield";
 
@@ -128,6 +130,12 @@ export class HiggsfieldProvider implements MediaProvider {
     private readonly mcp: McpManager,
     private readonly recorder?: GenerationRecorder
   ) {}
+
+  /** Drop cached catalog/detail probes (dev customizer refresh). */
+  refreshProbes(): void {
+    this.catalogCache = null;
+    this.detailCache.clear();
+  }
 
   /** Fire the generation recorder; a tally write must never break a
    *  generation, so recorder errors are non-fatal. */
@@ -528,6 +536,44 @@ export class HiggsfieldProvider implements MediaProvider {
     };
   }
 
+  /** The full normalized option schema for a model (dev customizer probe),
+   *  built from the catalog detail's `parameters` + `medias`. Null for
+   *  foreign ids and unknown models. */
+  async modelOptions(modelId: string): Promise<CliModelSchema | null> {
+    const raw = higgsfieldRawId(modelId);
+    if (!raw || raw === "auto") return null;
+    const detail = await this.modelDetail(raw).catch(() => null);
+    if (!detail) return null;
+    const params: RawModelParam[] = [];
+    const seen = new Set<string>();
+    const fold = (s: string) => s.toLowerCase().replace(/[_-]+/g, "");
+    const push = (p: RawModelParam): void => {
+      const key = fold(p.name);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      params.push(p);
+    };
+    for (const p of detail.parameters ?? []) {
+      push({
+        name: p.name ?? "",
+        type: p.type,
+        options: Array.isArray(p.options) ? p.options.map((v) => String(v)) : undefined,
+        default: p.default,
+        min: p.min,
+        max: p.max,
+      });
+    }
+    for (const m of detail.medias ?? []) {
+      push({ name: m.name ?? "", type: m.type, media: true, maxItems: m.max });
+    }
+    return buildModelSchema({
+      jobType: raw,
+      params,
+      roles: HiggsfieldProvider.mediaRoles(detail),
+      aspectRatios: detail.aspect_ratios ?? [],
+    });
+  }
+
   /** Ids (namespaced) of the video-capable models declaring a dedicated
    *  end-frame role. Empty when none is proven — the caller unions this with
    *  the user's manual allowlist before the tween dropdown offers anything. */
@@ -681,7 +727,7 @@ export class HiggsfieldProvider implements MediaProvider {
           // The job keeps rendering server-side — record it as pending so the
           // finished frame can be reclaimed instead of re-paid.
           if (shot && e instanceof Error && /timed out/.test(e.message)) {
-            shot.pendingImageGen = { historyId: jobId, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, at: new Date().toISOString() };
+            shot.pendingImageGen = { historyId: jobId, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, resolution, aspectRatio, at: new Date().toISOString() };
           }
           throw e;
         }
@@ -692,7 +738,7 @@ export class HiggsfieldProvider implements MediaProvider {
             this.fireGeneration(genMeta);
             return buf;
           }
-          if (shot) shot.pendingImageGen = { url, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, at: new Date().toISOString() };
+          if (shot) shot.pendingImageGen = { url, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, resolution, aspectRatio, at: new Date().toISOString() };
           throw new Error("Couldn't download the generated image.");
         }
         throw new Error(`Higgsfield returned no image (${done.text.slice(0, 120) || "empty reply"})`);
@@ -703,7 +749,7 @@ export class HiggsfieldProvider implements MediaProvider {
       if (!url) throw new Error(`Higgsfield returned no image (${text.slice(0, 120) || "empty reply"})`);
       const buf = await this.fetchBytes(url);
       if (!buf) {
-        if (shot) shot.pendingImageGen = { url, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, at: new Date().toISOString() };
+        if (shot) shot.pendingImageGen = { url, prompt, model: `${HIGGSFIELD_ID_PREFIX}${modelId}`, resolution, aspectRatio, at: new Date().toISOString() };
         throw new Error("Couldn't download the generated image.");
       }
       this.fireGeneration(genMeta);
@@ -973,11 +1019,8 @@ export class HiggsfieldProvider implements MediaProvider {
       return { buf: Buffer.from(await res.arrayBuffer()), ext };
     })();
 
-    const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
     const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
-    const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
-    fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
-    fs.writeFileSync(assetPath(p, rel), done.buf);
+    const rel = writeShotVideo(p, shot, done.buf, safeExt);
 
     this.fireGeneration({
       kind: "video",

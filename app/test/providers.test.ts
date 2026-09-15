@@ -25,11 +25,16 @@ describe("API_PROVIDERS", () => {
     expect(getProvider("nope")).toBeUndefined();
   });
 
-  it("declares which providers expose a balance endpoint", () => {
-    // Only gab has /credits — the app must never hit a doomed balance
-    // request against providers without the capability.
-    expect(getProvider("gab")?.balance).toBe("credits");
-    expect(getProvider("cheaperinference")?.balance).toBeUndefined();
+  it("declares each provider's balance endpoint", () => {
+    // gab reports credits, Cheaper Inference its wallet USD balance; a
+    // provider without an entry never gets a doomed balance request.
+    expect(getProvider("gab")?.balance).toEqual({ path: "/credits", field: "total_available", unit: "credits" });
+    expect(getProvider("cheaperinference")?.balance).toEqual({
+      path: "/account/balance",
+      field: "available_usd",
+      unit: "usd",
+      errorHint: "the API key needs the account:read scope",
+    });
     expect(getProvider("openai")?.balance).toBeUndefined();
   });
 });
@@ -192,6 +197,42 @@ describe("PROVIDER_CAPABILITIES", () => {
     expect(PROVIDER_CAPABILITIES["openart-cli"]).toEqual({ imageRefs: true, videoRefs: false, endFrame: false, tween: false });
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].videoRefs).toBe(true);
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].endFrame).toBe(true);
+  });
+});
+
+describe("applyModelSurfaces", () => {
+  it("tags choices with applicable surfaces; explicit assignments restrict", async () => {
+    const { applyModelSurfaces } = await import("../src/main/providers/registry.js");
+    const img = { id: "img1", displayName: "Img", description: "", imageInput: true, videoInput: false, cost: null };
+    const vid = { id: "vid1", displayName: "Vid", description: "", imageInput: false, videoInput: true, cost: null };
+    // No assignments → untouched (treated as everywhere).
+    const none = applyModelSurfaces([img, vid], {});
+    expect(none[0].surfaces).toBeUndefined();
+    // An explicit assignment restricts that model only.
+    const mapped = applyModelSurfaces([img, vid], { img1: ["image:edit"] });
+    expect(mapped[0].surfaces).toEqual(["image:edit"]);
+    expect(mapped[1].surfaces).toContain("video:generate");
+    // `video:tween` is opt-in — never in an unassigned model's default set.
+    expect(mapped[1].surfaces).not.toContain("video:tween");
+    // Assigning it declares end-frame capability for that model.
+    const declared = applyModelSurfaces([vid], { vid1: ["video:tween"] });
+    expect(declared[0].surfaces).toEqual(["video:tween"]);
+    // A surface not applicable to the kind is dropped.
+    const wrong = applyModelSurfaces([img], { img1: ["video:generate"] });
+    expect(wrong[0].surfaces).toEqual([]);
+  });
+
+  it("migrates legacy surface keys to the collapsed pool keys", async () => {
+    const { applyModelSurfaces } = await import("../src/main/providers/registry.js");
+    const { normalizeModelSurfaces } = await import("../src/shared/ipc.js");
+    const img = { id: "img1", displayName: "Img", description: "", imageInput: true, videoInput: false, cost: null };
+    // Old per-picker keys collapse onto the shared generate surface.
+    expect(normalizeModelSurfaces(["image:master", "image:node", "image:reference", "image:character"])).toEqual(["image:generate"]);
+    expect(normalizeModelSurfaces(["image:editnode"])).toEqual(["image:edit"]);
+    expect(normalizeModelSurfaces(["video:modal", "video:node", "video:tween"])).toEqual(["video:generate", "video:tween"]);
+    // A stale map still resolves through application.
+    const migrated = applyModelSurfaces([img], { img1: ["image:reference"] });
+    expect(migrated[0].surfaces).toEqual(["image:generate"]);
   });
 });
 

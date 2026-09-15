@@ -27,15 +27,17 @@ import {
   type FinalConnectionState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, type GraphEditNode, type GraphGenItem, type GraphLayout, type OpenArtModelChoice, type Production, type ProductionShot, type ProductionStyle, type TweenBlock, type VideoModelOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, modelOnSurface, type CliModelSchema, type GenParams, type GraphEditNode, type GraphGenItem, type GraphLayout, type OpenArtModelChoice, type Production, type ProductionShot, type ProductionStyle, type TweenBlock, type VideoModelOptions } from "../../../shared/ipc.js";
+import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { closestResolution } from "./resolution.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, parsePromptBoxes, refTagNames, removeRefTag, removeStyleParagraph, replaceRefTagAt, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { TriplePrompt } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
+import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
-import { EditIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
+import { EditIcon, EditVideoIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 function isTagReorder(a: string, b: string): boolean {
   const ra = refTagNames(a);
@@ -96,18 +98,25 @@ function editNodeDependsOnClient(shot: ProductionShot, nodeId: string, ancestorI
   return false;
 }
 
-/** Nodes whose resized dimensions persist in `GraphLayout.sizes` (the frame
- *  output plus the generation nodes, so an enlarged frame/clip/edit survives
- *  closing and reopening the graph). */
-const RESIZABLE_NODE_IDS = new Set(["output", "imagegen", "videogen"]);
+/** The frame output is the only manually resizable node — its dimensions
+ *  persist in `GraphLayout.sizes` so an enlarged frame survives closing and
+ *  reopening the graph. The generation nodes (image / edit-image / video /
+ *  edit-video) size themselves from their content instead. */
+const RESIZABLE_NODE_IDS = new Set(["output"]);
 function isResizableNodeId(id: string): boolean {
-  return RESIZABLE_NODE_IDS.has(id) || id.startsWith(EDITGEN_NODE_PREFIX) || id === "editgen";
+  return RESIZABLE_NODE_IDS.has(id);
 }
 
 /** Saved-size style for a resizable node, falling back to `defaultWidth`. */
 function sizeStyle(layout: GraphLayout | undefined, id: string, defaultWidth: number): { width: number; height?: number } {
   const saved = layout?.sizes?.[id];
   return saved ? { width: saved.width, height: saved.height } : { width: defaultWidth };
+}
+
+/** Fixed-width style for the content-sized generation nodes (height comes
+ *  from the content — no saved size is applied). */
+function fixedWidth(defaultWidth: number): { width: number } {
+  return { width: defaultWidth };
 }
 
 /** Split a `cascade-media://` URL into the production id + workspace-relative
@@ -140,6 +149,9 @@ export function refThumbUrl(artwork: string): string {
  *  slow, and nodes re-render often, so fetch each combination once. */
 const videoOptionsCache = new Map<string, VideoModelOptions | null>();
 
+/** Per-model full option schema (the Advanced panel), fetched once. */
+const modelSchemaCache = new Map<string, CliModelSchema | null>();
+
 /** Minimal reference shape (structurally identical to PromptReference). */
 export interface GraphRef {
   id: string;
@@ -170,7 +182,7 @@ interface RefData extends Record<string, unknown> {
   refId?: string;
   onToggle: (name: string, tagged: boolean) => void;
   /** Open the reference image in a lightbox (image refs only). */
-  onZoom: (name: string, artwork: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video") => void;
   /** Remove a placed ref node from the canvas (shelf refs only). */
   onRemove?: (refId: string) => void;
 }
@@ -231,15 +243,23 @@ interface ImageGenData extends Record<string, unknown> {
   /** Defaults from the production's OpenArt config (top-of-page pickers). */
   defaultModel: string;
   defaultResolution: string;
+  /** This shot's saved advanced/variant params (schema-driven). */
+  savedParams?: GenParams;
   /** Every stored generation (newest first) as media URLs. */
   items: { url: string; prompt: string }[];
   selected: number;
   /** True while this shot's image generation runs (lifted to the workspace so
    *  the "Generating…" label survives closing/reopening the graph). */
   busy: boolean;
-  onGenerate: (model: string, resolution: string) => Promise<void>;
+  onGenerate: (model: string, resolution: string, params?: GenParams) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
+  /** The model's full option schema (Advanced panel). */
+  onModelSchema: (model: string) => Promise<CliModelSchema | null>;
+  /** Persists a per-shot advanced-params change onto the shot. */
+  onSaveFields: (patch: Partial<ProductionShot>) => void;
+  /** Open a generation in the lightbox (same zoom as reference nodes). */
+  onZoom: (name: string, artwork: string, kind?: "image" | "video") => void;
 }
 type ImageGenFlowNode = Node<ImageGenData, "imagegen">;
 
@@ -250,17 +270,23 @@ interface VideoGenData extends Record<string, unknown> {
   savedModel?: string;
   savedResolution?: string;
   savedDurationSec?: number;
+  /** This shot's saved advanced/variant params (schema-driven). */
+  savedParams?: GenParams;
   items: { url: string; prompt: string }[];
   selected: number;
   hasImageSource: boolean;
   /** Lifted in-flight flag (see ImageGenData.busy). */
   busy: boolean;
-  onGenerate: (model: string, resolution: string, durationSec: number) => Promise<void>;
+  onGenerate: (model: string, resolution: string, durationSec: number, params?: GenParams) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
   onModelOptions: (model: string, withImage: boolean) => Promise<VideoModelOptions | null>;
+  /** The model's full option schema (for the Advanced panel). */
+  onModelSchema: (model: string) => Promise<CliModelSchema | null>;
   /** Persists a per-shot model/resolution/length change onto the shot. */
   onSaveFields: (patch: Partial<ProductionShot>) => void;
+  /** Open a generation in the lightbox (same zoom as reference nodes). */
+  onZoom: (name: string, artwork: string, kind?: "image" | "video") => void;
 }
 type VideoGenFlowNode = Node<VideoGenData, "videogen">;
 
@@ -278,6 +304,32 @@ interface TweenData extends Record<string, unknown> {
   onOpenTimeline: () => void;
 }
 type TweenFlowNode = Node<TweenData, "tween">;
+
+/** Edit-video node: a video-edit model + a mandatory source clip + optional
+ *  image/video references. Self-contained (in-node source/reference pickers),
+ *  so it needs no socket wiring. */
+interface EditVideoData extends Record<string, unknown> {
+  models: OpenArtModelChoice[];
+  savedModel?: string;
+  savedParams?: GenParams;
+  savedPrompt?: string;
+  /** Label of the clip wired into the source socket (null = not wired;
+   *  generation then falls back to the shot's own video). */
+  sourceLabel: string | null;
+  items: { url: string; prompt: string }[];
+  selected: number;
+  busy: boolean;
+  piped: boolean;
+  onGenerate: (model: string, prompt: string, params: GenParams) => Promise<void>;
+  onSelect: (index: number) => void;
+  onCycle: (dir: 1 | -1) => void;
+  onSave: (patch: Partial<ProductionShot>) => void;
+  onPipeToOutput: () => void;
+  onModelSchema: (model: string) => Promise<CliModelSchema | null>;
+  /** Open a generation in the lightbox (same zoom as reference nodes). */
+  onZoom: (name: string, artwork: string, kind?: "image" | "video") => void;
+}
+type EditVideoFlowNode = Node<EditVideoData, "editvideo">;
 
 /** Keyframe display entries for the in-betweener node + timeline: a reference
  *  id shows the reference's artwork; a generation-node sentinel shows that
@@ -312,17 +364,23 @@ interface EditGenData extends Record<string, unknown> {
    *  media-default, which only seeds nodes that never picked). */
   savedModel?: string;
   savedResolution?: string;
+  /** This node's saved advanced/variant params (schema-driven). */
+  savedParams?: GenParams;
   items: { url: string; prompt: string }[];
   selected: number;
   /** Where the source image comes from (drives the hint + the onGenerate path). */
   sourceHint: string;
   /** Lifted in-flight flag (see ImageGenData.busy). */
   busy: boolean;
-  onGenerate: (nodeId: string, model: string, resolution: string) => Promise<void>;
+  onGenerate: (nodeId: string, model: string, resolution: string, params?: GenParams) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
   /** Persists a per-node model/resolution change onto this edit node. */
   onSave: (patch: Partial<GraphEditNode>) => void;
+  /** The model's full option schema (Advanced panel). */
+  onModelSchema: (model: string) => Promise<CliModelSchema | null>;
+  /** Open a generation in the lightbox (same zoom as reference nodes). */
+  onZoom: (name: string, artwork: string, kind?: "image" | "video") => void;
 }
 type EditGenFlowNode = Node<EditGenData, "editgen">;
 
@@ -349,7 +407,18 @@ interface EditPromptData extends Record<string, unknown> {
 }
 type EditPromptFlowNode = Node<EditPromptData, "editprompt">;
 
-type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode | OutputFlowNode | ImageGenFlowNode | VideoGenFlowNode | TweenFlowNode | EditGenFlowNode | VideoPromptFlowNode | EditPromptFlowNode;
+interface EditVideoPromptData extends Record<string, unknown> {
+  /** The edit instructions for the edit-video node (`shot.graphEditVideoPrompt`). */
+  value: string;
+  refHandles: string[];
+  openHandleId: string;
+  includeBrand: boolean;
+  onChange: (text: string) => void;
+  registerApplier: (applier: PromptDraftApplier | undefined) => void;
+}
+type EditVideoPromptFlowNode = Node<EditVideoPromptData, "editvideoprompt">;
+
+type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode | OutputFlowNode | ImageGenFlowNode | VideoGenFlowNode | TweenFlowNode | EditVideoFlowNode | EditGenFlowNode | VideoPromptFlowNode | EditPromptFlowNode | EditVideoPromptFlowNode;
 
 /* ------------------------------------------------------------------ */
 /* Custom node views                                                   */
@@ -646,7 +715,13 @@ const OutputNodeView = memo(function OutputNodeView({ data, selected }: NodeProp
   );
 });
 
-const ImageGenNodeView = memo(function ImageGenNodeView({ data, selected }: NodeProps<ImageGenFlowNode>) {
+const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<ImageGenFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  // Content-sized: when the preview / strip / Advanced panel changes height,
+  // the percentage-offset sockets move without a resize, so re-measure.
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, data.items.length, data.selected, updateNodeInternals]);
   const [model, setModel] = useState(() => {
     // The production's saved pick wins when it's real; the remembered last
     // choice fills the gap (legacy "auto" or a stale id falls through —
@@ -657,16 +732,35 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data, selected }: Node
     return saved ?? getMediaDefault("image")?.model ?? data.defaultModel;
   });
   const [resolution, setResolution] = useState(data.defaultResolution);
+  const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
   const busy = data.busy === true;
   // The selection is always explicit: when the saved default is legacy "auto"
   // (or gone from the list), the first listed model is the effective pick.
   const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
+  // Full option schema for the picked model (Advanced panel).
+  useEffect(() => {
+    let live = true;
+    setSchema(null);
+    setParams(data.savedParams ?? {});
+    if (!effModel) return () => { live = false; };
+    void data.onModelSchema(effModel).then((s) => {
+      if (!live) return;
+      setSchema(s);
+      setParams((prev) => seedModelOptionValues(s, effModel, "image:generate", pruneModelOptionValues(s, prev)) as GenParams);
+    }).catch(() => { if (live) setSchema(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effModel]);
+  const saveParams = (next: ModelOptionValues) => {
+    const p = next as GenParams;
+    setParams(p);
+    data.onSaveFields({ graphImageParams: p });
+  };
   const run = async () => {
-    await data.onGenerate(effModel, resolution);
+    await data.onGenerate(effModel, resolution, params);
   };
   return (
-    <>
-      <NodeResizer isVisible={selected} minWidth={280} minHeight={260} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
       <div className="prod-graph-node prod-graph-gen prod-graph-imagegen">
       <Handle id="in-prompt" type="target" position={Position.Left} title="Prompt input" />
       <Handle type="source" position={Position.Right} title="Frame out — pipe into the video node or the output" />
@@ -683,8 +777,27 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data, selected }: Node
           <option value="4k">4k</option>
         </select>
       </div>
+      <div className="nodrag">
+        <ModelOptionsForm
+          schema={schema}
+          value={params}
+          onChange={saveParams}
+          exclude={["resolution"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.graphImage"
+        />
+      </div>
       {data.items[data.selected]
-        ? <img className="prod-graph-gen-preview" src={data.items[data.selected].url} alt="Generated frame" draggable={false} />
+        ? <div className="prod-graph-gen-preview-wrap">
+            <img className="prod-graph-gen-preview" src={data.items[data.selected].url} alt="Generated frame" draggable={false} />
+            <button
+              className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
+              title="View larger"
+              onClick={() => data.onZoom("Image generation", data.items[data.selected].url)}
+            >
+              <MagnifyIcon size={9} />
+            </button>
+          </div>
         : <div className="prod-graph-gen-preview blank">No generations yet</div>}
       {data.items.length > 0 && (
         <div className="prod-graph-gen-strip nodrag">
@@ -711,11 +824,16 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ data, selected }: Node
         {busy ? "Generating…" : "Generate"}
       </button>
       </div>
-    </>
   );
 });
 
-const VideoGenNodeView = memo(function VideoGenNodeView({ data, selected }: NodeProps<VideoGenFlowNode>) {
+const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<VideoGenFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  // Content-sized: when the preview / strip / Advanced panel changes height,
+  // the percentage-offset sockets move without a resize, so re-measure.
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, data.items.length, data.selected, updateNodeInternals]);
   // Seeds from THIS shot's saved picks (per-shot persistence wins; the global
   // media-default only seeds shots that never picked, so a change here stays
   // on this shot).
@@ -723,15 +841,25 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data, selected }: Node
   const [model, setModel] = useState(data.savedModel ?? remembered?.model ?? data.models[0]?.id ?? "");
   const [resolution, setResolution] = useState(data.savedResolution ?? remembered?.resolution ?? "1080p");
   const [durationSec, setDurationSec] = useState(data.savedDurationSec ?? remembered?.durationSec ?? 5);
+  const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
   const busy = data.busy === true;
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
   // Per-model resolution / length choices, fetched like the video panel. The
   // node ALWAYS animates a source frame (the piped frame or the shot's own),
   // so it always probes the image-to-video form — never text-to-video.
   useEffect(() => {
     let live = true;
     setOpts(null);
-    if (model) void data.onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+    setSchema(null);
+    if (model) {
+      void data.onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+      void data.onModelSchema(model).then((s) => {
+        if (!live) return;
+        setSchema(s);
+        setParams((prev) => seedModelOptionValues(s, model, "video:generate", pruneModelOptionValues(s, prev)) as GenParams);
+      }).catch(() => { if (live) setSchema(null); });
+    }
     return () => { live = false; };
   }, [model]);
   // Keep the current selection valid when the model's options arrive.
@@ -744,12 +872,15 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data, selected }: Node
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts]);
   const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
+  const saveParams = (next: ModelOptionValues) => {
+    const p = next as GenParams;
+    setParams(p);
+    data.onSaveFields({ graphVideoParams: p });
+  };
   const run = async () => {
-    await data.onGenerate(effModel, resolution, durationSec);
+    await data.onGenerate(effModel, resolution, durationSec, params);
   };
   return (
-    <>
-      <NodeResizer isVisible={selected} minWidth={280} minHeight={260} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
       <div className="prod-graph-node prod-graph-gen prod-graph-videogen">
       <Handle id="in-prompt" type="target" position={Position.Left} className="socket-ref" style={{ top: "33%" }} title="Prompt input — from the video-prompt node" />
       <span className="prod-graph-socket-label ref" style={{ top: "33%" }}>Prompt</span>
@@ -776,9 +907,28 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data, selected }: Node
           {durations.map((d) => <option key={d} value={d}>{d}s</option>)}
         </select>
       </div>
+      <div className="nodrag">
+        <ModelOptionsForm
+          schema={schema}
+          value={params}
+          onChange={saveParams}
+          exclude={["resolution", "duration", "length", "seconds"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.graphVideo"
+        />
+      </div>
       <span className="prod-graph-gen-hint">{data.hasImageSource ? "Source: piped frame" : "Source: shot frame"}</span>
       {data.items[data.selected]
-        ? <video className="prod-graph-gen-preview nodrag" src={data.items[data.selected].url} controls muted loop playsInline preload="metadata" />
+        ? <div className="prod-graph-gen-preview-wrap">
+            <video className="prod-graph-gen-preview nodrag" src={data.items[data.selected].url} controls muted loop playsInline preload="metadata" />
+            <button
+              className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
+              title="View larger"
+              onClick={() => data.onZoom("Video generation", data.items[data.selected].url, "video")}
+            >
+              <MagnifyIcon size={9} />
+            </button>
+          </div>
         : <div className="prod-graph-gen-preview blank">No generations yet</div>}
       {data.items.length > 0 && (
         <div className="prod-graph-gen-strip nodrag">
@@ -805,7 +955,6 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ data, selected }: Node
         {busy ? "Generating…" : "Generate"}
       </button>
       </div>
-    </>
   );
 });
 
@@ -843,24 +992,147 @@ const TweenNodeView = memo(function TweenNodeView({ data }: NodeProps<TweenFlowN
   );
 });
 
-const EditGenNodeView = memo(function EditGenNodeView({ data, selected }: NodeProps<EditGenFlowNode>) {
+/** Edit-video node: a video-edit model edits the clip wired into its source
+ *  socket, with optional image/video references wired into the reference
+ *  socket (both accept image and video outputs from any node). */
+const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProps<EditVideoFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  // Content-sized: when the preview / Advanced panel changes height, the
+  // percentage-offset sockets move without a resize, so re-measure.
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, data.items.length, data.selected, updateNodeInternals]);
+  const [model, setModel] = useState(() => data.savedModel ?? data.models[0]?.id ?? "");
+  const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
+  const busy = data.busy === true;
+  const prompt = data.savedPrompt ?? "";
+  const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
+  useEffect(() => {
+    let live = true;
+    setSchema(null);
+    if (!effModel) return () => { live = false; };
+    void data.onModelSchema(effModel).then((s) => {
+      if (!live) return;
+      setSchema(s);
+      setParams((prev) => seedModelOptionValues(s, effModel, "video:editnode", pruneModelOptionValues(s, prev)) as GenParams);
+    }).catch(() => { if (live) setSchema(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effModel]);
+  const save = (patch: Partial<ProductionShot>) => data.onSave(patch);
+  const run = async () => {
+    if (!prompt.trim()) return;
+    await data.onGenerate(effModel, prompt.trim(), params);
+  };
+  return (
+      <div className="prod-graph-node prod-graph-gen prod-graph-editvideo">
+      <Handle id="in-prompt" type="target" position={Position.Left} className="socket-ref" style={{ top: "25%" }} title="Prompt input — from the edit-video prompt node" />
+      <span className="prod-graph-socket-label ref" style={{ top: "25%" }}>Prompt</span>
+      <Handle id="in-video" type="target" position={Position.Left} className="socket-ref" style={{ top: "72%" }} title="Source clip — wire a video node output or a video reference (mandatory)" />
+      <span className="prod-graph-socket-label ref" style={{ top: "72%" }}>Source</span>
+      <Handle type="source" position={Position.Right} title="Edited clip out — pipe into the output" />
+      <div className="prod-graph-node-title"><EditVideoIcon size={13} className="prod-graph-title-icon" /> Edit video</div>
+      <div className="prod-graph-gen-controls">
+        <select
+          className="prod-openart-select nodrag"
+          value={data.models.some((m) => m.id === model) ? model : ""}
+          onChange={(e) => { setModel(e.target.value); save({ graphEditVideoModel: e.target.value }); }}
+          title="Video-edit model"
+          disabled={data.models.length === 0}
+        >
+          {data.models.length === 0 && <option value="">No edit-video models</option>}
+          {data.models.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>)}
+        </select>
+      </div>
+      <span className="prod-graph-gen-hint">
+        {data.sourceLabel ? `Source: ${data.sourceLabel}` : "Source: shot video (wire a clip to override)"}
+      </span>
+      <div className="nodrag">
+        <ModelOptionsForm
+          schema={schema}
+          value={params}
+          onChange={(next) => { const p = next as GenParams; setParams(p); save({ graphEditVideoParams: p }); }}
+          exclude={["resolution", "duration", "length", "seconds"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.graphEditVideo"
+        />
+      </div>
+      {data.items[data.selected]
+        ? <div className="prod-graph-gen-preview-wrap">
+            <video className="prod-graph-gen-preview nodrag" src={data.items[data.selected].url} controls muted loop playsInline preload="metadata" />
+            <button
+              className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
+              title="View larger"
+              onClick={() => data.onZoom("Edit video", data.items[data.selected].url, "video")}
+            >
+              <MagnifyIcon size={9} />
+            </button>
+          </div>
+        : <div className="prod-graph-gen-preview blank">No edits yet</div>}
+      {data.items.length > 1 && (
+        <div className="prod-graph-gen-cycle">
+          <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(1)} title="Older edit">‹</button>
+          <span>{data.selected + 1} / {data.items.length}</span>
+          <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(-1)} title="Newer edit">›</button>
+        </div>
+      )}
+      <div className="prod-graph-gen-controls">
+        <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy || !prompt.trim()} onClick={() => { void run(); }}>
+          {busy ? "Editing…" : "Edit video"}
+        </button>
+        {data.items[data.selected] && (
+          <button className="prod-btn nodrag" disabled={data.piped} onClick={() => data.onPipeToOutput()} title="Feed the edited clip into the frame output">
+            {data.piped ? "Piped" : "Pipe to output"}
+          </button>
+        )}
+      </div>
+      </div>
+  );
+});
+
+const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<EditGenFlowNode>) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  // Content-sized: when the preview / strip / Advanced panel changes height,
+  // the percentage-offset sockets move without a resize, so re-measure.
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, data.items.length, data.selected, updateNodeInternals]);
   // Seeds from THIS node's saved picks (per-node persistence wins; the global
   // media-default only seeds nodes that never picked, so a change here stays
   // on this node).
   const [model, setModel] = useState(() => data.savedModel ?? getMediaDefault("edit")?.model ?? data.models[0]?.id ?? "");
   const [resolution, setResolution] = useState(() => data.savedResolution ?? getMediaDefault("edit")?.resolution ?? data.defaultResolution);
+  const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
   const busy = data.busy === true;
   const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
+  useEffect(() => {
+    let live = true;
+    setSchema(null);
+    setParams(data.savedParams ?? {});
+    if (!effModel) return () => { live = false; };
+    void data.onModelSchema(effModel).then((s) => {
+      if (!live) return;
+      setSchema(s);
+      setParams((prev) => seedModelOptionValues(s, effModel, "image:edit", pruneModelOptionValues(s, prev)) as GenParams);
+    }).catch(() => { if (live) setSchema(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effModel]);
+  const saveParams = (next: ModelOptionValues) => {
+    const p = next as GenParams;
+    setParams(p);
+    data.onSave({ params: p });
+  };
   const run = async () => {
-    await data.onGenerate(data.nodeId, effModel, resolution);
+    await data.onGenerate(data.nodeId, effModel, resolution, params);
   };
   const sockets: { id: string; kind: "ref"; label: string; top: number }[] = [
     { id: "in-prompt", kind: "ref", label: "Prompt", top: 33 },
     { id: "in-image", kind: "ref", label: "Source", top: 67 },
   ];
   return (
-    <>
-      <NodeResizer isVisible={selected} minWidth={280} minHeight={260} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
       <div className="prod-graph-node prod-graph-gen prod-graph-editgen">
       {sockets.map((s) => (
         <Fragment key={s.id}>
@@ -889,9 +1161,28 @@ const EditGenNodeView = memo(function EditGenNodeView({ data, selected }: NodePr
           <option value="4k">4k</option>
         </select>
       </div>
+      <div className="nodrag">
+        <ModelOptionsForm
+          schema={schema}
+          value={params}
+          onChange={saveParams}
+          exclude={["resolution"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.graphEdit"
+        />
+      </div>
       <span className="prod-graph-gen-hint">Source: {data.sourceHint}</span>
       {data.items[data.selected]
-        ? <img className="prod-graph-gen-preview" src={data.items[data.selected].url} alt="Edited frame" draggable={false} />
+        ? <div className="prod-graph-gen-preview-wrap">
+            <img className="prod-graph-gen-preview" src={data.items[data.selected].url} alt="Edited frame" draggable={false} />
+            <button
+              className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
+              title="View larger"
+              onClick={() => data.onZoom(`Edit image ${editNodeLabel(data.nodeId)}`, data.items[data.selected].url)}
+            >
+              <MagnifyIcon size={9} />
+            </button>
+          </div>
         : <div className="prod-graph-gen-preview blank">No edits yet</div>}
       {data.items.length > 0 && (
         <div className="prod-graph-gen-strip nodrag">
@@ -915,10 +1206,9 @@ const EditGenNodeView = memo(function EditGenNodeView({ data, selected }: NodePr
         </div>
       )}
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
-        {busy ? "Editing…" : "Edit"}
+        {busy ? "Generating…" : "Generate"}
       </button>
       </div>
-    </>
   );
 });
 
@@ -926,7 +1216,10 @@ const EditGenNodeView = memo(function EditGenNodeView({ data, selected }: NodePr
  *  sockets for Style / Reference(s) / Brand, right source handle, TriplePrompt
  *  with local draft while focused. Each prompt's Style/Brand presence and @-tags
  *  drive its own edges, mirroring the composer. */
-const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: NodeProps<VideoPromptFlowNode>) {
+/** Shared body for the prompt nodes (video / edit-image / edit-video): Style +
+ *  Reference(s) + Brand sockets on the left, a TriplePrompt body, a source
+ *  handle on the right. The wrappers below supply the title/placeholder/class. */
+const PromptNodeView = memo(function PromptNodeView({ id, data, title, placeholder, containerClass }: { id: string; data: VideoPromptData; title: string; placeholder: string; containerClass: string }) {
   const updateNodeInternals = useUpdateNodeInternals();
   useEffect(() => { updateNodeInternals(id); }, [id, data.refHandles.length, updateNodeInternals]);
   const [localValue, setLocalValue] = useState(data.value);
@@ -1022,14 +1315,14 @@ const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: Node
     { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
   ];
   return (
-    <div ref={rootRef} className="prod-graph-node prod-graph-composer prod-graph-videoprompt">
+    <div ref={rootRef} className={"prod-graph-node prod-graph-composer " + containerClass}>
       {sockets.map((s) => (
         <Fragment key={s.id}>
           <Handle id={s.id} type="target" position={Position.Left} className={`socket-${s.kind}` + (s.open ? " open" : "")} style={{ top: `${s.top}%` }} title={s.open ? "Reference input — always open, drop a connection here" : `${s.label} input`} />
           <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
         </Fragment>
       ))}
-      <div className="prod-graph-node-title">Video prompt</div>
+      <div className="prod-graph-node-title">{title}</div>
       <TriplePrompt
         className="prod-graph-composer-text nodrag"
         sideRows={3}
@@ -1037,7 +1330,7 @@ const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: Node
         deferExternalWhileFocused
         value={localValue}
         includeBrand={data.includeBrand}
-        placeholder="Motion prompt — connect references, type @, or edit the boxes"
+        placeholder={placeholder}
         onBlur={handleBlur}
         onChange={(v) => {
           const prev = localValue;
@@ -1058,136 +1351,49 @@ const VideoPromptNodeView = memo(function VideoPromptNodeView({ id, data }: Node
   );
 });
 
-const EditPromptNodeView = memo(function EditPromptNodeView({ id, data }: NodeProps<EditPromptFlowNode>) {
-  const updateNodeInternals = useUpdateNodeInternals();
-  useEffect(() => { updateNodeInternals(id); }, [id, data.refHandles.length, updateNodeInternals]);
-  const [localValue, setLocalValue] = useState(data.value);
-  const emitted = useRef<Set<string>>(new Set([data.value]));
-  const rootRef = useRef<HTMLDivElement>(null);
-  const draftRef = useRef(localValue);
-  const dataRef = useRef(data);
-  useEffect(() => { draftRef.current = localValue; }, [localValue]);
-  useEffect(() => { dataRef.current = data; }, [data]);
-  const syncToParent = () => {
-    const latest = draftRef.current;
-    const cur = dataRef.current.value;
-    if (latest !== cur) {
-      emitted.current.add(latest);
-      if (emitted.current.size > 100) emitted.current.clear();
-      dataRef.current.onChange(dataRef.current.nodeId, latest);
-    }
+/** Video-prompt node: the motion prompt for the video generation node. */
+const VideoPromptNodeView = memo((props: NodeProps<VideoPromptFlowNode>) => (
+  <PromptNodeView
+    id={props.id}
+    data={props.data}
+    title="Video prompt"
+    placeholder="Motion prompt — connect references, type @, or edit the boxes"
+    containerClass="prod-graph-videoprompt"
+  />
+));
+
+/** Edit-image prompt node: the edit instructions for one edit-image node. */
+const EditPromptNodeView = memo((props: NodeProps<EditPromptFlowNode>) => {
+  const { id, data } = props;
+  const adapted: VideoPromptData = {
+    value: data.value,
+    refHandles: data.refHandles,
+    openHandleId: data.openHandleId,
+    includeBrand: data.includeBrand,
+    registerApplier: data.registerApplier,
+    onChange: (text: string) => data.onChange(data.nodeId, text),
   };
-  const handleBlur = () => {
-    setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
-  };
-  useEffect(() => {
-    if (emitted.current.has(data.value)) return;
-    const active = document.activeElement as HTMLElement | null;
-    const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
-    if (isFocused) {
-      const incoming = parsePromptBoxes(data.value);
-      const current = parsePromptBoxes(localValue);
-      const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
-      const isContentFocused = !!contentEl && !!active && (contentEl === active || contentEl.contains(active));
-      const activeIsStyle = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Visual style");
-      const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
-      let next: string | null = null;
-      if (isContentFocused) {
-        if (incoming.style !== current.style || incoming.brand !== current.brand) {
-          const merged = { ...current, style: incoming.style, brand: incoming.brand };
-          next = composePromptBoxes(merged);
-        }
-      } else if (activeIsStyle) {
-        if (incoming.content !== current.content || incoming.brand !== current.brand) {
-          const merged = { ...current, content: incoming.content, brand: incoming.brand };
-          next = composePromptBoxes(merged);
-        }
-      } else if (activeIsBrand) {
-        if (incoming.content !== current.content || incoming.style !== current.style) {
-          const merged = { ...current, style: incoming.style, content: incoming.content };
-          next = composePromptBoxes(merged);
-        }
-      } else {
-        return;
-      }
-      if (next !== null) {
-        emitted.current.add(next);
-        if (emitted.current.size > 100) emitted.current.clear();
-        setLocalValue(next);
-        draftRef.current = next;
-        return;
-      }
-      return;
-    }
-    emitted.current.clear();
-    emitted.current.add(data.value);
-    setLocalValue(data.value);
-    draftRef.current = data.value;
-  }, [data.value]);
-  useEffect(() => () => { syncToParent(); }, []);
-  // Live-draft handle for the edit-prompt node (see ComposerNodeView).
-  useEffect(() => {
-    const register = dataRef.current.registerApplier as ((a: PromptDraftApplier | undefined) => void) | undefined;
-    if (!register) return;
-    register({
-      get: () => draftRef.current,
-      apply: (fn) => {
-        const next = fn(draftRef.current);
-        if (next === draftRef.current) return;
-        draftRef.current = next;
-        setLocalValue(next);
-        const s = emitted.current;
-        if (s.size > 100) s.clear();
-        s.add(next);
-        dataRef.current.onChange(dataRef.current.nodeId, next);
-      },
-    });
-    return () => register?.(undefined);
-  }, []);
-  const n = data.refHandles.length + 1;
-  const total = n + 2;
-  const sockets: { id: string; kind: "ref" | "style" | "brand"; open: boolean; label: string; top: number }[] = [
-    { id: "in-style", kind: "style", open: false, label: "Style", top: (1 / (total + 1)) * 100 },
-    ...data.refHandles.map((h, i) => ({ id: h, kind: "ref" as const, open: false, label: "Reference", top: ((i + 2) / (total + 1)) * 100 })),
-    { id: data.openHandleId, kind: "ref", open: true, label: "Reference", top: ((n + 1) / (total + 1)) * 100 },
-    { id: "in-brand", kind: "brand", open: false, label: "Brand", top: (total / (total + 1)) * 100 },
-  ];
   return (
-    <div ref={rootRef} className="prod-graph-node prod-graph-composer prod-graph-editprompt">
-      {sockets.map((s) => (
-        <Fragment key={s.id}>
-          <Handle id={s.id} type="target" position={Position.Left} className={`socket-${s.kind}` + (s.open ? " open" : "")} style={{ top: `${s.top}%` }} title={s.open ? "Reference input — always open, drop a connection here" : `${s.label} input`} />
-          <span className={`prod-graph-socket-label ${s.kind}`} style={{ top: `${s.top}%` }}>{s.label}</span>
-        </Fragment>
-      ))}
-      <div className="prod-graph-node-title">Edit prompt {editNodeLabel(data.nodeId)}</div>
-      <TriplePrompt
-        className="prod-graph-composer-text nodrag"
-        sideRows={3}
-        resizable
-        deferExternalWhileFocused
-        value={localValue}
-        includeBrand={data.includeBrand}
-        placeholder="Edit instructions — connect references, type @, or edit the boxes"
-        onBlur={handleBlur}
-        onChange={(v) => {
-          const prev = localValue;
-          setLocalValue(v);
-          draftRef.current = v;
-          const s = emitted.current;
-          if (s.size > 100) s.clear();
-          s.add(v);
-          try {
-            const pc = parsePromptBoxes(prev).content;
-            const nc = parsePromptBoxes(v).content;
-            if (isTagReorder(pc, nc)) dataRef.current.onChange(dataRef.current.nodeId, v);
-          } catch {}
-        }}
-      />
-      <Handle type="source" position={Position.Right} />
-    </div>
+    <PromptNodeView
+      id={id}
+      data={adapted}
+      title={`Edit prompt ${editNodeLabel(data.nodeId)}`}
+      placeholder="Edit instructions — connect references, type @, or edit the boxes"
+      containerClass="prod-graph-editprompt"
+    />
   );
 });
+
+/** Edit-video prompt node: the edit instructions for the edit-video node. */
+const EditVideoPromptNodeView = memo((props: NodeProps<EditVideoPromptFlowNode>) => (
+  <PromptNodeView
+    id={props.id}
+    data={props.data}
+    title="Edit video prompt"
+    placeholder="Edit instructions — connect references, type @, or edit the boxes"
+    containerClass="prod-graph-editvideoprompt"
+  />
+));
 
 const nodeTypes = {
   ref: RefNodeView,
@@ -1200,9 +1406,11 @@ const nodeTypes = {
   imagegen: ImageGenNodeView,
   videogen: VideoGenNodeView,
   tween: TweenNodeView,
+  editvideo: EditVideoNodeView,
   editgen: EditGenNodeView,
   videoprompt: VideoPromptNodeView,
   editprompt: EditPromptNodeView,
+  editvideoprompt: EditVideoPromptNodeView,
 };
 
 /** Exported for the renderer-component tests (the node graph uses it directly). */
@@ -1448,6 +1656,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
   if (id === "videoprompt") return { x: VIDGEN_X, y: Math.max(20, midY + 140) };
   if (id === "videogen") return { x: VIDGEN_X, y: Math.max(20, midY - 190) };
   if (id === "tween") return { x: VIDGEN_X, y: Math.max(20, midY + 180) };
+  if (id === "editvideo") return { x: VIDGEN_X + 360, y: Math.max(20, midY - 190) };
   if (id === "output") return { x: OUTPUT_X, y: Math.max(20, midY - 150) };
   const availIdx = availIds.indexOf(id);
   if (availIdx >= 0) return { x: REF_X, y: REF_COL_TOP + availIdx * REF_STEP };
@@ -1460,7 +1669,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, imageGenBusy = false, videoGenBusy = false, editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onEditNodePrompt = () => {}, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, imageGenBusy = false, videoGenBusy = false, editVideoBusy = false, editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onEditNodePrompt = () => {}, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditVideoToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -1481,9 +1690,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onPromptChange: (value: string) => void;
   onStyleChange: (style: string) => void;
   onToggleBrand: (include: boolean) => void;
-  /** A media file dropped/pasted onto the canvas — becomes a reference in the
-   *  parent. Resolves to the created reference so the graph can place its node. */
+  /** A media file dropped onto the canvas — becomes a reference in the parent.
+   *  Resolves to the created reference so the graph can place its node. (Paste
+   *  prefers onPasteFiles; this is its fallback.) */
   onDropFile: (file: File) => Promise<GraphRef | null> | void;
+  /** A batch of pasted files. The parent names them (auto-numbered, Ref-001…)
+   *  so clipboard pastes never collide, and resolves to the created refs so the
+   *  graph places a node for each. Falls back to onDropFile when absent. */
+  onPasteFiles?: (files: File[]) => Promise<GraphRef[]> | void;
   /** The style link was detached: the parent clears the shot's style flag so
    *  the storyboard dropdown shows None. */
   onStyleDetached: () => void;
@@ -1499,15 +1713,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   defaultImageModel: string;
   defaultImageResolution: string;
   /** Run the image generation node (prompt = the composer's text). */
-  onRunImageGen: (model: string, resolution: string) => Promise<void>;
+  onRunImageGen: (model: string, resolution: string, params?: GenParams) => Promise<void>;
   /** Run the video generation node (prompt = the video-prompt node). */
-  onRunVideoGen: (model: string, resolution: string, durationSec: number) => Promise<void>;
+  onRunVideoGen: (model: string, resolution: string, durationSec: number, params?: GenParams) => Promise<void>;
   /** Run an edit-image node (prompt = that node's edit-prompt node). */
-  onRunEditGen: (nodeId: string, model: string, resolution: string) => Promise<void>;
+  onRunEditGen: (nodeId: string, model: string, resolution: string, params?: GenParams) => Promise<void>;
+  /** Run the edit-video node (source/refs come from its wired sockets). */
+  onRunEditVideo?: (model: string, prompt: string, params?: GenParams) => Promise<void>;
   /** Generate one in-betweener action block's clip (prompt = the block's;
    *  durationSec = the block's displayed length, so the submit never races a
    *  pending retime save). */
-  onRunTweenBlock?: (blockId: string, durationSec: number, model: string) => Promise<void>;
+  onRunTweenBlock?: (blockId: string, durationSec: number, model: string, params?: GenParams) => Promise<void>;
   /** Stitch every action block's selected clip into the continuous shot. */
   onStitchTween?: () => Promise<void>;
   /** Undo a stitch — back to the individual block clips (toggle on Stitch). */
@@ -1516,6 +1732,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  (the workspace owns them per shot). */
   imageGenBusy?: boolean;
   videoGenBusy?: boolean;
+  /** The edit-video node is generating for this shot (workspace-owned). */
+  editVideoBusy?: boolean;
   /** Edit node ids currently generating for this shot (per-node busy). */
   editBusyNodeIds?: string[];
   /** The in-betweener block currently generating (workspace-owned). */
@@ -1523,9 +1741,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** True while a stitch/unstitch runs (workspace-owned). */
   tweenStitching?: boolean;
   /** Select a generation node's stored output by index (edit kind names its node). */
-  onSelectGraphGen: (kind: "image" | "video" | "edit", index: number, nodeId?: string) => void;
+  onSelectGraphGen: (kind: "image" | "video" | "edit" | "editvideo", index: number, nodeId?: string) => void;
   /** Cycle a generation node's stored outputs (edit kind names its node). */
-  onCycleGraphGen: (kind: "image" | "video" | "edit", dir: 1 | -1, nodeId?: string) => void;
+  onCycleGraphGen: (kind: "image" | "video" | "edit" | "editvideo", dir: 1 | -1, nodeId?: string) => void;
   /** Update one edit node's prompt text. */
   onEditNodePrompt?: (nodeId: string, text: string) => void;
   /** Merge shot-level graph fields (video prompt text, cycle index, pipes). */
@@ -1543,6 +1761,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onPipeVideoToOutput: () => void;
   /** Pipe the in-betweener's stitched clip into the output (and apply it). */
   onPipeTweenToOutput?: () => void;
+  /** Pipe the edit-video node's selected clip into the output (and apply it). */
+  onPipeEditVideoToOutput?: () => void;
   /** Pipe an edit-image node's output into the output (and apply its selection). */
   onPipeEditToOutput: (nodeId: string) => void;
   /** Pipe a reference node's output into the output (applies its media to the shot). */
@@ -1575,7 +1795,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [shelfOpen, setShelfOpen] = useState(false);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<{ name: string; artwork: string } | null>(null);
+  const [lightbox, setLightbox] = useState<{ name: string; artwork: string; kind?: "image" | "video" } | null>(null);
   /** In-betweener timeline window (stacked above the graph). */
   const [tweenOpen, setTweenOpen] = useState(false);
   /** In-flight tween state is workspace-owned (see props) so the timeline's
@@ -1624,6 +1844,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   }, [prod.meta.id, shot.id, shot.artwork, bust]);
 
   const videoPromptValue = shot.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT;
+  const editVideoPromptValue = shot.graphEditVideoPrompt ?? "";
   const editNodes = useMemo(() => shot.graphEditNodes ?? [], [shot.graphEditNodes]);
   /** Per-edit-node prompt text keyed by node id. */
   const editPromptValues = useMemo(() => {
@@ -1669,6 +1890,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
     })),
     [taggedVideoNames, references],
+  );
+  const taggedEditVideoNames = useMemo(() => refTagNames(editVideoPromptValue), [editVideoPromptValue]);
+  const taggedEditVideo = useMemo(
+    () => taggedEditVideoNames.map((name) => ({
+      name,
+      ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
+    })),
+    [taggedEditVideoNames, references],
   );
 
   // Union of all tags across the prompts — every reference that appears
@@ -1729,16 +1958,31 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** The in-betweener is in use while it holds keyframes, blocks, a stitch,
    *  or the output feed — like the video/edit tools, it can't be removed then. */
   const tweenActive = !!((shot.graphTweenRefIds?.length ?? 0) > 0 || (shot.graphTweenBlocks?.length ?? 0) > 0 || shot.graphTweenOutput || shot.graphOutputSource === "tween");
+  /** The edit-video node is in use while it holds clips, a source, params, or
+   *  the output feed — like the other tools, it can't be removed then. */
+  const editVideoActive = !!((shot.graphEditVideoGens?.length ?? 0) > 0 || (shot.graphEditVideoPrompt ?? "").trim() || shot.graphEditVideoSourceRefId || shot.graphVideoToEditVideo || shot.graphEditVideoParams || shot.graphOutputSource === "editvideo");
   const [placedTools, setPlacedTools] = useState<Set<string>>(() => {
     const out = new Set<string>();
     const p = initialLayout?.positions ?? {};
     if (p.videogen || p.videoprompt) { out.add("videogen"); out.add("videoprompt"); }
     if (p.tween) { out.add("tween"); }
+    if (p.editvideo || p.editvideoprompt) { out.add("editvideo"); out.add("editvideoprompt"); }
     return out;
   });
   const hasVideoTool = videoGenActive || placedTools.has("videogen");
   const hasEditTool = editNodes.length > 0;
   const hasTweenTool = tweenActive || placedTools.has("tween");
+  const hasEditVideoTool = editVideoActive || placedTools.has("editvideo");
+  // Which models actually accept a video input (the edit-video capability
+  // probe). Empty for providers without a video-edit path.
+  const [videoEditModelIds, setVideoEditModelIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const api = (window as unknown as { cascade?: { videoEditModels?: () => Promise<string[]> } }).cascade;
+    if (!api || typeof api.videoEditModels !== "function") { setVideoEditModelIds([]); return () => { live = false; }; }
+    void api.videoEditModels().then((ids) => { if (live) setVideoEditModelIds(ids ?? []); }).catch(() => { if (live) setVideoEditModelIds([]); });
+    return () => { live = false; };
+  }, []);
 
   // The side shelf shows every reference organized by category (characters,
   // products, custom categories) — reusing the same deduped flat list the tags
@@ -1769,8 +2013,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // Node callbacks change identity every parent render; routing them through
   // a ref keeps node data (and node object identities) stable across renders,
   // which keeps React Flow's selection bookkeeping from fighting re-renders.
-  const cb = useRef({ onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onEditNodePrompt, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds });
-  cb.current = { onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onEditNodePrompt, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds };
+  const cb = useRef({ onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onEditNodePrompt, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt });
+  cb.current = { onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onEditNodePrompt, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt };
   // Live-draft handles registered by the three prompt nodes (see
   // PromptDraftApplier). Prompt mutations below prefer them over cb.current's
   // prop values, which lag the node's local draft while it is focused.
@@ -1820,6 +2064,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           const v = cb.current.videoPromptValue;
           if (refTagNames(v).some((n) => n.toLowerCase() === name.toLowerCase())) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(v, name) });
         }
+        if (!applyDraftEdit("editvideo", (t) => removeRefTag(t, name))) {
+          const v = cb.current.graphEditVideoPrompt ?? "";
+          if (refTagNames(v).some((n) => n.toLowerCase() === name.toLowerCase())) cb.current.onGraphField({ graphEditVideoPrompt: removeRefTag(v, name) });
+        }
         for (const n of cb.current.editNodes ?? []) {
           const key = `edit:${n.id}`;
           if (!applyDraftEdit(key, (t) => removeRefTag(t, name))) {
@@ -1836,17 +2084,20 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const p = cb.current.prompt;
       cb.current.onPromptChange(addRefTag(p, name));
     },
-    onZoom: (name: string, artwork: string) => cb.current.setLightbox({ name, artwork }),
-    onRunImageGen: (model: string, resolution: string) => cb.current.onRunImageGen(model, resolution),
-    onRunVideoGen: (model: string, resolution: string, durationSec: number) => cb.current.onRunVideoGen(model, resolution, durationSec),
-    onRunEditGen: (nodeId: string, model: string, resolution: string) => cb.current.onRunEditGen(nodeId, model, resolution),
+    onZoom: (name: string, artwork: string, kind?: "image" | "video") => cb.current.setLightbox({ name, artwork, kind }),
+    onRunImageGen: (model: string, resolution: string, params?: GenParams) => cb.current.onRunImageGen(model, resolution, params),
+    onRunVideoGen: (model: string, resolution: string, durationSec: number, params?: GenParams) => cb.current.onRunVideoGen(model, resolution, durationSec, params),
+    onRunEditGen: (nodeId: string, model: string, resolution: string, params?: GenParams) => cb.current.onRunEditGen(nodeId, model, resolution, params),
+    onRunEditVideo: (model: string, prompt: string, params?: GenParams) => cb.current.onRunEditVideo?.(model, prompt, params) ?? Promise.resolve(),
     onOpenTweenTimeline: () => cb.current.onOpenTweenTimeline(),
     onSelectImageGen: (index: number) => cb.current.onSelectGraphGen("image", index),
     onSelectVideoGen: (index: number) => cb.current.onSelectGraphGen("video", index),
     onSelectEditGen: (nodeId: string, index: number) => cb.current.onSelectGraphGen("edit", index, nodeId),
+    onSelectEditVideoGen: (index: number) => cb.current.onSelectGraphGen("editvideo", index),
     onCycleImageGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("image", dir),
     onCycleVideoGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("video", dir),
     onCycleEditGen: (nodeId: string, dir: 1 | -1) => cb.current.onCycleGraphGen("edit", dir, nodeId),
+    onCycleEditVideoGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("editvideo", dir),
     onModelOptions: (model: string, withImage: boolean) => {
       const key = `${model}|${withImage ? 1 : 0}`;
       const cached = videoOptionsCache.get(key);
@@ -1856,9 +2107,24 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         return o;
       }).catch(() => null);
     },
+    /** The model's full option schema for the Advanced panel. Degrades to
+     *  null when the provider has no schema or the IPC isn't present (tests). */
+    onModelSchema: (model: string) => {
+      const cached = modelSchemaCache.get(model);
+      if (cached !== undefined) return Promise.resolve(cached);
+      const api = (window as unknown as { cascade?: { modelOptions?: (m: string) => Promise<CliModelSchema | null> } }).cascade;
+      if (!api || typeof api.modelOptions !== "function") return Promise.resolve(null);
+      return api.modelOptions(model).then((s) => {
+        modelSchemaCache.set(model, s);
+        return s;
+      }).catch(() => null);
+    },
     onVideoPromptChange: (text: string) => cb.current.onGraphField({ graphVideoPrompt: text }),
+    onEditVideoPromptChange: (text: string) => cb.current.onGraphField({ graphEditVideoPrompt: text }),
     /** Per-shot video-gen selections (model/resolution/length) → the shot. */
     onSaveVideoFields: (patch: Partial<ProductionShot>) => cb.current.onGraphField(patch),
+    /** Per-shot edit-video selections → the shot. */
+    onSaveEditVideoFields: (patch: Partial<ProductionShot>) => cb.current.onGraphField(patch),
     /** Per-node edit-gen selections → the named edit node in the list. */
     onEditNodeSave: (nodeId: string, patch: Partial<GraphEditNode>) =>
       cb.current.onGraphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) }),
@@ -1869,6 +2135,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onPipeImageToOutput: () => cb.current.onPipeImageToOutput(),
     onPipeVideoToOutput: () => cb.current.onPipeVideoToOutput(),
     onPipeTweenToOutput: () => cb.current.onPipeTweenToOutput(),
+    onPipeEditVideoToOutput: () => cb.current.onPipeEditVideoToOutput?.(),
     onPipeEditToOutput: (nodeId: string) => cb.current.onPipeEditToOutput(nodeId),
     onPipeRefToOutput: (refId: string) => cb.current.onPipeRefToOutput(refId),
     onTweenRefs: (refIds: string[]) => cb.current.onTweenRefs(refIds),
@@ -1913,6 +2180,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         }
         if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
         if (cb.current.graphVideoSourceRefId === refId) cb.current.onGraphField({ graphVideoSourceRefId: undefined });
+        if (cb.current.graphEditVideoSourceRefId === refId) cb.current.onGraphField({ graphEditVideoSourceRefId: undefined });
         if ((cb.current.graphTweenRefIds ?? []).includes(refId)) {
           cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId));
         }
@@ -1979,6 +2247,69 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     };
   }, [shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphImageGens, shot.graphImageGenIndex, shot.graphEditNodes, references, stable]);
 
+  /** The edit-video node: a video-edit model + a mandatory source clip +
+   *  optional references. Only models that declare a video input are offered. */
+  const editVideoNode = useCallback((pos: { x: number; y: number }): EditVideoFlowNode => {
+    const editModels = videoModels.filter(
+      (m) => modelOnSurface(m, "video:editnode") && (videoEditModelIds ?? []).includes(m.id)
+    );
+    const sourceRef = shot.graphEditVideoSourceRefId
+      ? references.find((r) => r.id === shot.graphEditVideoSourceRefId)
+      : undefined;
+    const sourceLabel = shot.graphVideoToEditVideo
+      ? "Video node clip"
+      : sourceRef
+        ? `Reference: ${sourceRef.name}`
+        : null;
+    return {
+      id: "editvideo",
+      type: "editvideo",
+      position: pos,
+      style: fixedWidth(320),
+      data: {
+        models: editModels,
+        savedModel: shot.graphEditVideoModel,
+        savedParams: shot.graphEditVideoParams,
+        savedPrompt: shot.graphEditVideoPrompt,
+        sourceLabel,
+        items: (shot.graphEditVideoGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
+        selected: shot.graphEditVideoGenIndex ?? 0,
+        busy: editVideoBusy === true,
+        piped: shot.graphOutputSource === "editvideo",
+        onGenerate: stable.onRunEditVideo,
+        onSelect: stable.onSelectEditVideoGen,
+        onCycle: stable.onCycleEditVideoGen,
+        onSave: stable.onSaveEditVideoFields,
+        onPipeToOutput: stable.onPipeEditVideoToOutput,
+        onModelSchema: stable.onModelSchema,
+        onZoom: stable.onZoom,
+      },
+      deletable: true,
+    };
+  }, [videoModels, videoEditModelIds, shot.graphEditVideoSourceRefId, shot.graphVideoToEditVideo, shot.graphEditVideoModel, shot.graphEditVideoParams, shot.graphEditVideoPrompt, shot.graphEditVideoGens, shot.graphEditVideoGenIndex, shot.graphOutputSource, references, prod.meta.id, editVideoBusy, stable]);
+
+  /** The edit-video tool: the gen node + its prompt node (mirrors the video
+   *  node pair). Shared by buildDerived and addTool. */
+  const editVideoPair = useCallback((genPos: { x: number; y: number }, promptPos: { x: number; y: number }): GraphNode[] => {
+    return [
+      editVideoNode(genPos),
+      {
+        id: "editvideoprompt",
+        type: "editvideoprompt",
+        position: promptPos,
+        data: {
+          value: editVideoPromptValue,
+          refHandles: taggedEditVideo.map((_, i) => `in-ref-${i}`),
+          openHandleId: "in-ref-open",
+          includeBrand: hasBrandParagraph(editVideoPromptValue),
+          onChange: stable.onEditVideoPromptChange,
+          registerApplier: (a) => stable.registerApplier("editvideo", a),
+        },
+        deletable: true,
+      },
+    ];
+  }, [editVideoNode, editVideoPromptValue, taggedEditVideo, stable]);
+
   /** Build the video tool node pair (videogen+videoprompt) at the given
    *  positions. Shared by buildDerived and addTool. */
   const videoPair = useCallback((genPos: { x: number; y: number }, promptPos: { x: number; y: number }): GraphNode[] => {
@@ -1987,12 +2318,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "videogen",
         type: "videogen",
         position: genPos,
-        style: sizeStyle(initialLayout, "videogen", 300),
+        style: fixedWidth(300),
         data: {
-          models: videoModels,
+          models: videoModels.filter((m) => modelOnSurface(m, "video:generate")),
           savedModel: shot.graphVideoModel,
           savedResolution: shot.graphVideoResolution,
           savedDurationSec: shot.graphVideoDurationSec,
+          savedParams: shot.graphVideoParams,
           items: (shot.graphVideoGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: shot.graphVideoGenIndex ?? 0,
           hasImageSource: shot.graphImageToVideo === true || shot.graphEditToVideo === true || !!shot.graphVideoSourceRefId,
@@ -2001,7 +2333,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           onSelect: stable.onSelectVideoGen,
           onCycle: stable.onCycleVideoGen,
           onModelOptions: stable.onModelOptions,
+          onModelSchema: stable.onModelSchema,
           onSaveFields: stable.onSaveVideoFields,
+          onZoom: stable.onZoom,
         },
         deletable: true,
       },
@@ -2013,7 +2347,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: true,
       },
     ];
-  }, [videoModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphVideoModel, shot.graphVideoResolution, shot.graphVideoDurationSec, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceRefId, videoPromptValue, taggedVideo, stable, prod.meta.id, videoGenBusy, initialLayout?.sizes?.videogen?.width, initialLayout?.sizes?.videogen?.height]);
+  }, [videoModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphVideoModel, shot.graphVideoResolution, shot.graphVideoDurationSec, shot.graphVideoParams, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceRefId, videoPromptValue, taggedVideo, stable, prod.meta.id, videoGenBusy]);
 
   /** Build one edit node's gen+prompt pair. `editNode` supplies its prompt and
    *  generation history; node ids carry its stable id (`editgen:edit0`). */
@@ -2033,13 +2367,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: editGenNodeId(editNode.id),
         type: "editgen",
         position: genPos,
-        style: sizeStyle(initialLayout, editGenNodeId(editNode.id), 300),
+        style: fixedWidth(300),
         data: {
           nodeId: editNode.id,
-          models: imageModels,
+          models: imageModels.filter((m) => modelOnSurface(m, "image:edit")),
           defaultResolution: prod.openArt?.resolution ?? "1k",
           savedModel: editNode.model,
           savedResolution: editNode.resolution,
+          savedParams: editNode.params,
           items: (editNode.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: editNode.genIndex ?? 0,
           sourceHint,
@@ -2048,6 +2383,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           onSelect: (index: number) => stable.onSelectEditGen(editNode.id, index),
           onCycle: (dir: 1 | -1) => stable.onCycleEditGen(editNode.id, dir),
           onSave: (patch) => stable.onEditNodeSave(editNode.id, patch),
+          onModelSchema: stable.onModelSchema,
+          onZoom: stable.onZoom,
         },
         deletable: true,
       },
@@ -2059,12 +2396,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: true,
       },
     ];
-  }, [imageModels, prod.openArt?.resolution, prod.meta.id, references, taggedEditByNode, editBusyNodeIds, stable, initialLayout]);
+  }, [imageModels, prod.openArt?.resolution, prod.meta.id, references, taggedEditByNode, editBusyNodeIds, stable]);
 
   /** Place a tool dragged from the right panel at the drop point. Video lands
    *  as a gen+prompt pair, the in-betweener as a single node, and edit appends
    *  a new edit node to the shot's list. */
-  const addTool = useCallback((kind: "video" | "edit" | "tween", pos: { x: number; y: number }) => {
+  const addTool = useCallback((kind: "video" | "edit" | "tween" | "editvideo", pos: { x: number; y: number }) => {
     const genPos = { x: pos.x, y: pos.y };
     const promptPos = { x: pos.x - 400, y: pos.y };
     if (kind === "edit") {
@@ -2076,6 +2413,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       cb.current.onGraphField({ graphEditNodes: [...editNodes, { id: nodeId, prompt: "" }] });
       saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       showHint("Edit-image node added — connect a source and an edit prompt, then edit.");
+      return;
+    }
+    if (kind === "editvideo") {
+      if (hasEditVideoTool) { showHint("The edit-video node is already on the canvas."); return; }
+      const pair = editVideoPair(genPos, promptPos);
+      const next = [...nodesRef.current, ...pair];
+      nodesRef.current = next;
+      setNodes(next);
+      setPlacedTools((prev) => { const n = new Set(prev); n.add("editvideo"); n.add("editvideoprompt"); return n; });
+      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      showHint("Edit-video node added — wire a source clip and write the edit in its prompt node.");
       return;
     }
     const present = kind === "video" ? hasVideoTool : hasTweenTool;
@@ -2090,19 +2438,21 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     setPlacedTools((prev) => { const n = new Set(prev); for (const node of pair) n.add(node.id); return n; });
     saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
     showHint(kind === "video" ? "Video generation node added — connect a frame or reference in, then generate." : "In-betweener added — pipe 2–5 keyframes (references or generated frames) into its sockets, then open the timeline.");
-  }, [editNodes, hasVideoTool, hasTweenTool, showHint, editPair, videoPair, tweenNode]);
+  }, [editNodes, hasVideoTool, hasTweenTool, hasEditVideoTool, showHint, editPair, videoPair, tweenNode, editVideoPair]);
 
-  /** Remove the placed video/tween tool from the canvas (returns it to the
-   *  right panel). Tools that are in use (generations/pipes/prompt) stay. */
-  const removeTool = useCallback((kind: "video" | "tween") => {
-    const ids = kind === "video" ? ["videogen", "videoprompt"] : ["tween"];
-    if (kind === "video" ? videoGenActive : tweenActive) return;
+  /** Remove the placed video/tween/edit-video tool from the canvas (returns it
+   *  to the right panel). Tools that are in use (generations/pipes/prompt) stay. */
+  const removeTool = useCallback((kind: "video" | "tween" | "editvideo") => {
+    const ids = kind === "video" ? ["videogen", "videoprompt"]
+      : kind === "editvideo" ? ["editvideo", "editvideoprompt"]
+      : [kind];
+    if (kind === "video" ? videoGenActive : kind === "tween" ? tweenActive : editVideoActive) return;
     setPlacedTools((prev) => { const n = new Set(prev); for (const id of ids) n.delete(id); return n; });
     const next = nodesRef.current.filter((n) => !ids.includes(n.id));
     nodesRef.current = next;
     setNodes(next);
     saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
-  }, [videoGenActive, tweenActive]);
+  }, [videoGenActive, tweenActive, editVideoActive]);
 
   const buildDerived = useCallback((): GraphNode[] => {
     const ORIGIN = { x: 0, y: 0 };
@@ -2164,9 +2514,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         position: ORIGIN,
         // Resizable: the saved size restores the user's last expansion, else
         // the default width (the CSS min keeps the blank state legible).
-        style: initialLayout?.sizes?.output
-          ? { width: initialLayout.sizes.output.width, height: initialLayout.sizes.output.height }
-          : { width: 300 },
+        style: sizeStyle(initialLayout, "output", 300),
         data: (() => {
           // The output mirrors ONLY its pipe: the bound node's selected
           // generation, or the piped reference's own media. Nothing is piped
@@ -2189,6 +2537,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             // first stitch the frame stays blank like any empty pipe.
             if (shot.graphTweenOutput) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, shot.graphTweenOutput), previewKind: "video" as const, bound: true };
           }
+          if (shot.graphOutputSource === "editvideo") {
+            const sel = shot.graphEditVideoGens?.[shot.graphEditVideoGenIndex ?? 0];
+            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "video" as const, bound: true };
+          }
           if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) {
             const ref = references.find((r) => r.id === shot.graphOutputRefId);
             if (ref?.media === "video" && ref.mediaPath) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, ref.mediaPath), previewKind: "video" as const, bound: true };
@@ -2202,25 +2554,30 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         id: "imagegen",
         type: "imagegen" as const,
         position: ORIGIN,
-        style: sizeStyle(initialLayout, "imagegen", 300),
+        style: fixedWidth(300),
         data: {
-          models: imageModels,
+          models: imageModels.filter((m) => modelOnSurface(m, "image:generate")),
           defaultModel: prod.openArt?.model ?? "auto",
           defaultResolution: prod.openArt?.resolution ?? "1k",
+          savedParams: shot.graphImageParams,
           items: (shot.graphImageGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: shot.graphImageGenIndex ?? 0,
           busy: imageGenBusy === true,
           onGenerate: stable.onRunImageGen,
           onSelect: stable.onSelectImageGen,
           onCycle: stable.onCycleImageGen,
+          onModelSchema: stable.onModelSchema,
+          onSaveFields: stable.onSaveVideoFields,
+          onZoom: stable.onZoom,
         },
         deletable: false,
       }),
       ...(hasVideoTool ? videoPair(ORIGIN, ORIGIN).map((n) => build(n)) : []),
       ...editNodes.flatMap((n) => editPair(n, ORIGIN, ORIGIN).map((node) => build(node))),
       ...(hasTweenTool ? [build(tweenNode(ORIGIN))] : []),
+      ...(hasEditVideoTool ? editVideoPair(ORIGIN, ORIGIN).map((n) => build(n)) : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, imageModels, videoModels, references, hasVideoTool, hasTweenTool, videoPair, editPair, tweenNode, imageGenBusy, videoGenBusy, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height, initialLayout?.sizes?.imagegen?.width, initialLayout?.sizes?.imagegen?.height, initialLayout?.sizes?.videogen?.width, initialLayout?.sizes?.videogen?.height]);
+  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphImageParams, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, imageModels, videoModels, references, hasVideoTool, hasTweenTool, hasEditVideoTool, videoPair, editPair, tweenNode, editVideoNode, editVideoPair, taggedEditVideo, editVideoPromptValue, imageGenBusy, videoGenBusy, editVideoBusy, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -2303,6 +2660,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.missing as boolean) === (b.missing as boolean);
       else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
       else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
+      else if (d.type === "editvideo") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean) && (a.piped as boolean) === (b.piped as boolean) && (a.sourceLabel as string | null) === (b.sourceLabel as string | null);
       if (equal) return old;
       changed = true;
       // A rebuilt node keeps its canvas geometry: position, selection, and —
@@ -2343,8 +2701,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     // the dropdown to "None" removes the Style paragraph but keeps the plug.
     const styleAttached = shot.graphStyleConnected ?? /^Style:/m.test(prompt);
     const styleAttachedVideo = shot.graphVideoStyleConnected ?? /^Style:/m.test(videoPromptValue);
+    const styleAttachedEditVideo = /^Style:/m.test(editVideoPromptValue);
     const brandAttached = hasBrandParagraph(prompt);
     const brandAttachedVideo = hasBrandParagraph(videoPromptValue);
+    const brandAttachedEditVideo = hasBrandParagraph(editVideoPromptValue);
     const nodeIdForTag = (name: string): string => {
       const entry = unionTagged.find((t) => t.name.toLowerCase() === name.toLowerCase());
       const idx = unionTagged.findIndex((t) => t.name.toLowerCase() === name.toLowerCase());
@@ -2392,10 +2752,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           selected: selectedEdges.has(id),
         };
       })),
+      // Edit-video prompt reference edges.
+      ...taggedEditVideo.map((t, i) => {
+        const refNodeId = nodeIdForTag(t.name);
+        const id = `e-${refNodeId}-editvideoprompt-${i}`;
+        return {
+          id,
+          source: refNodeId,
+          target: "editvideoprompt",
+          targetHandle: `in-ref-${i}`,
+          style: { stroke: SOCKET_COLORS.ref },
+          reconnectable: false,
+          selected: selectedEdges.has(id),
+        };
+      }),
       ...(styleAttached ? [{ id: "e-style", source: "style", target: "composer", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
       ...(styleAttachedVideo ? [{ id: "e-style-vp", source: "style", target: "videoprompt", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
+      ...(styleAttachedEditVideo ? [{ id: "e-style-evp", source: "style", target: "editvideoprompt", targetHandle: "in-style", style: { stroke: SOCKET_COLORS.style }, deletable: false, reconnectable: false }] : []),
       ...(brandAttached ? [{ id: "e-brand", source: "brand", target: "composer", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
       ...(brandAttachedVideo ? [{ id: "e-brand-vp", source: "brand", target: "videoprompt", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
+      ...(brandAttachedEditVideo ? [{ id: "e-brand-evp", source: "brand", target: "editvideoprompt", targetHandle: "in-brand", style: { stroke: SOCKET_COLORS.brand }, deletable: false, reconnectable: false }] : []),
       // Per-edit-node style / brand plugs.
       ...editNodes.flatMap((n) => {
         const pv = editPromptValues.get(n.id) ?? "";
@@ -2408,10 +2784,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       // feed the video/edit nodes; pipes into the output mirror the binding.
       { id: "e-cmp-img", source: "composer", target: "imagegen", targetHandle: "in-prompt", deletable: false, reconnectable: false },
       ...(hasVideoTool ? [{ id: "e-vp-vid", source: "videoprompt", target: "videogen", targetHandle: "in-prompt", deletable: false, reconnectable: false }] : []),
+      ...(hasEditVideoTool ? [{ id: "e-evp-ev", source: "editvideoprompt", target: "editvideo", targetHandle: "in-prompt", deletable: false, reconnectable: false }] : []),
       ...editNodes.map((n) => ({ id: `e-ep-edit:${n.id}`, source: editPromptNodeId(n.id), target: editGenNodeId(n.id), targetHandle: "in-prompt", deletable: false, reconnectable: false })),
       ...(shot.graphImageToVideo ? [{ id: "e-img-vid", source: "imagegen", target: "videogen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
       ...(shot.graphEditToVideo && shot.graphVideoSourceEditNodeId ? [{ id: "e-edit-vid", source: editGenNodeId(shot.graphVideoSourceEditNodeId), target: "videogen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
       ...(shot.graphVideoSourceRefId && references.some((r) => r.id === shot.graphVideoSourceRefId) ? [{ id: "e-ref-vid", source: `ref:${shot.graphVideoSourceRefId}`, target: "videogen", targetHandle: "in-image", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
+      // Edit-video node: one source wire (video node clip or a video ref).
+      ...(hasEditVideoTool && shot.graphVideoToEditVideo ? [{ id: "e-vid-ev", source: "videogen", target: "editvideo", targetHandle: "in-video", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
+      ...(hasEditVideoTool && shot.graphEditVideoSourceRefId && references.some((r) => r.id === shot.graphEditVideoSourceRefId) ? [{ id: "e-ref-ev", source: `ref:${shot.graphEditVideoSourceRefId}`, target: "editvideo", targetHandle: "in-video", style: { stroke: SOCKET_COLORS.ref }, deletable: false, reconnectable: false }] : []),
       // Each edit node's source pipe (image node / parent edit node / reference).
       ...editNodes.flatMap((n): Edge[] => {
         const src = n.source;
@@ -2440,7 +2820,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       // composer's classic straight-to-output pipe is gone.
     ];
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unionTagged, tagged, taggedVideo, taggedEditByNode, editNodes, editPromptValues, selectedEdges, prompt, videoPromptValue, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphVideoSourceRefId, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphTweenRefIds, referencesSig, hasVideoTool, hasTweenTool]);
+  }, [unionTagged, tagged, taggedVideo, taggedEditByNode, editNodes, editPromptValues, selectedEdges, prompt, videoPromptValue, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphVideoSourceRefId, shot.graphVideoToEditVideo, shot.graphEditVideoSourceRefId, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphTweenRefIds, referencesSig, hasVideoTool, hasTweenTool, hasEditVideoTool]);
 
   const onNodesChange = useCallback<OnNodesChange<GraphNode>>((changes) => {
     // Canonical controlled flow: apply every change (position, select,
@@ -2569,6 +2949,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         }
         if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
         if (cb.current.graphVideoSourceRefId === refId) cb.current.onGraphField({ graphVideoSourceRefId: undefined });
+        if (cb.current.graphEditVideoSourceRefId === refId) cb.current.onGraphField({ graphEditVideoSourceRefId: undefined });
         if ((cb.current.graphTweenRefIds ?? []).includes(refId)) {
           cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId));
         }
@@ -2577,8 +2958,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     nodesRef.current = final;
     setNodes(final);
     // A resize reports as a `dimensions` change (committed when the drag
-    // ends) — persist the resizable nodes' sizes alongside positions so an
-    // enlarged frame/clip survives closing and reopening the graph.
+    // ends) — persist the frame output's size alongside positions so an
+    // enlarged frame survives closing and reopening the graph.
     const resized = changes.some((c) => c.type === "dimensions" || (c as { type: string }).type === "resize");
     if (dragStop || removed.length > 0 || toolNodeIds.size > 0 || resized) {
       // One save per drag gesture. The state only ever contains live nodes,
@@ -2616,9 +2997,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           setSelectedEdges(new Set());
           continue;
         }
+        // Edit-video source wire: select + Delete unbinds it.
+        if (c.id === "e-vid-ev") { cb.current.onGraphField({ graphVideoToEditVideo: undefined }); setSelectedEdges(new Set()); continue; }
+        if (c.id === "e-ref-ev") { cb.current.onGraphField({ graphEditVideoSourceRefId: undefined }); setSelectedEdges(new Set()); continue; }
         // Reference edges are deletable via keyboard (select+Delete) —
         // ids are `e-<refId>-<target>-<idx>` for the prompt nodes.
-        const m = /^e-(.+)-(composer|videoprompt|editprompt(?::[^:]+)?)-(\d+)$/.exec(c.id);
+        const m = /^e-(.+)-(composer|videoprompt|editvideoprompt|editprompt(?::[^:]+)?)-(\d+)$/.exec(c.id);
         if (m) {
           const [, , targetKind, idxStr] = m;
           const idx = Number(idxStr);
@@ -2630,6 +3014,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             const name = refTagNames(fresh)[idx] ?? taggedVideo[idx]?.name;
             if (name) {
               if (!applyDraftEdit("video", (t) => removeRefTag(t, name))) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, name) });
+            }
+          } else if (targetKind === "editvideoprompt") {
+            const fresh = appliers.current["editvideo"]?.get() ?? cb.current.graphEditVideoPrompt ?? "";
+            const name = refTagNames(fresh)[idx] ?? taggedEditVideo[idx]?.name;
+            if (name) {
+              if (!applyDraftEdit("editvideo", (t) => removeRefTag(t, name))) cb.current.onGraphField({ graphEditVideoPrompt: removeRefTag(cb.current.graphEditVideoPrompt ?? "", name) });
             }
           } else {
             const nodeId = targetKind === "editprompt" ? "edit0" : targetKind.slice(EDITPROMPT_NODE_PREFIX.length);
@@ -2659,7 +3049,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         });
       }
     }
-  }, [tagged, taggedVideo, taggedEditByNode, prompt, onPromptChange]);
+  }, [tagged, taggedVideo, taggedEditVideo, taggedEditByNode, prompt, onPromptChange]);
 
   const onConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
@@ -2681,6 +3071,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     };
     const srcEditId = parseEditGenNode(conn.source);
     const tgtEditId = parseEditGenNode(conn.target);
+    // Edit-video node: `in-video` = the source clip (video node / video ref).
+    // References ride the edit-video prompt node's sockets, like the video node.
+    if (conn.target === "editvideo") {
+      if (conn.targetHandle === "in-video") {
+        if (conn.source === "videogen") { cb.current.onGraphField({ graphVideoToEditVideo: true, graphEditVideoSourceRefId: undefined }); return; }
+        const rid = /^ref:(.+)$/.exec(conn.source)?.[1];
+        const ref = rid ? references.find((r) => r.id === rid) : undefined;
+        if (ref && ref.media === "video") { cb.current.onGraphField({ graphEditVideoSourceRefId: rid, graphVideoToEditVideo: undefined }); return; }
+      }
+      return;
+    }
     // Generation pipes: the image node's output feeds the video/edit image
     // inputs and/or the output (both can coexist); the video/edit nodes feed
     // the output; a reference can feed the output or an edit node's source.
@@ -2723,8 +3124,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     // Prompt nodes: style / brand / reference inputs — exactly like composer.
     const isComposer = conn.target === "composer";
     const isVideo = conn.target === "videoprompt";
+    const isEditVideoPrompt = conn.target === "editvideoprompt";
     const editPromptId = conn.target === "editprompt" ? "edit0" : conn.target.startsWith(EDITPROMPT_NODE_PREFIX) ? conn.target.slice(EDITPROMPT_NODE_PREFIX.length) : null;
-    if (isComposer || isVideo || editPromptId) {
+    if (isComposer || isVideo || isEditVideoPrompt || editPromptId) {
       const editFresh = editPromptId ? (appliers.current[`edit:${editPromptId}`]?.get() ?? cb.current.editPromptValues.get(editPromptId) ?? "") : "";
       const editCur = editPromptId ? (cb.current.editPromptValues.get(editPromptId) ?? "") : "";
       const applyEdit = (fn: (t: string) => string) => {
@@ -2734,6 +3136,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const applyVideo = (fn: (t: string) => string) => {
         if (!applyDraftEdit("video", fn)) cb.current.onGraphField({ graphVideoPrompt: fn(cb.current.videoPromptValue) });
       };
+      const applyEditVideo = (fn: (t: string) => string) => {
+        if (!applyDraftEdit("editvideo", fn)) cb.current.onGraphField({ graphEditVideoPrompt: fn(cb.current.graphEditVideoPrompt ?? "") });
+      };
       if (conn.source === "style") {
         const text = cb.current.styles.find((s) => s.id === cb.current.styleValue)?.prompt.trim() ?? "";
         if (isComposer) {
@@ -2742,6 +3147,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         } else if (isVideo) {
           cb.current.onGraphField({ graphVideoStyleConnected: true });
           applyVideo((t) => addStyleParagraph(t, text));
+        } else if (isEditVideoPrompt) {
+          applyEditVideo((t) => addStyleParagraph(t, text));
         } else {
           patchEditNode(editPromptId!, { styleConnected: true });
           applyEdit((t) => addStyleParagraph(t, text));
@@ -2759,6 +3166,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           if (!hasBrandParagraph(fresh)) applyVideo((t) => hasBrandParagraph(t) ? t : getBrandNext(t));
           return;
         }
+        if (isEditVideoPrompt) {
+          const fresh = appliers.current["editvideo"]?.get() ?? cb.current.graphEditVideoPrompt ?? "";
+          if (!hasBrandParagraph(fresh)) applyEditVideo((t) => hasBrandParagraph(t) ? t : getBrandNext(t));
+          return;
+        }
         if (!hasBrandParagraph(editFresh)) applyEdit(getBrandNext);
         return;
       }
@@ -2774,6 +3186,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (!applyDraftEdit("composer", place)) onPromptChange(place(prompt));
       }
       else if (isVideo) applyVideo(place);
+      else if (isEditVideoPrompt) applyEditVideo(place);
       else applyEdit(place);
       return;
     }
@@ -2796,9 +3209,21 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       return ids.includes(keyId) || ids.length < 5;
     };
     if (source === "videoprompt") return c.target === "videogen" && c.targetHandle === "in-prompt";
+    if (source === "editvideoprompt") return c.target === "editvideo" && c.targetHandle === "in-prompt";
     if (source === "composer") return c.target === "imagegen" && c.targetHandle === "in-prompt";
     const srcEditId = parseEditGenNode(source);
     const tgtEditId = parseEditGenNode(c.target ?? "");
+    // Edit-video node: the source socket takes a video node clip or a video
+    // reference. References ride the edit-video prompt node's sockets.
+    if (c.target === "editvideo") {
+      if (c.targetHandle === "in-video") {
+        if (source === "videogen") return true;
+        const rid = /^ref:(.+)$/.exec(source)?.[1];
+        const ref = rid ? references.find((r) => r.id === rid) : undefined;
+        return !!ref && ref.media === "video";
+      }
+      return false;
+    }
     const editPromptId = source === "editprompt" ? "edit0" : source.startsWith(EDITPROMPT_NODE_PREFIX) ? source.slice(EDITPROMPT_NODE_PREFIX.length) : null;
     const targetEditPrompt = c.target === "editprompt" || (c.target ?? "").startsWith(EDITPROMPT_NODE_PREFIX);
     if (editPromptId) return parseEditGenNode(c.target ?? "") === editPromptId && c.targetHandle === "in-prompt";
@@ -2836,14 +3261,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const ids = shot.graphTweenRefIds ?? [];
         return ids.includes(refId) || ids.length < 5;
       }
-      if (c.target === "composer" || c.target === "videoprompt" || targetEditPrompt) {
+      if (c.target === "composer" || c.target === "videoprompt" || c.target === "editvideoprompt" || targetEditPrompt) {
         // The open socket appends; dropping onto an occupied reference socket
         // replaces the reference in that slot (same type — an image/any ref).
         return (c.targetHandle === "in-ref-open" || /^in-ref-\d+$/.test(c.targetHandle ?? "")) && !!ref;
       }
       return false;
     }
-    if (c.target === "composer" || c.target === "videoprompt" || targetEditPrompt) {
+    if (c.target === "composer" || c.target === "videoprompt" || c.target === "editvideoprompt" || targetEditPrompt) {
       if (source === "style") return c.targetHandle === "in-style";
       if (source === "brand") return c.targetHandle === "in-brand";
       return false;
@@ -3025,6 +3450,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (refTagNames(freshComposer).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) { if (!applyDraftEdit("composer", (t) => removeRefTag(t, unionEntry.name))) cb.current.onPromptChange(removeRefTag(cb.current.prompt, unionEntry.name)); }
         const freshVideo = appliers.current["video"]?.get() ?? cb.current.videoPromptValue;
         if (refTagNames(freshVideo).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) { if (!applyDraftEdit("video", (t) => removeRefTag(t, unionEntry.name))) cb.current.onGraphField({ graphVideoPrompt: removeRefTag(cb.current.videoPromptValue, unionEntry.name) }); }
+        const freshEditVideo = appliers.current["editvideo"]?.get() ?? cb.current.graphEditVideoPrompt ?? "";
+        if (refTagNames(freshEditVideo).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) { if (!applyDraftEdit("editvideo", (t) => removeRefTag(t, unionEntry.name))) cb.current.onGraphField({ graphEditVideoPrompt: removeRefTag(cb.current.graphEditVideoPrompt ?? "", unionEntry.name) }); }
         const editUnionNext = (cb.current.graphEditNodes ?? []).map((n) => {
           const fresh = appliers.current[`edit:${n.id}`]?.get() ?? n.prompt ?? "";
           if (!refTagNames(fresh).some((nm) => nm.toLowerCase() === unionEntry.name.toLowerCase())) return n;
@@ -3035,6 +3462,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       }
       if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
       if (cb.current.graphVideoSourceRefId === refId) cb.current.onGraphField({ graphVideoSourceRefId: undefined });
+      if (cb.current.graphEditVideoSourceRefId === refId) cb.current.onGraphField({ graphEditVideoSourceRefId: undefined });
       // A keyframe removed from the canvas leaves the tween wiring too.
       if ((cb.current.graphTweenRefIds ?? []).includes(refId)) {
         cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId));
@@ -3058,8 +3486,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   }, []);
 
   // Ctrl+V with an image creates a reference AND places its node on the
-  // canvas — same as dropping the file, but at the viewport center. Text
-  // pastes are untouched.
+  // canvas — same as dropping the file, but at the viewport center. Pasted
+  // files are auto-numbered (Ref-001…) by the parent so a batch never collides
+  // on a generic clipboard file name. Text pastes are untouched.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
@@ -3074,6 +3503,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (!files.length) return;
       e.preventDefault();
       void (async () => {
+        if (onPasteFiles) {
+          const refs = await onPasteFiles(files);
+          for (const ref of refs ?? []) addPlacedRef(ref, pastePosition());
+          return;
+        }
         for (const file of files) {
           const ref = await onDropFile(file);
           if (ref) addPlacedRef(ref, pastePosition());
@@ -3082,7 +3516,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [onDropFile, addPlacedRef, pastePosition]);
+  }, [onDropFile, onPasteFiles, addPlacedRef, pastePosition]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -3092,7 +3526,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const pos = { x: Number.isFinite(p?.x) ? (p?.x ?? 0) : 0, y: Number.isFinite(p?.y) ? (p?.y ?? 0) : 0 };
     // Right-panel tool drag: place a video/edit/tween node at the drop point.
     const toolKind = e.dataTransfer.getData("application/x-cascade-tool");
-    if (toolKind === "video" || toolKind === "edit" || toolKind === "tween") {
+    if (toolKind === "video" || toolKind === "edit" || toolKind === "tween" || toolKind === "editvideo") {
       addTool(toolKind, pos);
       return;
     }
@@ -3234,7 +3668,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           {lightbox && (
             <div className="prod-ref-lightbox prod-graph-lightbox" onClick={() => setLightbox(null)}>
               <figure className="prod-ref-lightbox-card">
-                <img src={lightbox.artwork} alt={lightbox.name} />
+                {lightbox.kind === "video" ? (
+                  <video className="prod-ref-lightbox-video" src={lightbox.artwork} controls autoPlay playsInline />
+                ) : (
+                  <img src={lightbox.artwork} alt={lightbox.name} />
+                )}
                 <figcaption>{lightbox.name} — click anywhere to close</figcaption>
               </figure>
             </div>
@@ -3280,6 +3718,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                 {hasEditTool && <span className="prod-graph-shelf-count">{editNodes.length}</span>}
               </div>
               <div
+                className={"prod-graph-tools-item" + (hasEditVideoTool ? " on-canvas" : "")}
+                draggable={!hasEditVideoTool}
+                title={hasEditVideoTool ? "Already on the canvas" : "Drag onto the canvas to add the edit-video node"}
+                onDragStart={(e) => {
+                  e.dataTransfer.setData("application/x-cascade-tool", "editvideo");
+                  e.dataTransfer.effectAllowed = "copy";
+                }}
+              >
+                <EditVideoIcon size={14} className="prod-graph-tools-icon" />
+                <span className="prod-graph-tools-label">Edit video</span>
+                {hasEditVideoTool && (
+                  <button
+                    className="prod-graph-tools-remove"
+                    disabled={editVideoActive}
+                    title={editVideoActive ? "In use — has clips or is piped" : "Remove from the canvas"}
+                    onClick={() => removeTool("editvideo")}
+                  ><XIcon size={9} /></button>
+                )}
+              </div>
+              <div
                 className={"prod-graph-tools-item" + (hasTweenTool ? " on-canvas" : "")}
                 draggable={!hasTweenTool}
                 title={hasTweenTool ? "Already on the canvas" : "Drag onto the canvas to add the in-betweener node"}
@@ -3316,8 +3774,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           onModelOptions={stable.onModelOptions}
           onModelChange={(m) => { onGraphField({ graphTweenModel: m }); rememberMediaDefault("tween", { model: m }); }}
           onResolutionChange={(r) => { onGraphField({ graphTweenResolution: r }); rememberMediaDefault("tween", { resolution: r }); }}
+          params={shot.graphTweenParams ?? {}}
+          onParamsChange={(p) => onGraphField({ graphTweenParams: p })}
+          onModelSchema={stable.onModelSchema}
           onBlocksChange={(b: TweenBlock[]) => onGraphField({ graphTweenBlocks: b })}
-          onRunBlock={(blockId: string, durationSec: number, model: string) => onRunTweenBlock(blockId, durationSec, model)}
+          onRunBlock={(blockId: string, durationSec: number, model: string, params?: GenParams) => onRunTweenBlock(blockId, durationSec, model, params)}
           busyBlock={busyBlock}
           onStitch={() => onStitchTween()}
           onUnstitch={() => onUnstitchTween()}

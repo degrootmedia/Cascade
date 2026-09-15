@@ -13,8 +13,10 @@
  * needs to stay visually correct, never to persist novel shapes.
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { GraphGenItem, OpenArtModelChoice, TweenBlock, VideoModelOptions } from "../../../shared/ipc.js";
+import type { CliModelSchema, GenParams, GraphGenItem, OpenArtModelChoice, TweenBlock, VideoModelOptions } from "../../../shared/ipc.js";
 import { closestResolution } from "./resolution.js";
+import { ModelOptionsForm, type ModelOptionValues } from "./ModelOptionsForm.js";
+import { seedModelOptionValues } from "./production/model-param-defaults.js";
 
 export const TWEEN_MIN_REFS = 2;
 export const TWEEN_MAX_REFS = 5;
@@ -208,8 +210,14 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   resolution: string;
   videoModels: OpenArtModelChoice[];
   onModelOptions: (model: string, withImage: boolean) => Promise<VideoModelOptions | null>;
+  /** The selected model's full option schema (Advanced panel). */
+  onModelSchema: (model: string) => Promise<CliModelSchema | null>;
   onModelChange: (model: string) => void;
   onResolutionChange: (resolution: string) => void;
+  /** Persisted advanced/variant params (keyed by canonical flag; aspect
+   *  ratio lives under `aspect_ratio`). */
+  params: GenParams;
+  onParamsChange: (params: GenParams) => void;
   /** Persist block edits (prompt, timing, history selection). */
   onBlocksChange: (blocks: TweenBlock[]) => void;
   /** Generate one block's clip. `model` is the dropdown's CURRENT selection
@@ -217,7 +225,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
    *  from what the user sees selected, even when the persisted pick fell back
    *  to the first listed model. Also rides the block's displayed length (it
    *  can be newer than the last save after a keyframe drag). */
-  onRunBlock: (blockId: string, durationSec: number, model: string) => Promise<void>;
+  onRunBlock: (blockId: string, durationSec: number, model: string, params?: GenParams) => Promise<void>;
   busyBlock: string | null;
   /** Stitch every block's selected clip into the continuous shot. */
   onStitch: () => Promise<void>;
@@ -237,12 +245,14 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
 }) {
   const {
     prodId, shotNumber, refIds, blocks, keyframes, model, resolution, videoModels,
-    onModelOptions, onModelChange, onResolutionChange, onBlocksChange,
+    onModelOptions, onModelSchema, onModelChange, onResolutionChange,
+    params, onParamsChange, onBlocksChange,
     onRunBlock, busyBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
     stitchUrl, onPipeToOutput, piped, onClose,
   } = props;
 
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
+  const [schema, setSchema] = useState<CliModelSchema | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [drag, setDrag] = useState<{ index: number; t: number } | null>(null);
@@ -263,9 +273,20 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   useEffect(() => {
     let live = true;
     setOpts(null);
-    if (model) void onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+    setSchema(null);
+    if (model) {
+      void onModelOptions(model, true).then((o) => { if (live) setOpts(o); }).catch(() => {});
+      void onModelSchema(model).then((s) => {
+        if (!live) return;
+        setSchema(s);
+        // Seed the configured per-surface defaults (a persisted block value wins).
+        const seeded = seedModelOptionValues(s, model, "video:tween", params as ModelOptionValues);
+        if (seeded !== params) onParamsChange(seeded as GenParams);
+      }).catch(() => {});
+    }
     return () => { live = false; };
-  }, [model, onModelOptions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, onModelOptions, onModelSchema]);
 
   // Duration options for EVERY listed model (image-to-video form — the tween
   // always submits start+end frames). The per-model cache in NodeGraphModal
@@ -413,6 +434,14 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
             {resolutions.includes(resolution) ? null : <option value={resolution}>{resolution}</option>}
             {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
+          <ModelOptionsForm
+            schema={schema}
+            value={params as ModelOptionValues}
+            onChange={(next) => onParamsChange(next as GenParams)}
+            exclude={["resolution", "duration", "length", "seconds"]}
+            compact
+            persistKey="cascade.modelOptions.advanced.tween"
+          />
           <span className="prod-tween-spacer" />
           {stitched && (
             <span className="prod-tween-stitched" title={reencoded ? "Block codecs differed, so the preview was re-encoded. The assembly package still uses the original clips." : "Lossless stitch — no recompression."}>
@@ -511,7 +540,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                     <button
                       className="prod-btn primary prod-tween-go"
                       disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || blocked}
-                      onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec, effectiveModel); }}
+                      onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec, effectiveModel, params); }}
                       title={noneFit ? `No model supports a ${b.durationSec}s block. Retime the block or pick another model.` : badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
                     >
                       {busyBlock === b.id ? "Generating…" : "Submit block"}

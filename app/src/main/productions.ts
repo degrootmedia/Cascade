@@ -7,8 +7,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Production, ProductionMeta, ProductionShot } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations, relocateBoardLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
+import type { GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock } from "../shared/ipc.js";
+import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations, relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -32,10 +32,12 @@ function normalize(p: ProductionFile): ProductionFile {
   p.styles ??= [];
   p.brand ??= { colors: [], font: "" };
   p.currentStep ??= 1;
-  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" };
+  // `videosDir` is legacy: clips now live in each shot's board folder under
+  // `video/`. It's only read by `relocateVideoLayout` (below) to find old flat
+  // files; normalize never recreates it.
+  p.assets ??= { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" };
   p.assets.voiceoverDir ??= "voiceover";
   p.assets.musicDir ??= "music";
-  p.assets.videosDir ??= "videos";
   p.assets.referencesDir ??= "references";
   p.assets.assemblyDir ??= "assembly";
   p.assets.modelsDir ??= "models";
@@ -85,7 +87,7 @@ export function listProductions(): ProductionMeta[] {
 
 /** Current production schema version. Bump when adding a one-time migration
  *  to migrateBoardArtwork; loads with >= this value skip the board walk. */
-export const PRODUCTION_SCHEMA_VERSION = 1;
+export const PRODUCTION_SCHEMA_VERSION = 2;
 
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
@@ -135,6 +137,189 @@ export function saveProduction(p: ProductionFile): void {
   store.save(p);
 }
 
+/**
+ * Prefer the incoming generation index when both snapshots agree on the
+ * node's history, but keep the fresh index when the histories diverged (a
+ * generation landed after the snapshot was captured — the stale index is
+ * positional and would select the wrong take). Readers treat undefined as 0.
+ */
+function takeGenIndex(
+  incomingIdx: number | undefined,
+  incomingGens: { path: string }[] | undefined,
+  freshIdx: number | undefined,
+  freshGens: { path: string }[] | undefined
+): number | undefined {
+  if (incomingIdx === undefined) return freshIdx;
+  const same = JSON.stringify(incomingGens ?? []) === JSON.stringify(freshGens ?? []);
+  return same ? incomingIdx : freshIdx;
+}
+
+/** Merge one shot's edit-image nodes by stable node id: the fresh node owns
+ *  its generation history (main-side appends), the incoming snapshot owns the
+ *  node's editable fields (prompt, wiring, model picks). Nodes only the
+ *  incoming snapshot has are creations racing this save — adopt them whole. */
+function mergeEditNodes(
+  freshNodes: GraphEditNode[] | undefined,
+  incomingNodes: GraphEditNode[] | undefined
+): GraphEditNode[] | undefined {
+  if (!incomingNodes) return freshNodes;
+  const incomingById = new Map<string, GraphEditNode>();
+  for (const n of incomingNodes) {
+    if (n && typeof n.id === "string" && !incomingById.has(n.id)) incomingById.set(n.id, n);
+  }
+  const out = (freshNodes ?? []).map((fn) => {
+    const inc = incomingById.get(fn.id);
+    if (!inc) return fn;
+    const { gens: _gens, genIndex: _idx, id: _id, ...rest } = inc;
+    const node: GraphEditNode = { ...fn, ...rest };
+    node.genIndex = takeGenIndex(inc.genIndex, inc.gens, fn.genIndex, fn.gens);
+    return node;
+  });
+  for (const [id, inc] of incomingById) {
+    if (!(freshNodes ?? []).some((n) => n.id === id)) out.push({ ...inc });
+  }
+  return out;
+}
+
+/** Merge in-betweener action blocks by keyframe pair (start/end source ids —
+ *  block ids are positional and reshuffle when keyframes reorder). The fresh
+ *  block owns its generation history; the incoming snapshot owns the block's
+ *  prompt and timing. Pairs only the incoming snapshot has are re-derived
+ *  from the (incoming) keyframe list by syncTweenBlocks below. */
+function mergeTweenBlocks(
+  freshBlocks: TweenBlock[] | undefined,
+  incomingBlocks: TweenBlock[] | undefined
+): TweenBlock[] | undefined {
+  if (!incomingBlocks) return freshBlocks;
+  const incomingByPair = new Map<string, TweenBlock>();
+  for (const b of incomingBlocks) {
+    if (!b) continue;
+    const key = `${b.startRefId}→${b.endRefId}`;
+    if (!incomingByPair.has(key)) incomingByPair.set(key, b);
+  }
+  return (freshBlocks ?? []).map((fb) => {
+    const ib = incomingByPair.get(`${fb.startRefId}→${fb.endRefId}`);
+    if (!ib) return fb;
+    const { gens: _gens, genIndex: _idx, id: _id, startRefId: _s, endRefId: _e, ...rest } = ib;
+    const block: TweenBlock = { ...fb, ...rest };
+    block.genIndex = takeGenIndex(ib.genIndex, ib.gens, fb.genIndex, fb.gens);
+    return block;
+  });
+}
+
+/**
+ * Merge one shot's renderer edits onto the fresh shot. The fresh shot owns
+ * its identity, its number, and every path-bearing field (artwork, histories,
+ * generation arrays, clip paths) — those are written main-side by generations
+ * and by relocateBoardsForRenumber, and a stale snapshot must never resurrect
+ * or cross-wire them. The incoming snapshot owns everything the renderer
+ * edits (text, prompts, pipes, selections, flags). Two exceptions:
+ * explicit nulls on `artwork`/`videoPath` are honoured (the node-graph
+ * pipe/unpipe flows clear the storyboard frame that way), and a `videoPath`
+ * string rides through when the output feeds the edit-video node (no pipe
+ * sync derives it — there is no follow-up channel for that selection).
+ */
+function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot): ProductionShot {
+  const { voiceoverPath: _v, transition: _t, ...incomingFields } = incoming as ProductionShot & {
+    voiceoverPath?: unknown; transition?: unknown;
+  };
+  const incomingRec = incomingFields as unknown as Record<string, unknown>;
+  // Main-owned fields: never copied from the incoming snapshot.
+  const DENIED = new Set([
+    "id", "number",
+    "artworkHistory",
+    "graphImageGens", "graphVideoGens", "graphEditGens", "graphEditVideoGens",
+    "graphTweenOutput", "pendingImageGen", "graphMigrated",
+    "graphImageGenIndex", "graphVideoGenIndex", "graphEditVideoGenIndex",
+  ]);
+  const merged: ProductionShot = { ...freshShot };
+  const mergedRec = merged as unknown as Record<string, unknown>;
+  // Legacy fields no longer used (single-VO model, cuts-only timeline) —
+  // stripped from whichever side still carries them so they don't resurface.
+  delete mergedRec.voiceoverPath;
+  delete mergedRec.transition;
+  for (const [key, value] of Object.entries(incomingRec)) {
+    if (DENIED.has(key)) continue;
+    if (key === "artwork" || key === "videoPath") continue; // explicit-null / editvideo rules below
+    if (key === "graphEditNodes" || key === "graphTweenBlocks") continue; // merged by id / pair below
+    mergedRec[key] = value;
+  }
+  merged.graphImageGenIndex = takeGenIndex(
+    incoming.graphImageGenIndex, incoming.graphImageGens,
+    freshShot.graphImageGenIndex, freshShot.graphImageGens
+  );
+  merged.graphVideoGenIndex = takeGenIndex(
+    incoming.graphVideoGenIndex, incoming.graphVideoGens,
+    freshShot.graphVideoGenIndex, freshShot.graphVideoGens
+  );
+  merged.graphEditVideoGenIndex = takeGenIndex(
+    incoming.graphEditVideoGenIndex, incoming.graphEditVideoGens,
+    freshShot.graphEditVideoGenIndex, freshShot.graphEditVideoGens
+  );
+  merged.graphEditNodes = mergeEditNodes(freshShot.graphEditNodes, incoming.graphEditNodes);
+  merged.graphTweenBlocks = mergeTweenBlocks(freshShot.graphTweenBlocks, incoming.graphTweenBlocks);
+  // Explicit clears ride the whole-document save (unpipe flows send
+  // artwork/videoPath as explicit nulls). A stale echo carries paths, never
+  // nulls, so honouring nulls cannot resurrect or cross-wire frames.
+  if ("artwork" in incomingFields && (incoming as { artwork?: unknown }).artwork == null) merged.artwork = undefined;
+  if ("videoPath" in incomingFields && (incoming as { videoPath?: unknown }).videoPath == null) merged.videoPath = undefined;
+  if (
+    merged.graphOutputSource === "editvideo"
+    && typeof incoming.videoPath === "string" && incoming.videoPath
+  ) {
+    merged.videoPath = incoming.videoPath;
+  }
+  return merged;
+}
+
+/**
+ * Merge renderer-owned scene edits onto the freshest on-disk scenes.
+ *
+ * Whole-document renderer saves (`production:save`) are captured from the
+ * renderer's snapshot, which can predate a structural change that committed
+ * first — the classic case is a shot drag-reorder (new order, new numbers,
+ * relocated board folders) racing an in-flight graph/text save. Copying the
+ * incoming scenes wholesale would revert the order, reattach stale numbers,
+ * and point artwork at another shot's folder; the pipe sync would then
+ * "heal" the artwork from the wrong selection, visibly swapping pure and
+ * edited frames.
+ *
+ * So the fresh document owns everything structural — scene membership and
+ * order, shot numbers, and all path-bearing fields — matched per shot by
+ * stable id (a shot moved across scenes is found in its new scene). The
+ * incoming snapshot contributes only the fields the renderer edits. Shots the
+ * fresh document no longer has (deleted after the snapshot) stay deleted;
+ * the save's edits to surviving shots still apply.
+ */
+function mergeRendererScenes(fresh: ProductionFile, incoming: Production): void {
+  if (!Array.isArray(incoming.scenes)) return;
+  const incomingById = new Map<string, ProductionShot>();
+  for (const scene of incoming.scenes) {
+    if (!scene || !Array.isArray(scene.shots)) continue;
+    for (const shot of scene.shots) {
+      if (shot && typeof shot.id === "string" && !incomingById.has(shot.id)) incomingById.set(shot.id, shot);
+    }
+  }
+  for (const scene of fresh.scenes) {
+    for (let i = 0; i < scene.shots.length; i++) {
+      const prev = incomingById.get(scene.shots[i].id);
+      if (prev) scene.shots[i] = mergeRendererShot(scene.shots[i], prev);
+    }
+  }
+  for (const shot of fresh.scenes.flatMap((s) => s.shots)) {
+    // Fold any legacy single-edit fields from a stale renderer payload into
+    // the edit-node list before the output pipe is re-derived from it.
+    migrateEditNodes(shot);
+    // The output pipe is authoritative: re-derive artwork/videoPath so a
+    // renderer save with a stale or missing frame can't diverge from the
+    // graph's frame output node (e.g. an edit-image node piped to output).
+    syncBoardOutputToPipe(shot);
+    // Tween keyframes must point at live references — prune deleted refs so
+    // a stale save can't leave phantom action blocks behind.
+    syncTweenBlocks(fresh, shot);
+  }
+}
+
 /** Merge renderer-owned state onto the freshest on-disk production.
  *
  *  `fresh` is the document just loaded from disk — it is never clobbered
@@ -152,28 +337,18 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.brand = p.brand && Array.isArray(p.brand.colors)
     ? { colors: p.brand.colors.slice(0, 5).map((c) => String(c)), font: typeof p.brand.font === "string" ? p.brand.font : "" }
     : { colors: [], font: "" };
-  fresh.scenes = Array.isArray(p.scenes) ? p.scenes.map((sc) => ({
-    ...sc,
-    shots: sc.shots.map((sh) => {
-      // Legacy fields no longer used (single-VO model, cuts-only timeline).
-      const { voiceoverPath: _v, transition: _t, ...rest } = sh as typeof sh & { voiceoverPath?: unknown; transition?: unknown };
-      // Fold any legacy single-edit fields from a stale renderer payload into
-      // the edit-node list before the output pipe is re-derived from it.
-      migrateEditNodes(rest);
-      // The output pipe is authoritative: re-derive artwork/videoPath so a
-      // renderer save with a stale or missing frame can't diverge from the
-      // graph's frame output node (e.g. an edit-image node piped to output).
-      syncBoardOutputToPipe(rest);
-      // Tween keyframes must point at live references — prune deleted refs so
-      // a stale save can't leave phantom action blocks behind.
-      syncTweenBlocks(p, rest);
-      return rest;
-    }),
-  })) : [];
+  // Scenes merge per shot by stable id (see mergeRendererScenes): the fresh
+  // document owns order, numbers, and all media paths, so a renderer snapshot
+  // that predates a shot reorder can neither revert the order nor cross-wire
+  // frames between shots. Shots the renderer deleted stay deleted.
+  mergeRendererScenes(fresh, p);
+  // promptOverrides is keyed by displayed shot number and written main-side
+  // (ingest stashes manual prompts, reorder remaps them) — the renderer never
+  // edits it through a save, so the fresh map always wins. Replacing it with
+  // a stale snapshot's map would reattach overrides to the wrong shots after
+  // a reorder.
   fresh.promptOverrides =
-    p.promptOverrides && typeof p.promptOverrides === "object"
-      ? Object.fromEntries(Object.entries(p.promptOverrides).filter(([, v]) => typeof v === "string" && v.trim()))
-      : {};
+    fresh.promptOverrides && typeof fresh.promptOverrides === "object" ? { ...fresh.promptOverrides } : {};
   fresh.characters = Array.isArray(p.characters) ? p.characters : [];
   fresh.products = Array.isArray(p.products) ? p.products : [];
   fresh.references = Array.isArray(p.references) ? p.references : [];
@@ -217,8 +392,16 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     };
   }
   if (typeof p.meta.name === "string" && p.meta.name.trim()) fresh.meta.name = p.meta.name.trim();
+  // magicPrompts IS renderer-edited through saves (the prompt drawer writes
+  // magicPrompts[shotId]), so merge per key: incoming non-blank entries win,
+  // incoming blanks clear, and fresh-only keys survive a stale snapshot
+  // (e.g. a save captured before a bulk magic-prompt generation landed).
   if (p.magicPrompts && typeof p.magicPrompts === "object") {
-    fresh.magicPrompts = Object.fromEntries(Object.entries(p.magicPrompts).filter(([, v]) => typeof v === "string" && v.trim()).map(([k, v]) => [k, String(v).trim().slice(0, 2000)]));
+    fresh.magicPrompts ??= {};
+    for (const [k, v] of Object.entries(p.magicPrompts)) {
+      if (typeof v === "string" && v.trim()) fresh.magicPrompts[k] = v.trim().slice(0, 2000);
+      else delete fresh.magicPrompts[k];
+    }
   } else if (p.magicPrompts === undefined) {
     fresh.magicPrompts = fresh.magicPrompts ?? {};
   }
@@ -254,6 +437,7 @@ function migrateBoardArtwork(p: Production): boolean {
       if (syncTweenBlocks(p, s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;
+      if (relocateVideoLayout(p, s)) changed = true;
       if (syncBoardOutputToPipe(s)) changed = true;
       if (s.artworkHistory) {
         const next = s.artworkHistory.map((rel) => rel);
@@ -268,6 +452,12 @@ function migrateBoardArtwork(p: Production): boolean {
         if (hChanged) { s.artworkHistory = next; changed = true; }
       }
     }
+  }
+  // The legacy flat video folder is no longer part of the layout; drop the
+  // field once every shot's clips have been relocated into its `video/` folder.
+  if ((p.assets as { videosDir?: string }).videosDir) {
+    delete (p.assets as { videosDir?: string }).videosDir;
+    changed = true;
   }
   if (migrateReferenceArtwork(p)) changed = true;
   return changed;
@@ -335,12 +525,12 @@ export function newProduction(name: string, parentFolder: string): ProductionFil
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
     schemaVersion: PRODUCTION_SCHEMA_VERSION,
   };
   // Scaffold the asset folders inside the user's production folder.
-  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
     try {
       fs.mkdirSync(path.join(folder, d), { recursive: true });
     } catch {
@@ -399,12 +589,12 @@ export function importProduction(folder: string): ProductionFile {
     references: [],
     openArt: { model: "auto", resolution: "1k" },
     status: {},
-    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
     assembly: { fps: 24, width: 1920, height: 1080, exportDir: "out/assembly" },
     schemaVersion: PRODUCTION_SCHEMA_VERSION,
   };
   // Scaffold only what's missing — never delete or overwrite.
-  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.videosDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
+  for (const d of [p.assets.boardsDir, p.assets.voiceoverDir, p.assets.musicDir, p.assets.outDir, p.assets.referencesDir, p.assets.modelsDir, `${p.assets.outDir}/${p.assets.assemblyDir}`]) {
     try {
       fs.mkdirSync(path.join(resolved, d), { recursive: true });
     } catch {

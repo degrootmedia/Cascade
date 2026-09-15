@@ -1,10 +1,17 @@
 /**
  * Expenses ledger — the running tally of every AI generation made in-app.
  *
- * Owns the whole expense concept: the durable ledger (entries + pricing rules
- * in userData/ledger.json), the human-readable CSV mirror
- * (userData/expenses.csv) rewritten on every mutation, and the pure price-rule
- * matcher that turns a generation's metadata into a dollar amount.
+ * Owns the whole expense concept: the per-production entry ledgers
+ * (userData/ledger/<productionId>.json, one per project), the global pricing
+ * rules (userData/ledger.json — vendor-wide, not project data), each
+ * project's human-readable CSV mirror (userData/ledger/<productionId>.csv)
+ * rewritten on every mutation, and the pure price-rule matcher that turns a
+ * generation's metadata into a dollar amount.
+ *
+ * Entries are scoped to the production that produced them (the generation's
+ * `productionId`), so a project's Expenses page shows only its own spend.
+ * Deleting/archiving a production's ledger is the caller's concern (wiring);
+ * the global rules file is never per-project.
  *
  * Pricing is range-based: one rule per model holds a min→max dollar range and
  * the model's baked option ladder (resolutions + video length range). The
@@ -71,18 +78,31 @@ void import("electron")
  *  the first read/write. */
 export function setLedgerUserDataDir(dir: string): void {
   userDataDir = dir;
-  cache = null;
+  rulesCache = null;
+  projectCache.clear();
 }
 
-interface LedgerFile {
-  entries: LedgerEntry[];
+/** The global pricing-rules doc (userData/ledger.json). Entries used to live
+ *  here too; `version: 2` moved them into per-production files. */
+interface RulesFile {
   priceRules: ExpensePriceRule[];
+  updatedAt: string;
+  version: number;
+}
+
+/** One production's entry ledger (userData/ledger/<productionId>.json). */
+interface ProjectLedgerFile {
+  productionId: string;
+  entries: LedgerEntry[];
   updatedAt: string;
 }
 
-const DEFAULTS: LedgerFile = { entries: [], priceRules: [], updatedAt: "" };
+/** Current on-disk ledger schema. 1 = legacy single-file (rules + entries),
+ *  2 = rules in ledger.json, entries split per production. */
+const RULES_VERSION = 2;
 
-let cache: LedgerFile | null = null;
+let rulesCache: RulesFile | null = null;
+const projectCache = new Map<string, ProjectLedgerFile>();
 
 function ledgerDir(): string {
   if (!userDataDir) throw new Error("Ledger userData dir not available (is this running inside Electron?)");
@@ -93,12 +113,134 @@ function ledgerJsonPath(): string {
   return path.join(ledgerDir(), "ledger.json");
 }
 
-function ledgerCsvPath(): string {
-  return path.join(ledgerDir(), "expenses.csv");
+function entriesDir(): string {
+  return path.join(ledgerDir(), "ledger");
+}
+
+/** Guard a production id before it becomes a filename. Real ids are
+ *  store-generated (`<base36>-<random>`) so this only rejects corrupt callers. */
+function validProductionId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{1,128}$/.test(id);
+}
+
+function entryFilePath(productionId: string): string {
+  if (!validProductionId(productionId)) throw new Error(`Invalid production id for ledger: ${productionId}`);
+  return path.join(entriesDir(), `${productionId}.json`);
+}
+
+function entryCsvPath(productionId: string): string {
+  if (!validProductionId(productionId)) throw new Error(`Invalid production id for ledger: ${productionId}`);
+  return path.join(entriesDir(), `${productionId}.csv`);
 }
 
 function newId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Read + normalize the global pricing rules, running the one-time split of
+ *  legacy single-file entries into per-production ledgers. Migrated entries
+ *  without a `productionId` are dropped (unattributable), then ledger.json is
+ *  rewritten rules-only. */
+function loadRules(): RulesFile {
+  if (rulesCache) return rulesCache;
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(ledgerJsonPath(), "utf8")) as Record<string, unknown>;
+  } catch {
+    // no rules file yet — start empty
+  }
+  const priceRules = Array.isArray(raw.priceRules)
+    ? migrateRules(raw.priceRules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null))
+    : [];
+  const version = typeof raw.version === "number" ? raw.version : 1;
+  rulesCache = {
+    priceRules,
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : "",
+    version: RULES_VERSION,
+  };
+  if (version < RULES_VERSION) {
+    migrateEntries(raw.entries);
+    saveRules();
+  }
+  return rulesCache;
+}
+
+/** One-time split of the legacy global `entries` array into per-production
+ *  files. Rows without a `productionId` cannot be attributed to any project
+ *  and are discarded. */
+function migrateEntries(legacy: unknown): void {
+  if (!Array.isArray(legacy)) return;
+  const byProject = new Map<string, LedgerEntry[]>();
+  for (const e of legacy) {
+    const entry = normalizeEntry(e as LedgerEntry);
+    if (!entry || !entry.productionId || !validProductionId(entry.productionId)) continue;
+    const list = byProject.get(entry.productionId) ?? [];
+    list.push(entry);
+    byProject.set(entry.productionId, list);
+  }
+  for (const [productionId, entries] of byProject) {
+    const f = loadProject(productionId);
+    f.entries = [...f.entries, ...entries];
+    f.updatedAt = new Date().toISOString();
+    saveProject(f);
+  }
+}
+
+function loadProject(productionId: string): ProjectLedgerFile {
+  // Ensure the one-time legacy split has run before reading per-project files
+  // (loadRules sets its cache before migrating, so this is re-entrancy-safe).
+  loadRules();
+  const cached = projectCache.get(productionId);
+  if (cached) return cached;
+  let f: ProjectLedgerFile = { productionId, entries: [], updatedAt: "" };
+  try {
+    const raw = JSON.parse(fs.readFileSync(entryFilePath(productionId), "utf8")) as Partial<ProjectLedgerFile>;
+    f.entries = Array.isArray(raw.entries)
+      ? raw.entries.map(normalizeEntry).filter((x): x is LedgerEntry => x !== null)
+      : [];
+    f.updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : "";
+  } catch {
+    // no ledger for this production yet — start empty
+  }
+  projectCache.set(productionId, f);
+  return f;
+}
+
+/** Atomic temp+rename write of one production's ledger, then its CSV mirror. */
+function saveProject(f: ProjectLedgerFile): void {
+  fs.mkdirSync(entriesDir(), { recursive: true });
+  const target = entryFilePath(f.productionId);
+  const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(f, null, 2), "utf8");
+  fs.renameSync(tmp, target);
+  writeProjectCsv(f);
+}
+
+/** Atomic temp+rename write of the global rules file. */
+function saveRules(): void {
+  const f = loadRules();
+  fs.mkdirSync(ledgerDir(), { recursive: true });
+  const target = ledgerJsonPath();
+  const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(f, null, 2), "utf8");
+  fs.renameSync(tmp, target);
+}
+
+/** Every per-production ledger on disk (newest read order isn't needed here). */
+function loadAllProjects(): ProjectLedgerFile[] {
+  let files: string[];
+  try {
+    files = fs.readdirSync(entriesDir());
+  } catch {
+    return [];
+  }
+  const out: ProjectLedgerFile[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json") || file.endsWith(".tmp")) continue;
+    const id = file.slice(0, -".json".length);
+    if (validProductionId(id)) out.push(loadProject(id));
+  }
+  return out;
 }
 
 /** Position of a resolution label on a 0..1 scale inside a ladder: exact
@@ -230,40 +372,12 @@ function migrateRules(rules: ExpensePriceRule[]): ExpensePriceRule[] {
   return [...byKey.values()];
 }
 
-function load(): LedgerFile {
-  if (cache) return cache;
-  let f: LedgerFile = { ...DEFAULTS, entries: [], priceRules: [] };
-  try {
-    f = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(ledgerJsonPath(), "utf8")) };
-  } catch {
-    // no ledger file yet — start empty
-  }
-  f.entries = Array.isArray(f.entries) ? f.entries.map(normalizeEntry).filter((x): x is LedgerEntry => x !== null) : [];
-  f.priceRules = Array.isArray(f.priceRules)
-    ? migrateRules(f.priceRules.map(normalizeRule).filter((x): x is ExpensePriceRule => x !== null))
-    : [];
-  f.updatedAt = typeof f.updatedAt === "string" ? f.updatedAt : "";
-  cache = f;
-  return cache;
-}
-
-/** Atomic temp+rename write (mirrors store.ts), then rewrite the CSV mirror. */
-function save(): void {
-  const f = load();
-  fs.mkdirSync(ledgerDir(), { recursive: true });
-  const target = ledgerJsonPath();
-  const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(f, null, 2), "utf8");
-  fs.renameSync(tmp, target);
-  writeCsv();
-}
-
 const csvEscape = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
 
-/** The human-readable text mirror of the ledger. Rewritten on every mutation,
- *  oldest-first (a chronological log) so the file reads like a running tally. */
-function writeCsv(): void {
-  const f = load();
+/** The human-readable text mirror of one production's ledger. Rewritten on
+ *  every mutation, oldest-first (a chronological log) so the file reads like a
+ *  running tally. */
+function writeProjectCsv(f: ProjectLedgerFile): void {
   const rows = [...f.entries].reverse().map((e) =>
     [
       new Date(e.at).toISOString(),
@@ -278,17 +392,22 @@ function writeCsv(): void {
       .join(",")
   );
   const body = ["date,kind,model,resolution,duration_sec,price,label", ...rows].join("\r\n") + "\r\n";
-  fs.mkdirSync(ledgerDir(), { recursive: true });
-  const target = ledgerCsvPath();
+  fs.mkdirSync(entriesDir(), { recursive: true });
+  const target = entryCsvPath(f.productionId);
   const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
   fs.writeFileSync(tmp, body, "utf8");
   fs.renameSync(tmp, target);
 }
 
-/** Record one successful AI generation. The price is derived from the current
- *  rules at record time; later rule edits re-price it via repriceAll(). */
+/** Record one successful AI generation against its production. The price is
+ *  derived from the current rules at record time; later rule edits re-price it
+ *  via repriceAll(). A generation with no `productionId` can't be attributed
+ *  to a project and is dropped. */
 export function recordGeneration(meta: LedgerGenMeta): void {
-  const f = load();
+  const productionId = meta.productionId;
+  if (!productionId || !validProductionId(productionId)) return;
+  const rules = loadRules();
+  const f = loadProject(productionId);
   f.entries.unshift({
     id: newId(),
     kind: meta.kind,
@@ -296,18 +415,18 @@ export function recordGeneration(meta: LedgerGenMeta): void {
     resolution: meta.resolution || "",
     durationSec: meta.kind === "video" ? meta.durationSec : undefined,
     aspectRatio: meta.aspectRatio,
-    price: matchPriceRule(f.priceRules, meta),
+    price: matchPriceRule(rules.priceRules, meta),
     at: meta.at || Date.now(),
-    productionId: meta.productionId,
+    productionId,
     shotId: meta.shotId,
   });
   f.updatedAt = new Date().toISOString();
-  save();
+  saveProject(f);
 }
 
-/** Add a manual "purchased asset" row with a custom dollar amount. */
-export function addManualEntry(label: string, amount: number): LedgerView {
-  const f = load();
+/** Add a manual "purchased asset" row to one production's ledger. */
+export function addManualEntry(productionId: string, label: string, amount: number): LedgerView {
+  const f = loadProject(productionId);
   f.entries.unshift({
     id: newId(),
     kind: "manual",
@@ -316,57 +435,65 @@ export function addManualEntry(label: string, amount: number): LedgerView {
     price: Number.isFinite(amount) ? Math.max(0, amount) : 0,
     at: Date.now(),
     label: String(label ?? "").trim() || "Manual expense",
+    productionId,
   });
   f.updatedAt = new Date().toISOString();
-  save();
-  return view();
+  saveProject(f);
+  return view(productionId);
 }
 
-/** Remove one ledger row. */
-export function removeEntry(id: string): LedgerView {
-  const f = load();
+/** Remove one row from a production's ledger. */
+export function removeEntry(productionId: string, id: string): LedgerView {
+  const f = loadProject(productionId);
   const before = f.entries.length;
   f.entries = f.entries.filter((e) => e.id !== id);
   if (f.entries.length !== before) {
     f.updatedAt = new Date().toISOString();
-    save();
+    saveProject(f);
   }
-  return view();
+  return view(productionId);
 }
 
-/** Re-run the current rules over every existing generation, overwriting each
- *  entry's price. Manual rows keep their custom amounts. Pure on the persisted
- *  data — unit-tested. */
-export function repriceAll(): LedgerView {
-  const f = load();
-  let changed = false;
-  for (const e of f.entries) {
-    if (e.kind === "manual") continue;
-    const price = matchPriceRule(f.priceRules, {
-      kind: e.kind,
-      model: e.model,
-      resolution: e.resolution,
-      durationSec: e.durationSec,
-      aspectRatio: e.aspectRatio,
-      at: e.at,
-      productionId: e.productionId,
-      shotId: e.shotId,
-    });
-    if (price !== e.price) {
-      e.price = price;
-      changed = true;
+/** The generation metadata an entry prices against (drops the pricing-irrelevant
+ *  fields, normalizing "manual" out — callers skip manual rows first). */
+function entryMeta(e: LedgerEntry): LedgerGenMeta {
+  return {
+    kind: e.kind === "video" ? "video" : "image",
+    model: e.model,
+    resolution: e.resolution,
+    durationSec: e.durationSec,
+    aspectRatio: e.aspectRatio,
+    at: e.at,
+    productionId: e.productionId,
+    shotId: e.shotId,
+  };
+}
+
+/** Re-run the current rules over every production's generations, overwriting
+ *  each entry's price. Manual rows keep their custom amounts. */
+export function repriceAll(): void {
+  const rules = loadRules();
+  for (const f of loadAllProjects()) {
+    let changed = false;
+    for (const e of f.entries) {
+      if (e.kind === "manual") continue;
+      const price = matchPriceRule(rules.priceRules, entryMeta(e));
+      if (price !== e.price) {
+        e.price = price;
+        changed = true;
+      }
+    }
+    if (changed) {
+      f.updatedAt = new Date().toISOString();
+      saveProject(f);
     }
   }
-  if (changed) {
-    f.updatedAt = new Date().toISOString();
-    save();
-  }
-  return view();
 }
 
-/** The renderer read model: newest-first entries plus the running total. */
-export function view(): LedgerView {
-  const f = load();
+/** The renderer read model for one production: newest-first entries plus the
+ *  running total. */
+export function view(productionId: string): LedgerView {
+  const f = loadProject(productionId);
   let total = 0;
   let imageCount = 0;
   let videoCount = 0;
@@ -379,18 +506,18 @@ export function view(): LedgerView {
 }
 
 export function getPriceRules(): ExpensePriceRule[] {
-  return load().priceRules;
+  return loadRules().priceRules;
 }
 
-/** Persist pricing rules and immediately re-price every existing generation
- *  against them (manual rows untouched). */
+/** Persist pricing rules and immediately re-price every production's existing
+ *  generations against them (manual rows untouched). */
 export function setPriceRules(rules: ExpensePriceRule[]): void {
-  const f = load();
+  const f = loadRules();
   f.priceRules = Array.isArray(rules)
     ? migrateRules(rules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null))
     : [];
   f.updatedAt = new Date().toISOString();
-  save();
+  saveRules();
   repriceAll();
 }
 
@@ -497,13 +624,43 @@ export function writePriceRulesFile(filePath: string, rules: ExpensePriceRule[])
   fs.renameSync(tmp, filePath);
 }
 
-/** Open the CSV text ledger in the OS file manager. */
-export async function openLedgerFile(): Promise<void> {
+/** Open one production's CSV text ledger in the OS file manager. */
+export async function openLedgerFile(productionId: string): Promise<void> {
   if (!shell) {
     const m = await import("electron").catch(() => null);
     if (!m?.shell) return;
     shell = m.shell;
   }
-  const p = ledgerCsvPath();
+  const p = entryCsvPath(productionId);
   if (fs.existsSync(p)) await shell.openPath(p);
+}
+
+/** Drop a production's ledger files (JSON + CSV). Called when the production is
+ *  hard-deleted from the workspace so its spend can't linger as an orphan. */
+export function removeProject(productionId: string): void {
+  if (!validProductionId(productionId)) return;
+  projectCache.delete(productionId);
+  try {
+    fs.rmSync(entryFilePath(productionId), { force: true });
+    fs.rmSync(entryCsvPath(productionId), { force: true });
+  } catch {
+    /* nothing to remove */
+  }
+}
+
+/** Soft-delete a production's ledger into ledger/archive/ (mirrors the
+ *  production document store's archive). */
+export function archiveProject(productionId: string): void {
+  if (!validProductionId(productionId)) return;
+  projectCache.delete(productionId);
+  const dir = path.join(entriesDir(), "archive");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.renameSync(entryFilePath(productionId), path.join(dir, `${productionId}.json`));
+    if (fs.existsSync(entryCsvPath(productionId))) {
+      fs.renameSync(entryCsvPath(productionId), path.join(dir, `${productionId}.csv`));
+    }
+  } catch {
+    /* nothing to archive */
+  }
 }

@@ -7,6 +7,7 @@ import { mcpChannels } from "./ipc-channels/mcp.js";
 import { agentChannels } from "./ipc-channels/agents.js";
 import { productionChannels } from "./ipc-channels/production.js";
 import { ledgerChannels } from "./ipc-channels/ledger.js";
+import { modelCustomizerChannels } from "./ipc-channels/model-customizer.js";
 
 export interface ApprovalRequestIpc {
   id: number;
@@ -75,6 +76,13 @@ export interface ModelInfo {
 export type ModelListResult =
   | { ok: true; models: ModelInfo[] }
   | { ok: false; error: string };
+
+/** Chat-side account balance for the active provider: credits (gab) or US
+ *  dollars (Cheaper Inference), tagged so the footer formats it correctly. */
+export interface ChatBalance {
+  amount: number;
+  unit: "credits" | "usd";
+}
 
 export interface SkillInfo {
   name: string;
@@ -212,8 +220,8 @@ export interface ProductionMeta {
 export interface GraphLayout {
   /** Node positions keyed by graph node id (ref/composer/style/brand/output). */
   positions?: Record<string, { x: number; y: number }>;
-  /** Node sizes keyed by graph node id (the frame output plus the resizable
-   *  image/edit/video generation nodes). */
+  /** Node sizes keyed by graph node id (the frame output — the generation
+   *  nodes size themselves from their content). */
   sizes?: Record<string, { width: number; height: number }>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
@@ -241,6 +249,9 @@ export interface GraphEditNode {
    *  media-default; unset falls back to it). */
   model?: string;
   resolution?: string;
+  /** Schema-driven advanced/variant params for this edit node (keyed by
+   *  canonical flag). Optional/additive. */
+  params?: GenParams;
 }
 
 export interface ProductionShot {
@@ -302,6 +313,9 @@ export interface ProductionShot {
    *  first), plus the cycled selection index. */
   graphImageGens?: GraphGenItem[];
 graphImageGenIndex?: number;
+  /** Schema-driven advanced/variant params for the image gen node (keyed by
+   *  canonical flag). Optional/additive. */
+  graphImageParams?: GenParams;
   /** Node graph video generation node: stored clips (newest first) + index. */
   graphVideoGens?: GraphGenItem[];
   graphVideoGenIndex?: number;
@@ -313,6 +327,9 @@ graphImageGenIndex?: number;
   graphVideoModel?: string;
   graphVideoResolution?: string;
   graphVideoDurationSec?: number;
+  /** Schema-driven advanced/variant params for the video gen node (keyed by
+   *  canonical flag). Optional/additive — absent on old documents. */
+  graphVideoParams?: GenParams;
   /** Node graph edit-image nodes (zero or more, daisy-chainable). The list is
    *  the source of truth; the legacy flat `graphEdit*` fields below migrate
    *  into a single `edit0` entry on load. */
@@ -366,6 +383,27 @@ graphImageGenIndex?: number;
   graphTweenModel?: string;
   /** The in-betweener node's output resolution label (e.g. "1080p"). */
   graphTweenResolution?: string;
+  /** Node-graph edit-video node: stored edited clips (newest first) + index. */
+  graphEditVideoGens?: GraphGenItem[];
+  graphEditVideoGenIndex?: number;
+  /** The edit-video node's prompt. */
+  graphEditVideoPrompt?: string;
+  /** The edit-video node's model (a video-edit model). */
+  graphEditVideoModel?: string;
+  graphEditVideoResolution?: string;
+  /** Schema-driven advanced params for the edit-video node. */
+  graphEditVideoParams?: GenParams;
+  /** Reference ids feeding the edit-video node (beyond the mandatory source). */
+  graphEditVideoRefIds?: string[];
+  /** A video reference feeding the edit-video source input (the video to
+   *  edit). Absent = the shot's video, or a clip piped from the video node
+   *  (`graphVideoToEditVideo`). */
+  graphEditVideoSourceRefId?: string;
+  /** Whether the video generation node's output feeds the edit-video source. */
+  graphVideoToEditVideo?: boolean;
+  /** Schema-driven advanced/variant params for the in-betweener (keyed by
+   *  canonical flag; `aspect_ratio` lives here). Optional/additive. */
+  graphTweenParams?: GenParams;
   /** Workspace-relative path of the last stitched tween output (the single
    *  continuous clip previewed by the output node and the animatic). */
   graphTweenOutput?: string;
@@ -385,7 +423,7 @@ graphImageGenIndex?: number;
   /** Which node is piped into the output (becomes the shot's primary
    *  artwork/videoPath): an image/video generation node, the in-betweener
    *  node, or a reference. */
-  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "tween" | "ref";
+  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "editvideo" | "tween" | "ref";
   /** The reference feeding the output when `graphOutputSource === "ref"`. */
   graphOutputRefId?: string;
   /** One-time marker: classic generations were moved into the gen nodes. */
@@ -479,6 +517,11 @@ export interface PendingImageGen {
   prompt: string;
   /** The model id used ("auto" when Cascade picked). */
   model: string;
+  /** The resolution the job was submitted at — kept so a reclaimed frame can be
+   *  billed to the ledger exactly as the original generation would have been. */
+  resolution?: string;
+  /** The aspect ratio the job was submitted at (same purpose as resolution). */
+  aspectRatio?: string;
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }
@@ -579,6 +622,15 @@ export interface OpenArtBoardConfig {
    *  that declare one, e.g. Seedream basic/high). Omitted when the model
    *  declares no quality options — the vendor default then applies. */
   quality?: string;
+  /**
+   * Per-model, schema-driven option values keyed by canonical flag name
+   * (see `CliModelSchema`). Optional and additive — old configs load with
+   * `params` undefined and unknown keys from newer schemas are ignored by
+   * older readers. The generic arg builder drops values the active model's
+   * schema doesn't allow, so switching models never carries stale keys
+   * into the next submission.
+   */
+  params?: Record<string, string | number | boolean | string[]>;
 }
 
 /** One named visual style in the Step 2 style set. A production keeps up to 5.
@@ -608,6 +660,69 @@ export interface ProductionStyle {
   resolution?: "1k" | "2k" | "4k";
 }
 
+/** The generation surfaces a model can be offered on. Each picker filters by
+ *  its own surface key (see `modelOnSurface`); the dev Model Customizer lets
+ *  the user assign them per model.
+ *
+ *  Surfaces are deliberately coarse — every picker that should share a model
+ *  pool shares a key:
+ *  - `image:generate` — Step 3 master picker, generate-image node, Step 2
+ *    reference generation, character sheets, and style-frame generation (one
+ *    image-generation pool).
+ *  - `image:edit` — classic edit-frame popup and the node-graph edit-image node.
+ *  - `video:generate` — classic video modal and the node-graph video node.
+ *  - `video:tween` — in-betweener timeline (opt-in end-frame declaration).
+ *  - `video:editnode` — node-graph edit-video node. */
+export type ModelSurface =
+  | "image:generate" // image generation: master board / node / references / characters / style frames
+  | "image:edit"     // image editing: classic edit popup + edit-image node
+  | "video:generate" // video generation: classic video modal + video node
+  | "video:tween"    // in-betweener timeline
+  | "video:editnode"; // node-graph edit-video node
+
+/** Every surface key, in display order. */
+export const MODEL_SURFACES: readonly ModelSurface[] = [
+  "image:generate", "image:edit", "video:generate", "video:tween", "video:editnode",
+];
+
+/** Legacy surface keys from before surfaces were collapsed into pools. Each
+ *  maps to the single surface that now owns its pickers. */
+const LEGACY_MODEL_SURFACES: Record<string, ModelSurface> = {
+  "image:master": "image:generate",
+  "image:node": "image:generate",
+  "image:reference": "image:generate",
+  "image:character": "image:generate",
+  "image:edit": "image:edit",
+  "image:editnode": "image:edit",
+  "video:modal": "video:generate",
+  "video:node": "video:generate",
+  "video:tween": "video:tween",
+  "video:editnode": "video:editnode",
+};
+
+/** Coerce a stored/legacy surface list to the current keys, dropping unknowns.
+ *  The single home for surface-key migration (settings read/write and the
+ *  main-side surface application both go through here). */
+export function normalizeModelSurfaces(list: unknown): ModelSurface[] {
+  if (!Array.isArray(list)) return [];
+  const out = new Set<ModelSurface>();
+  for (const raw of list) {
+    const key = String(raw);
+    const mapped = LEGACY_MODEL_SURFACES[key] ?? (MODEL_SURFACES.includes(key as ModelSurface) ? (key as ModelSurface) : null);
+    if (mapped) out.add(mapped);
+  }
+  return [...out];
+}
+
+/** Whether a model is offered on a surface. Undefined/absent `surfaces` means
+ *  "everywhere it can go" (the default until the user restricts it). */
+export function modelOnSurface(
+  m: Pick<OpenArtModelChoice, "surfaces">,
+  surface: ModelSurface
+): boolean {
+  return !m.surfaces || m.surfaces.includes(surface);
+}
+
 /** An OpenArt model surfaced in the Step 3 model dropdown. */
 export interface OpenArtModelChoice {
   id: string;
@@ -623,6 +738,8 @@ export interface OpenArtModelChoice {
    *  `element2video`). Used to submit in the mode that actually carries
    *  references; absent for non-video models. */
   videoModes?: string[];
+  /** Surfaces this model is allowed on, applied main-side from settings. */
+  surfaces?: ModelSurface[];
 }
 
 /** The one kind classification every dropdown follows: a model is IMAGE only
@@ -676,6 +793,50 @@ export interface MediaDefaultChoice {
 /** The dropdown contexts a media default is remembered for. */
 export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "character" | "tween";
 
+/** The one aspect-ratio default every generation surface shares. The vendor
+ *  image default is 1:1; Cascade deliberately forces 16:9 unless the user
+ *  picks another ratio the model lists. Never send "16x9" — the wire value
+ *  is "16:9". */
+export const DEFAULT_ASPECT_RATIO = "16:9";
+
+/** Normalize a chosen aspect ratio to the shared default. Empty/whitespace
+ *  falls back to 16:9; otherwise the caller's value is returned verbatim
+ *  (only values the model lists is ever submitted). */
+export function resolveAspectRatio(chosen?: string | null): string {
+  return chosen && chosen.trim() ? chosen : DEFAULT_ASPECT_RATIO;
+}
+
+/** A per-node/per-block model-option bag. Values are CLI-ready strings keyed
+ *  by canonical flag (e.g. `{ variant: "sunburst", aspect_ratio: "16:9" }`). */
+export type GenParams = Record<string, string>;
+
+/** Where a model parameter renders in the options form. "hidden" removes it
+ *  from the UI entirely; core/advanced place it in the exposed list or the
+ *  collapsible Advanced panel. */
+export type ModelParamExposure = "core" | "advanced" | "hidden";
+
+/** One user-configured parameter default (dev Model Customizer). Kept in the
+ *  same scalar shapes the options form edits: enum/string as string, numeric
+ *  as number, boolean as boolean, repeatable as string[]. */
+export type ModelParamDefaultValue = string | number | boolean | string[];
+
+/** A provider parameter that is not a first-class exposed control. Derived
+ *  from the provider's live schema as a projection (see CliOptionField). */
+export interface ModelParamOption {
+  /** CLI flag as consumed by the provider layer, e.g. "--variant". */
+  flag: string;
+  /** Stable storage key inside a params map, e.g. "variant". */
+  key: string;
+  /** Ordered values offered by the UI. */
+  values: string[];
+  /** Value used when the user has not chosen one. */
+  defaultValue?: string;
+  /** Presentation class. "advanced" renders inside the collapsible panel. */
+  exposure: "exposed" | "advanced";
+  /** Human label for the control. */
+  label?: string;
+}
+
 /** Choices made in the per-shot video-generation modal. */
 export interface VideoGenOptions {
   /** OpenArt video model id, or "auto" for Cascade to pick. */
@@ -686,6 +847,12 @@ export interface VideoGenOptions {
   durationSec: number;
   /** Motion/animation prompt (may contain @[name] reference tags). */
   prompt: string;
+  /**
+   * Per-model, schema-driven option values keyed by canonical flag name
+   * (see `CliModelSchema`). Optional and additive — same semantics as
+   * `OpenArtBoardConfig.params` for the video path.
+   */
+  params?: Record<string, string | number | boolean | string[]>;
 }
 
 /** The resolution / length options a video model actually accepts, read from
@@ -695,6 +862,15 @@ export interface VideoModelOptions {
   resolutions: string[];
   /** Clip lengths in seconds the model accepts. */
   durations: number[];
+  /** Accepted aspect ratios. The UI default is forced by
+   *  `DEFAULT_ASPECT_RATIO` regardless of the vendor default. */
+  aspectRatios?: string[];
+  /** Accepted quality labels (models that declare a quality/definition enum). */
+  qualities?: string[];
+  defaultQuality?: string;
+  defaultResolution?: string;
+  /** Remaining provider params rendered in the Advanced panel. */
+  params?: ModelParamOption[];
 }
 
 /** The quality options an image model actually accepts, read from its live
@@ -705,6 +881,83 @@ export interface ImageModelOptions {
   qualities: string[];
   /** The model's declared default quality, when it names one we recognize. */
   defaultQuality?: string | null;
+  /** Accepted aspect ratios. UI default is forced by `DEFAULT_ASPECT_RATIO`. */
+  aspectRatios?: string[];
+  /** Accepted --resolution values. */
+  resolutions?: string[];
+  defaultResolution?: string;
+  /** GPT Image 2.5 "--variant" values ("submodels" in UI copy). */
+  submodels?: string[];
+  defaultSubmodel?: string;
+  /** Remaining provider params rendered in the Advanced panel. */
+  params?: ModelParamOption[];
+}
+
+/** How a schema-driven model option value is rendered and emitted. */
+export type CliOptionKind =
+  | "enum"      // values[] present — a closed pick list
+  | "integer"   // whole numbers (duration, seed, batch_size)
+  | "number"    // free numeric input
+  | "boolean"   // explicit true/false flag
+  | "string"    // free text
+  | "array"     // repeatable flag / list value (reference arrays)
+  | "json";     // structured payload (passed inline or via @file)
+
+/** Display grouping for the schema-driven options form. */
+export type CliOptionGroup = "core" | "reference" | "control" | "advanced";
+
+/** How a schema field's value reaches the CLI argv. */
+export type CliOptionEmit =
+  | "value"        // --flag <value>
+  | "boolean-flag" // --flag true | --flag false (always explicit)
+  | "repeat"       // --flag <v> repeated per item
+  | "json-file";   // JSON written to a temp file, emitted as --flag @<path>
+
+/** One normalized model parameter from `model get <job_type> --json`. */
+export interface CliOptionField {
+  /** Canonical folded name, e.g. "aspect_ratio". */
+  name: string;
+  /** Emitted flag without dashes, e.g. "aspect_ratio". */
+  flag: string;
+  /** Folded aliases for value lookup (["aspectratio", ...]). */
+  aliases: string[];
+  kind: CliOptionKind;
+  group: CliOptionGroup;
+  /** Enum member set (kind === "enum" only). */
+  values?: string[];
+  default?: string | number | boolean | string[] | null;
+  min?: number;
+  max?: number;
+  step?: number;
+  /** Whether the CLI requires the flag (or only conditionally). */
+  required?: boolean | "conditional";
+  /** Raw human constraint text from the CLI, if any. */
+  constraint?: string;
+  /** Media role for reference fields (e.g. "image_references"). */
+  mediaRole?: string;
+  repeatable?: boolean;
+  /** Max accepted items for repeatable fields (e.g. 16). */
+  maxItems?: number;
+  emit: CliOptionEmit;
+  /** Provenance for debugging. */
+  source: "parameters" | "topLevel";
+}
+
+/** The normalized per-model option schema, derived live from
+ *  `model get <job_type> --json`. Rendered by `<ModelOptionsForm>` and
+ *  consumed by the generic arg builder. */
+export interface CliModelSchema {
+  jobType: string;
+  /** CLI version that produced the schema (support-report provenance). */
+  cliVersion: string | null;
+  /** Epoch ms of the fetch (TTL + staleness display). */
+  fetchedAt: number;
+  fields: CliOptionField[];
+  aspectRatios: string[];
+  durations: number[];
+  roles: string[];
+  /** Last raw `model get --json` payload (for constraint parsing). */
+  raw: unknown;
 }
 
 /** A discovered media model with its pricing ladder baked — the read model for
@@ -722,6 +975,25 @@ export interface MediaModelLadder {
   durMin: number | null;
   /** Most expensive video length in seconds this model accepts (null for images). */
   durMax: number | null;
+}
+
+/** One probed model in the dev Model Customizer. */
+export interface ModelProbeEntry {
+  /** The provider namespaced choice (id, display name, capabilities). */
+  choice: OpenArtModelChoice;
+  /** Whether the user hides this model from generation dropdowns. */
+  hidden: boolean;
+  /** Manual kind override, when set. */
+  kindOverride?: "image" | "video";
+}
+
+/** One provider's probe result for the dev Model Customizer. */
+export interface ModelProbeResult {
+  provider: MediaProviderId;
+  displayName: string;
+  available: boolean;
+  error?: string;
+  models: ModelProbeEntry[];
 }
 
 /** One row in the expenses ledger — a priced AI generation or a manual
@@ -813,6 +1085,8 @@ export interface ReferenceImageGenOptions {
   categoryId?: string;
   /** When set, the reference's current image is edited in place. */
   sourceRefId?: string;
+  /** Schema-driven advanced/variant params (keyed by canonical flag). */
+  params?: GenParams;
 }
 
 /** The view layout a character-sheet generation produces: front view only, or
@@ -978,7 +1252,7 @@ export interface Production {
    * the lower-right corner of every page.
    */
   storyboardPdf?: StoryboardPdfSettings;
-  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; videosDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string };
+  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string; /** @deprecated Legacy flat video folder; clips now live in each shot's board folder under `video/`. Read only by the one-time relocation migration. */ videosDir?: string };
   /** Schema version gating the one-time board-artwork migrations (perf 1.2):
    *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk
    *  entirely. Missing/older runs the idempotent migrations once, then stamps. */
@@ -1073,9 +1347,6 @@ export interface CascadeApi {
   setExternalEditor(path: string | null): Promise<void>;
   /** Set (or clear with "") the 3D AI Studio API key, encrypted at rest. */
   set3daiApiKey(key: string): Promise<void>;
-  /** Video model ids the user manually declared end-frame capable. */
-  getEndFrameModels(): Promise<string[]>;
-  setEndFrameModels(ids: string[]): Promise<void>;
   /** Media model ids the user hides from the generation model dropdowns. */
   getHiddenMediaModels(): Promise<string[]>;
   setHiddenMediaModels(ids: string[]): Promise<void>;
@@ -1089,6 +1360,26 @@ export interface CascadeApi {
   /** The user's saved media model arrangement (dropdowns follow it). */
   getMediaModelOrder(): Promise<string[]>;
   setMediaModelOrder(ids: string[]): Promise<void>;
+  /** Dev Model Customizer: per-parameter placement (`modelId::flag` →
+   *  core/advanced/hidden). */
+  getModelOptionExposure(): Promise<Record<string, ModelParamExposure>>;
+  setModelOptionExposure(key: string, placement: ModelParamExposure | null): Promise<void>;
+  resetModelOptionExposure(): Promise<void>;
+  /** Per-model surface assignments (which pickers a model is offered on). */
+  getModelSurfaces(): Promise<Record<string, ModelSurface[]>>;
+  setModelSurfaces(surfaces: Record<string, ModelSurface[]>): Promise<void>;
+  resetModelSurfaces(): Promise<void>;
+  /** Dev Model Customizer: per-surface parameter defaults applied when a model
+   *  loads (`<modelId>::<surface>::<flag>` → value). */
+  getModelParamDefaults(): Promise<Record<string, ModelParamDefaultValue>>;
+  setModelParamDefault(key: string, value: ModelParamDefaultValue | null): Promise<void>;
+  resetModelParamDefaults(): Promise<void>;
+  /** Probe one media provider's catalog (dev Model Customizer). Read-only. */
+  probeModels(providerId: MediaProviderId): Promise<ModelProbeResult>;
+  /** Probe one model's full option schema from a specific provider. */
+  probeModelOptions(providerId: MediaProviderId, modelId: string): Promise<CliModelSchema | null>;
+  /** Drop a provider's cached probes so the next probe refetches. */
+  refreshModelProbe(providerId?: MediaProviderId): Promise<void>;
   /** Dev Mode: verbose human-readable submission logging. */
   getDevMode(): Promise<boolean>;
   setDevMode(v: boolean): Promise<void>;
@@ -1113,7 +1404,7 @@ export interface CascadeApi {
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
   onZoomChanged(cb: () => void): () => void;
   listModels(): Promise<ModelListResult>;
-  getCredits(): Promise<number | null>;
+  getCredits(): Promise<ChatBalance | null>;
   /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
   getOpenArtCredits(): Promise<number | null>;
 
@@ -1380,7 +1671,8 @@ export interface CascadeApi {
   /**
    * Step 3/4: generate a video clip for one shot, using its current frame
    * (full resolution) plus any @[name] references as visual references.
-   * Writes the clip into videosDir and stores the relative path on the shot.
+   * Writes the clip into the shot's board folder under `video/` and stores the
+   * relative path on the shot.
    */
   generateVideo(productionId: string, shotId: string, opts: VideoGenOptions): Promise<Production>;
   /**
@@ -1388,7 +1680,7 @@ export interface CascadeApi {
    * composer's text) without touching the shot's artwork — the result is
    * stored on the image generation node. Returns the updated production.
    */
-  generateFrameNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string }): Promise<Production>;
+  generateFrameNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; params?: GenParams }): Promise<Production>;
   /**
    * Step 3 node graph: generate one video clip for the video generation node.
    * `sourcePath` overrides the animated source frame (workspace-relative);
@@ -1428,7 +1720,7 @@ export interface CascadeApi {
    * frame. The result is stored on the named edit node (`nodeId`; the first
    * node when omitted). Returns the updated production.
    */
-  generateEditNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string }): Promise<Production>;
+  generateEditNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; params?: GenParams }): Promise<Production>;
   /**
    * Step 3 node graph: make a generation node's selected output the shot's
    * primary output (artwork for frames, videoPath for clips). Returns the
@@ -1454,11 +1746,21 @@ export interface CascadeApi {
    *  the storyboard quality dropdown hides itself and the vendor default
    *  applies. */
   imageModelOptions(modelId: string): Promise<ImageModelOptions | null>;
+  /** Step 3/4: the full normalized option schema for a model (from its live
+   *  `model get --json` detail). Null when the model form can't be read —
+   *  callers fall back to `videoModelOptions`/`imageModelOptions`. */
+  modelOptions(modelId: string): Promise<CliModelSchema | null>;
   /** Step 3 in-betweener: ids of the video-capable models that accept a
    *  dedicated end-frame slot (live form/schema probe) unioned with the
    *  user's manual allowlist (Settings → Media generation). The tween model
    *  lists offer ONLY these ids. */
   videoEndFrameModels(): Promise<string[]>;
+  /** Ids (namespaced) of the video models that accept a video input (the
+   *  edit-video node's capability probe). Empty when none is proven. */
+  videoEditModels(): Promise<string[]>;
+  /** Step 3 node graph: edit one video (mandatory video source + prompt +
+   *  references) and store the result on the shot's edit-video node. */
+  generateEditVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
   /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
@@ -1512,28 +1814,31 @@ export interface CascadeApi {
   /** Step 3: data URL of the stored storyboard-PDF logo (for the export
    *  dialog preview), or null when none is attached. */
   storyboardLogoImage(productionId: string): Promise<string | null>;
-  /** Expenses: the full ledger (entries + running total + per-kind counts). */
-  getLedger(): Promise<LedgerView>;
-  /** Expenses: the pricing rules edited from Settings. */
+  /** Expenses: one production's ledger (entries + running total + per-kind
+   *  counts). Scope is the production — the ledger is saved per project. */
+  getLedger(productionId: string): Promise<LedgerView>;
+  /** Expenses: the pricing rules edited from Settings. Global — pricing is
+   *  per-model, not per-project. */
   getExpensePriceRules(): Promise<ExpensePriceRule[]>;
   /** Expenses: persist the pricing rules edited from Settings. Saving re-prices
    *  every existing generation against the new ranges (manual rows untouched). */
   setExpensePriceRules(rules: ExpensePriceRule[]): Promise<void>;
-  /** Expenses: re-run the current rules over every existing generation and
-   *  update its price (manual rows untouched). Resolves to the refreshed view. */
-  repriceExpenses(): Promise<LedgerView>;
+  /** Expenses: re-run the current rules over every production's generations and
+   *  update prices (manual rows untouched). Resolves to this project's view. */
+  repriceExpenses(productionId: string): Promise<LedgerView>;
   /** Expenses: save the current price rules to a user-picked CSV file.
    *  Resolves to the saved path, or null when the user cancels. */
   exportExpensePriceRules(): Promise<string | null>;
   /** Expenses: load price rules from a user-picked CSV file and apply them.
    *  Resolves to the applied rules (or null when the user cancels). */
   importExpensePriceRules(): Promise<{ path: string; rules: ExpensePriceRule[] } | null>;
-  /** Expenses: add a manual "purchased asset" row with a custom dollar amount. */
-  addManualExpense(label: string, amount: number): Promise<LedgerView>;
-  /** Expenses: remove one ledger row. */
-  removeLedgerEntry(id: string): Promise<LedgerView>;
-  /** Expenses: open the human-readable CSV ledger in the OS file manager. */
-  openLedgerFile(): Promise<void>;
+  /** Expenses: add a manual "purchased asset" row to one production's ledger. */
+  addManualExpense(productionId: string, label: string, amount: number): Promise<LedgerView>;
+  /** Expenses: remove one row from a production's ledger. */
+  removeLedgerEntry(productionId: string, id: string): Promise<LedgerView>;
+  /** Expenses: open one production's human-readable CSV ledger in the OS file
+   *  manager. */
+  openLedgerFile(productionId: string): Promise<void>;
   /** Pre-generate the node-graph reference-thumbnail cache for every
    *  production (compressed JPEGs), reusing valid entries and pruning stale
    *  ones. Counts: newly encoded / reused from cache / could not encode. */
@@ -1567,6 +1872,7 @@ export const ipcContract = {
   ...agentChannels,
   ...productionChannels,
   ...ledgerChannels,
+  ...modelCustomizerChannels,
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */

@@ -34,7 +34,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { assetPath, type ImageGenFn } from "../pipeline.js";
+import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
 import {
   IMAGE_URL_RX,
   parseJsonLooseArray,
@@ -42,6 +42,7 @@ import {
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
 import type {
+  CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
   LedgerGenMeta,
@@ -64,6 +65,7 @@ import {
 import {
   describeOpenArtDurations,
   extractOpenArtVideoOptions,
+  openArtSchemaFromProps,
   parseOpenArtFormProperties,
   shapeOpenArtModelChoices,
 } from "./openart-core.js";
@@ -94,6 +96,8 @@ const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
 const IMAGE_MODES = ["image2image", "text2image"];
 const VIDEO_IMAGE_MODES = ["image2video", "image_to_video", "img2video", "element2video"];
 const VIDEO_TEXT_MODES = ["text2video", "text_to_video"];
+/** Broad mode list for a provider-agnostic option probe (dev customizer). */
+const ALL_MODES = [...IMAGE_MODES, ...VIDEO_IMAGE_MODES, ...VIDEO_TEXT_MODES];
 
 /** Pull the history/creation id out of a `--async` submit reply: a bare id
  *  string, a `{historyId|id|…}` object, or a UUID buried in prose. */
@@ -241,6 +245,13 @@ export class OpenArtCliProvider implements MediaProvider {
       recorder?: GenerationRecorder;
     }
   ) {}
+
+  /** Drop cached catalog/form/cost probes (dev customizer refresh). */
+  refreshProbes(): void {
+    this.listCache = null;
+    this.formCache.clear();
+    this.costCache = null;
+  }
 
   /** True when an `openart` binary resolves (PATH or Settings override).
    *  Auth is NOT checked here — a signed-out CLI fails loudly with a
@@ -435,6 +446,15 @@ export class OpenArtCliProvider implements MediaProvider {
    *  hides the quality dropdown and the vendor default applies). */
   async imageModelOptions(_modelId: string): Promise<ImageModelOptions | null> {
     return null;
+  }
+
+  /** The full normalized option schema for a model (dev customizer probe).
+   *  Tries every known form mode and takes the first that parses. */
+  async modelOptions(modelId: string): Promise<CliModelSchema | null> {
+    const raw = openArtCliRawId(modelId);
+    if (!raw || raw === "auto" || isForeignId(modelId)) return null;
+    const props = await this.formProps(raw, ALL_MODES).catch(() => null);
+    return props ? openArtSchemaFromProps(raw, props) : null;
   }
 
   /** The CLI (v0.1.1) exposes no end-frame slot on any video model, so the
@@ -641,7 +661,7 @@ export class OpenArtCliProvider implements MediaProvider {
           done = await this.createAndWait(args, false, IMAGE_WAIT_TIMEOUT_MS);
         } catch (e) {
           if (shot && e instanceof OpenArtCliPendingError) {
-            shot.pendingImageGen = { historyId: e.historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, at: new Date().toISOString() };
+            shot.pendingImageGen = { historyId: e.historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, resolution: cfgUsed.resolution, aspectRatio, at: new Date().toISOString() };
           }
           throw e;
         }
@@ -769,11 +789,8 @@ export class OpenArtCliProvider implements MediaProvider {
         emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
       );
 
-      const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
-      const rel = `${p.assets.videosDir}/shot-${shot.number}-${tag}.${safeExt}`;
-      fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
-      fs.writeFileSync(assetPath(p, rel), done.buf);
+      const rel = writeShotVideo(p, shot, done.buf, safeExt);
 
       this.fireGeneration({
         kind: "video",

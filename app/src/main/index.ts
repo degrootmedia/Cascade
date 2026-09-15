@@ -13,13 +13,13 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { styleFramePrompt } from "../shared/look.js";
 import { McpManager } from "./mcp.js";
 import { resolveProductionFile } from "./media-menu.js";
-import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection } from "./pipeline.js";
+import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, shotVideoDir, shotVideoRelPath } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
-import { createProviders, listAllModelLadders, applyKindOverrides, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
+import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary } from "./providers/higgsfield-cli.js";
 import { getOpenArtCliStatus, resolveOpenArtCliBinary } from "./providers/openart-cli.js";
 import { resolvePromptRefs } from "./providers/refs.js";
@@ -36,7 +36,8 @@ import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
+import { applyOptionExposure } from "./providers/model-schema.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -829,12 +830,6 @@ function registerIpc() {
     settings.set3daiApiKey(key.trim());
   });
 
-  handle("settings:getEndFrameModels", () => settings.getEndFrameModels());
-
-  handle("settings:setEndFrameModels", (_e, ids: string[]) => {
-    settings.setEndFrameModels(Array.isArray(ids) ? ids.map(String) : []);
-  });
-
   handle("settings:getHiddenMediaModels", () => settings.getHiddenMediaModels());
 
   handle("settings:setHiddenMediaModels", (_e, ids: string[]) => {
@@ -859,6 +854,39 @@ function registerIpc() {
 
   handle("settings:setMediaModelOrder", (_e, ids: string[]) => {
     settings.setMediaModelOrder(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
+  // Dev Model Customizer: per-parameter placement (modelId::flag → placement).
+  handle("modelCustomizer:getExposure", () => settings.getModelOptionExposure());
+
+  handle("modelCustomizer:setExposure", (_e, key: string, placement: ModelParamExposure | null) => {
+    settings.setModelOptionExposure(String(key ?? ""), placement ?? null);
+  });
+
+  handle("modelCustomizer:resetExposure", () => {
+    settings.resetModelOptionExposure();
+  });
+
+  handle("modelCustomizer:getSurfaces", () => settings.getModelSurfaces());
+
+  handle("modelCustomizer:setSurfaces", (_e, surfaces: Record<string, string[]>) => {
+    settings.setModelSurfaces(surfaces ?? {});
+  });
+
+  handle("modelCustomizer:resetSurfaces", () => {
+    settings.resetModelSurfaces();
+  });
+
+  // Dev Model Customizer: per-surface parameter defaults
+  // (`<modelId>::<surface>::<flag>` → value).
+  handle("modelCustomizer:getParamDefaults", () => settings.getModelParamDefaults());
+
+  handle("modelCustomizer:setParamDefault", (_e, key: string, value: ModelParamDefaultValue | null) => {
+    settings.setModelParamDefault(String(key ?? ""), value ?? null);
+  });
+
+  handle("modelCustomizer:resetParamDefaults", () => {
+    settings.resetModelParamDefaults();
   });
 
   handle("settings:getDevMode", () => settings.getDevMode());
@@ -997,12 +1025,18 @@ function registerIpc() {
 
   handle("credits:get", async () => {
     const apiKey = settings.getApiKey();
-    // Only providers that expose a balance endpoint get a request — the
-    // capability is declared in the provider registry (shared/providers.ts).
-    if (!apiKey || getProvider(settings.getProviderId())?.balance !== "credits") return null;
+    // Only providers that declare a balance endpoint get a request — the
+    // shape (path + field + unit) is provider data in shared/providers.ts.
+    const provider = getProvider(settings.getProviderId());
+    if (!apiKey || !provider?.balance) return null;
     try {
-      return await new ChatClient(apiKey, settings.getBaseUrl()).balance();
-    } catch {
+      const amount = await new ChatClient(apiKey, settings.getBaseUrl()).balance(provider.balance);
+      return amount === null ? null : { amount, unit: provider.balance.unit };
+    } catch (e) {
+      // The footer hides the line on failure, so leave a breadcrumb for the
+      // operator — a rejected/scope-limited key otherwise looks like "no balance".
+      const hint = provider.balance.errorHint ? ` (${provider.balance.errorHint})` : "";
+      console.warn(`[credits] ${provider.id} balance fetch failed: ${String(e)}${hint}`);
       return null;
     }
   });
@@ -1287,6 +1321,11 @@ function registerIpc() {
 
   handle("production:remove", (_e, id: string, mode: "delete" | "archive") => {
     const ok = mode === "archive" ? productions.archiveProduction(id) : productions.deleteProduction(id);
+    // The production's expense ledger is per-project; follow the same lifecycle.
+    if (ok) {
+      if (mode === "archive") ledger.archiveProject(id);
+      else ledger.removeProject(id);
+    }
     return ok;
   });
 
@@ -1847,6 +1886,18 @@ function registerIpc() {
       const { jpegRel } = writeBoardFrame(p, shot, buf, "png");
       recordGraphImageGen(shot, jpegRel, pending.prompt, pending.model);
       hookImageGenToOutput(shot);
+      // The original submit never reached its generation recorder (the wait
+      // timed out), so the cost was unbilled. Bill it now, once, using the
+      // submit-time resolution/aspect kept on the pending record.
+      ledger.recordGeneration({
+        kind: "image",
+        model: pending.model,
+        resolution: pending.resolution ?? "",
+        aspectRatio: pending.aspectRatio,
+        at: Date.now(),
+        productionId: p.meta.id,
+        shotId: shot.id,
+      });
       delete shot.pendingImageGen;
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
     })
@@ -2099,7 +2150,10 @@ function registerIpc() {
       // so the video modal and node graph populate instantly on first open.
       media().prewarm?.(choices);
       const visible = hidden.size ? choices.filter((c) => !hidden.has(c.id)) : choices;
-      return sortByModelOrder(visible, settings.getMediaModelOrder(), (c) => c.id);
+      // Tag each model with the surfaces it's allowed on so every picker can
+      // filter by its own surface key.
+      const surfaced = applyModelSurfaces(visible, settings.getModelSurfaces());
+      return sortByModelOrder(surfaced, settings.getMediaModelOrder(), (c) => c.id);
     } catch {
       return [];
     }
@@ -2330,8 +2384,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
 
   // Per-shot video generation: the shot's current frame (full resolution) plus
   // any @[name] references in the prompt are uploaded to the active provider
-  // as visual references; the finished clip is stored under videosDir and
-  // played by the animatic timeline for this shot's duration window.
+  // as visual references; the finished clip is stored in the shot's board
+  // folder under video/ and played by the animatic timeline for this shot's
+  // duration window.
   handle("production:generateVideo", (_e, id: string, shotId: string, opts: VideoGenOptions) =>
     runVideoJob(id, `Generating a video for a shot`, async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -2342,6 +2397,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
         durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
+        // Schema-driven extras ride through opaquely; the provider's arg
+        // builder drops anything the active model's schema doesn't allow.
+        ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
@@ -2365,7 +2423,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // Step 3 node graph: generate one frame from a custom prompt (the prompt
   // composer's text) without touching the shot's artwork — the result is
   // stored on the image generation node and cycled/applied from there.
-  handle("production:generateFrameNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string }) =>
+  handle("production:generateFrameNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; params?: Record<string, string | number | boolean | string[]> }) =>
     runProductionStep(id, 3, "generating a frame (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -2379,7 +2437,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // References: the @[name] tags the composer prompt actually cites.
       const { resolved, extras } = resolvePromptRefs(p, prompt, 0);
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
-      const png = await gen(resolved, extras, shot);
+      const png = await gen(resolved, extras, shot, opts?.params);
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
       syncBoardOutputToPipe(shot);
@@ -2391,7 +2449,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // The animated source frame comes from the node's image pipe when one is
   // connected, otherwise the shot's current frame. The clip is stored on the
   // node; it becomes shot.videoPath only when the node is piped to the output.
-  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[] }) =>
+  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "generating a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -2400,6 +2458,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
         durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
+        ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       // Additional references plugged into the video node's open sockets. Both
@@ -2429,13 +2488,58 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     })
   );
 
+  // Step 3 node graph: edit one video (mandatory source clip + prompt +
+  // references). The source may be an explicit path (piped from the video
+  // node or a generated clip), a video reference id, or the shot's current
+  // video. Only providers with a video-edit path (Higgsfield CLI) can run it.
+  handle("production:generateEditVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+    runVideoJob(id, "editing a video (node graph)", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const clean: VideoGenOptions = {
+        model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
+        resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "",
+        durationSec: 0,
+        prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
+        ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
+      };
+      if (!clean.prompt) throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
+      let sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
+      if (!sourcePath && typeof opts?.sourceRefId === "string" && opts.sourceRefId) {
+        const ref = (p.references ?? []).find((r) => r.id === opts.sourceRefId && r.media === "video");
+        if (ref?.mediaPath) sourcePath = ref.mediaPath;
+      }
+      if (!sourcePath) sourcePath = shot.videoPath;
+      if (!sourcePath) throw new Error("The edit-video node needs a source video — pipe a clip in, pick a video reference, or generate a clip first. Nothing was submitted.");
+      const provider = mediaFor(clean.model);
+      if (!provider.generateVideoEdit) {
+        throw new Error(`${provider.displayName} can't edit videos yet — switch to a provider with a video-edit path (Higgsfield CLI).`);
+      }
+      // References ride the prompt node's @[name] tags and are resolved inside
+      // the provider (like the video node) — no separate refIds arg.
+      emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      const { rel } = await provider.generateVideoEdit(p, shot, clean, emit, sourcePath);
+      recordGraphEditVideoGen(shot, rel, clean.prompt, clean.model);
+      if (shot.graphOutputSource === "editvideo") applyVideoOutput(shot, rel, sourcePath);
+      emit(`Shot ${shot.number}: edited video ready.`, "done");
+    })
+  );
+
   /** Read a workspace-relative asset as an uploadable data URL (JPEG/PNG/WebP
    *  by extension), for feeding stored generations into image-input models. */
   function fileDataUrl(p: Production, rel: string): string | null {
     try {
       const buf = fs.readFileSync(assetPath(p, rel));
       const ext = (path.extname(rel).slice(1).toLowerCase() || "jpg").replace("jpeg", "jpg");
-      const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/png";
+      const mime =
+        ext === "jpg" ? "image/jpeg"
+        : ext === "webp" ? "image/webp"
+        : ext === "gif" ? "image/gif"
+        : ext === "mp4" ? "video/mp4"
+        : ext === "webm" ? "video/webm"
+        : ext === "mov" ? "video/quicktime"
+        : ext === "m4v" ? "video/x-m4v"
+        : "image/png";
       return `data:${mime};base64,${buf.toString("base64")}`;
     } catch {
       return null;
@@ -2476,7 +2580,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // can't submit phantom blocks; prompts and history survive via the pair-key
   // match in deriveTweenBlocks. The clip lands on the block's history — it
   // joins the continuous output only through production:stitchTween.
-  handle("production:generateTweenBlock", (_e, id: string, shotId: string, blockId: string, opts: { model?: string; resolution?: string; durationSec?: number }) =>
+  handle("production:generateTweenBlock", (_e, id: string, shotId: string, blockId: string, opts: { model?: string; resolution?: string; durationSec?: number; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "generating an in-between", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -2496,6 +2600,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
         durationSec: tweenClampGap(Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : block.durationSec),
         prompt,
+        ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
       const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
@@ -2530,9 +2635,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const bin = await resolveFfmpeg();
       if (!bin) throw new Error("No ffmpeg found — install it or keep previewing the per-block clips.");
       const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-      const rel = `${p.assets.videosDir}/shot-${shot.number}-tween-${tag}.mp4`;
+      const rel = shotVideoRelPath(p, shot, "mp4", "tween");
       const absOut = assetPath(p, rel);
-      fs.mkdirSync(assetPath(p, p.assets.videosDir), { recursive: true });
+      fs.mkdirSync(assetPath(p, shotVideoDir(p, shot)), { recursive: true });
       const listPath = path.join(os.tmpdir(), `cascade-tween-${tag}.txt`);
       fs.writeFileSync(listPath, buildTweenConcatList(absPaths));
       try {
@@ -2580,7 +2685,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // the image node's selection, or a reference's artwork — falling back to the
   // shot's current frame. The result is stored on the node; it becomes the
   // shot's artwork only when the node is piped to the output.
-  handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string }) =>
+  handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; params?: Record<string, string | number | boolean | string[]> }) =>
     runProductionStep(id, 3, "editing an image (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -2634,7 +2739,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const png = await gen(
         buildEditGenPrompt(editText),
         [{ name: sourceName, dataUrl }, ...extras],
-        shot
+        shot,
+        opts?.params
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       node.prompt = text;
@@ -2727,11 +2833,72 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return mediaFor(String(modelId ?? "")).imageModelOptions(String(modelId ?? ""));
   });
 
+  // Full normalized option schema for a model (live `model get` detail).
+  // Optional provider capability — providers without a schema surface
+  // resolve null and the renderer falls back to the ladder channels above.
+  handle("production:modelOptions", async (_e, modelId: string): Promise<CliModelSchema | null> => {
+    const id = String(modelId ?? "");
+    const schema = (await mediaFor(id).modelOptions?.(id)) ?? null;
+    // Apply the dev Model Customizer's per-parameter placements so every
+    // options form follows the user (dedicated/media fields are locked).
+    return schema ? applyOptionExposure(schema, id, settings.getModelOptionExposure()) : null;
+  });
+
+  // Dev Model Customizer: probe one provider's catalog (read-only). Returns
+  // the namespaced choices plus the user's hidden/kind/end-frame state; each
+  // model's option schema is fetched lazily by `modelCustomizer:probeOptions`.
+  handle("modelCustomizer:probeModels", async (_e, providerId: string): Promise<ModelProbeResult> => {
+    const id = resolveProviderId(providerId);
+    const provider = providers[id];
+    const base: ModelProbeResult = {
+      provider: id,
+      displayName: PROVIDER_META[id].displayName,
+      available: false,
+      models: [],
+    };
+    try {
+      base.available = provider.isAvailable();
+    } catch {
+      base.available = false;
+    }
+    if (!base.available) {
+      base.error = `${PROVIDER_META[id].displayName} isn't available (not connected / not installed).`;
+      return base;
+    }
+    try {
+      const overrides = settings.getModelKindOverrides();
+      const choices = applyKindOverrides(await provider.listModelChoices(), overrides);
+      const hidden = new Set(settings.getHiddenMediaModels());
+      const sorted = sortByModelOrder(choices, settings.getMediaModelOrder(), (c) => c.id);
+      base.models = sorted.map((choice) => ({
+        choice,
+        hidden: hidden.has(choice.id),
+        kindOverride: overrides[choice.id],
+      }));
+    } catch (e) {
+      base.error = String(e).replace(/^Error:\s*/, "");
+    }
+    return base;
+  });
+
+  handle("modelCustomizer:probeOptions", async (_e, providerId: string, modelId: string): Promise<CliModelSchema | null> => {
+    const id = resolveProviderId(providerId);
+    const provider = providers[id];
+    return (await provider.modelOptions?.(String(modelId ?? ""))) ?? null;
+  });
+
+  handle("modelCustomizer:refresh", (_e, providerId?: string) => {
+    if (providerId) {
+      providers[resolveProviderId(providerId)].refreshProbes?.();
+      return;
+    }
+    for (const pid of PROVIDER_IDS) providers[pid].refreshProbes?.();
+  });
+
   // Step 3 in-betweener: which video models accept a dedicated end-frame
-  // slot. The tween node/modal offer ONLY these — the submit path must always
-  // ride the start/end roles. Proven ids are unioned with the user's manual
-  // allowlist (Settings → Media generation) so a provider whose probe can't
-  // see the role still lists the models the user knows work.
+  // slot. The live probe is unioned with the models the user explicitly
+  // assigned to the in-betweener surface (that assignment IS their capability
+  // declaration). Hidden models and models classified as image are excluded.
   handle("production:videoEndFrameModels", async (): Promise<string[]> => {
     let proven: string[] = [];
     try {
@@ -2739,16 +2906,27 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     } catch {
       proven = [];
     }
-    const manual = settings.getEndFrameModels();
     const hidden = new Set(settings.getHiddenMediaModels());
     const kinds = settings.getModelKindOverrides();
-    const out = [...proven];
-    for (const id of manual) {
-      if (!out.includes(id)) out.push(id);
-    }
-    // Hidden models and models the user manually classified as image never
-    // land in a video dropdown.
+    const declared = Object.entries(settings.getModelSurfaces())
+      .filter(([, list]) => list.includes("video:tween"))
+      .map(([id]) => id);
+    const out = [...new Set([...proven, ...declared])];
     return out.filter((id) => !hidden.has(id) && kinds[id] !== "image");
+  });
+
+  // Step 3 edit-video node: which video models accept a video input. Empty
+  // for providers with no video-edit path (the node then offers nothing).
+  handle("production:videoEditModels", async (): Promise<string[]> => {
+    try {
+      const proven = await media().videoEditModels?.();
+      if (!proven) return [];
+      const hidden = new Set(settings.getHiddenMediaModels());
+      const kinds = settings.getModelKindOverrides();
+      return proven.filter((id) => !hidden.has(id) && kinds[id] !== "image");
+    } catch {
+      return [];
+    }
   });
 
   // Step 3 per-frame edit (classic storyboard view): appends a new edit-image
@@ -3037,7 +3215,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
 
       emit(`${sourceRef ? `Editing reference "${sourceRef.name}"` : "Generating a reference image"}${modelId ? ` via ${modelId}` : ""} (${aspectRatio})…`);
-      const buf = await gen(promptText, refs);
+      const buf = await gen(promptText, refs, undefined, opts?.params);
 
       const base = (sourceRef?.name ?? (typeof opts?.name === "string" && opts.name.trim() ? opts.name.trim() : "Generated reference"))
         .replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "reference";
@@ -3282,24 +3460,25 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     void shell.openPath(assetPath(p, p.assembly?.exportDir ?? `${p.assets.outDir}/${p.assets.assemblyDir}`));
   });
 
-  // Expenses: the ledger of every AI generation (and manual purchased-asset
-  // rows), plus the pricing rules edited from Settings.
-  handle("ledger:get", async (): Promise<LedgerView> => ledger.view());
+  // Expenses: per-production AI-generation ledgers (and manual purchased-asset
+  // rows), plus the global pricing rules edited from Settings.
+  handle("ledger:get", async (_e, productionId: string): Promise<LedgerView> => ledger.view(productionId));
   handle("ledger:getPriceRules", async (): Promise<ExpensePriceRule[]> => ledger.getPriceRules());
   handle("ledger:setPriceRules", async (_e, rules: ExpensePriceRule[]): Promise<void> => {
     ledger.setPriceRules(rules);
   });
-  handle("ledger:reprice", async (): Promise<LedgerView> => {
-    return ledger.repriceAll();
+  handle("ledger:reprice", async (_e, productionId: string): Promise<LedgerView> => {
+    ledger.repriceAll();
+    return ledger.view(productionId);
   });
-  handle("ledger:addManual", async (_e, label: string, amount: number): Promise<LedgerView> => {
-    return ledger.addManualEntry(label, amount);
+  handle("ledger:addManual", async (_e, productionId: string, label: string, amount: number): Promise<LedgerView> => {
+    return ledger.addManualEntry(productionId, label, amount);
   });
-  handle("ledger:removeEntry", async (_e, id: string): Promise<LedgerView> => {
-    return ledger.removeEntry(id);
+  handle("ledger:removeEntry", async (_e, productionId: string, id: string): Promise<LedgerView> => {
+    return ledger.removeEntry(productionId, id);
   });
-  handle("ledger:openFile", async (): Promise<void> => {
-    await ledger.openLedgerFile();
+  handle("ledger:openFile", async (_e, productionId: string): Promise<void> => {
+    await ledger.openLedgerFile(productionId);
   });
   handle("ledger:exportRules", async (): Promise<string | null> => {
     const res = await dialog.showSaveDialog(win!, {

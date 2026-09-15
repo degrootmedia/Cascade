@@ -1,11 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { sortByModelOrder, type ExpensePriceRule, type MediaProviderInfo, type ModelInfo, type SettingsView } from "../../../shared/ipc.js";
+import { type MediaProviderInfo, type ModelInfo, type SettingsView } from "../../../shared/ipc.js";
 import { API_PROVIDERS } from "../../../shared/providers.js";
 import { McpSection } from "./McpSection.js";
 import { TRANSPORT_CHANGED, isProviderVisible, readTransportMode, writeTransportMode, type ProviderTransportMode } from "./media-transport.js";
 import { applyAccent } from "../theme.js";
-import { uid } from "./production/hex.js";
-import { DragHandleIcon, EyeIcon, EyeOffIcon, ExpensesIcon, ImportIcon } from "./icons.js";
 
 const ACCENT_PRESETS = [
   { name: "Blue", value: "#4f8ef7" },
@@ -16,545 +14,13 @@ const ACCENT_PRESETS = [
   { name: "Pink", value: "#f778ba" },
 ];
 
-/** Editable model-price row draft for Settings → Models & expenses. One row
- *  per (provider, kind, model), auto-populated from both media vendors; the
- *  min→max price range interpolates by resolution/video length against the
- *  model's baked ladder (text fields so number inputs don't fight the user
- *  mid-keystroke). */
-interface ModelPriceDraft {
-  id: string;
-  /** Which media vendor surfaced the model ("openart" | "higgsfield"). */
-  provider: string;
-  kind: "image" | "video";
-  /** Provider-namespaced model id ("" = "Any model" wildcard). */
-  model: string;
-  displayName: string;
-  /** Whether the model is hidden from the generation dropdowns. */
-  hidden: boolean;
-  minText: string;
-  maxText: string;
-  /** Resolution ladder baked when the model was probed (low → high). */
-  resolutions: string[];
-  /** Video length range baked when the model was probed (null for images). */
-  durMin: number | null;
-  durMax: number | null;
-}
-
-/** Default image ladder (mirrors the main-process fallback in ledger.ts). */
-const IMAGE_RESOLUTIONS = ["1k", "2k", "4k"];
-/** Default video ladder for the optimistic drag preview (mirrors ledger.ts). */
-const FALLBACK_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"];
-const FALLBACK_VIDEO_DURATIONS = [5, 10, 15, 20];
-
-/** Sub-panel display names, one per media vendor (matches PROVIDER_META). */
-const PROVIDER_LABELS: Record<string, string> = { openart: "OpenArt", higgsfield: "Higgsfield", "higgsfield-cli": "Higgsfield CLI", "openart-cli": "OpenArt CLI" };
-const PROVIDER_ORDER = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
-
-/** The vendor a model id belongs to. Provider ids are namespaced where they
- *  leave the provider (higgsfield:<id>, higgsfield-cli:<id>,
- *  openart-cli:<id>); everything else is OpenArt. */
-const providerOf = (id: string): string =>
-  id.startsWith("higgsfield-cli:") ? "higgsfield-cli"
-  : id.startsWith("higgsfield:") ? "higgsfield"
-  : id.startsWith("openart-cli:") ? "openart-cli"
-  : "openart";
-
-/** The ladder a rule interpolates over, as a short human label. */
-const ladderLabel = (d: ModelPriceDraft): string => {
-  const res =
-    d.resolutions.length > 1
-      ? `${d.resolutions[0]}→${d.resolutions[d.resolutions.length - 1]}`
-      : d.resolutions[0] ?? "";
-  if (d.kind === "video" && d.durMin != null && d.durMax != null) return `${res} · ${d.durMin}s–${d.durMax}s`;
-  return res;
-};
-
-/** Persisted rules → editable draft rows (used after an import). */
-const rulesToDrafts = (rules: ExpensePriceRule[]): ModelPriceDraft[] =>
-  rules.map((r) => ({
-    id: r.id,
-    provider: providerOf(r.model),
-    kind: r.kind,
-    model: r.model,
-    displayName: r.model || "Any model",
-    hidden: false,
-    minText: String(r.minPrice),
-    maxText: String(r.maxPrice),
-    resolutions: [...r.resolutions],
-    durMin: r.durMin,
-    durMax: r.durMax,
-  }));
-
-/** Settings → Models & expenses: every model discovered across both media
- *  vendors with its min→max price range and a hide-from-dropdowns toggle.
- *  Prices are saved together (re-pricing all existing expenses); the hidden
- *  toggle applies immediately. */
-function ExpensePricingSection() {
-  const [drafts, setDrafts] = useState<ModelPriceDraft[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  /** Collapsed provider sub-panels (session-only). */
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  /** The draft id being dragged (dims the row), and the group (provider+kind)
-   *  under the pointer for the drop highlight. */
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<{ provider: string; kind: ModelPriceDraft["kind"] } | null>(null);
-  /** The same-group row under the pointer — the reorder insert indicator. */
-  const [overModel, setOverModel] = useState<string | null>(null);
-  /** Eyeball toggle: conceal the hidden models in this list (visual only —
-   *  they're excluded from the generation dropdowns either way). */
-  const [showHidden, setShowHidden] = useState(true);
-
-  const toggleProvider = (p: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(p)) next.delete(p);
-      else next.add(p);
-      return next;
-    });
-  };
-
-  const update = (i: number, patch: Partial<ModelPriceDraft>) => {
-    setNote(null);
-    setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
-  };
-
-  /** Merge the discovered models + persisted rules into draft rows: one row
-   *  per (provider, kind, model). Keeps persisted rows whose model a vendor no
-   *  longer lists, and re-bakes ladders from the live probe for everything it
-   *  does. */
-  const loadAll = async () => {
-    const [ladders, rules, hidden, orderIds] = await Promise.all([
-      window.cascade.listAllMediaModels(),
-      window.cascade.getExpensePriceRules(),
-      window.cascade.getHiddenMediaModels(),
-      window.cascade.getMediaModelOrder(),
-    ]);
-    const hiddenSet = new Set(hidden);
-    const byKey = new Map<string, ModelPriceDraft>();
-    // Discovered model → which sections it belongs to. OpenArt's imageInput
-    // flag means "accepts image references", so a video model usually flags it
-    // too — a model is an IMAGE model only when it isn't a video model.
-    const sections = new Map<string, { image: boolean; video: boolean }>();
-    const upsert = (
-      provider: string,
-      kind: ModelPriceDraft["kind"],
-      model: string,
-      displayName: string,
-      resolutions: string[],
-      durMin: number | null,
-      durMax: number | null
-    ) => {
-      const key = `${provider}\u0000${kind}\u0000${model}`;
-      if (byKey.has(key)) return;
-      // Prefer the row's kind, but carry the price from any existing rule for
-      // the model (e.g. after a manual re-classification) so it survives a
-      // refresh instead of resetting to $0.
-      const rule =
-        rules.find((r) => r.kind === kind && r.model === model) ??
-        rules.find((r) => r.model === model);
-      byKey.set(key, {
-        id: rule?.id ?? uid("expense-rule"),
-        provider,
-        kind,
-        model,
-        displayName,
-        hidden: hiddenSet.has(model),
-        minText: rule ? String(rule.minPrice) : "",
-        maxText: rule ? String(rule.maxPrice) : "",
-        resolutions,
-        durMin,
-        durMax,
-      });
-    };
-    for (const l of ladders) {
-      const c = l.choice;
-      sections.set(c.id, { image: c.imageInput && !c.videoInput, video: c.videoInput });
-      if (c.imageInput && !c.videoInput) upsert(l.provider, "image", c.id, c.displayName, [...IMAGE_RESOLUTIONS], null, null);
-      if (c.videoInput) upsert(l.provider, "video", c.id, c.displayName, l.resolutions, l.durMin, l.durMax);
-    }
-    // Preserve persisted rules whose model isn't currently discovered — but
-    // drop a rule whose kind no longer matches the model's live capability
-    // (e.g. a stale image rule left over for a video model).
-    for (const r of rules) {
-      const cap = sections.get(r.model);
-      if (cap && ((r.kind === "image" && !cap.image) || (r.kind === "video" && !cap.video))) continue;
-      upsert(providerOf(r.model), r.kind, r.model, r.model, r.resolutions, r.durMin, r.durMax);
-    }
-    // The list renders in the user's saved drag-to-reorder arrangement —
-    // models not in it (fresh discoveries) append in discovery order.
-    setDrafts(sortByModelOrder([...byKey.values()], orderIds, (d) => d.model));
-  };
-
-  useEffect(() => {
-    void loadAll().catch((e) => setError(String(e)));
-  }, []);
-
-  const refresh = async () => {
-    setBusy(true);
-    setError(null);
-    setNote(null);
-    try {
-      await loadAll();
-      setNote("Model list refreshed from both providers.");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleHidden = async (i: number) => {
-    setNote(null);
-    const d = drafts[i];
-    const nextHidden = !d.hidden;
-    setDrafts((ds) => ds.map((x, j) => (j === i ? { ...x, hidden: nextHidden } : x)));
-    const ids = new Set(drafts.filter((x, j) => j !== i && x.hidden).map((x) => x.model).filter(Boolean));
-    if (nextHidden) ids.add(d.model);
-    else ids.delete(d.model);
-    await window.cascade.setHiddenMediaModels([...ids]).catch(() => {});
-    // Re-read the active vendor so the generation dropdowns pick up the filter
-    // (same event MediaProviderSection dispatches; keep the string in sync).
-    window.dispatchEvent(new Event("cascade:media-provider-changed"));
-  };
-
-  /** Manually re-classify a model by dragging it between the Image/Video
-   *  groups: persist the kind override (every model dropdown respects it
-   *  main-side), flip the row optimistically, then reconcile prices + ladders
-   *  against the override via a reload. */
-  const moveModel = async (
-    targetProvider: string,
-    targetKind: ModelPriceDraft["kind"],
-    payload: { provider: string; model: string }
-  ) => {
-    setDropTarget(null);
-    setDraggingId(null);
-    if (payload.provider !== targetProvider) {
-      setNote("Models stay with their own provider — drop into the same vendor's group.");
-      return;
-    }
-    const d = drafts.find((x) => x.model === payload.model);
-    if (!d || d.kind === targetKind) return;
-    setNote(null);
-    setBusy(true);
-    setError(null);
-    try {
-      // Optimistic: flip the kind with a kind-default ladder so the row jumps
-      // immediately; loadAll re-bakes the true ladder below.
-      const ladder =
-        targetKind === "video"
-          ? {
-              resolutions: [...FALLBACK_VIDEO_RESOLUTIONS],
-              durMin: Math.min(...FALLBACK_VIDEO_DURATIONS),
-              durMax: Math.max(...FALLBACK_VIDEO_DURATIONS),
-            }
-          : { resolutions: [...IMAGE_RESOLUTIONS], durMin: null, durMax: null };
-      setDrafts((ds) => ds.map((x) => (x.model === payload.model ? { ...x, kind: targetKind, ...ladder } : x)));
-      const current = await window.cascade.getModelKindOverrides();
-      await window.cascade.setModelKindOverrides({ ...current, [payload.model]: targetKind });
-      await loadAll();
-      setNote(`Moved to ${targetKind === "video" ? "Video" : "Image"} models — all dropdowns updated.`);
-      // Re-read the active vendor so the generation dropdowns pick up the
-      // re-classification (same event the hidden toggle dispatches).
-      window.dispatchEvent(new Event("cascade:media-provider-changed"));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** Re-order within a provider+kind group: move the dragged row directly
-   *  before the target row and persist the arrangement — the generation
-   *  dropdowns re-sort main-side from the same saved order. */
-  const reorder = (targetModel: string) => {
-    setOverModel(null);
-    setDraggingId(null);
-    setDropTarget(null);
-    const from = drafts.findIndex((d) => d.id === draggingId);
-    const at = drafts.findIndex((d) => d.model === targetModel);
-    if (from < 0 || at < 0 || from === at) return;
-    const next = [...drafts];
-    const [row] = next.splice(from, 1);
-    // After removing the dragged row, the target's index shifts down by one
-    // when it sat after the source — inserting at the shifted index lands
-    // directly before the target.
-    next.splice(at - (from < at ? 1 : 0), 0, row);
-    setDrafts(next);
-    const ids = next.map((d) => d.model).filter(Boolean);
-    void window.cascade.setMediaModelOrder(ids).catch(() => {});
-    // Re-read the active vendor so the generation dropdowns pick up the new
-    // order (same event the kind move dispatches; keep the string in sync).
-    window.dispatchEvent(new Event("cascade:media-provider-changed"));
-  };
-
-  const toRules = (): ExpensePriceRule[] =>
-    drafts.map((d) => ({
-      id: d.id,
-      kind: d.kind,
-      model: d.model.trim(),
-      minPrice: Number(d.minText) || 0,
-      maxPrice: Number(d.maxText) || 0,
-      resolutions: [...d.resolutions],
-      durMin: d.kind === "video" ? d.durMin : null,
-      durMax: d.kind === "video" ? d.durMax : null,
-    }));
-
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await window.cascade.setExpensePriceRules(toRules());
-      setNote("Prices saved — existing expenses re-priced.");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const exportRules = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const file = await window.cascade.exportExpensePriceRules();
-      setNote(file ? `Exported ${drafts.length} rules to ${file}.` : null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const importRules = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await window.cascade.importExpensePriceRules();
-      if (res) {
-        setDrafts(rulesToDrafts(res.rules));
-        setNote(`Imported ${res.rules.length} rules from ${res.path}.`);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const renderRow = (d: ModelPriceDraft, i: number) => {
-    const dragged = draggingId != null ? drafts.find((x) => x.id === draggingId) : undefined;
-    const sameGroup = !!dragged && dragged.provider === d.provider && dragged.kind === d.kind;
-    return (
-      <div
-        className={
-          "expense-rule" +
-          (draggingId === d.id ? " expense-dragging" : "") +
-          (overModel === d.model && draggingId !== d.id ? " expense-reorder-before" : "")
-        }
-        key={d.id}
-        draggable
-        onDragStart={(e) => {
-          setDraggingId(d.id);
-          e.dataTransfer.setData("application/json", JSON.stringify({ provider: d.provider, model: d.model }));
-          e.dataTransfer.effectAllowed = "move";
-        }}
-        onDragEnd={() => {
-          setDraggingId(null);
-          setDropTarget(null);
-          setOverModel(null);
-        }}
-        onDragOver={(e) => {
-          // Same-group rows take the reorder insert indicator; cross-kind
-          // rows let the event bubble so the group's kind-move highlight
-          // (and drop) applies.
-          if (!sameGroup) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.dataTransfer.dropEffect = "move";
-          if (overModel !== d.model) setOverModel(d.model);
-        }}
-        onDrop={(e) => {
-          if (!sameGroup) return; // falls through to the group's kind move
-          e.preventDefault();
-          e.stopPropagation();
-          reorder(d.model);
-        }}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-            setOverModel((cur) => (cur === d.model ? null : cur));
-          }
-        }}
-        title="Drag to reorder (the dropdowns follow this order), or between Image and Video to re-classify."
-      >
-        <span className="expense-grip"><DragHandleIcon size={13} /></span>
-        <input
-          type="checkbox"
-          checked={!d.hidden}
-          onChange={() => void toggleHidden(i)}
-          title={
-            d.hidden
-              ? "Hidden from generation dropdowns — check to show it again."
-              : "Uncheck to hide this model from the generation dropdowns."
-          }
-        />
-        <span className="expense-model" title={d.model}>
-          {d.displayName || "Any model"}
-          {d.hidden && <span className="expense-hidden-tag">hidden</span>}
-        </span>
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          placeholder="$0.00"
-          value={d.minText}
-          onChange={(e) => update(i, { minText: e.target.value })}
-        />
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          placeholder="$0.00"
-          value={d.maxText}
-          onChange={(e) => update(i, { maxText: e.target.value })}
-        />
-        <span className="hint" title={`The model's available resolution and video-length ladder this range interpolates over.`}>
-          {ladderLabel(d)}
-        </span>
-      </div>
-    );
-  };
-
-  const group = (provider: string, kind: ModelPriceDraft["kind"], title: string, empty: string) => {
-    const isTarget = dropTarget?.provider === provider && dropTarget?.kind === kind;
-    const rows = drafts
-      .map((d, i) => ({ d, i }))
-      .filter(({ d }) => d.provider === provider && d.kind === kind && (showHidden || !d.hidden));
-    return (
-      <div
-        key={`${provider}-${kind}`}
-        className={"expense-group" + (isTarget ? " expense-drop-hover" : "")}
-        onDragOver={(e) => {
-          if (draggingId == null) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "move";
-          setDropTarget((t) => (t?.provider === provider && t?.kind === kind ? t : { provider, kind }));
-        }}
-        onDragLeave={() =>
-          setDropTarget((t) => (t?.provider === provider && t?.kind === kind ? null : t))
-        }
-        onDrop={(e) => {
-          e.preventDefault();
-          try {
-            const payload = JSON.parse(e.dataTransfer.getData("application/json") ?? "{}");
-            if (payload && typeof payload.model === "string") void moveModel(provider, kind, payload);
-          } catch {
-            // ignore malformed drops
-          }
-        }}
-      >
-        <div className="expense-group-title">{title}</div>
-        {rows.length ? (
-          rows.map(({ d, i }) => renderRow(d, i))
-        ) : (
-          <p className="hint">{empty}</p>
-        )}
-      </div>
-    );
-  };
-
-  return (
-    <>
-      <label>Models &amp; expenses</label>
-      <p className="hint">
-        Every model discovered across both media providers, grouped by vendor, with a min→max price range each:
-        the cheapest configuration (lowest resolution, shortest video) up to the most expensive. A generation's
-        price is interpolated by its resolution and length along the model's range. Saving <strong>re-prices all
-        existing expenses</strong>. Unchecking a model's toggle hides it from the generation dropdowns immediately.
-        Drag a row between Image and Video to override a mis-classified model — every model dropdown follows
-        the manual assignment. Drag a row up or down its group to set the order every dropdown lists models in.
-      </p>
-      <div className="expense-pricing">
-        {PROVIDER_ORDER.some((p) => drafts.some((d) => d.provider === p)) ? (
-          PROVIDER_ORDER.map((p) => {
-            if (!drafts.some((d) => d.provider === p)) return null;
-            const isCollapsed = collapsed.has(p);
-            return (
-              <Fragment key={p}>
-                <button
-                  className="expense-provider-title"
-                  onClick={() => toggleProvider(p)}
-                  title={isCollapsed ? `Expand ${PROVIDER_LABELS[p] ?? p} models` : `Collapse ${PROVIDER_LABELS[p] ?? p} models`}
-                >
-                  <span className="expense-chevron">{isCollapsed ? "▸" : "▾"}</span>
-                  {PROVIDER_LABELS[p] ?? p}
-                </button>
-                {!isCollapsed && (
-                  <>
-                    <div className="expense-rule expense-rule-head">
-                      <span />
-                      <span>Show</span>
-                      <span>Model</span>
-                      <span>Min $</span>
-                      <span>Max $</span>
-                      <span>Range</span>
-                    </div>
-                    {group(p, "image", "Image models", "No image models discovered.")}
-                    <hr className="expense-divider" />
-                    {group(p, "video", "Video models", "No video models discovered.")}
-                  </>
-                )}
-              </Fragment>
-            );
-          })
-        ) : (
-          <p className="hint">No models discovered — is a media provider connected?</p>
-        )}
-        <div className="expense-pricing-actions">
-          <button
-            className="expense-eye"
-            onClick={() => setShowHidden((v) => !v)}
-            title={showHidden ? "Conceal the models hidden from the generation dropdowns (visual only — the list comes back next time you open Settings)." : "Show the models hidden from the generation dropdowns."}
-          >
-            {showHidden ? <EyeIcon size={14} /> : <EyeOffIcon size={14} />}
-            {showHidden ? "Conceal hidden" : "Show hidden"}
-          </button>
-          <button
-            onClick={() => void refresh()}
-            disabled={busy}
-            title="Re-probe all media providers for every available image and video model"
-          >
-            Refresh models
-          </button>
-          <button className="primary" onClick={() => void save()} disabled={busy}>
-            {busy ? "Working…" : "Save prices"}
-          </button>
-          <button onClick={() => void exportRules()} disabled={busy} title="Save the price ranges above to a CSV file">
-            Export CSV
-          </button>
-          <button onClick={() => void importRules()} disabled={busy} title="Load price ranges from a CSV file" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <ImportIcon size={13} /> Import CSV
-          </button>
-          {!showHidden && (
-            <span className="hint">
-              {drafts.filter((d) => d.hidden).length} hidden model{drafts.filter((d) => d.hidden).length === 1 ? "" : "s"} concealed
-            </span>
-          )}
-          {note && <span className="hint" title={note}>{note.length > 90 ? `${note.slice(0, 90)}…` : note}</span>}
-        </div>
-      </div>
-      {error && <p className="error-text">{error}</p>}
-    </>
-  );
-}
 
 /** Settings → Media generation: which MCP vendor serves image/video
  *  generation (global for all productions), plus the manual end-frame model
  *  allowlist for the in-betweener (merged with the providers' live probe).
  *  Model ids from the other vendor are treated as unknown until the user
  *  picks explicitly. */
-function MediaProviderSection() {
+function MediaProviderSection({ onOpenModelCustomizer }: { onOpenModelCustomizer?: () => void }) {
   const [providers, setProviders] = useState<MediaProviderInfo[]>([]);
   const [active, setActive] = useState<string>("openart");
   const [error, setError] = useState<string | null>(null);
@@ -563,9 +29,6 @@ function MediaProviderSection() {
   /** Dev Mode: submission logging + dry run. */
   const [devMode, setDevMode] = useState(false);
   const [dryRun, setDryRun] = useState(false);
-  /** Manual end-frame allowlist, edited one id per line. */
-  const [endFrameText, setEndFrameText] = useState("");
-  const [endFrameSaved, setEndFrameSaved] = useState(false);
   /** Higgsfield CLI transport: custom binary path + live status. */
   const [cliBinary, setCliBinary] = useState("");
   const [cliBinarySaved, setCliBinarySaved] = useState(false);
@@ -588,7 +51,6 @@ function MediaProviderSection() {
   useEffect(() => {
     void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
     void window.cascade.getMediaProvider().then(setActive).catch(() => {});
-    void window.cascade.getEndFrameModels().then((ids) => setEndFrameText(ids.join("\n"))).catch(() => {});
     void window.cascade.getDevMode().then(setDevMode).catch(() => {});
     void window.cascade.getSubmissionDryRun().then(setDryRun).catch(() => {});
     refreshCli();
@@ -598,17 +60,6 @@ function MediaProviderSection() {
     window.addEventListener(TRANSPORT_CHANGED, onTransport);
     return () => window.removeEventListener(TRANSPORT_CHANGED, onTransport);
   }, []);
-
-  const saveEndFrame = async () => {
-    setEndFrameSaved(false);
-    try {
-      const ids = endFrameText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      await window.cascade.setEndFrameModels(ids);
-      setEndFrameSaved(true);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
 
   const saveCliBinary = async () => {
     setCliBinarySaved(false);
@@ -746,19 +197,7 @@ function MediaProviderSection() {
       <p className="hint">OpenArt CLI video takes a single start-frame image — no end frames or extra references. In-betweening and multi-reference video need the OpenArt MCP transport.</p>
       </>
       )}
-      <label style={{ marginTop: 8 }}>In-betweener end-frame models</label>
-      <textarea
-        rows={3}
-        value={endFrameText}
-        onChange={(e) => { setEndFrameText(e.target.value); setEndFrameSaved(false); }}
-        placeholder={"One video model id per line, e.g.\nseedance_2_5"}
-        title="Video models that accept a start AND end frame. Merged with the live capability probe — anything listed here becomes selectable in the in-betweener node."
-      />
-      <div className="row">
-        <button onClick={() => void saveEndFrame()}>Save end-frame models</button>
-        {endFrameSaved && <span className="hint">saved</span>}
-      </div>
-      <p className="hint">The in-betweener only offers video models with a dedicated end-frame slot (probed live, or listed above).</p>
+      <p className="hint">The in-betweener offers video models the live probe confirms, plus any model you assign to the in-betweener surface in the Model Customizer.</p>
       <label style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 8 }}>
         <input
           type="checkbox"
@@ -776,6 +215,9 @@ function MediaProviderSection() {
           <p className="hint">Submissions append to &lt;userData&gt;/logs/submissions.md (+ submissions.jsonl). Secrets are redacted.</p>
           <div className="row">
             <button onClick={() => void window.cascade.openSubmissionLog().catch((err) => setError(String(err)))}>Open submission log</button>
+            {onOpenModelCustomizer && (
+              <button onClick={onOpenModelCustomizer} title="Probe every media vendor and customize models + parameters">Model customization…</button>
+            )}
           </div>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <input
@@ -796,7 +238,7 @@ function MediaProviderSection() {
   );
 }
 
-export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: SettingsView; onClose: () => void; onOpenAgents?: () => void }) {
+export function SettingsPanel({ settings, onClose, onOpenAgents, onOpenModelCustomizer }: { settings: SettingsView; onClose: () => void; onOpenAgents?: () => void; onOpenModelCustomizer?: () => void }) {
   const [provider, setProvider] = useState(settings.provider);
   const [apiKey, setApiKeyInput] = useState("");
   const [workspace, setWorkspace] = useState(settings.workspace);
@@ -809,8 +251,6 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   const [error, setError] = useState<string | null>(null);
   /** Why the model list is empty (real HTTP/API message, shown inline). */
   const [modelError, setModelError] = useState<string | null>(null);
-  /** Which settings tab is open. */
-  const [tab, setTab] = useState<"general" | "expenses">("general");
   /** 3D AI Studio API key (design-page 3D model generator). */
   const [has3daiKey, setHas3daiKey] = useState(settings.has3daiApiKey);
   const [apiKey3dai, setApiKey3daiInput] = useState("");
@@ -968,17 +408,10 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
   const ready = hasKey;
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal settings">
+    <div className="modal-backdrop top-layer" onClick={onClose}>
+      <div className="modal settings" onClick={(e) => e.stopPropagation()}>
         <h3>Settings</h3>
 
-        <div className="settings-tabs" role="tablist">
-          <button role="tab" className={"settings-tab" + (tab === "general" ? " active" : "")} onClick={() => setTab("general")}>General</button>
-          <button role="tab" className={"settings-tab" + (tab === "expenses" ? " active" : "")} onClick={() => setTab("expenses")}><ExpensesIcon size={13} /> Models &amp; expenses</button>
-        </div>
-
-        {tab === "general" && (
-          <>
         <label>API provider</label>
         <select value={provider} onChange={(e) => void changeProvider(e.target.value)}>
           {API_PROVIDERS.map((p) => (
@@ -1136,14 +569,8 @@ export function SettingsPanel({ settings, onClose, onOpenAgents }: { settings: S
 
         {error && <p className="error-text">{error}</p>}
 
-        <MediaProviderSection />
+        <MediaProviderSection onOpenModelCustomizer={onOpenModelCustomizer} />
         <McpSection />
-          </>
-        )}
-
-        {tab === "expenses" && (
-          <ExpensePricingSection />
-        )}
 
         <div className="modal-actions">
           <button className="primary" onClick={onClose} disabled={!ready}>

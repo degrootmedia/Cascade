@@ -387,12 +387,12 @@ export class OpenArtCliProvider implements MediaProvider {
   }
 
   /** Turn a stored choice into the raw id to submit. "auto" (or empty)
-   *  resolves to the first eligible model. A foreign (`higgsfield:…`) or
+   *  resolves to the first eligible model. A foreign (Higgsfield) or
    *  unknown explicit pick fails loudly instead of billing the wrong model. */
   private resolveModel(choice: string, models: OpenArtModelChoice[], video: boolean): string {
     const trimmed = (choice ?? "").trim();
     if (trimmed && (trimmed.startsWith("higgsfield:") || trimmed.startsWith("higgsfield-cli:"))) {
-      throw new Error(`"${trimmed}" is a Higgsfield pick — switch the media provider to Higgsfield to use it, or re-pick an OpenArt model.`);
+      throw new Error(`"${trimmed}" is a Higgsfield pick — switch the media provider to Higgsfield CLI to use it, or re-pick an OpenArt model.`);
     }
     const raw = trimmed.startsWith(OPENART_CLI_ID_PREFIX) ? trimmed.slice(OPENART_CLI_ID_PREFIX.length) : trimmed;
     if (raw && models.some((m) => openArtCliRawId(m.id) === raw)) return raw;

@@ -1,9 +1,25 @@
 import { useEffect, useState } from "react";
 import type { LedgerView } from "../../../../shared/ipc.js";
-import { ExpensesIcon, XIcon } from "../icons.js";
+import { ExpensesIcon, TokenIcon, XIcon } from "../icons.js";
+import { formatGenerationCost } from "./generation-cost.js";
 
 function formatPrice(p: number): string {
   return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** One row's price: credit-tracked rows (Higgsfield CLI) show their credits
+ *  with the token icon; $ rule rows and manual rows show dollars. */
+function RowPrice({ credits, price, rate }: { credits?: number; price: number; rate: number | null }) {
+  if (credits == null) return <>{formatPrice(price)}</>;
+  const title = rate != null
+    ? `${formatGenerationCost(credits)} credits × $${rate}/credit = ${formatPrice(credits * rate)}`
+    : `${formatGenerationCost(credits)} credits — set a Higgsfield credit value in the Model Customizer to price them`;
+  return (
+    <span className="cost-badge" title={title}>
+      <TokenIcon size={12} />
+      {formatGenerationCost(credits)}
+    </span>
+  );
 }
 
 /** The Expenses page (far-right tab): this production's AI generations priced
@@ -70,12 +86,14 @@ export function ExpensesPanel({ productionId }: { productionId: string }) {
   };
 
   const entries = view?.entries ?? [];
+  const rate = view?.creditUsd ?? null;
+  const creditRows = entries.filter((e) => e.credits != null).length;
 
   return (
     <section className="prod-panel prod-expenses">
       <h3><ExpensesIcon size={18} className="prod-panel-title-icon" /> Expenses</h3>
       <p className="hint">
-        This project's AI generations, priced against the rules in Settings → Media generation and tallied here.
+        This project's AI generations{rate != null ? ` (Higgsfield credits convert at $${rate}/credit)` : ""}, priced against the rules in Settings → Media generation and tallied here.
         Rows are mirrored to a per-project CSV text file you can open anytime.
       </p>
 
@@ -123,7 +141,7 @@ export function ExpensesPanel({ productionId }: { productionId: string }) {
               </td>
               <td>{e.kind === "video" && e.durationSec ? `${e.durationSec}s` : ""}</td>
               <td>{e.label ?? ""}</td>
-              <td className="num">{formatPrice(e.price)}</td>
+              <td className="num"><RowPrice credits={e.credits} price={e.price} rate={rate} /></td>
               <td>
                 <button className="prod-btn inline" onClick={() => void remove(e.id)} title="Remove row" disabled={busy}>
                   <XIcon size={12} />
@@ -141,6 +159,9 @@ export function ExpensesPanel({ productionId }: { productionId: string }) {
           <tr>
             <td colSpan={6}>
               Total — {view?.imageCount ?? 0} images · {view?.videoCount ?? 0} videos
+              {rate == null && creditRows > 0 && (
+                <> · {creditRows} credit row{creditRows === 1 ? "" : "s"} unpriced (set a Higgsfield credit value in the Model Customizer)</>
+              )}
             </td>
             <td className="num total">{formatPrice(view?.total ?? 0)}</td>
             <td></td>

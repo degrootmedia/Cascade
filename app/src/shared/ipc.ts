@@ -124,14 +124,15 @@ export interface McpStatusIpc {
   error?: string;
 }
 
-/** Which vendor serves image/video generation (global setting). `higgsfield-cli`
- *  is the same Higgsfield account driven through the local `higgsfield` CLI
- *  binary instead of the MCP server; its model ids are namespaced
- *  `higgsfield-cli:<job_type>` so the two transports never collide.
+/** Which vendor serves image/video generation (global setting).
+ *  `higgsfield-cli` is the Higgsfield account driven through the local
+ *  `higgsfield` CLI binary; its model ids are namespaced
+ *  `higgsfield-cli:<job_type>`. Legacy `higgsfield:…` picks (removed MCP
+ *  transport) route to the CLI, which accepts the old prefix as an alias.
  *  `openart-cli` is likewise the OpenArt account via the local `openart`
  *  CLI binary (`openart-cli:<id>`); it cannot send end frames or multiple
  *  video references, so those requests fail loudly with an MCP redirect. */
-export type MediaProviderId = "openart" | "higgsfield" | "higgsfield-cli" | "openart-cli";
+export type MediaProviderId = "openart" | "higgsfield-cli" | "openart-cli";
 
 /** Which transport the media-provider pickers show: MCP servers or CLI binaries. */
 export type ProviderTransportMode = "mcp" | "cli";
@@ -522,6 +523,11 @@ export interface PendingImageGen {
   resolution?: string;
   /** The aspect ratio the job was submitted at (same purpose as resolution). */
   aspectRatio?: string;
+  /** The quality tier the job was submitted at (same purpose as resolution). */
+  quality?: string;
+  /** Schema-driven options the job was submitted with (same purpose as
+   *  resolution) — lets a reclaimed frame bill exactly like the original. */
+  params?: Record<string, string | number | boolean | string[]>;
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }
@@ -560,6 +566,8 @@ export interface CharacterSheetBuilder {
   model: string;
   /** Output resolution bucket used. */
   resolution: string;
+  /** Schema-driven model options used (absent = vendor defaults). */
+  params?: Record<string, string | number | boolean | string[]>;
 }
 
 /** A product whose look must stay consistent (label, packaging, hero item). */
@@ -658,6 +666,9 @@ export interface ProductionStyle {
   /** Per-style resolution override for style-frame generation. Absent =
    *  inherit the production default. */
   resolution?: "1k" | "2k" | "4k";
+  /** Per-style schema-driven model options (variant, seed, …) for
+   *  style-frame generation. Absent/empty = vendor defaults. */
+  params?: Record<string, string | number | boolean | string[]>;
 }
 
 /** The generation surfaces a model can be offered on. Each picker filters by
@@ -810,6 +821,21 @@ export function resolveAspectRatio(chosen?: string | null): string {
  *  by canonical flag (e.g. `{ variant: "sunburst", aspect_ratio: "16:9" }`). */
 export type GenParams = Record<string, string>;
 
+/** Keep only CLI-safe scalar option values (string/number/boolean/string[])
+ *  from an untrusted params bag. Providers ignore unknown keys for the active
+ *  model, but non-scalar shapes (objects from a corrupt doc or a raw IPC
+ *  payload) must never reach argv or persisted state. Undefined for
+ *  absent/empty bags so callers can omit the field. */
+export function sanitizeGenParams(params: unknown): Record<string, string | number | boolean | string[]> | undefined {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return undefined;
+  const out: Record<string, string | number | boolean | string[]> = {};
+  for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+    else if (Array.isArray(v) && v.every((e) => typeof e === "string")) out[k] = [...v];
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Where a model parameter renders in the options form. "hidden" removes it
  *  from the UI entirely; core/advanced place it in the exposed list or the
  *  collapsible Advanced panel. */
@@ -852,6 +878,29 @@ export interface VideoGenOptions {
    * (see `CliModelSchema`). Optional and additive — same semantics as
    * `OpenArtBoardConfig.params` for the video path.
    */
+  params?: Record<string, string | number | boolean | string[]>;
+}
+
+/** Per-config credit quote for one generation (Higgsfield CLI `generate
+ *  cost` preflight — mirrors `generate create` args but submits nothing).
+ *  Only structural price drivers travel: prompt text and reference bytes
+ *  never affect the price, so the probe sends a constant placeholder prompt
+ *  and no media flags (zero uploads). */
+export interface GenerationCostRequest {
+  /** Provider-namespaced model id (only `higgsfield-cli:*` quotes; anything
+   *  else resolves null with zero spawns). */
+  model: string;
+  /** Whether this is an image or video quote (gates `--duration`). */
+  kind: "image" | "video";
+  /** Output resolution label (e.g. "720p", "2k"). */
+  resolution?: string;
+  /** Desired clip length in seconds (video only). */
+  durationSec?: number;
+  /** Aspect ratio wire value (e.g. "16:9"). */
+  aspectRatio?: string;
+  /** Quality tier label (image models that declare one). */
+  quality?: string;
+  /** Schema-driven extras (variant, mode, …) keyed by canonical flag. */
   params?: Record<string, string | number | boolean | string[]>;
 }
 
@@ -1011,8 +1060,15 @@ export interface LedgerEntry {
   durationSec?: number;
   /** Aspect ratio for images (e.g. "16:9"). */
   aspectRatio?: string;
-  /** The price stamped when the entry was recorded ($0 when no rule matched). */
+  /** The price stamped when the entry was recorded ($0 when no rule matched).
+   *  For credit-tracked rows (Higgsfield CLI) this is credits × the credit
+   *  rate at record/reprice time — the row's `credits` is the source of
+   *  truth and the rate is recomputable, same philosophy as the $ rules. */
   price: number;
+  /** Credits the generation cost (Higgsfield CLI `generate cost` preflight at
+   *  submit time). Rows carrying this render in credits; `price` is the
+   *  dollar conversion. Absent for $ rule rows and manual rows. */
+  credits?: number;
   /** When the generation completed / the manual row was added. */
   at: number;
   /** Custom label for manual entries. */
@@ -1052,6 +1108,9 @@ export interface LedgerView {
   total: number;
   imageCount: number;
   videoCount: number;
+  /** Dollar value of one Higgsfield credit used for `total` (null when the
+   *  user hasn't set a rate — credit rows then contribute $0). */
+  creditUsd: number | null;
 }
 
 /** Metadata handed to the generation seam for one successful AI generation. */
@@ -1061,6 +1120,9 @@ export interface LedgerGenMeta {
   resolution: string;
   durationSec?: number;
   aspectRatio?: string;
+  /** Credits the generation cost (Higgsfield CLI preflight at submit time).
+   *  Recorded on the entry so credit-tracked rows never need $ rules. */
+  credits?: number;
   at: number;
   productionId?: string;
   shotId?: string;
@@ -1110,6 +1172,8 @@ export interface CharacterSheetGenOptions {
   description: string;
   /** Front only, or front + back (both with the face inset). */
   view: CharacterSheetView;
+  /** Schema-driven model options (variant, seed, …); absent = defaults. */
+  params?: Record<string, string | number | boolean | string[]>;
 }
 
 /** A generated 3D model stored in the production's models folder. */
@@ -1380,6 +1444,11 @@ export interface CascadeApi {
   probeModelOptions(providerId: MediaProviderId, modelId: string): Promise<CliModelSchema | null>;
   /** Drop a provider's cached probes so the next probe refetches. */
   refreshModelProbe(providerId?: MediaProviderId): Promise<void>;
+  /** Dollar value of one Higgsfield credit for the Expenses total (null when
+   *  unset — credit rows show their credits and contribute $0 until set).
+   *  Edited in the dev Model Customizer; saving re-prices history. */
+  getHiggsfieldCreditRate(): Promise<number | null>;
+  setHiggsfieldCreditRate(v: number | null): Promise<number | null>;
   /** Dev Mode: verbose human-readable submission logging. */
   getDevMode(): Promise<boolean>;
   setDevMode(v: boolean): Promise<void>;
@@ -1549,7 +1618,7 @@ export interface CascadeApi {
    * persist it to styles/ and point the style at it (frameSource "generated").
    * Returns the updated production.
    */
-  generateStyleFrame(productionId: string, styleId: string, model?: string, resolution?: string): Promise<Production>;
+  generateStyleFrame(productionId: string, styleId: string, model?: string, resolution?: string, params?: Record<string, string | number | boolean | string[]>): Promise<Production>;
   /**
    * Step 2: attach an existing image (data URL) as one style's frame
    * (frameSource "upload"). Returns the updated production.
@@ -1641,9 +1710,11 @@ export interface CascadeApi {
   /**
    * Step 3: edit a shot's current frame via an image-input model — the frame
    * is sent as a visual reference alongside `prompt`, and the result becomes
-   * the new current frame (the old one moves into the history).
+   * the new current frame (the old one moves into the history). `params`
+   * carries the schema-driven model options (variant, seed, …); absent means
+   * vendor defaults.
    */
-  editBoard(productionId: string, shotId: string, model: string, prompt: string): Promise<Production>;
+  editBoard(productionId: string, shotId: string, model: string, prompt: string, params?: Record<string, string | number | boolean | string[]>, resolution?: string): Promise<Production>;
   /**
    * Step 3: make a stored frame primary, selecting its image/edit generation
    * and wiring that node to the output. The path stays stable as history grows.
@@ -1758,6 +1829,11 @@ export interface CascadeApi {
   /** Ids (namespaced) of the video models that accept a video input (the
    *  edit-video node's capability probe). Empty when none is proven. */
   videoEditModels(): Promise<string[]>;
+  /** Step 3/4: live per-config credit quote for one generation (Higgsfield
+   *  CLI `generate cost` preflight — no job submitted). Null for providers
+   *  without a cost surface and whenever the quote can't be read — callers
+   *  hide the quote and never block submit. Fractional credits possible. */
+  generationCost(req: GenerationCostRequest): Promise<number | null>;
   /** Step 3 node graph: edit one video (mandatory video source + prompt +
    *  references) and store the result on the shot's edit-video node. */
   generateEditVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;

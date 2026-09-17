@@ -677,6 +677,21 @@ describe("recordBoardEdit", () => {
     expect(node.source).toEqual({ kind: "editgen", nodeId: "edit0" });
     expect(shot.artwork).toBe("edit.jpg");
   });
+
+  it("stores the dialog's advanced params on the created node (absent stays absent)", () => {
+    const withParams = makeShot({ artwork: "a.jpg" });
+    const id = recordBoardEdit(withParams, "edit.jpg", "add rain", "auto", undefined, { variant: "sunburst", seed: "7" });
+    expect(withParams.graphEditNodes?.find((n) => n.id === id)?.params).toEqual({ variant: "sunburst", seed: "7" });
+    const bare = makeShot({ artwork: "a.jpg" });
+    const bareId = recordBoardEdit(bare, "edit.jpg", "add rain", "auto");
+    expect(bare.graphEditNodes?.find((n) => n.id === bareId)?.params).toBeUndefined();
+  });
+
+  it("stores the dialog's resolution tier on the created node", () => {
+    const shot = makeShot({ artwork: "a.jpg" });
+    const id = recordBoardEdit(shot, "edit.jpg", "add rain", "auto", undefined, undefined, "2k");
+    expect(shot.graphEditNodes?.find((n) => n.id === id)?.resolution).toBe("2k");
+  });
 });
 
 describe("wireEditNodeToCurrentFrame", () => {

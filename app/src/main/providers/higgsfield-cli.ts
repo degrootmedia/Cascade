@@ -53,6 +53,7 @@ import {
   type CliOptionField,
   type ImageGenAspectRatio,
   type ImageModelOptions,
+  type GenerationCostRequest,
   type LedgerGenMeta,
   type ModelParamOption,
   type OpenArtBoardConfig,
@@ -69,8 +70,9 @@ import { resizeVideoRef } from "../video-ref.js";
 import { buildModelSchema, OWNED_FLAGS, type RawModelParam } from "./model-schema.js";
 
 /** Prefix marking model ids that belong to this provider (see types.ts).
- *  The raw id is the CLI/MCP job_type (`seedance_2_5`); the prefix keeps the
- *  two Higgsfield transports from colliding in price rules and dropdowns. */
+ *  The raw id is the CLI job_type (`seedance_2_5`); the legacy MCP prefix
+ *  `higgsfield:` is accepted as an alias (same vendor id space) so saved
+ *  MCP-era picks keep submitting. */
 export const HIGGSFIELD_CLI_ID_PREFIX = "higgsfield-cli:";
 
 /** Strip the CLI prefix; foreign ids come back unchanged. */
@@ -81,8 +83,8 @@ export function higgsfieldCliRawId(modelId: string): string {
 }
 
 /** Raw job_type for an id this transport serves: strips our prefix, the
- *  sibling MCP transport's `higgsfield:` prefix (same vendor id space), or
- *  nothing for unprefixed picks. Anything else namespaced is foreign. */
+ *  legacy MCP transport's `higgsfield:` prefix (same vendor id space, removed),
+ *  or nothing for unprefixed picks. Anything else namespaced is foreign. */
 function rawJobType(modelId: string): string {
   const t = modelId.trim();
   if (t.startsWith(HIGGSFIELD_CLI_ID_PREFIX)) return t.slice(HIGGSFIELD_CLI_ID_PREFIX.length);
@@ -91,7 +93,7 @@ function rawJobType(modelId: string): string {
 }
 
 /** True when the id names a foreign provider (an explicit namespace that is
- *  neither this transport's nor the sibling MCP transport's). */
+ *  neither this transport's nor the legacy MCP `higgsfield:` alias). */
 function isForeignId(modelId: string): boolean {
   const t = modelId.trim();
   return t.includes(":") && !t.startsWith(HIGGSFIELD_CLI_ID_PREFIX) && !t.startsWith("higgsfield:");
@@ -106,6 +108,17 @@ const CATALOG_TTL_MS = 10 * 60_000;
 /** Schema-cache TTL (10 min) + cap; last-good schemas survive past expiry. */
 const SCHEMA_TTL_MS = 10 * 60_000;
 const SCHEMA_CACHE_CAP = 64;
+/** Cost-quote cache TTL (5 min) + cap. Quotes price the live catalog, so a
+ *  shorter TTL than options; failures are cached too (briefly) so a bad
+ *  config can't hammer the CLI on every keystroke. */
+const COST_TTL_MS = 5 * 60_000;
+const COST_CACHE_CAP = 64;
+/** Placeholder prompt for cost preflights. Verified live (2026-09-16):
+ *  prompt text never moves the price, but the flag is required — the real
+ *  prompt never travels, and no media flags are sent (zero uploads; refs
+ *  don't move the price either — seedance_2_5 5s/720p quotes 32.5 with and
+ *  without a start frame). */
+const COST_PROBE_PROMPT = "cost probe";
 const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
@@ -669,6 +682,57 @@ function cliResultUrls(stdout: string, video: boolean): string[] {
   return out;
 }
 
+/** The credit quote out of a `generate cost --json` reply. Live shape
+ *  (v1.1.25) is a flat `{credits: N}` (fractional allowed — 32.5 for
+ *  seedance_2_5 5s/720p); envelope/nested spellings and numeric strings are
+ *  accepted defensively. Null when unreadable. Exported for tests. */
+export function parseCostCredits(stdout: string): number | null {
+  const num = (v: unknown): number | null => {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+    if (typeof v === "string" && v.trim() !== "") {
+      const n = Number(v.trim());
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return null;
+  };
+  const search = (o: Record<string, unknown>): number | null => {
+    for (const key of ["credits", "total_credits", "totalCredits", "cost", "price", "amount"]) {
+      const n = num(o[key]);
+      if (n !== null) return n;
+    }
+    for (const key of ["data", "account", "job", "result", "estimate"]) {
+      const v = o[key];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const n = search(v as Record<string, unknown>);
+        if (n !== null) return n;
+      }
+    }
+    return null;
+  };
+  const obj = parseJsonLooseObject(stdout);
+  if (obj) return search(obj as Record<string, unknown>);
+  const arr = parseJsonLooseArray(stdout);
+  if (arr) {
+    for (const e of arr) {
+      if (e && typeof e === "object") {
+        const n = search(e as Record<string, unknown>);
+        if (n !== null) return n;
+      }
+    }
+  }
+  return null;
+}
+
+/** Stable cache key for a cost request: sorted params so key order never
+ *  splits the cache. Exported for tests. */
+export function costCacheKey(req: GenerationCostRequest): string {
+  const params = req.params
+    ? Object.keys(req.params).sort().map((k) => `${k}=${JSON.stringify(req.params?.[k])}`)
+    : [];
+  return [req.model.trim(), req.kind, req.resolution ?? "", req.durationSec ?? "",
+    req.aspectRatio ?? "", req.quality ?? "", ...params].join("|");
+}
+
 /** The credit balance out of an `account status --json` reply. */
 function parseCliCredits(stdout: string): number | null {
   const num = (v: unknown): number | null =>
@@ -713,6 +777,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
    *  kept past expiry so a transient `model get` failure degrades to
    *  stale-but-usable instead of the old hardcoded path. */
   private schemaCache = new Map<string, { at: number; schema: CliModelSchema | null }>();
+  /** Per-config credit quotes (TTL + cap). Keyed by costCacheKey — prompt
+   *  text and media never participate (they don't move the price). */
+  private costCache = new Map<string, { at: number; cost: number | null }>();
 
   /** `binary` resolves the CLI path lazily (Settings override → PATH probe
    *  cached by the caller) so a path change applies without a restart.
@@ -807,6 +874,65 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return parseCliCredits(stdout);
   }
 
+  /** Live per-config credit quote via `generate cost` (no job submitted).
+   *  Never throws — any failure (unknown model, unreadable reply, invalid
+   *  flag combo such as a media-requiring `mode` with no media attached)
+   *  resolves null so the UI hides the quote instead of blocking submit.
+   *  Arg emission mirrors the submit paths (exact-match resolution/quality,
+   *  listed aspects only, schema extras via the same normalizer) so the
+   *  quote prices what the submit would send — minus prompt and media. In
+   *  particular a per-surface `params.quality` pick beats the top-level
+   *  quality, exactly like the submit. */
+  async getGenerationCost(req: GenerationCostRequest): Promise<number | null> {
+    const raw = rawJobType(req.model);
+    if (!raw || raw === "auto" || isForeignId(req.model)) return null;
+    const key = costCacheKey({ ...req, model: raw });
+    const hit = this.costCache.get(key);
+    if (hit && Date.now() - hit.at < COST_TTL_MS) return hit.cost;
+    const remember = (cost: number | null): number | null => {
+      this.costCache.set(key, { at: Date.now(), cost });
+      if (this.costCache.size > COST_CACHE_CAP) {
+        const oldest = this.costCache.keys().next();
+        if (!oldest.done) this.costCache.delete(oldest.value);
+      }
+      return cost;
+    };
+    try {
+      const detail = await this.modelDetail(raw).catch(() => null);
+      const args = [raw, "--prompt", COST_PROBE_PROMPT];
+      if (req.kind === "video") {
+        args.push("--duration", String(Math.round(req.durationSec ?? 0) || 5));
+      }
+      if (req.resolution) {
+        const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
+        const resMatch = resValues.find((v) => v.toLowerCase() === String(req.resolution).toLowerCase());
+        if (resMatch) args.push("--resolution", resMatch);
+      }
+      // Nearest explicit pick wins (see the submit path): a per-surface
+      // params pick beats the top-level quality.
+      const paramsQuality = typeof req.params?.quality === "string" && req.params.quality.trim()
+        ? req.params.quality.trim()
+        : undefined;
+      const quality = paramsQuality ?? req.quality;
+      if (quality) {
+        const qualities = detail ? (HiggsfieldCliProvider.param(detail, "quality")?.values ?? []) : [];
+        const qMatch = qualities.find((v) => v.toLowerCase() === String(quality).toLowerCase());
+        if (qMatch) args.push("--quality", qMatch);
+      }
+      if (req.aspectRatio) {
+        const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
+        if (aspects.includes(req.aspectRatio)) args.push("--aspect_ratio", req.aspectRatio);
+      }
+      if (detail && req.params) {
+        emitExtraParams(normalizeCliModelDetail(detail, null, raw, null), req.params, args);
+      }
+      const stdout = await this.json(["generate", "cost", ...args], 30_000);
+      return remember(parseCostCredits(stdout));
+    } catch {
+      return remember(null);
+    }
+  }
+
   /** One model's normalized detail (cached); null when unknown/unreadable. */
   private async modelDetail(rawId: string): Promise<CliModelDetail | null> {
     const hit = this.detailCache.get(rawId);
@@ -828,6 +954,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
     this.listCache = null;
     this.detailCache.clear();
     this.schemaCache.clear();
+    this.costCache.clear();
   }
 
   /** Warm the per-model detail cache for every video-capable model.
@@ -876,8 +1003,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
   /** Resolve a stored/selected id to the raw job_type to submit: foreign or
    *  unknown ids fall back to the house default (or the first model of that
-   *  kind). The `higgsfield:` (MCP) prefix is accepted too — same vendor,
-   *  same id space — so a pick made under the MCP transport still submits. */
+   *  kind). The legacy `higgsfield:` (MCP, removed) prefix is accepted too —
+   *  same vendor, same id space — so a pick made under the MCP transport
+   *  still submits. */
   private async resolveImageModel(choice: string, items: CliListItem[]): Promise<string> {
     const raw = rawJobType(choice);
     const ids = items.map((m) => strField(m, "job_type", "jobType", "job_set_type", "id", "model", "name")).filter(Boolean);
@@ -1232,7 +1360,14 @@ export class HiggsfieldCliProvider implements MediaProvider {
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
         const resMatch = resValues.find((v) => v.toLowerCase() === String(resolution).toLowerCase());
         if (resMatch) args.push("--resolution", resMatch);
-        const quality = p.openArt?.quality?.trim();
+        // Quality: the nearest explicit pick wins — a per-surface params pick
+        // (node/ref option forms render it) beats the production default, so a
+        // quality set on the node actually submits instead of silently billing
+        // the storyboard default. Cleared/absent falls back to production.
+        const paramsQuality = typeof extraParams?.quality === "string" && extraParams.quality.trim()
+          ? extraParams.quality.trim()
+          : undefined;
+        const quality = paramsQuality ?? p.openArt?.quality?.trim();
         const qualities = detail ? (HiggsfieldCliProvider.param(detail, "quality")?.values ?? []) : [];
         if (quality) {
           const qMatch = qualities.find((v) => v.toLowerCase() === quality.toLowerCase());
@@ -1250,6 +1385,17 @@ export class HiggsfieldCliProvider implements MediaProvider {
           model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
           resolution,
           aspectRatio,
+          // Best-effort submit-time credit quote for the ledger (usually a
+          // cache hit — the renderer pre-probes this exact config for the
+          // Generate button). Null when unreadable; the row then prices $0
+          // like an unmatched rule instead of blocking the submit.
+          credits: (await this.getGenerationCost({
+            model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, kind: "image",
+            ...(resolution ? { resolution } : {}),
+            aspectRatio: wantAspect,
+            ...(quality ? { quality } : {}),
+            ...(extraParams && Object.keys(extraParams).length ? { params: { ...extraParams } } : {}),
+          })) ?? undefined,
           at: Date.now(),
           productionId: p.meta.id,
           shotId: shot?.id,
@@ -1259,9 +1405,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
           done = await this.createAndWait(args, false, IMAGE_WAIT_TIMEOUT_MS);
         } catch (e) {
           // The job keeps rendering server-side — record it as pending so
-          // the finished frame can be reclaimed instead of re-paid.
+          // the finished frame can be reclaimed instead of re-paid. Quality
+          // and params ride along so the reclaim bills like the submit.
           if (shot && e instanceof HiggsfieldCliPendingError) {
-            shot.pendingImageGen = { historyId: e.jobId, prompt, model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, resolution, aspectRatio, at: new Date().toISOString() };
+            shot.pendingImageGen = {
+              historyId: e.jobId, prompt, model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
+              resolution, aspectRatio,
+              ...(quality ? { quality } : {}),
+              ...(extraParams && Object.keys(extraParams).length ? { params: { ...extraParams } } : {}),
+              at: new Date().toISOString(),
+            };
           }
           throw e;
         }
@@ -1478,6 +1631,15 @@ export class HiggsfieldCliProvider implements MediaProvider {
         model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
         resolution: opts.resolution || "",
         durationSec,
+        // Best-effort submit-time credit quote (see the image path — usually
+        // a cache hit from the renderer's pre-submit probe).
+        credits: (await this.getGenerationCost({
+          model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, kind: "video",
+          ...(opts.resolution ? { resolution: opts.resolution } : {}),
+          durationSec,
+          aspectRatio: wantAspect,
+          ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+        })) ?? undefined,
         at: Date.now(),
         productionId: p.meta.id,
         shotId: shot.id,
@@ -1604,6 +1766,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
         model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
         resolution: opts.resolution || "",
         durationSec: durationSec || undefined,
+        // Best-effort submit-time credit quote (see the image path). An edit
+        // keeps the source's timing, so no duration travels when the submit
+        // sends none — the quote prices the same flag set.
+        credits: (await this.getGenerationCost({
+          model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`, kind: "video",
+          ...(opts.resolution ? { resolution: opts.resolution } : {}),
+          ...(durationSec > 0 ? { durationSec } : {}),
+          aspectRatio: wantAspect,
+          ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+        })) ?? undefined,
         at: Date.now(),
         productionId: p.meta.id,
         shotId: shot.id,

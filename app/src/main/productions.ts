@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock } from "../shared/ipc.js";
+import { sanitizeGenParams } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations, relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
 import { createStore } from "./store.js";
 
@@ -359,6 +360,11 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     if (typeof p.openArt.quality === "string" && p.openArt.quality.trim()) {
       fresh.openArt.quality = p.openArt.quality.trim();
     }
+    // Schema-driven model options (variant, mode, …) are renderer-edited
+    // through saves like quality — dropping them here silently reverted every
+    // storyboard params pick (and its quote) on the next reload.
+    const params = sanitizeGenParams(p.openArt.params);
+    if (params) fresh.openArt.params = params;
   }
   if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
     fresh.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;

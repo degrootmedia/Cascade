@@ -1,5 +1,6 @@
 /**
- * MediaProvider — the abstraction layer over MCP-based image/video generation.
+ * MediaProvider — the abstraction layer over image/video generation
+ * (MCP servers and local CLI binaries).
  *
  * OpenArt was originally hardcoded through the whole main process
  * (`const SERVER = "openart"` + `findTool(/^openart_…/)` inside OpenArtClient).
@@ -8,9 +9,10 @@
  * this interface, never to a vendor class directly.
  *
  * Model ids are provider-namespaced where they leave the provider
- * (`higgsfield:<id>`): price rules, stored configs, and the renderer treat
- * them opaquely, and each provider maps foreign/unknown ids back to "auto"
- * instead of submitting a cross-vendor id to its server.
+ * (`higgsfield-cli:<id>`, `openart-cli:<id>`): price rules, stored configs,
+ * and the renderer treat them opaquely, and each provider maps
+ * foreign/unknown ids back to "auto" instead of submitting a cross-vendor
+ * id to its server.
  */
 import type { McpManager } from "../mcp.js";
 import type { ImageGenFn } from "../pipeline.js";
@@ -18,6 +20,7 @@ import type {
   CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
+  GenerationCostRequest,
   LedgerGenMeta,
   MediaProviderId,
   OpenArtBoardConfig,
@@ -113,6 +116,12 @@ export interface MediaProvider {
    *  callers fall back to the ladder methods. */
   modelOptions?(modelId: string): Promise<CliModelSchema | null>;
 
+  /** Live per-config credit quote for one generation (no job submitted).
+   *  Optional — providers without a cost surface omit it and callers treat
+   *  the quote as unknown (null). Never throws: unreadable quotes resolve
+   *  null so the UI hides the price instead of blocking submit. */
+  getGenerationCost?(req: GenerationCostRequest): Promise<number | null>;
+
   /** Ids of the video-capable models that accept a dedicated end frame
    *  (the in-betweener's start→end submit path). Empty when none is proven —
    *  the caller unions this with the user's manual allowlist before the
@@ -156,6 +165,7 @@ export type {
   CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,
+  GenerationCostRequest,
   LedgerGenMeta,
   MediaProviderId,
   OpenArtBoardConfig,

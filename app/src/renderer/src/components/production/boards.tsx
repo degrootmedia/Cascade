@@ -3,6 +3,8 @@ import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, Vi
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
+import { costAspect, isQuotableCostModel, useGenerationCost } from "./generation-cost.js";
+import { CostValue, GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
@@ -652,7 +654,17 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prod.meta.id, shot.id]);
   const selected = videoModels.find((m) => m.id === model);
-  const cost = selected && typeof selected.cost === "number" ? selected.cost : null;
+  const staticCost = selected && typeof selected.cost === "number" ? selected.cost : null;
+  // Live per-config quote (Higgsfield CLI only — mirrors the submit args
+  // minus prompt/media). Stale-while-revalidate: the previous quote stays up
+  // while the next one resolves; falls back to the static overlay.
+  const quotable = isQuotableCostModel(model);
+  const videoCostReq = quotable ? {
+    model, kind: "video" as const, resolution, durationSec, aspectRatio: costAspect(extraParams),
+    ...(Object.keys(extraParams).length ? { params: { ...extraParams } } : {}),
+  } : null;
+  const liveQuote = useGenerationCost(videoCostReq);
+  const cost = liveQuote.cost ?? staticCost;
   const references = promptRefsForShot(prod, shot.id);
   return (
     <div className="prod-edit-overlay prod-video-overlay" onClick={onClose}>
@@ -723,12 +735,12 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
         />
         {(cost != null || credits != null) && (
           <p className="prod-video-cost">
-            {cost != null && <>This clip costs about <strong>◎{cost} credits</strong>.</>}
+            {cost != null && <>This clip costs about <strong><CostValue cost={cost} /> credits</strong>.{quotable && liveQuote.pending ? " Updating…" : ""}</>}
             {credits != null ? ` You have ~${credits.toLocaleString()} credits available.` : ""}
           </p>
         )}
         <button className="prod-btn prod-edit-go" disabled={!prompt.trim()} onClick={() => onSubmit({ model, resolution, durationSec, prompt: prompt.trim(), ...(Object.keys(extraParams).length ? { params: extraParams } : {}) })}>
-          Generate video
+          Generate video<GenerationCostSuffix req={videoCostReq} />{liveQuote.cost == null && staticCost != null ? <CostValue cost={staticCost} /> : null}
         </button>
       </div>
     </div>
@@ -739,7 +751,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
  *  describe the change; the current frame is sent as the visual reference and
  *  the result becomes the new frame (previous one kept in history). */
 
-export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelChange, prompt: externalPrompt, onPromptChange, onSubmit, onClose }: {
+export function EditBoardModal({ shotNumber, models, savedModel, savedResolution, productionQuality, onSavedModelChange, prompt: externalPrompt, onPromptChange, onSubmit, onClose }: {
   shotNumber: string;
   models: OpenArtModelChoice[];
   /** This shot's edit chain's last-used model (the output-bound edit node's
@@ -747,10 +759,16 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
   savedModel?: string;
   /** Persists a model change onto the same edit node. */
   onSavedModelChange?: (model: string) => void;
+  /** This shot's edit chain's last-used resolution (the output-bound edit
+   *  node's pick) — seeds the dialog so re-edits keep the chain's tier. */
+  savedResolution?: string;
+  /** Production quality tier — classic edits bill it (the provider reads it
+   *  off the production), so the quote must price it too. */
+  productionQuality?: string;
   /** Synced prompt — when provided, this IS the `graphEditPrompt` source of truth shared with the node graph's edit-prompt node. */
   prompt?: string;
   onPromptChange?: (text: string) => void;
-  onSubmit: (model: string, prompt: string) => void;
+  onSubmit: (model: string, prompt: string, params?: ModelOptionValues, resolution?: string) => void;
   onClose: () => void;
 }) {
   const imageModels = models.filter(isImageModel);
@@ -758,6 +776,31 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
   const external = externalPrompt ?? "";
   const [prompt, setPrompt] = useState(external);
   const [focused, setFocused] = useState(false);
+  const effEditModel = imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "");
+  // Resolution rides the created edit node (per-node persistence, like the
+  // node-graph edit view) — seeded from the output-bound node's pick so
+  // re-editing a chain keeps its resolution.
+  const [resolution, setResolution] = useState(() => savedResolution ?? getMediaDefault("edit")?.resolution ?? "1k");
+  // Schema-driven model options (variant, seed, … — same surface as the
+  // node-graph edit node, so the dialog and the node agree). No resolution
+  // or quality controls: the edit runs through the shot's edit-node chain
+  // (node resolution, production quality default).
+  const [editParams, setEditParams] = useState<ModelOptionValues>({});
+  const [editSchema, setEditSchema] = useState<CliModelSchema | null>(null);
+  useEffect(() => {
+    let live = true;
+    setEditSchema(null);
+    if (!effEditModel) return () => { live = false; };
+    window.cascade.modelOptions(effEditModel)
+      .then((s) => {
+        if (!live) return;
+        setEditSchema(s);
+        setEditParams((prev) => seedModelOptionValues(s, effEditModel, "image:edit", pruneModelOptionValues(s, prev)));
+      })
+      .catch(() => { if (live) setEditSchema(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effEditModel]);
   const emitted = useRef<Set<string>>(new Set([external]));
   useEffect(() => {
     if (focused) return;
@@ -772,6 +815,18 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
     if (s.size > 100) s.clear();
     s.add(text);
     onPromptChange?.(text);
+  };
+  // Live per-config quote (Higgsfield CLI only). No resolution control here —
+  // the edit runs through the shot's edit-node chain — so the quote prices
+  // the model + its advanced options (advisory).
+  const editCostReq = isQuotableCostModel(effEditModel) ? {
+    model: effEditModel, kind: "image" as const, resolution, aspectRatio: costAspect(editParams),
+    ...(productionQuality ? { quality: productionQuality } : {}),
+    ...(Object.keys(editParams).length ? { params: { ...editParams } } : {}),
+  } : null;
+  const submitEdit = () => {
+    if (!prompt.trim()) return;
+    onSubmit(model, prompt, Object.keys(editParams).length ? editParams : undefined, resolution);
   };
   return (
     <div className="prod-edit-overlay" onClick={onClose}>
@@ -795,6 +850,23 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
         {imageModels.length === 0 && (
           <p className="hint">No image-input models reported — connect the media MCP server.</p>
         )}
+        <div className="prod-video-row">
+          <label className="prod-label">Resolution
+            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); }} title="Resolution for the edited frame (stored on the edit node)">
+              <option value="1k">1k</option>
+              <option value="2k">2k</option>
+              <option value="4k">4k</option>
+            </select>
+          </label>
+        </div>
+        <ModelOptionsForm
+          schema={editSchema}
+          value={editParams}
+          onChange={setEditParams}
+          exclude={["resolution"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.boardEdit"
+        />
         <label className="prod-label">Edit prompt</label>
         <textarea
           className="prod-edit-prompt"
@@ -806,7 +878,7 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
           onBlur={() => setFocused(false)}
           onChange={(e) => handlePromptChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) onSubmit(model, prompt);
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && prompt.trim()) submitEdit();
             if (e.key === "Escape") onClose();
           }}
         />
@@ -819,9 +891,9 @@ export function EditBoardModal({ shotNumber, models, savedModel, onSavedModelCha
         <button
           className="prod-btn prod-edit-go"
           disabled={!prompt.trim()}
-          onClick={() => onSubmit(model, prompt)}
+          onClick={() => submitEdit()}
         >
-          Edit frame
+          Edit frame<GenerationCostSuffix req={editCostReq} />
         </button>
       </div>
     </div>

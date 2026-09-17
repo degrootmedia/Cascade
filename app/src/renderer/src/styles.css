@@ -2987,6 +2987,30 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
 }
+/* Live credit quote: self-contained pill so the price reads as one unit
+ * inside Generate-button labels (vertically centered — the tooltip carries
+ * the "about"). Solid accent with a thin white border, matching the accent
+ * buttons. Pure CSS: zero JS cost. */
+.cost-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 9px 2px;
+  margin-left: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+/* Inside inline-flex labels the label's own gap already spaces the pill. */
+.prod-openart-label .cost-pill {
+  margin-left: 0;
+}
 .model-menu {
   position: absolute;
   bottom: calc(100% + 6px);

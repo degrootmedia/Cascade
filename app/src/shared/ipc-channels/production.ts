@@ -77,6 +77,7 @@ export const productionChannels = {
   "production:imageModelOptions": { method: "imageModelOptions", kind: "invoke" },
   "production:modelOptions": { method: "modelOptions", kind: "invoke" },
   "production:videoEndFrameModels": { method: "videoEndFrameModels", kind: "invoke" },
+  "production:generationCost": { method: "generationCost", kind: "invoke" },
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
   "production:generate3dModel": { method: "generate3dModel", kind: "invoke" },

@@ -7,17 +7,16 @@ export type MediaCredits = Record<MediaProviderId, number | null>;
 
 const LOGOS: Record<string, string> = {
   openart: openartLogo,
-  higgsfield: higgsfieldLogo,
-  // Same vendor families as their MCP transports — one recognizable mark each.
+  // Higgsfield MCP transport removed — the CLI keeps the same vendor mark.
   "higgsfield-cli": higgsfieldLogo,
   "openart-cli": openartLogo,
 };
 
 /** Compact balance text: OpenArt (either transport) as an integer,
- *  Higgsfield (either transport) with 1 decimal. */
+ *  Higgsfield CLI with 1 decimal. */
 export function formatMediaBalance(id: MediaProviderId, v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
-  if (id === "higgsfield" || id === "higgsfield-cli")
+  if (id === "higgsfield-cli")
     return v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   return Math.round(v).toLocaleString("en-US");
 }
@@ -44,9 +43,9 @@ export function MediaProviderToggle({
 }) {
   const list = providers.length
     ? providers
-    : (["openart", "higgsfield"] as MediaProviderId[]).map((id) => ({
+    : (["openart"] as MediaProviderId[]).map((id) => ({
         id,
-        displayName: id === "openart" ? "OpenArt" : "Higgsfield",
+        displayName: "OpenArt",
         available: true,
       }));
   return (

@@ -66,6 +66,33 @@ describe("applyRendererState", () => {
     expect(merged.scriptSource).toBe("C:/script.md");
   });
 
+  it("preserves sanitized openArt params/quality and drops non-scalar shapes", () => {
+    // Regression: the whitelist once rebuilt openArt with model/resolution
+    // (+quality) only, silently reverting every storyboard params pick —
+    // and its quote — on the next reload.
+    const fresh = baseProduction();
+    // Parsed from the wire, so corrupt shapes are representable.
+    const dirtyParams = JSON.parse(JSON.stringify({
+      variant: "sunburst", seed: 7, deep: { nested: true }, list: ["a", 1],
+    }));
+    const incoming = baseProduction({
+      openArt: {
+        model: "higgsfield-cli:gpt_image_2_5", resolution: "2k", quality: " high ",
+        params: dirtyParams,
+      },
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.openArt).toEqual({
+      model: "higgsfield-cli:gpt_image_2_5", resolution: "2k", quality: "high",
+      params: { variant: "sunburst", seed: 7 },
+    });
+    // Absent params stay absent (no empty bag written).
+    const bare = applyRendererState(baseProduction(), baseProduction({
+      openArt: { model: "auto", resolution: "1k" },
+    }));
+    expect(bare.openArt).toEqual({ model: "auto", resolution: "1k" });
+  });
+
   it("never clobbers scene structure the renderer doesn't own", () => {
     // The fresh doc carries the post-reorder scene order; the incoming
     // renderer copy predates it (or simply echoes an empty list) — the fresh

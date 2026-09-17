@@ -248,7 +248,7 @@ describe("ledger records", () => {
 
     const csv = fs.readFileSync(path.join(dataDir, "ledger", `${P1}.csv`), "utf8");
     const lines = csv.split("\r\n").filter(Boolean);
-    expect(lines[0]).toBe("date,kind,model,resolution,duration_sec,price,label");
+    expect(lines[0]).toBe("date,kind,model,resolution,duration_sec,price,credits,label");
     // Chronological order: the image (at=1000) precedes the video (at=2000).
     expect(lines[1]).toContain("image");
     expect(lines[1]).toContain('"flux,pro"');
@@ -281,6 +281,60 @@ describe("ledger records", () => {
     expect(rules).toHaveLength(2);
     expect(rules[0]).toMatchObject({ kind: "image", model: "flux-pro", minPrice: 0.2, maxPrice: 0.8 });
     expect(rules[1]).toMatchObject({ kind: "video", model: "veo", minPrice: 1.0, maxPrice: 1.0 });
+  });
+});
+
+describe("credit-tracked rows", () => {
+  const hf = (over: Partial<LedgerGenMeta> = {}): LedgerGenMeta => ({
+    kind: "image", model: "higgsfield-cli:gpt_image_2_5", resolution: "1k",
+    credits: 2, at: 1000, productionId: P1, ...over,
+  });
+
+  it("converts credits at the current rate, bypassing $ rules", () => {
+    setPriceRules([rangeRule({ id: "r1", model: "higgsfield-cli:gpt_image_2_5", minPrice: 99, maxPrice: 99 })]);
+    recordGeneration(hf(), 0.05);
+    const [e] = view(P1, 0.05).entries;
+    expect(e).toMatchObject({ credits: 2, price: 0.1 });
+    expect(view(P1, 0.05).total).toBeCloseTo(0.1);
+    expect(view(P1, 0.05).creditUsd).toBe(0.05);
+  });
+
+  it("prices credit rows $0 until a rate is set (credits still recorded)", () => {
+    recordGeneration(hf());
+    const v = view(P1);
+    expect(v.entries[0]).toMatchObject({ credits: 2, price: 0 });
+    expect(v.total).toBe(0);
+    expect(v.creditUsd).toBeNull();
+  });
+
+  it("re-prices credit rows when the rate changes, leaving $ rows on rules", () => {
+    setPriceRules([rangeRule({ id: "r1", model: "flux-pro", minPrice: 0.3, maxPrice: 0.3 })]);
+    recordGeneration(hf(), 0.05);
+    recordGeneration(img(), 0.05);
+    expect(view(P1, 0.05).total).toBeCloseTo(0.4);
+
+    repriceAll(0.1);
+    const v = view(P1, 0.1);
+    expect(v.entries.find((e) => e.model.startsWith("higgsfield-cli:"))!.price).toBeCloseTo(0.2);
+    expect(v.entries.find((e) => e.model === "flux-pro")!.price).toBeCloseTo(0.3);
+    expect(v.total).toBeCloseTo(0.5);
+  });
+
+  it("a rules save never zeroes credit rows when the rate travels with it", () => {
+    recordGeneration(hf(), 0.05);
+    setPriceRules([rangeRule({ id: "r1", model: "*", minPrice: 0.25, maxPrice: 0.25 })], 0.05);
+    expect(view(P1, 0.05).entries[0].price).toBeCloseTo(0.1);
+  });
+
+  it("normalizes corrupt credit shapes to absent and mirrors credits to CSV", () => {
+    recordGeneration(hf({ credits: 32.5 }), 0.04);
+    recordGeneration(hf({ credits: Number.NaN }), 0.04);
+    const [bad, good] = view(P1, 0.04).entries;
+    expect(good).toMatchObject({ credits: 32.5, price: 1.3 });
+    expect(bad.credits).toBeUndefined();
+    expect(bad.price).toBe(0);
+    const csv = fs.readFileSync(path.join(dataDir, "ledger", `${P1}.csv`), "utf8");
+    expect(csv).toContain(",32.5,");
   });
 });
 

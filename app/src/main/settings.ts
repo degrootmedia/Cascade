@@ -41,6 +41,10 @@ interface SettingsFile {
   higgsfieldCliBinary: string | null;
   /** Custom path to the `openart` CLI binary (null = resolve from PATH). */
   openartCliBinary: string | null;
+  /** Dollar value of one Higgsfield credit for the Expenses total (null =
+   *  unset — credit rows show their credits and contribute $0 until set).
+   *  Edited in the dev Model Customizer; saving re-prices history. */
+  higgsfieldCreditUsd: number | null;
   /** UI accent color (hex), applied to the --accent CSS variable. */
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
@@ -131,6 +135,7 @@ const DEFAULTS: SettingsFile = {
   mediaProvider: "openart",
   higgsfieldCliBinary: null,
   openartCliBinary: null,
+  higgsfieldCreditUsd: null,
   accent: "#4f8ef7",
   externalEditor: null,
   encrypted3daiApiKey: null,
@@ -173,11 +178,50 @@ function load(): SettingsFile {
   delete legacy.encryptedApiKey;
   delete legacy.model;
   if (!getProvider(s.provider)) s.provider = "gab";
-  // Higgsfield exposes ~100 tools — keep it on-demand like OpenArt so the
-  // default agent payload stays lean. Applies to fresh installs (DEFAULTS
-  // lacks it) and migrates existing profiles that predate the vendor.
-  if (!s.mcpOnDemand.includes("higgsfield")) s.mcpOnDemand = [...s.mcpOnDemand, "higgsfield"];
-  if (s.mediaProvider !== "higgsfield" && s.mediaProvider !== "higgsfield-cli" && s.mediaProvider !== "openart-cli" && s.mediaProvider !== "openart") s.mediaProvider = "openart";
+  // Higgsfield MCP transport removed — the CLI is the successor. Drop the
+  // server name from the on-demand list and migrate a stored `higgsfield`
+  // global pick to `higgsfield-cli` so existing profiles keep generating.
+  if (s.mcpOnDemand.includes("higgsfield")) s.mcpOnDemand = s.mcpOnDemand.filter((n) => n !== "higgsfield");
+  if ((s.mediaProvider as string) === "higgsfield") s.mediaProvider = "higgsfield-cli";
+  if (s.mediaProvider !== "higgsfield-cli" && s.mediaProvider !== "openart-cli" && s.mediaProvider !== "openart") s.mediaProvider = "openart";
+  // Prune orphaned `higgsfield:*` per-model keys (MCP-namespaced ids no
+  // longer list); `higgsfield-cli:` rows are untouched. Media-default model
+  // values with the legacy prefix are rewritten to the CLI prefix so
+  // dropdown seeding survives (the CLI also accepts the old prefix).
+  if (Array.isArray(s.hiddenMediaModels) && s.hiddenMediaModels.some((id) => typeof id === "string" && id.startsWith("higgsfield:"))) {
+    s.hiddenMediaModels = s.hiddenMediaModels.filter((id) => typeof id === "string" && !id.startsWith("higgsfield:"));
+  }
+  if (s.modelKindOverrides) {
+    for (const id of Object.keys(s.modelKindOverrides)) {
+      if (id.startsWith("higgsfield:")) delete s.modelKindOverrides[id];
+    }
+  }
+  if (Array.isArray(s.mediaModelOrder) && s.mediaModelOrder.some((id) => typeof id === "string" && id.startsWith("higgsfield:"))) {
+    s.mediaModelOrder = s.mediaModelOrder.filter((id) => typeof id === "string" && !id.startsWith("higgsfield:"));
+  }
+  if (s.modelOptionExposure) {
+    for (const k of Object.keys(s.modelOptionExposure)) {
+      if (k.startsWith("higgsfield:")) delete s.modelOptionExposure[k];
+    }
+  }
+  if (s.modelSurfaces) {
+    for (const id of Object.keys(s.modelSurfaces)) {
+      if (id.startsWith("higgsfield:")) delete (s.modelSurfaces as Record<string, unknown>)[id];
+    }
+  }
+  if (s.modelParamDefaults) {
+    for (const k of Object.keys(s.modelParamDefaults)) {
+      if (k.startsWith("higgsfield:")) delete s.modelParamDefaults[k];
+    }
+  }
+  if (s.mediaDefaults) {
+    for (const ctx of Object.keys(s.mediaDefaults)) {
+      const m = (s.mediaDefaults as Record<string, { model?: unknown }>)[ctx]?.model;
+      if (typeof m === "string" && m.startsWith("higgsfield:")) {
+        (s.mediaDefaults as Record<string, { model?: string }>)[ctx].model = `higgsfield-cli:${m.slice("higgsfield:".length)}`;
+      }
+    }
+  }
   cache = s;
   return cache!;
 }
@@ -308,11 +352,15 @@ export function setMcpOnDemand(names: string[]): void {
 /** Which vendor serves image/video generation ("openart" default). */
 export function getMediaProvider(): string {
   const v = load().mediaProvider;
-  return v === "higgsfield" || v === "higgsfield-cli" || v === "openart-cli" ? v : "openart";
+  // Legacy `higgsfield` (MCP, removed) reads as its CLI successor.
+  if (v === "higgsfield") return "higgsfield-cli";
+  return v === "higgsfield-cli" || v === "openart-cli" ? v : "openart";
 }
 
 export function setMediaProvider(id: string): void {
-  load().mediaProvider = id === "higgsfield" || id === "higgsfield-cli" || id === "openart-cli" ? id : "openart";
+  // Accept legacy `higgsfield` writes as the CLI successor.
+  const norm = id === "higgsfield" ? "higgsfield-cli" : id;
+  load().mediaProvider = norm === "higgsfield-cli" || norm === "openart-cli" ? norm : "openart";
   save();
 }
 
@@ -336,6 +384,20 @@ export function getOpenArtCliBinary(): string | null {
 export function setOpenArtCliBinary(p: string | null): void {
   load().openartCliBinary = typeof p === "string" && p.trim() ? p.trim() : null;
   save();
+}
+
+/** Dollar value of one Higgsfield credit (Expenses total), or null when unset. */
+export function getHiggsfieldCreditUsd(): number | null {
+  const v = load().higgsfieldCreditUsd;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** Set (or clear, with null) the Higgsfield credit value. Returns normalized. */
+export function setHiggsfieldCreditUsd(v: number | null): number | null {
+  const next = typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  load().higgsfieldCreditUsd = next;
+  save();
+  return next;
 }
 
 /** UI accent color (hex string). */

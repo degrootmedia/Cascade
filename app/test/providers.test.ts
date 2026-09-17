@@ -193,7 +193,8 @@ describe("cost tiers (relative ranking)", () => {
 describe("PROVIDER_CAPABILITIES", () => {
   it("declares a conservative matrix (openart-cli: no video refs, no end frame)", async () => {
     const { PROVIDER_CAPABILITIES, PROVIDER_IDS } = await import("../src/main/providers/registry.js");
-    expect(PROVIDER_IDS).toEqual(expect.arrayContaining(["openart", "higgsfield", "higgsfield-cli", "openart-cli"]));
+    expect(PROVIDER_IDS).toEqual(expect.arrayContaining(["openart", "higgsfield-cli", "openart-cli"]));
+    expect(PROVIDER_IDS).not.toContain("higgsfield");
     expect(PROVIDER_CAPABILITIES["openart-cli"]).toEqual({ imageRefs: true, videoRefs: false, endFrame: false, tween: false });
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].videoRefs).toBe(true);
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].endFrame).toBe(true);

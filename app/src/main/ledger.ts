@@ -269,6 +269,16 @@ function durationScale(durMin: number | null, durMax: number | null, durationSec
   return Math.max(0, Math.min(1, (durationSec - durMin) / (durMax - durMin)));
 }
 
+/** Price a generation in dollars: credit-tracked rows convert at the current
+ *  credit rate (unset rate prices them $0 — the credits themselves are the
+ *  record); everything else prices against the $ rules. Pure — unit-tested. */
+export function priceFor(rules: ExpensePriceRule[], meta: LedgerGenMeta, creditUsd: number | null): number {
+  if (meta.credits != null) {
+    return creditUsd != null ? meta.credits * creditUsd : 0;
+  }
+  return matchPriceRule(rules, meta);
+}
+
 /** Price a generation against the rules: pick the most specific rule (exact
  *  model beats "*"), then interpolate its min→max range by the generation's
  *  resolution and video length. Generations matching no rule are priced at $0.
@@ -295,9 +305,16 @@ export function matchPriceRule(rules: ExpensePriceRule[], meta: LedgerGenMeta): 
 
 const clampPrice = (v: unknown, fallback: number): number => (Number.isFinite(v) ? Math.max(0, Number(v)) : fallback);
 
+/** Keep only sane credit amounts (finite, non-negative); corrupt shapes —
+ *  NaN from a bad IPC payload, negatives — record as absent. */
+function validCredits(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
 function normalizeEntry(e: LedgerEntry): LedgerEntry | null {
   if (!e || typeof e !== "object" || typeof e.id !== "string") return null;
   const kind = e.kind === "video" ? "video" : e.kind === "manual" ? "manual" : "image";
+  const credits = typeof e.credits === "number" && Number.isFinite(e.credits) && e.credits >= 0 ? e.credits : undefined;
   return {
     id: e.id,
     kind,
@@ -306,6 +323,7 @@ function normalizeEntry(e: LedgerEntry): LedgerEntry | null {
     durationSec: kind === "video" && e.durationSec != null ? Math.max(0, e.durationSec) : undefined,
     aspectRatio: typeof e.aspectRatio === "string" ? e.aspectRatio : undefined,
     price: Number.isFinite(e.price) ? Math.max(0, e.price) : 0,
+    credits,
     at: Number.isFinite(e.at) ? e.at : 0,
     label: typeof e.label === "string" ? e.label : undefined,
     productionId: typeof e.productionId === "string" ? e.productionId : undefined,
@@ -386,12 +404,13 @@ function writeProjectCsv(f: ProjectLedgerFile): void {
       e.resolution,
       e.kind === "video" && e.durationSec != null ? String(e.durationSec) : "",
       e.price.toFixed(2),
+      e.credits != null ? String(e.credits) : "",
       e.label ?? "",
     ]
       .map(csvEscape)
       .join(",")
   );
-  const body = ["date,kind,model,resolution,duration_sec,price,label", ...rows].join("\r\n") + "\r\n";
+  const body = ["date,kind,model,resolution,duration_sec,price,credits,label", ...rows].join("\r\n") + "\r\n";
   fs.mkdirSync(entriesDir(), { recursive: true });
   const target = entryCsvPath(f.productionId);
   const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
@@ -400,13 +419,15 @@ function writeProjectCsv(f: ProjectLedgerFile): void {
 }
 
 /** Record one successful AI generation against its production. The price is
- *  derived from the current rules at record time; later rule edits re-price it
- *  via repriceAll(). A generation with no `productionId` can't be attributed
- *  to a project and is dropped. */
-export function recordGeneration(meta: LedgerGenMeta): void {
+ *  derived from the current rules (or the credit rate for credit-tracked
+ *  rows) at record time; later rule/rate edits re-price it via repriceAll().
+ *  A generation with no `productionId` can't be attributed to a project and
+ *  is dropped. */
+export function recordGeneration(meta: LedgerGenMeta, creditUsd?: number | null): void {
   const productionId = meta.productionId;
   if (!productionId || !validProductionId(productionId)) return;
   const rules = loadRules();
+  const credits = validCredits(meta.credits);
   const f = loadProject(productionId);
   f.entries.unshift({
     id: newId(),
@@ -415,7 +436,8 @@ export function recordGeneration(meta: LedgerGenMeta): void {
     resolution: meta.resolution || "",
     durationSec: meta.kind === "video" ? meta.durationSec : undefined,
     aspectRatio: meta.aspectRatio,
-    price: matchPriceRule(rules.priceRules, meta),
+    price: priceFor(rules.priceRules, { ...meta, credits }, creditUsd ?? null),
+    credits,
     at: meta.at || Date.now(),
     productionId,
     shotId: meta.shotId,
@@ -425,7 +447,7 @@ export function recordGeneration(meta: LedgerGenMeta): void {
 }
 
 /** Add a manual "purchased asset" row to one production's ledger. */
-export function addManualEntry(productionId: string, label: string, amount: number): LedgerView {
+export function addManualEntry(productionId: string, label: string, amount: number, creditUsd?: number | null): LedgerView {
   const f = loadProject(productionId);
   f.entries.unshift({
     id: newId(),
@@ -439,11 +461,11 @@ export function addManualEntry(productionId: string, label: string, amount: numb
   });
   f.updatedAt = new Date().toISOString();
   saveProject(f);
-  return view(productionId);
+  return view(productionId, creditUsd);
 }
 
 /** Remove one row from a production's ledger. */
-export function removeEntry(productionId: string, id: string): LedgerView {
+export function removeEntry(productionId: string, id: string, creditUsd?: number | null): LedgerView {
   const f = loadProject(productionId);
   const before = f.entries.length;
   f.entries = f.entries.filter((e) => e.id !== id);
@@ -451,7 +473,7 @@ export function removeEntry(productionId: string, id: string): LedgerView {
     f.updatedAt = new Date().toISOString();
     saveProject(f);
   }
-  return view(productionId);
+  return view(productionId, creditUsd);
 }
 
 /** The generation metadata an entry prices against (drops the pricing-irrelevant
@@ -463,21 +485,24 @@ function entryMeta(e: LedgerEntry): LedgerGenMeta {
     resolution: e.resolution,
     durationSec: e.durationSec,
     aspectRatio: e.aspectRatio,
+    credits: e.credits,
     at: e.at,
     productionId: e.productionId,
     shotId: e.shotId,
   };
 }
 
-/** Re-run the current rules over every production's generations, overwriting
- *  each entry's price. Manual rows keep their custom amounts. */
-export function repriceAll(): void {
+/** Re-run the current rules (and credit rate) over every production's
+ *  generations, overwriting each entry's price. Manual rows keep their
+ *  custom amounts. */
+export function repriceAll(creditUsd?: number | null): void {
   const rules = loadRules();
+  const rate = creditUsd ?? null;
   for (const f of loadAllProjects()) {
     let changed = false;
     for (const e of f.entries) {
       if (e.kind === "manual") continue;
-      const price = matchPriceRule(rules.priceRules, entryMeta(e));
+      const price = priceFor(rules.priceRules, entryMeta(e), rate);
       if (price !== e.price) {
         e.price = price;
         changed = true;
@@ -491,8 +516,8 @@ export function repriceAll(): void {
 }
 
 /** The renderer read model for one production: newest-first entries plus the
- *  running total. */
-export function view(productionId: string): LedgerView {
+ *  running total (credit rows converted at the given rate). */
+export function view(productionId: string, creditUsd?: number | null): LedgerView {
   const f = loadProject(productionId);
   let total = 0;
   let imageCount = 0;
@@ -502,7 +527,7 @@ export function view(productionId: string): LedgerView {
     if (e.kind === "image") imageCount += 1;
     else if (e.kind === "video") videoCount += 1;
   }
-  return { entries: f.entries, total, imageCount, videoCount };
+  return { entries: f.entries, total, imageCount, videoCount, creditUsd: creditUsd ?? null };
 }
 
 export function getPriceRules(): ExpensePriceRule[] {
@@ -510,15 +535,17 @@ export function getPriceRules(): ExpensePriceRule[] {
 }
 
 /** Persist pricing rules and immediately re-price every production's existing
- *  generations against them (manual rows untouched). */
-export function setPriceRules(rules: ExpensePriceRule[]): void {
+ *  generations against them (manual rows untouched). Credit rows convert at
+ *  the given rate — callers pass the current one so a rules edit never
+ *  zeroes them. */
+export function setPriceRules(rules: ExpensePriceRule[], creditUsd?: number | null): void {
   const f = loadRules();
   f.priceRules = Array.isArray(rules)
     ? migrateRules(rules.map(normalizeRule).filter((r): r is ExpensePriceRule => r !== null))
     : [];
   f.updatedAt = new Date().toISOString();
   saveRules();
-  repriceAll();
+  repriceAll(creditUsd);
 }
 
 /** Bake a model's live resolution/length options into its rule. Only video

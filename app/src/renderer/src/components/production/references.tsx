@@ -4,6 +4,8 @@ import type { ChangeEvent, DragEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
+import { isQuotableCostModel } from "./generation-cost.js";
+import { GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
@@ -437,10 +439,13 @@ export function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
  *  front + back) view, neutral pose/expression/lighting on a plain gray
  *  background (characterSheetPrompt in pipeline.ts). The finished sheet is
  *  attached to the character (created on first build) and shown below. */
-export function CharacterBuilderSection({ prodId, characters, models, onGenerate }: {
+export function CharacterBuilderSection({ prodId, characters, models, productionQuality, onGenerate }: {
   prodId: string;
   characters: CharacterSheet[];
   models: OpenArtModelChoice[];
+  /** Production quality tier — sheets bill it (the provider reads it off the
+   *  production), so the quote must price it too. */
+  productionQuality?: string;
   onGenerate: (opts: CharacterSheetGenOptions) => Promise<void>;
 }) {
   const imageModels = models.filter(isImageModel);
@@ -457,18 +462,47 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
   const sheets = characters.filter((c) => c.imagePath || c.artwork);
+  // Schema-driven model options (variant, quality, seed, … — same surface
+  // pool as the other image pickers). No resolution control here (dedicated
+  // Resolution above); quality renders inline and submits (nearest pick wins).
+  const effCharModel = imageModels.some((m) => m.id === model) ? model : (imageModels[0]?.id ?? "");
+  const [charParams, setCharParams] = useState<GenParams>({});
+  const [charSchema, setCharSchema] = useState<CliModelSchema | null>(null);
+  useEffect(() => {
+    let live = true;
+    setCharSchema(null);
+    if (!effCharModel) return () => { live = false; };
+    window.cascade.modelOptions(effCharModel)
+      .then((s) => {
+        if (!live) return;
+        setCharSchema(s);
+        setCharParams((prev) => seedModelOptionValues(s, effCharModel, "image:generate", pruneModelOptionValues(s, prev)) as GenParams);
+      })
+      .catch(() => { if (live) setCharSchema(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effCharModel]);
 
   const canSubmit = name.trim().length > 0 && description.trim().length > 0;
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true); setError(null);
     try {
-      await onGenerate({ model, resolution, name: name.trim(), description: description.trim(), view });
+      await onGenerate({
+        model, resolution, name: name.trim(), description: description.trim(), view,
+        ...(Object.keys(charParams).length ? { params: { ...charParams } } : {}),
+      });
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
     }
     setBusy(false);
   };
+  // Live per-config quote (Higgsfield CLI only) for the Build button.
+  const charCostReq = isQuotableCostModel(effCharModel) ? {
+    model: effCharModel, kind: "image" as const, resolution, aspectRatio: "16:9",
+    ...(productionQuality ? { quality: productionQuality } : {}),
+    ...(Object.keys(charParams).length ? { params: { ...charParams } } : {}),
+  } : null;
   const refine = async () => {
     if (!description.trim() || refining) return;
     setRefining(true); setError(null);
@@ -491,6 +525,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
       setView("front");
       setModel(rememberedModel("character", imageModels.map((m) => m.id), imageModels[0]?.id ?? ""));
       setResolution(getMediaDefault("character")?.resolution ?? "1k");
+      setCharParams({});
       return;
     }
     setName(c.name);
@@ -500,6 +535,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
       ? c.builder!.model
       : rememberedModel("character", imageModels.map((m) => m.id), imageModels[0]?.id ?? ""));
     setResolution(c.builder?.resolution ?? getMediaDefault("character")?.resolution ?? "1k");
+    setCharParams({ ...(c.builder?.params ?? {}) } as GenParams);
   };
 
   return (
@@ -549,9 +585,17 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
             </select>
           </label>
         </div>
+        <ModelOptionsForm
+          schema={charSchema}
+          value={charParams as ModelOptionValues}
+          onChange={(next) => setCharParams(next as GenParams)}
+          exclude={["resolution"]}
+          compact
+          persistKey="cascade.modelOptions.advanced.character"
+        />
         {error && <p className="error-text">{error}</p>}
         <button className="prod-btn" disabled={!canSubmit || busy} onClick={() => void submit()}>
-          {busy ? "Generating…" : "＋ Build character sheet"}
+          {busy ? "Generating…" : <>＋ Build character sheet<GenerationCostSuffix req={charCostReq} /></>}
         </button>
       </div>
       <div className="prod-char-sheets">
@@ -591,7 +635,7 @@ export function CharacterBuilderSection({ prodId, characters, models, onGenerate
  *  / 16:9) plus a prompt; editing reuses a reference's current image as the
  *  visual source. The modal stays open while generating and reports errors
  *  inline; `onSubmit` resolves on success (the caller closes via onClose). */
-export function RefGenModal({ prodId, models, editModels, categories, references, promptRefs, defaultCategoryId, initialRefId, onClose, onSubmit }: {
+export function RefGenModal({ prodId, models, editModels, categories, references, promptRefs, defaultCategoryId, initialRefId, productionQuality, onClose, onSubmit }: {
   prodId: string;
   /** Image-generation models (the `image:generate` surface). */
   models: OpenArtModelChoice[];
@@ -606,6 +650,9 @@ export function RefGenModal({ prodId, models, editModels, categories, references
   defaultCategoryId?: string;
   /** Reference to edit — preselects edit mode with this ref as the source. */
   initialRefId?: string;
+  /** Production quality tier — reference gens bill it (the provider reads it
+   *  off the production), so the quote must price it too. */
+  productionQuality?: string;
   onClose: () => void;
   onSubmit: (opts: ReferenceImageGenOptions) => Promise<void>;
 }) {
@@ -675,6 +722,13 @@ export function RefGenModal({ prodId, models, editModels, categories, references
   const sourceUrl = sourceRef?.imagePath ? cascadeMedia(prodId, sourceRef.imagePath) : sourceRef?.artwork;
 
   const canSubmit = prompt.trim().length > 0 && (mode === "edit" ? !!sourceRefId : true);
+  // Live per-config quote (Higgsfield CLI only) for the Generate/Edit button.
+  const effRefModel = activeModels.some((m) => m.id === model) ? model : (activeModels[0]?.id ?? "");
+  const refCostReq = isQuotableCostModel(effRefModel) ? {
+    model: effRefModel, kind: "image" as const, resolution, aspectRatio,
+    ...(productionQuality ? { quality: productionQuality } : {}),
+    ...(Object.keys(params).length ? { params: { ...params } } : {}),
+  } : null;
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true); setError(null);
@@ -800,7 +854,7 @@ export function RefGenModal({ prodId, models, editModels, categories, references
         </p>
         {error && <p className="error-text">{error}</p>}
         <button className="prod-btn prod-edit-go" disabled={!canSubmit || busy} onClick={() => void submit()}>
-          {busy ? "Generating…" : mode === "edit" ? "Edit reference" : "Generate reference"}
+          {busy ? "Generating…" : <>{mode === "edit" ? "Edit reference" : "Generate reference"}<GenerationCostSuffix req={refCostReq} /></>}
         </button>
       </div>
     </div>

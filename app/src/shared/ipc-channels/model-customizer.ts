@@ -12,4 +12,6 @@ export const modelCustomizerChannels = {
   "modelCustomizer:probeModels": { method: "probeModels", kind: "invoke" },
   "modelCustomizer:probeOptions": { method: "probeModelOptions", kind: "invoke" },
   "modelCustomizer:refresh": { method: "refreshModelProbe", kind: "invoke" },
+  "modelCustomizer:getCreditRate": { method: "getHiggsfieldCreditRate", kind: "invoke" },
+  "modelCustomizer:setCreditRate": { method: "setHiggsfieldCreditRate", kind: "invoke" },
 } as const;

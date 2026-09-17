@@ -31,12 +31,12 @@ import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, san
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sortByModelOrder, styleFrameOverride, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, styleFrameOverride, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
 import { applyOptionExposure } from "./providers/model-schema.js";
 
 let win: BrowserWindow | null = null;
@@ -605,7 +605,7 @@ function registerIpc() {
   let openArtCliPathCache: string | null | undefined;
   void resolveOpenArtCliBinary().then((p) => { openArtCliPathCache = p; }).catch(() => { openArtCliPathCache = null; });
   const openArtCliBinary = (): string | null => settings.getOpenArtCliBinary() ?? openArtCliPathCache ?? null;
-  const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta) }, higgsCliBinary, openArtCliBinary);
+  const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta, settings.getHiggsfieldCreditUsd()) }, higgsCliBinary, openArtCliBinary);
   // The active media vendor (OpenArt/Higgsfield/Higgsfield CLI) — a global setting resolved
   // per call, so every generation flow follows a Settings change immediately.
   const media = (): MediaProvider => providers[resolveProviderId(settings.getMediaProvider())];
@@ -1483,7 +1483,7 @@ function registerIpc() {
 
   // Step 2: generate a style frame (look plate) for one style via the active
   // media provider — fixed neutral-subject scaffold + style text + brand.
-  handle("production:generateStyleFrame", (_e, id: string, styleId: string, model?: string, resolution?: string) =>
+  handle("production:generateStyleFrame", (_e, id: string, styleId: string, model?: string, resolution?: string, params?: Record<string, string | number | boolean | string[]>) =>
     runProductionJob(id, "generating a style frame", async (p, emit) => {
       const style = (p.styles ?? []).find((s) => s.id === styleId);
       if (!style) throw new Error("Style not found.");
@@ -1497,7 +1497,7 @@ function registerIpc() {
       if (!gen) throw new Error(`${refMedia.displayName} isn't connected, so style frames can't be generated in-app.`);
       const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p));
       emit(`Generating a style frame for "${style.name || `Style ${style.index}`}” (16:9)…`);
-      const buf = await gen(prompt, []);
+      const buf = await gen(prompt, [], undefined, sanitizeGenParams(params));
       const ext = buf[0] === 0xff && buf[1] === 0xd8 ? "jpg" : "png";
       const rel = writeStyleFrame(p, style.id, `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${buf.toString("base64")}`);
       style.imagePath = rel;
@@ -1808,28 +1808,28 @@ function registerIpc() {
   }
 
   // Step 3: storyboard frame generation (batched or single-shot). In-app
-  // generation goes through the active media provider (OpenArt/Higgsfield);
-  // when that isn't connected we export per-shot prompts instead so the user
-  // can generate the frames elsewhere and import them (production:importBoards).
+  // generation goes through the active media provider; when that isn't
+  // connected we export per-shot prompts instead so the user can generate
+  // the frames elsewhere and import them (production:importBoards).
   const boardsOrPrompts = async (
     p: Production,
     emit: (m: string, l?: ProductionEvent["level"]) => void,
     genOpts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[] }
   ): Promise<void> => {
     // Route by the production's stored pick, not the global vendor: an
-    // explicit `higgsfield:…` pick rides Higgsfield even when the global is
-    // OpenArt (mirrors the video-node path via mediaFor). "auto"/empty defers
-    // to the global.
+    // explicit `higgsfield-cli:…` (or legacy `higgsfield:…`) pick rides
+    // Higgsfield even when the global is OpenArt (mirrors the video-node
+    // path via mediaFor). "auto"/empty defers to the global.
     const routed = mediaFor(p.openArt?.model);
     const gen = routed.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
     if (!gen) {
-      emit(`${routed.displayName} MCP isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
+      emit(`${routed.displayName} isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
       exportBoardPrompts(p, emit);
       emit("Generate the frames with those prompts, then use “Import frames…” (name each file with its shot number, e.g. 0100.png).", "info");
       p.status[3] = "todo";
       return;
     }
-    emit(`Using the ${routed.displayName} MCP server for image generation.`);
+    emit(`Using ${routed.displayName} for image generation.`);
     await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName });
   };
 
@@ -1888,16 +1888,30 @@ function registerIpc() {
       hookImageGenToOutput(shot);
       // The original submit never reached its generation recorder (the wait
       // timed out), so the cost was unbilled. Bill it now, once, using the
-      // submit-time resolution/aspect kept on the pending record.
+      // submit-time resolution/aspect kept on the pending record. Higgsfield
+      // rows re-quote their credits from the kept config (best-effort).
+      let reclaimCredits: number | undefined;
+      try {
+        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+          model: pending.model, kind: "image",
+          ...(pending.resolution ? { resolution: pending.resolution } : {}),
+          ...(pending.aspectRatio ? { aspectRatio: pending.aspectRatio } : {}),
+          ...(pending.quality ? { quality: pending.quality } : {}),
+          ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
+        }) ?? undefined;
+      } catch {
+        reclaimCredits = undefined;
+      }
       ledger.recordGeneration({
         kind: "image",
         model: pending.model,
         resolution: pending.resolution ?? "",
         aspectRatio: pending.aspectRatio,
+        credits: reclaimCredits,
         at: Date.now(),
         productionId: p.meta.id,
         shotId: shot.id,
-      });
+      }, settings.getHiggsfieldCreditUsd());
       delete shot.pendingImageGen;
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
     })
@@ -2833,6 +2847,19 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return mediaFor(String(modelId ?? "")).imageModelOptions(String(modelId ?? ""));
   });
 
+  // Live per-config credit quote (Higgsfield CLI `generate cost` preflight).
+  // Providers without a cost surface resolve null with zero spawns; every
+  // failure is swallowed to null — the quote is advisory and never blocks
+  // submit.
+  handle("production:generationCost", async (_e, req: GenerationCostRequest): Promise<number | null> => {
+    try {
+      const model = String(req?.model ?? "");
+      return (await mediaFor(model).getGenerationCost?.(req)) ?? null;
+    } catch {
+      return null;
+    }
+  });
+
   // Full normalized option schema for a model (live `model get` detail).
   // Optional provider capability — providers without a schema surface
   // resolve null and the renderer falls back to the ladder channels above.
@@ -2895,6 +2922,16 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     for (const pid of PROVIDER_IDS) providers[pid].refreshProbes?.();
   });
 
+  // Higgsfield credit value ($/credit) for the Expenses total. Saving
+  // re-prices history so the total follows the rate (credit rows keep their
+  // credits — the rate is recomputable, like the $ rules).
+  handle("modelCustomizer:getCreditRate", async (): Promise<number | null> => settings.getHiggsfieldCreditUsd());
+  handle("modelCustomizer:setCreditRate", async (_e, v: number | null): Promise<number | null> => {
+    const rate = settings.setHiggsfieldCreditUsd(v);
+    ledger.repriceAll(rate);
+    return rate;
+  });
+
   // Step 3 in-betweener: which video models accept a dedicated end-frame
   // slot. The live probe is unioned with the models the user explicitly
   // assigned to the in-betweener surface (that assignment IS their capability
@@ -2934,15 +2971,20 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // (the previous edit node, the image node, or a reference), then pipes the
   // result to the output — so the node view shows the full daisy chain
   // afterwards. The previous frame moves into the shot's history (arrows).
-  handle("production:editBoard", (_e, id: string, shotId: string, model: string, prompt: string) =>
+  handle("production:editBoard", (_e, id: string, shotId: string, model: string, prompt: string, params?: Record<string, string | number | boolean | string[]>, resolution?: string) =>
     runProductionStep(id, 3, "editing one board", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       const text = typeof prompt === "string" ? prompt.trim() : "";
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof model === "string" && model.trim() && model !== "auto" ? model.trim() : undefined;
+      const resolutionOverride = typeof resolution === "string" && resolution.trim() ? resolution.trim() : undefined;
+      // Schema-driven model options from the classic dialog (variant, seed,
+      // …). Sanitized to scalars — the provider ignores unknown keys for the
+      // active model, so a stale pick never leaks into another model's submit.
+      const editParams = sanitizeGenParams(params) as GenParams | undefined;
       const editMedia = mediaFor(modelId);
-      const gen = editMedia.imageGenFn(p, modelId, undefined, (m) => emit(m, "info"));
+      const gen = editMedia.imageGenFn(p, modelId, resolutionOverride, (m) => emit(m, "info"));
       if (!gen) throw new Error(`${editMedia.displayName} MCP isn't connected (no image-generation tool found), so frames can't be edited in-app.`);
       // Create the node up front so the generation rides the same pipe the node
       // view will show: chained from the output edit node / image node / ref.
@@ -2986,10 +3028,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const png = await gen(
         buildEditGenPrompt(editText),
         [{ name: sourceName, dataUrl }, ...extras],
-        shot
+        shot,
+        editParams
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordBoardEdit(shot, jpegRel, text, modelId ?? "auto", node);
+      recordBoardEdit(shot, jpegRel, text, modelId ?? "auto", node, editParams, resolutionOverride);
       productionEmit(id, `Shot ${shot.number}: frame edited.`);
     }, { needsApiKey: false })
   );
@@ -3276,7 +3319,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
 
       const promptText = characterSheetPrompt(description, view);
       emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}…`);
-      const buf = await gen(promptText, []);
+      const buf = await gen(promptText, [], undefined, sanitizeGenParams(opts?.params));
 
       const base = name.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "character";
       const dir = p.assets.referencesDir;
@@ -3293,11 +3336,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       fs.writeFileSync(assetPath(p, rel), buf);
 
       const existing = p.characters.find((c) => c.name.toLowerCase() === name.toLowerCase());
+      const sheetParams = sanitizeGenParams(opts?.params);
       const builder: CharacterSheetBuilder = {
         description,
         view,
         model: typeof opts?.model === "string" && opts.model ? opts.model : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution ? opts.resolution : "1k",
+        ...(sheetParams ? { params: sheetParams } : {}),
       };
       // Old files replaced by this generation (the character and its mirrored
       // reference usually share one file) — deleted after both point at rel.
@@ -3461,21 +3506,22 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   });
 
   // Expenses: per-production AI-generation ledgers (and manual purchased-asset
-  // rows), plus the global pricing rules edited from Settings.
-  handle("ledger:get", async (_e, productionId: string): Promise<LedgerView> => ledger.view(productionId));
+  // rows), plus the global pricing rules edited from Settings. Higgsfield
+  // rows track credits, converted at the credit rate for the $ total.
+  handle("ledger:get", async (_e, productionId: string): Promise<LedgerView> => ledger.view(productionId, settings.getHiggsfieldCreditUsd()));
   handle("ledger:getPriceRules", async (): Promise<ExpensePriceRule[]> => ledger.getPriceRules());
   handle("ledger:setPriceRules", async (_e, rules: ExpensePriceRule[]): Promise<void> => {
-    ledger.setPriceRules(rules);
+    ledger.setPriceRules(rules, settings.getHiggsfieldCreditUsd());
   });
   handle("ledger:reprice", async (_e, productionId: string): Promise<LedgerView> => {
-    ledger.repriceAll();
-    return ledger.view(productionId);
+    ledger.repriceAll(settings.getHiggsfieldCreditUsd());
+    return ledger.view(productionId, settings.getHiggsfieldCreditUsd());
   });
   handle("ledger:addManual", async (_e, productionId: string, label: string, amount: number): Promise<LedgerView> => {
-    return ledger.addManualEntry(productionId, label, amount);
+    return ledger.addManualEntry(productionId, label, amount, settings.getHiggsfieldCreditUsd());
   });
   handle("ledger:removeEntry", async (_e, productionId: string, id: string): Promise<LedgerView> => {
-    return ledger.removeEntry(productionId, id);
+    return ledger.removeEntry(productionId, id, settings.getHiggsfieldCreditUsd());
   });
   handle("ledger:openFile", async (_e, productionId: string): Promise<void> => {
     await ledger.openLedgerFile(productionId);
@@ -3502,7 +3548,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       ledger.parsePriceRulesCsv(fs.readFileSync(filePath, "utf8")),
       async (modelId) => (await mediaFor(modelId).videoModelOptions(modelId, true)) ?? null
     );
-    ledger.setPriceRules(rules);
+    ledger.setPriceRules(rules, settings.getHiggsfieldCreditUsd());
     return { path: filePath, rules: ledger.getPriceRules() };
   });
 

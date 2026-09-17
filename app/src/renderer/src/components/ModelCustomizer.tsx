@@ -243,6 +243,8 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
   const [priceDraft, setPriceDraft] = useState<Record<string, { min: string; max: string }>>({});
   const [ladders, setLadders] = useState<Map<string, MediaModelLadder>>(new Map());
   const [priceNote, setPriceNote] = useState<string | null>(null);
+  /** Higgsfield $/credit draft for the Expenses total (global, not per-model). */
+  const [rateDraft, setRateDraft] = useState("");
   const [panelWidth, setPanelWidth] = useState<number>(() => {
     try {
       const v = Number(window.localStorage.getItem(PANEL_KEY));
@@ -260,6 +262,13 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
     void window.cascade.getMediaModelOrder().then((ids) => setOrder(ids ?? [])).catch(() => {});
     void window.cascade.getModelSurfaces().then((m) => setSurfacesMap(m ?? {})).catch(() => {});
     void window.cascade.getModelParamDefaults().then((m) => setParamDefaults(m ?? {})).catch(() => {});
+    // Guarded (not assumed like the older calls): mixed-version bundles may
+    // carry a preload without the rate channel yet.
+    if (typeof window.cascade.getHiggsfieldCreditRate === "function") {
+      void window.cascade.getHiggsfieldCreditRate().then((r) => {
+        if (r != null) setRateDraft(String(r));
+      }).catch(() => {});
+    }
     void window.cascade.getExpensePriceRules().then((rules) => {
       const d: Record<string, { min: string; max: string }> = {};
       for (const r of rules) if (r.model) d[r.model] = { min: String(r.minPrice), max: String(r.maxPrice) };
@@ -440,6 +449,9 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
   // ---- pricing -------------------------------------------------------------
 
   const priceLabel = (id: string): string => {
+    // Higgsfield rows track credits, not dollars — one global rate prices
+    // them (edited in the model details), so no per-model range applies.
+    if (id.startsWith("higgsfield-cli:") || id.startsWith("higgsfield:")) return "credits";
     const d = priceDraft[id];
     if (!d || (!d.min && !d.max)) return "—";
     const min = Number(d.min) || 0;
@@ -448,6 +460,25 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
     return `$${min.toFixed(2)}–$${max.toFixed(2)}`;
   };
 
+  /** Save the global Higgsfield $/credit rate (re-prices history). Blank clears it. */
+  const saveCreditRate = async () => {
+    setPriceNote(null);
+    try {
+      const trimmed = rateDraft.trim();
+      const v = trimmed === "" ? null : Number(trimmed);
+      if (v !== null && (!Number.isFinite(v) || v < 0)) {
+        setPriceNote("Enter a non-negative dollar amount (or blank to clear).");
+        return;
+      }
+      const saved = await window.cascade.setHiggsfieldCreditRate(v);
+      setRateDraft(saved == null ? "" : String(saved));
+      setPriceNote(saved == null
+        ? "Cleared — Higgsfield rows show credits and contribute $0."
+        : "Saved — existing expenses re-priced.");
+    } catch (e) {
+      setPriceNote(String(e).replace(/^Error:\s*/, ""));
+    }
+  };
   /** Save the selected model's price range, preserving every other rule. */
   const saveModelPrice = async (id: string) => {
     setPriceNote(null);
@@ -695,7 +726,7 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
                         <option value="image">image</option>
                         <option value="video">video</option>
                       </select>
-                      <span className="mc-price" title="Price range — edit in the model details">{priceLabel(id)}</span>
+                      <span className="mc-price" title={id.startsWith("higgsfield-cli:") || id.startsWith("higgsfield:") ? "Tracked in credits — set the dollar value in the model details" : "Price range — edit in the model details"}>{priceLabel(id)}</span>
                     </div>
                   );
                 })}
@@ -744,6 +775,17 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
                     <button className="mc-link" onClick={resetSurfaces} title="Offer this model on every applicable surface again">Reset all to “everywhere”</button>
                   </div>
                 )}
+                {(selectedId.startsWith("higgsfield-cli:") || selectedId.startsWith("higgsfield:")) ? (
+                  <div className="mc-meta-block">
+                    <div className="mc-meta-title">Credit value (Higgsfield)</div>
+                    <div className="mc-price-edit">
+                      <label>$ per credit<input type="number" min="0" step="0.0001" placeholder="e.g. 0.039" value={rateDraft} onChange={(e) => setRateDraft(e.target.value)} /></label>
+                      <button className="prod-btn primary" onClick={() => void saveCreditRate()}>Save rate</button>
+                    </div>
+                    <p className="hint">Higgsfield generations track credits, not dollars — the Expenses total converts at this rate. Blank clears it (credit rows then show credits and contribute $0). Per-model ranges don't apply here.</p>
+                    {priceNote && <span className="hint">{priceNote}</span>}
+                  </div>
+                ) : (
                 <div className="mc-meta-block">
                   <div className="mc-meta-title">Price range {ladders.get(selectedId)?.choice.videoInput ? "(video)" : "(image)"}</div>
                   <div className="mc-price-edit">
@@ -755,6 +797,7 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
                   </div>
                   {priceNote && <span className="hint">{priceNote}</span>}
                 </div>
+                )}
               </div>
             );
           })()}

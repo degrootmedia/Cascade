@@ -49,8 +49,8 @@ describe("applyKindOverrides", () => {
 });
 
 describe("providerOfModelId", () => {
-  it("routes higgsfield:-prefixed picks to higgsfield and defers the rest to active", () => {
-    expect(providerOfModelId("higgsfield:seedance_2_5")).toBe("higgsfield");
+  it("routes higgsfield-cli: and legacy higgsfield: picks to higgsfield-cli and defers the rest to active", () => {
+    expect(providerOfModelId("higgsfield:seedance_2_5")).toBe("higgsfield-cli");
     expect(providerOfModelId("higgsfield-cli:seedance_2_5")).toBe("higgsfield-cli");
     expect(providerOfModelId("openart-cli:nano-banana-2")).toBe("openart-cli");
     expect(providerOfModelId("auto")).toBeNull();
@@ -61,20 +61,19 @@ describe("providerOfModelId", () => {
 });
 
 describe("mediaForModel", () => {
-  it("sends a saved Seedance pick to Higgsfield even when the global is OpenArt", () => {
+  it("sends a saved Seedance pick to Higgsfield CLI even when the global is OpenArt", () => {
     const openart = { id: "openart" };
-    const higgsfield = { id: "higgsfield" };
     const cli = { id: "higgsfield-cli" };
     const ocli = { id: "openart-cli" };
-    const providers = { openart, higgsfield, "higgsfield-cli": cli, "openart-cli": ocli } as any;
-    expect(mediaForModel(providers, "openart", "higgsfield:seedance_2_5")).toBe(higgsfield);
+    const providers = { openart, "higgsfield-cli": cli, "openart-cli": ocli } as any;
+    expect(mediaForModel(providers, "openart", "higgsfield:seedance_2_5")).toBe(cli);
     expect(mediaForModel(providers, "openart", "gemini-foo")).toBe(openart);
     expect(mediaForModel(providers, "openart", "auto")).toBe(openart);
-    expect(mediaForModel(providers, "higgsfield", "higgsfield:seedance_2_5")).toBe(higgsfield);
+    expect(mediaForModel(providers, "higgsfield-cli", "higgsfield:seedance_2_5")).toBe(cli);
     expect(mediaForModel(providers, "openart", "higgsfield-cli:seedance_2_0")).toBe(cli);
-    expect(mediaForModel(providers, "higgsfield", "higgsfield-cli:seedance_2_0")).toBe(cli);
+    expect(mediaForModel(providers, "higgsfield-cli", "higgsfield-cli:seedance_2_0")).toBe(cli);
     expect(mediaForModel(providers, "openart", "openart-cli:nano-banana-2")).toBe(ocli);
-    expect(mediaForModel(providers, "higgsfield", "openart-cli:nano-banana-2")).toBe(ocli);
+    expect(mediaForModel(providers, "higgsfield-cli", "openart-cli:nano-banana-2")).toBe(ocli);
   });
 });
 
@@ -89,16 +88,16 @@ describe("getMediaCredits", () => {
 
   it("returns every vendor's balance at once", async () => {
     await expect(
-      getMediaCredits({ openart: stub(42), higgsfield: stub(1388.74), "higgsfield-cli": stub(99.5), "openart-cli": stub(250) })
-    ).resolves.toEqual({ openart: 42, higgsfield: 1388.74, "higgsfield-cli": 99.5, "openart-cli": 250 });
+      getMediaCredits({ openart: stub(42), "higgsfield-cli": stub(99.5), "openart-cli": stub(250) })
+    ).resolves.toEqual({ openart: 42, "higgsfield-cli": 99.5, "openart-cli": 250 });
   });
 
   it("isolates a failure to its own vendor", async () => {
     await expect(
-      getMediaCredits({ openart: stub(new Error("down")), higgsfield: stub(10), "higgsfield-cli": stub(1), "openart-cli": stub(2) })
-    ).resolves.toEqual({ openart: null, higgsfield: 10, "higgsfield-cli": 1, "openart-cli": 2 });
+      getMediaCredits({ openart: stub(new Error("down")), "higgsfield-cli": stub(1), "openart-cli": stub(2) })
+    ).resolves.toEqual({ openart: null, "higgsfield-cli": 1, "openart-cli": 2 });
     await expect(
-      getMediaCredits({ openart: stub(7), higgsfield: stub(null), "higgsfield-cli": stub(new Error("no binary")), "openart-cli": stub(null) })
-    ).resolves.toEqual({ openart: 7, higgsfield: null, "higgsfield-cli": null, "openart-cli": null });
+      getMediaCredits({ openart: stub(7), "higgsfield-cli": stub(new Error("no binary")), "openart-cli": stub(null) })
+    ).resolves.toEqual({ openart: 7, "higgsfield-cli": null, "openart-cli": null });
   });
 });

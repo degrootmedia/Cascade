@@ -225,3 +225,14 @@ control chars ï¿½ only a byte-level scan found them.
   2. Keep the per-ref role table (`boundRoles`) parallel to the upload table
      so a retry can rebind without re-uploading; assert both submits in tests
      (snapshot params at capture — the retry mutates the same object).
+
+## 2026-09-16 — PowerShell content rewrite, second offense
+
+- Did it again: `(Get-Content …) -replace … | Set-Content` on a test file to
+  refactor act() blocks, despite the 2026-09-07 lesson. Got lucky (ASCII-only
+  file, byte scan clean: zero U+FFFD), then redid the remaining edits with
+  the Edit tool.
+- Rule (strengthened): the Edit tool is the ONLY way to modify file text. If
+  a tabular/renaming edit feels too big for one Edit call, split it into
+  several Edit calls — never reach for a shell rewrite, regardless of file
+  encoding.

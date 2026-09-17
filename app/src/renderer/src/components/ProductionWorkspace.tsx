@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
 import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { ShotTable } from "./ShotTable.js";
@@ -23,6 +23,9 @@ import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
+import { StyleParamsForm } from "./production/style-params.js";
+import { GenerationCostSuffix } from "./production/generation-cost-label.js";
+import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
@@ -325,10 +328,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!mediaDefaultsReady || !prod || !imageModelIdsKey) return;
     const ids = imageModelIdsKey.split(",");
     if (prod.openArt?.model && ids.includes(prod.openArt.model)) return;
-    // Keep an explicit cross-vendor pick (e.g. `higgsfield:…` while the
+    // Keep an explicit cross-vendor pick (e.g. `higgsfield-cli:…` while the
     // active vendor is OpenArt): it routes to its own vendor at submit time,
     // so overwriting it here would silently lose the user's choice.
-    if (prod.openArt?.model && prod.openArt.model.startsWith("higgsfield:")) return;
+    if (prod.openArt?.model && (prod.openArt.model.startsWith("higgsfield-cli:") || prod.openArt.model.startsWith("higgsfield:"))) return;
     const model = rememberedModel("image", ids, prod.openArt?.model ?? "") || ids[0];
     if (model === prod.openArt?.model) return;
     saveField({ openArt: { model, resolution: (prod.openArt?.resolution ?? getMediaDefault("image")?.resolution ?? "1k") as "1k" | "2k" | "4k", ...(prod.openArt?.quality ? { quality: prod.openArt.quality } : {}), ...(prod.openArt?.params ? { params: prod.openArt.params } : {}) } });
@@ -770,7 +773,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 2: edit one style's field (persisted immediately). */
-  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number; imagePath?: string; frameSource?: "upload" | "generated" | "reference" | "anchor"; model?: string; resolution?: "1k" | "2k" | "4k" }>) {
+  function setStyle(idx: number, patch: Partial<{ name: string; prompt: string; index: number; imagePath?: string; frameSource?: "upload" | "generated" | "reference" | "anchor"; model?: string; resolution?: "1k" | "2k" | "4k"; params?: Record<string, string | number | boolean | string[]> }>) {
     if (!prod) return;
     saveField({
       styles: (prod.styles ?? []).map((s, i) => (i === idx ? { ...s, ...patch } : s)),
@@ -822,8 +825,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 2: generate a style frame (look plate) for one style via IPC,
-   *  forwarding its per-style model/resolution overrides ("auto"/absent =
-   *  inherit the production default). */
+   *  forwarding its per-style model/resolution/params overrides ("auto"/
+   *  absent = inherit the production default). */
   function generateStyleFrame(styleId: string) {
     if (!prod || styleFrameBusy) return;
     const style = (prod.styles ?? []).find((s) => s.id === styleId);
@@ -834,9 +837,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       : undefined;
     const model = styleFrameOverride(liveModel);
     const resolution = styleFrameOverride(style?.resolution);
+    const params = style?.params && Object.keys(style.params).length ? { ...style.params } : undefined;
     setStyleFrameBusy(styleId);
     setErr(null);
-    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution).finally(() => setStyleFrameBusy(null)));
+    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution, params).finally(() => setStyleFrameBusy(null)));
   }
 
   /** Step 2: attach a picked file as one style's frame. */
@@ -2225,12 +2229,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   /** Step 3: AI-edit a shot's current frame (image-input model + prompt).
    *  Runs in the background: the modal closes immediately so more edits can
    *  be queued; failures surface via err + the production log. */
-  async function runBoardEdit(shotId: string, model: string, prompt: string) {
+  async function runBoardEdit(shotId: string, model: string, prompt: string, params?: ModelOptionValues, resolution?: string) {
     if (!prod || editBusyIds.includes(shotId)) return;
     setEditBusyIds((ids) => [...ids, shotId]);
     setErr(null);
     try {
-      const next = await window.cascade.editBoard(prod.meta.id, shotId, model, prompt);
+      const next = await window.cascade.editBoard(
+        prod.meta.id,
+        shotId,
+        model,
+        prompt,
+        params && Object.keys(params).length ? params : undefined,
+        resolution || undefined
+      );
       setProd(next);
       bustOne(shotId);
       void refreshList();
@@ -2388,6 +2399,22 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     (imageMasterModels.some((m) => m.id === storedBoardModel) || boardModelStale) && storedBoardModel
       ? storedBoardModel
       : (imageMasterModels[0]?.id ?? "");
+  /** Live per-config quote req for the production-level image config — shared
+   *  by the master-model label and the Submit-frame button so both price what
+   *  regenBoard submits with. Null for providers without a cost surface. */
+  const boardCostReq: GenerationCostRequest | null = (() => {
+    const m = prod?.openArt?.model ?? "auto";
+    if (!isQuotableCostModel(m)) return null;
+    const p = prod?.openArt?.params;
+    const aspect = typeof p?.aspect_ratio === "string" && p.aspect_ratio ? p.aspect_ratio : "16:9";
+    return {
+      model: m, kind: "image" as const,
+      ...(prod?.openArt?.resolution ? { resolution: prod.openArt.resolution } : {}),
+      ...(prod?.openArt?.quality ? { quality: prod.openArt.quality } : {}),
+      aspectRatio: aspect,
+      ...(p && Object.keys(p).length ? { params: { ...p } } : {}),
+    };
+  })();
   // Quality tiers for the model that will run (Higgsfield catalog probe).
   // Null while loading; empty when the model declares none (dropdown hidden,
   // vendor default applies).
@@ -2672,7 +2699,23 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                             onClick={() => void generateStyleFrame(s.id)}
                             title="Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"
                           >
-                            {styleFrameBusy === s.id ? "Working…" : s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}
+                            {styleFrameBusy === s.id ? "Working…" : <>{s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}<GenerationCostSuffix req={(() => {
+                              const liveModel = s.model && s.model !== "auto" && imageMasterModels.some((m) => m.id === s.model)
+                                ? s.model
+                                : prod.openArt?.model ?? "auto";
+                              const res = s.resolution ?? prod.openArt?.resolution;
+                              // Style frames bill the production quality tier
+                              // (the submit reads it off the production).
+                              const quality = prod.openArt?.quality;
+                              const sp = s.params;
+                              return isQuotableCostModel(liveModel) ? {
+                                model: liveModel, kind: "image" as const,
+                                ...(res ? { resolution: res } : {}),
+                                ...(quality ? { quality } : {}),
+                                aspectRatio: "16:9",
+                                ...(sp && Object.keys(sp).length ? { params: { ...sp } } : {}),
+                              } : null;
+                            })()} /></>}
                           </button>
                           <button
                             className="prod-btn"
@@ -2729,6 +2772,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                             </select>
                           </label>
                         </div>
+                        <StyleParamsForm
+                          modelId={s.model && s.model !== "auto" && imageMasterModels.some((m) => m.id === s.model) ? s.model : (prod.openArt?.model ?? "auto")}
+                          value={(s.params ?? {}) as ModelOptionValues}
+                          onChange={(next) => setStyle(i, { params: Object.keys(next).length ? { ...next } : undefined })}
+                        />
                         {!s.imagePath && (
                           <p className="hint">No frame — add one so every shot shares the same look (text-only otherwise).</p>
                         )}
@@ -2813,6 +2861,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 prodId={prod.meta.id}
                 characters={prod.characters}
                 models={imageCharacterModels}
+                productionQuality={prod.openArt?.quality}
                 onGenerate={runCharacterGen}
               />
             </DesignSection>
@@ -2866,6 +2915,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 promptRefs={allPromptRefs(prod)}
                 defaultCategoryId={refGen.categoryId}
                 initialRefId={refGen.refId}
+                productionQuality={prod.openArt?.quality}
                 onClose={() => setRefGen(null)}
                 onSubmit={runRefGen}
               />
@@ -2913,6 +2963,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             <div className="prod-boards-controls">
               <div className="prod-boards-config-row">
                   <label className="prod-openart-label">Model
+                    <span className="prod-boards-model-cost">
+                      <GenerationCostSuffix req={boardCostReq} />
+                    </span>
                     <select
                       className="prod-openart-select"
                       value={boardModelValue}
@@ -3110,6 +3163,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                 onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
                 submitting={!!promptShotId && regenIds.has(promptShotId)}
+                submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
                 onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
                 magicActive={!!prod.magicEnabled}
               />
@@ -3190,6 +3244,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   shotNumber={es.number}
                   models={imageEditModels}
                   savedModel={es.graphEditNodes?.find((n) => n.id === (es.graphOutputSource === "editgen" ? es.graphOutputEditNodeId : undefined))?.model}
+                  savedResolution={es.graphEditNodes?.find((n) => n.id === (es.graphOutputSource === "editgen" ? es.graphOutputEditNodeId : undefined))?.resolution}
+                  productionQuality={prod.openArt?.quality}
                   onSavedModelChange={(m) => {
                     if (es.graphOutputSource === "editgen" && es.graphOutputEditNodeId) {
                       saveGraphShotFields(es.id, {
@@ -3199,10 +3255,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   }}
                   prompt={es.graphEditPrompt ?? ""}
                   onPromptChange={(text) => saveGraphShotFields(es.id, { graphEditPrompt: text })}
-                  onSubmit={(model, prompt) => {
+                  onSubmit={(model, prompt, params, resolution) => {
                     const id = editShotId;
                     setEditShotId(null); // close immediately; edit runs in background
-                    if (id) void runBoardEdit(id, model, prompt);
+                    if (id) void runBoardEdit(id, model, prompt, params, resolution);
                   }}
                   onClose={() => setEditShotId(null)}
                 />

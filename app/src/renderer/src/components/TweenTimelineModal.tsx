@@ -17,6 +17,8 @@ import type { CliModelSchema, GenParams, GraphGenItem, OpenArtModelChoice, Tween
 import { closestResolution } from "./resolution.js";
 import { ModelOptionsForm, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
+import { GenerationCostSuffix } from "./production/generation-cost-label.js";
+import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
 
 export const TWEEN_MIN_REFS = 2;
 export const TWEEN_MAX_REFS = 5;
@@ -543,7 +545,10 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                       onClick={() => { setFocusId(b.id); saveDraft(b.id); void onRunBlock(b.id, b.durationSec, effectiveModel, params); }}
                       title={noneFit ? `No model supports a ${b.durationSec}s block. Retime the block or pick another model.` : badLength ? `The chosen model doesn't support a ${b.durationSec}s block${supported ? ` — it supports ${supported}` : ""}. Retime the block or pick another model.` : "Generate this block's in-between clip"}
                     >
-                      {busyBlock === b.id ? "Generating…" : "Submit block"}
+                      {busyBlock === b.id ? "Generating…" : <>Submit block<GenerationCostSuffix req={isQuotableCostModel(effectiveModel) ? {
+                        model: effectiveModel, kind: "video", resolution, durationSec: b.durationSec,
+                        aspectRatio: costAspect(params), ...(Object.keys(params).length ? { params: { ...params } } : {}),
+                      } : null} /></>}
                     </button>
                     <select
                       className="prod-openart-select prod-tween-takes"

@@ -35,6 +35,8 @@ import { TriplePrompt } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
+import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
+import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
 import { EditIcon, EditVideoIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
@@ -243,6 +245,9 @@ interface ImageGenData extends Record<string, unknown> {
   /** Defaults from the production's OpenArt config (top-of-page pickers). */
   defaultModel: string;
   defaultResolution: string;
+  /** Production quality tier — image submits bill it (the provider reads it
+   *  off the production), so the quote must price it too. */
+  productionQuality?: string;
   /** This shot's saved advanced/variant params (schema-driven). */
   savedParams?: GenParams;
   /** Every stored generation (newest first) as media URLs. */
@@ -364,6 +369,8 @@ interface EditGenData extends Record<string, unknown> {
    *  media-default, which only seeds nodes that never picked). */
   savedModel?: string;
   savedResolution?: string;
+  /** Production quality tier (see ImageGenData.productionQuality). */
+  productionQuality?: string;
   /** This node's saved advanced/variant params (schema-driven). */
   savedParams?: GenParams;
   items: { url: string; prompt: string }[];
@@ -760,6 +767,14 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
   const run = async () => {
     await data.onGenerate(effModel, resolution, params);
   };
+  // Live per-config quote (Higgsfield CLI only) for the node's Generate button.
+  // Quality rides the production default (the submit bills it), so it prices here.
+  const imageCostReq = isQuotableCostModel(effModel) ? {
+    model: effModel, kind: "image" as const, resolution,
+    aspectRatio: costAspect(params),
+    ...(data.productionQuality ? { quality: data.productionQuality } : {}),
+    ...(Object.keys(params).length ? { params: { ...params } } : {}),
+  } : null;
   return (
       <div className="prod-graph-node prod-graph-gen prod-graph-imagegen">
       <Handle id="in-prompt" type="target" position={Position.Left} title="Prompt input" />
@@ -821,7 +836,7 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
         </div>
       )}
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
-        {busy ? "Generating…" : "Generate"}
+        {busy ? "Generating…" : <>Generate<GenerationCostSuffix req={imageCostReq} /></>}
       </button>
       </div>
   );
@@ -880,6 +895,11 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   const run = async () => {
     await data.onGenerate(effModel, resolution, durationSec, params);
   };
+  // Live per-config quote (Higgsfield CLI only) for the node's Generate button.
+  const videoCostReq = isQuotableCostModel(effModel) ? {
+    model: effModel, kind: "video" as const, resolution, durationSec,
+    aspectRatio: costAspect(params), ...(Object.keys(params).length ? { params: { ...params } } : {}),
+  } : null;
   return (
       <div className="prod-graph-node prod-graph-gen prod-graph-videogen">
       <Handle id="in-prompt" type="target" position={Position.Left} className="socket-ref" style={{ top: "33%" }} title="Prompt input — from the video-prompt node" />
@@ -952,7 +972,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
         </div>
       )}
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
-        {busy ? "Generating…" : "Generate"}
+        {busy ? "Generating…" : <>Generate<GenerationCostSuffix req={videoCostReq} /></>}
       </button>
       </div>
   );
@@ -1025,6 +1045,13 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
     if (!prompt.trim()) return;
     await data.onGenerate(effModel, prompt.trim(), params);
   };
+  // Live per-config quote (Higgsfield CLI only). No resolution/duration
+  // controls here — the submit keeps the source's timing — so the quote is
+  // for the model + advanced params (advisory).
+  const editVideoCostReq = isQuotableCostModel(effModel) ? {
+    model: effModel, kind: "video" as const,
+    aspectRatio: costAspect(params), ...(Object.keys(params).length ? { params: { ...params } } : {}),
+  } : null;
   return (
       <div className="prod-graph-node prod-graph-gen prod-graph-editvideo">
       <Handle id="in-prompt" type="target" position={Position.Left} className="socket-ref" style={{ top: "25%" }} title="Prompt input — from the edit-video prompt node" />
@@ -1079,7 +1106,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
       )}
       <div className="prod-graph-gen-controls">
         <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy || !prompt.trim()} onClick={() => { void run(); }}>
-          {busy ? "Editing…" : "Edit video"}
+          {busy ? "Editing…" : <>Edit video<GenerationCostSuffix req={editVideoCostReq} /></>}
         </button>
         {data.items[data.selected] && (
           <button className="prod-btn nodrag" disabled={data.piped} onClick={() => data.onPipeToOutput()} title="Feed the edited clip into the frame output">
@@ -1128,6 +1155,14 @@ const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<Ed
   const run = async () => {
     await data.onGenerate(data.nodeId, effModel, resolution, params);
   };
+  // Live per-config quote (Higgsfield CLI only) for the node's Generate button.
+  // Quality rides the production default (the submit bills it), so it prices here.
+  const editCostReq = isQuotableCostModel(effModel) ? {
+    model: effModel, kind: "image" as const, resolution,
+    aspectRatio: costAspect(params),
+    ...(data.productionQuality ? { quality: data.productionQuality } : {}),
+    ...(Object.keys(params).length ? { params: { ...params } } : {}),
+  } : null;
   const sockets: { id: string; kind: "ref"; label: string; top: number }[] = [
     { id: "in-prompt", kind: "ref", label: "Prompt", top: 33 },
     { id: "in-image", kind: "ref", label: "Source", top: 67 },
@@ -1206,7 +1241,7 @@ const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<Ed
         </div>
       )}
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
-        {busy ? "Generating…" : "Generate"}
+        {busy ? "Generating…" : <>Generate<GenerationCostSuffix req={editCostReq} /></>}
       </button>
       </div>
   );
@@ -2375,6 +2410,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           savedModel: editNode.model,
           savedResolution: editNode.resolution,
           savedParams: editNode.params,
+          productionQuality: prod.openArt?.quality,
           items: (editNode.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: editNode.genIndex ?? 0,
           sourceHint,
@@ -2396,7 +2432,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: true,
       },
     ];
-  }, [imageModels, prod.openArt?.resolution, prod.meta.id, references, taggedEditByNode, editBusyNodeIds, stable]);
+  }, [imageModels, prod.openArt?.resolution, prod.openArt?.quality, prod.meta.id, references, taggedEditByNode, editBusyNodeIds, stable]);
 
   /** Place a tool dragged from the right panel at the drop point. Video lands
    *  as a gen+prompt pair, the in-betweener as a single node, and edit appends
@@ -2559,6 +2595,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           models: imageModels.filter((m) => modelOnSurface(m, "image:generate")),
           defaultModel: prod.openArt?.model ?? "auto",
           defaultResolution: prod.openArt?.resolution ?? "1k",
+          productionQuality: prod.openArt?.quality,
           savedParams: shot.graphImageParams,
           items: (shot.graphImageGens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt })),
           selected: shot.graphImageGenIndex ?? 0,
@@ -2577,7 +2614,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(hasTweenTool ? [build(tweenNode(ORIGIN))] : []),
       ...(hasEditVideoTool ? editVideoPair(ORIGIN, ORIGIN).map((n) => build(n)) : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, shot.graphImageGens, shot.graphImageGenIndex, shot.graphImageParams, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, imageModels, videoModels, references, hasVideoTool, hasTweenTool, hasEditVideoTool, videoPair, editPair, tweenNode, editVideoNode, editVideoPair, taggedEditVideo, editVideoPromptValue, imageGenBusy, videoGenBusy, editVideoBusy, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height]);
+  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, prod.openArt?.quality, shot.graphImageGens, shot.graphImageGenIndex, shot.graphImageParams, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceEditNodeId, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, imageModels, videoModels, references, hasVideoTool, hasTweenTool, hasEditVideoTool, videoPair, editPair, tweenNode, editVideoNode, editVideoPair, taggedEditVideo, editVideoPromptValue, imageGenBusy, videoGenBusy, editVideoBusy, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.

@@ -18,7 +18,9 @@ import {
   HiggsfieldCliProvider,
   higgsfieldCliRawId,
   HIGGSFIELD_CLI_ID_PREFIX,
+  costCacheKey,
   emitSchemaField,
+  parseCostCredits,
   resolveHiggsfieldCliBinary,
   type CliRun,
   type CliRunResult,
@@ -600,8 +602,7 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     expect(args[args.indexOf("--mode") + 1]).toBe("omni_reference");
   });
 
-  it("fails loudly instead of coercing when the model can't do the requested length", async () => {
-    let submitted = false;
+  it("fails loudly instead of coercing when the model can't do the requested length", async () => {    let submitted = false;
     const { run } = fakeRun(
       baseHandler({
         "generate create veo3_1_lite": () => {
@@ -828,5 +829,216 @@ describe("HiggsfieldCliProvider schema-driven arg emission", () => {
     const args = seen[0];
     expect(args.filter((a) => a === "--mode")).toHaveLength(1);
     expect(args[args.indexOf("--mode") + 1]).toBe("t2v");
+  });
+});
+
+describe("parseCostCredits / costCacheKey", () => {
+  it("reads the flat live shape and keeps fractions", () => {
+    expect(parseCostCredits(JSON.stringify({ credits: 32.5 }))).toBe(32.5);
+    expect(parseCostCredits(JSON.stringify({ credits: 1 }))).toBe(1);
+  });
+
+  it("tolerates envelope spellings and numeric strings", () => {
+    expect(parseCostCredits(JSON.stringify({ data: { total_credits: 12 } }))).toBe(12);
+    expect(parseCostCredits(JSON.stringify({ cost: "7.25" }))).toBe(7.25);
+    expect(parseCostCredits(JSON.stringify([{ price: 3 }]))).toBe(3);
+  });
+
+  it("returns null when no credit field parses", () => {
+    expect(parseCostCredits("not json")).toBeNull();
+    expect(parseCostCredits(JSON.stringify({ status: "ok" }))).toBeNull();
+    expect(parseCostCredits(JSON.stringify({ credits: -1 }))).toBeNull();
+  });
+
+  it("keys stably regardless of params order", () => {
+    const a = costCacheKey({ model: "higgsfield-cli:seedance_2_5", kind: "video", params: { mode: "t2v", seed: 1 } });
+    const b = costCacheKey({ model: "higgsfield-cli:seedance_2_5", kind: "video", params: { seed: 1, mode: "t2v" } });
+    expect(a).toBe(b);
+    expect(costCacheKey({ model: "higgsfield-cli:seedance_2_5", kind: "video", durationSec: 5 })).not.toBe(
+      costCacheKey({ model: "higgsfield-cli:seedance_2_5", kind: "video", durationSec: 10 })
+    );
+  });
+});
+
+describe("HiggsfieldCliProvider.getGenerationCost", () => {
+  it("quotes a video config through generate cost (no job submitted)", async () => {
+    const seen: string[][] = [];
+    const { run, calls } = fakeRun(
+      baseHandler({
+        "generate cost seedance_2_0": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ credits: 32.5 }));
+        },
+      })
+    );
+    const p = provider(run);
+    const cost = await p.getGenerationCost({
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, kind: "video",
+      resolution: "720p", durationSec: 5, aspectRatio: "16:9",
+    });
+    expect(cost).toBe(32.5);
+    // Preflight argv mirrors the submit path (no --wait, no media flags).
+    const args = seen[0];
+    expect(args.slice(0, 3)).toEqual(["generate", "cost", "seedance_2_0"]);
+    expect(args).not.toContain("--wait");
+    expect(args).not.toContain("--start-image");
+    expect(args[args.indexOf("--prompt") + 1]).toBe("cost probe");
+    expect(args[args.indexOf("--duration") + 1]).toBe("5");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("720p");
+    // Second call serves the cache — no new spawn.
+    expect(await p.getGenerationCost({
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, kind: "video",
+      resolution: "720p", durationSec: 5, aspectRatio: "16:9",
+    })).toBe(32.5);
+    expect(calls.filter((a) => a[0] === "generate" && a[1] === "cost").length).toBe(1);
+  });
+
+  it("quotes an image config without --duration and passes schema extras", async () => {
+    const seen: string[][] = [];
+    const { run } = fakeRun(
+      baseHandler({
+        "generate cost gpt_image_2_5": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ credits: 1 }));
+        },
+      })
+    );
+    const cost = await provider(run).getGenerationCost({
+      model: "gpt_image_2_5", kind: "image", resolution: "2k",
+      aspectRatio: "16:9", quality: "high", params: { variant: "sunburst" },
+    });
+    expect(cost).toBe(1);
+    const args = seen[0];
+    expect(args).not.toContain("--duration");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("2k");
+    expect(args[args.indexOf("--quality") + 1]).toBe("high");
+    expect(args[args.indexOf("--variant") + 1]).toBe("sunburst");
+  });
+
+  it("resolves null without spawning for foreign/auto ids, and null on CLI failure", async () => {
+    const { run, calls } = fakeRun(baseHandler({
+      "generate cost kling3_0": () => fail("boom"),
+    }));
+    const p = provider(run);
+    expect(await p.getGenerationCost({ model: "openart:foo", kind: "video" })).toBeNull();
+    expect(await p.getGenerationCost({ model: "auto", kind: "video" })).toBeNull();
+    expect(await p.getGenerationCost({ model: `${HIGGSFIELD_CLI_ID_PREFIX}kling3_0`, kind: "video", durationSec: 5 })).toBeNull();
+    expect(await p.getGenerationCost({ model: `${HIGGSFIELD_CLI_ID_PREFIX}nope`, kind: "image" })).toBeNull();
+    expect(calls.filter((a) => a[0] === "generate" && a[1] === "cost").length).toBe(2);
+  });
+});
+
+describe("submit-time credit quotes", () => {
+  it("prefers a per-surface params quality over the production default (submit + quote)", async () => {
+    // Regression: node/ref option forms render quality, but the submit used
+    // to skip it as an "owned" flag and bill the storyboard default — the
+    // node control was dead and its quote mirrored master. Nearest pick wins.
+    const costSeen: string[][] = [];
+    const createSeen: string[][] = [];
+    const jobId = "56565656-7777-8888-9999-000000000000";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate cost gpt_image_2_5": (args) => {
+          costSeen.push(args);
+          return ok(JSON.stringify({ credits: 2 }));
+        },
+        "generate create gpt_image_2_5": (args) => {
+          createSeen.push(args);
+          return ok(JSON.stringify([jobId]));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/q2.png" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const gen = p.imageGenFn(makeProduction({
+      openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`, resolution: "1k", quality: "low" },
+    }))!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([6]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await gen("A castle", [], undefined, { quality: "high" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // Both the submit and its ledger quote carry the node's pick, not master.
+    expect(createSeen[0][createSeen[0].indexOf("--quality") + 1]).toBe("high");
+    expect(costSeen[0][costSeen[0].indexOf("--quality") + 1]).toBe("high");
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ credits: 2 }));
+    // And the quote API itself prefers params.quality over top-level quality.
+    expect(await p.getGenerationCost({
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`, kind: "image",
+      resolution: "1k", aspectRatio: "16:9", quality: "low", params: { quality: "max" },
+    })).not.toBeNull();
+    const maxProbe = costSeen[costSeen.length - 1];
+    expect(maxProbe[maxProbe.indexOf("--quality") + 1]).toBe("max");
+  });
+  it("attaches the image quote to the ledger meta (absent when unreadable)", async () => {
+    const jobId = "12121212-3333-4444-5555-666666666666";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate cost gpt_image_2_5": () => ok(JSON.stringify({ credits: 2 })),
+        "generate create gpt_image_2_5": () => ok(JSON.stringify([jobId])),
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/q.png" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const gen = p.imageGenFn(makeProduction({
+      openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`, resolution: "1k", quality: "high" },
+    }))!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([3]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await gen("A castle", []);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ credits: 2 }));
+  });
+
+  it("attaches the video quote to the ledger meta", async () => {
+    const jobId = "34343434-5555-6666-7777-888888888888";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate cost seedance_2_0": () => ok(JSON.stringify({ credits: 65 })),
+        "generate create seedance_2_0": () => ok(JSON.stringify({ job_id: jobId })),
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", video_url: "https://example.invalid/q.mp4" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const folder = path.join(dataDir, "prod-q");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg"));
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "T", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([4]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await p.generateVideoClip(
+        prod,
+        { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" },
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 10, prompt: "animate" },
+        () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ credits: 65, durationSec: 10 }));
   });
 });

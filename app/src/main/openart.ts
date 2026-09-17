@@ -390,10 +390,10 @@ export class OpenArtClient implements MediaProvider {
 
   /** The resolution / length options a video model accepts (from its live form
    *  schema). Null when the model form can't be read — including foreign
-   *  (`higgsfield:…`) ids, which this vendor must never introspect. Cached
-   *  per model+mode. */
+   *  (Higgsfield `higgsfield-cli:…` / legacy `higgsfield:…`) ids, which this
+   *  vendor must never introspect. Cached per model+mode. */
   videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
-    if (modelId.startsWith("higgsfield:")) return Promise.resolve(null);
+    if (modelId.startsWith("higgsfield:") || modelId.startsWith("higgsfield-cli:")) return Promise.resolve(null);
     return this.resolveVideoOptions(modelId, withImage);
   }
 
@@ -423,10 +423,10 @@ export class OpenArtClient implements MediaProvider {
   }
 
   /** The full normalized option schema for a model (dev customizer probe).
-   *  Null for foreign (`higgsfield:…`) ids and when no form parses. */
+   *  Null for foreign (Higgsfield) ids and when no form parses. */
   async modelOptions(modelId: string): Promise<CliModelSchema | null> {
     const raw = (modelId ?? "").trim();
-    if (!raw || raw === "auto" || raw.startsWith("higgsfield")) return null;
+    if (!raw || raw === "auto" || raw.startsWith("higgsfield:") || raw.startsWith("higgsfield-cli:")) return null;
     const props = await this.fetchAnyFormProps(raw).catch(() => null);
     return props ? openArtSchemaFromProps(raw, props) : null;
   }
@@ -1173,7 +1173,7 @@ text.match(IMAGE_URL_RX)?.[0] ??
     if (picked && picked !== "auto" && models.length && !models.some((m) => m.id === picked)) {
       throw new Error(`"${picked}" isn't an OpenArt model (the active media provider is OpenArt) — re-pick the model and retry; switching media providers can strand a stale pick.`);
     }
-    let modelId = picked && picked !== "auto" && !picked.startsWith("higgsfield:") ? picked : "";
+    let modelId = picked && picked !== "auto" && !picked.startsWith("higgsfield:") && !picked.startsWith("higgsfield-cli:") ? picked : "";
     if (!modelId) {
       const video = models.filter((m) => m.videoInput);
       if (frameRefs?.end && video.length > 1) {

@@ -28,7 +28,7 @@ import {
 } from "../shared/prompt-grammar.js";
 import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
 import { styleFrameForShot, withLookClause, ensureLookSeed } from "../shared/look.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, TweenBlock, ProductionStyle } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1854,12 +1854,17 @@ export function wireEditNodeToCurrentFrame(shot: ProductionShot, node?: GraphEdi
  *  reference), then become the output feed. Pass a pre-created `node` (from
  *  `newEditNode`, so the caller could resolve its source before generating);
  *  otherwise one is created here. Returns the node's id. */
-export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string, node?: GraphEditNode): string {
+export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: string, model: string, node?: GraphEditNode, params?: GenParams, resolution?: string): string {
   const target = node ?? newEditNode(shot, prompt, chainSourceForEdit(shot));
   target.prompt = prompt;
   // The model chosen in the classic dialog becomes this node's own pick —
   // per-node model persistence (see GraphEditNode.model).
   target.model = model;
+  // Same for the dialog's advanced/variant options, so the node view shows
+  // what the classic edit ran with (and re-running it from the graph agrees).
+  if (params && Object.keys(params).length) target.params = { ...params };
+  // Same for the dialog's resolution tier.
+  if (typeof resolution === "string" && resolution.trim()) target.resolution = resolution.trim();
   recordGraphEditGen(shot, target.id, rel, prompt, model);
   shot.graphEditPrompt = prompt;
   shot.graphOutputSource = "editgen";

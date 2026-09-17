@@ -41,8 +41,8 @@ export function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   /** Top-bar media dial: active vendor, per-vendor balances + availability. */
   const [mediaProvider, setMediaProvider] = useState<MediaProviderId>("openart");
-  const [mediaCredits, setMediaCredits] = useState<MediaCredits>({ openart: null, higgsfield: null, "higgsfield-cli": null, "openart-cli": null });
-  const [mediaAvailable, setMediaAvailable] = useState<Record<MediaProviderId, boolean>>({ openart: true, higgsfield: true, "higgsfield-cli": true, "openart-cli": true });
+  const [mediaCredits, setMediaCredits] = useState<MediaCredits>({ openart: null, "higgsfield-cli": null, "openart-cli": null });
+  const [mediaAvailable, setMediaAvailable] = useState<Record<MediaProviderId, boolean>>({ openart: true, "higgsfield-cli": true, "openart-cli": true });
   const [mediaProviderList, setMediaProviderList] = useState<MediaProviderInfo[]>([]);
   /** Transport toggle (MCP vs CLI): which provider family the top bar and
    *  Settings show. Persisted; defaults to MCP. */

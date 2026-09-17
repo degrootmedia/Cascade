@@ -17,7 +17,7 @@ import {
   writeTransportMode,
 } from "../src/renderer/src/components/media-transport.js";
 
-const ALL_IDS: MediaProviderId[] = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
+const ALL_IDS: MediaProviderId[] = ["openart", "higgsfield-cli", "openart-cli"];
 
 function info(id: MediaProviderId, available: boolean): MediaProviderInfo {
   return { id, displayName: id, available };
@@ -25,7 +25,7 @@ function info(id: MediaProviderId, available: boolean): MediaProviderInfo {
 
 describe("isProviderVisible", () => {
   it("shows only MCP ids in mcp mode and only CLI ids in cli mode", () => {
-    expect(ALL_IDS.filter((id) => isProviderVisible(id, "mcp"))).toEqual(["openart", "higgsfield"]);
+    expect(ALL_IDS.filter((id) => isProviderVisible(id, "mcp"))).toEqual(["openart"]);
     expect(ALL_IDS.filter((id) => isProviderVisible(id, "cli"))).toEqual(["higgsfield-cli", "openart-cli"]);
   });
 });
@@ -94,7 +94,7 @@ describe("transport mode persistence", () => {
 });
 
 describe("firstVisibleAvailable", () => {
-  const list = [info("openart", true), info("higgsfield", true), info("higgsfield-cli", false), info("openart-cli", true)];
+  const list = [info("openart", true), info("higgsfield-cli", false), info("openart-cli", true)];
 
   it("picks the first available provider on the target transport", () => {
     // higgsfield-cli unavailable → falls to openart-cli.

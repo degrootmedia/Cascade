@@ -7,7 +7,6 @@
  */
 import type { McpManager } from "../mcp.js";
 import { OpenArtClient } from "../openart.js";
-import { HiggsfieldProvider } from "./higgsfield.js";
 import { HiggsfieldCliProvider } from "./higgsfield-cli.js";
 import { OpenArtCliProvider } from "./openart-cli.js";
 import type { GenerationRecorder, MediaProvider, MediaProviderId } from "./types.js";
@@ -49,12 +48,11 @@ export type { MediaProviderId };
 
 export const PROVIDER_META: Record<MediaProviderId, { displayName: string }> = {
   openart: { displayName: "OpenArt" },
-  higgsfield: { displayName: "Higgsfield" },
   "higgsfield-cli": { displayName: "Higgsfield CLI" },
   "openart-cli": { displayName: "OpenArt CLI" },
 };
 
-export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield", "higgsfield-cli", "openart-cli"];
+export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield-cli", "openart-cli"];
 
 /** Single source of truth for transport capabilities. Providers default to
  *  the conservative value; a transport must opt in. Drives the tween
@@ -68,33 +66,34 @@ export interface ProviderCapabilities {
 
 export const PROVIDER_CAPABILITIES: Record<MediaProviderId, ProviderCapabilities> = {
   openart: { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
-  higgsfield: { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
   "higgsfield-cli": { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
   "openart-cli": { imageRefs: true, videoRefs: false, endFrame: false, tween: false },
 };
 
 /** Coerce a stored/foreign value to a known provider id (unknown → openart). */
 export function resolveProviderId(raw: unknown): MediaProviderId {
-  if (raw === "higgsfield" || raw === "higgsfield-cli" || raw === "openart-cli") return raw;
+  if (raw === "higgsfield-cli" || raw === "openart-cli") return raw;
+  // Legacy `higgsfield` (MCP transport, removed) maps to its CLI successor.
+  if (raw === "higgsfield") return "higgsfield-cli";
   return "openart";
 }
 
 /**
- * Which vendor owns an explicit model pick. A `higgsfield:…` id always
- * belongs to Higgsfield, `higgsfield-cli:…` to the Higgsfield CLI, and
- * `openart-cli:…` to the OpenArt CLI (ids leave each provider namespaced);
+ * Which vendor owns an explicit model pick. A `higgsfield-cli:…` id belongs
+ * to the Higgsfield CLI; a legacy `higgsfield:…` id (MCP transport, removed)
+ * also routes to the CLI — the CLI accepts the sibling prefix as an alias
+ * (same vendor id space) so saved MCP-era picks keep submitting instead of
+ * silently falling back to the active vendor's first model (the
+ * Seedance→Gemini bug). `openart-cli:…` routes to the OpenArt CLI;
  * "auto", empty, and unprefixed OpenArt ids defer to the caller's active
- * provider (null = use active). Callers use this so a saved cross-vendor
- * pick (e.g. a Seedance tween chosen under Higgsfield) still submits to its
- * own vendor after the global provider flips — instead of silently falling
- * back to the active vendor's first model (the Seedance→Gemini bug).
+ * provider (null = use active).
  */
 export function providerOfModelId(model?: string): MediaProviderId | null {
   if (typeof model !== "string") return null;
   const m = model.trim();
   if (!m || m === "auto") return null;
   if (m.startsWith("higgsfield-cli:")) return "higgsfield-cli";
-  if (m.startsWith("higgsfield:")) return "higgsfield";
+  if (m.startsWith("higgsfield:")) return "higgsfield-cli";
   if (m.startsWith("openart-cli:")) return "openart-cli";
   return null;
 }
@@ -119,7 +118,6 @@ export function createProviders(
 ): Record<MediaProviderId, MediaProvider> {
   return {
     openart: new OpenArtClient(mcp, recorder),
-    higgsfield: new HiggsfieldProvider(mcp, recorder),
     "higgsfield-cli": new HiggsfieldCliProvider({ binary: higgsCliBinary ?? (() => null), recorder }),
     "openart-cli": new OpenArtCliProvider({ binary: openArtCliBinary ?? (() => null), recorder }),
   };

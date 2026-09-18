@@ -1166,9 +1166,12 @@ export interface CharacterSheetGenOptions {
   resolution: string;
   /** Character name — the sheet is attached to this character. */
   name: string;
-  /** The user's description of the character. The generation prompt always
-   *  wraps it in the character-sheet framing: full body shot + face-closeup
-   *  inset, neutral pose/expression/lighting on a plain gray background. */
+  /** The user's description of the character. May cite references with
+   *  `@[name]` tags (typed via the editor's @ autocomplete or dropped in from
+   *  the references panel); each cited reference is uploaded as a visual input.
+   *  The generation prompt always wraps it in the character-sheet framing:
+   *  full body shot + face-closeup inset, neutral pose/expression/lighting on a
+   *  plain gray background. */
   description: string;
   /** Front only, or front + back (both with the face inset). */
   view: CharacterSheetView;
@@ -1562,6 +1565,28 @@ export interface CascadeApi {
    */
   addReferenceImage(productionId: string, fileName: string, dataUrl: string): Promise<{ path: string } | null>;
   /**
+   * Step 3: a completed frame dragged onto another frame becomes a reference.
+   * Copies the source frame's original file (full resolution — never the
+   * resized thumbnail `boardImage` returns) into this production's
+   * referencesDir and returns its workspace-relative path. The source shot may
+   * live in a different production.
+   */
+  addBoardFrameReference(productionId: string, sourceProductionId: string, sourceShotId: string, fileName: string): Promise<{ path: string } | null>;
+  /**
+   * Step 2: delete a custom reference entirely — JSON entry, on-disk files,
+   * and every node + connection it had across all shots (output pipe, video
+   * sources, tween keyframes, edit-node sources, prompt tags, canvas
+   * placement). Returns the updated production.
+   */
+  deleteReference(productionId: string, refId: string): Promise<Production>;
+  /**
+   * Step 2: rename a custom reference and rewrite its `@[name]` tags across
+   * every prompt store (composer, video, edit, edit-video, edit nodes, tween
+   * blocks, magic prompts) so its node graph follows the new name instead of
+   * disconnecting. Returns the updated production.
+   */
+  renameReference(productionId: string, refId: string, name: string): Promise<Production>;
+  /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's
    * current image is edited in place; otherwise a brand-new reference is added
@@ -1684,7 +1709,21 @@ export interface CascadeApi {
    * number in their filename (e.g. "0100.png"). With no files at all, the
    * <folder>/boards/import/ directory is scanned instead.
    */
-  importBoards(productionId: string, files?: string[], shotId?: string): Promise<Production>;
+   importBoards(productionId: string, files?: string[], shotId?: string): Promise<Production>;
+  /**
+   * Step 3: import one dropped file onto a single panel. The renderer reads
+   * the OS file as a data URL (browser File drops carry no disk path, unlike
+   * the native picker behind `pickBoardImages`), so this is the drop-target
+   * sibling of `importBoards` — same frame write + history wiring, one shot.
+   */
+  importBoardImage(productionId: string, shotId: string, fileName: string, dataUrl: string): Promise<Production>;
+  /**
+   * Step 3: import one dropped video file onto a single panel. The clip is
+   * saved as a reference video and piped into the frame output — the same
+   * end state as a node-graph reference-node → output wiring. Bytes ride
+   * raw (ArrayBuffer, like `addReferenceMedia`), never as a data URL.
+   */
+  importBoardVideo(productionId: string, shotId: string, fileName: string, mime: string, bytes: ArrayBuffer): Promise<Production>;
 /** Load a board frame as a data URL (thumbnail) for the contact sheet.
    *  `framePath` selects a frame from either generation node or legacy history;
    *  omit it for the current frame. */
@@ -1720,6 +1759,20 @@ export interface CascadeApi {
    * and wiring that node to the output. The path stays stable as history grows.
    */
   promoteBoardHistory(productionId: string, shotId: string, framePath: string): Promise<Production>;
+  /**
+   * Step 3: permanently delete one stored generation (image/video/edit/
+   * edit-video/in-betweener take) from a shot — removes the history entry and
+   * unlinks the file. Rejected when the generation is currently feeding the
+   * storyboard, the animatic, or a node pipe. Returns the updated production.
+   */
+  deleteGeneration(productionId: string, shotId: string, rel: string): Promise<Production>;
+  /**
+   * Step 3/4: save any stored generated image or clip as a new reference —
+   * copy the file into referencesDir and add a `CustomRef` named "Saved Ref_00"
+   * (then _01, _02, …), without tagging any prompt. Returns the updated
+   * production.
+   */
+  saveGenerationAsReference(productionId: string, shotId: string, rel: string): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */

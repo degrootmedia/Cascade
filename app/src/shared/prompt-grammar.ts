@@ -73,6 +73,14 @@ export function removeRefTag(text: string, name: string): string {
   return text.replace(refTagPattern(name), "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Rename every `@[oldName]` tag to `@[newName]`, preserving each tag's
+ *  position. Matching is case-insensitive (like every other tag helper), and
+ *  equal names (modulo case) are a no-op so a rename can't churn the text. */
+export function renameRefTag(text: string, oldName: string, newName: string): string {
+  if (oldName.trim().toLowerCase() === newName.trim().toLowerCase()) return text;
+  return text.replace(refTagPattern(oldName), () => `@[${newName}]`);
+}
+
 /** Strip every `@[Name]` tag (used to compare the non-tag text of two prompts). */
 export function stripRefTags(text: string): string {
   return text.replace(/@\[[^\]]+\]/g, "");
@@ -154,6 +162,18 @@ export function addStyleParagraph(text: string, styleText: string): string {
 
 /** Alias for stripStyleParagraph (paragraph-scoped Style section). */
 export const removeStyleParagraph = stripStyleParagraph;
+
+/** Mirror a plugged prompt's leading `Style:` paragraph to the style node's
+ *  live text — insert/replace it when a style is chosen, strip it for "None".
+ *  Unplugged prompts are returned untouched, so a prompt that isn't wired to
+ *  the style node keeps whatever it carries. This is the one place a style
+ *  paragraph is rebuilt from the live selection; the style node is a pure
+ *  passthrough, so every consumer (composer, video, edit nodes) mirrors the
+ *  Design page through it. */
+export function mirrorStyleParagraph(text: string, styleText: string, plugged: boolean): string {
+  if (!plugged) return text;
+  return styleText ? addStyleParagraph(text, styleText) : stripStyleParagraph(text);
+}
 
 /** Split a prompt into its Style / content / Brand paragraphs. The first
  *  `Style:` and `Brand identity:` paragraphs become the boxes; everything

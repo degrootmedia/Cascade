@@ -589,3 +589,80 @@ Done. Verification note: intermittent full-suite collection failures
 environmental contention with the running dev server — isolated reruns pass
 and a dev-free run is fully green (704+1). If CI shows the same, run suites
 with dev stopped. Dev relaunched detached after verification.
+
+---
+
+# Right-click delete generations
+
+User: right-click a generation → delete it, after a warning ("permanently
+removes it from your disk, but you can always access it again on your
+Higgsfield/OpenArt account"). Applies to every generation surface; a take
+currently feeding the output/animatic/a pipe is blocked, not silently unbound.
+
+## Plan
+
+- [x] `shared/generations.ts` (new): `findGeneration(shot, rel)` locates a
+      take across image/video/edit/edit-video/tween histories;
+      `generationInUse` returns what it feeds (or null); `removeGeneration`
+      prunes + repairs the selection + purges the `artworkHistory` mirror.
+- [x] `pipeline.deleteGeneration(p, shot, rel)`: guard (not-a-gen / in-use),
+      remove, unlink the file, and delete a board JPEG's same-tag original;
+      `production:deleteGeneration` IPC + thin `index.ts` handler.
+- [x] `ProductionWorkspace.deleteGeneration(shotId, rel)`: pre-check + the one
+      shared warning + `apply()`; threaded to the board cards, node graph, and
+      tween timeline.
+- [x] Board card menu gains "Delete generation…" when a history frame that is
+      a stored generation is being browsed.
+- [x] Node graph image/video/edit strips + the edit-video preview right-click
+      to delete a take (items now carry `path`).
+- [x] Tween timeline take `<select>` right-click deletes the selected take.
+- [x] Tests: `generation-delete.test.ts` (9: locate, block output/pipe/
+      keyframe/child, remove + index repair + history purge, unlink +
+      original, refuse non-gen/in-use). `npm run build` clean; full suite
+      731 pass + 1 skip.
+
+## Review
+
+Done. Blocking is selection-scoped: only a history's SELECTED take can feed
+anything, so older takes delete freely. Kept the warning + block wording in
+one place (renderer pre-check and main guard both read
+`generationInUseMessage`). Board originals are deleted only on an exact tag
+match, never the legacy newest-file fallback (that could destroy another
+take). Pre-existing, unrelated `tsc` error in the untracked
+`character-builder-refs.test.ts` (`status` optionality) remains.
+
+---
+
+# Rename a reference without disconnecting its node
+
+User: renaming a reference image on the Design page should rename its node,
+not disconnect it. Tag resolution (and therefore every reference node + edge)
+is name-based (`unionTagged` matches `@[name]` against `references[].name`), so
+the old-name tag went dangling and the node rendered as "missing".
+
+## Plan
+
+- [x] `shared/prompt-grammar.ts`: `renameRefTag(text, old, new)` — rewrites
+      every occurrence case-insensitively, position-preserving, literal old
+      name (no regex), no-op on equal names.
+- [x] `pipeline.renameReference(p, refId, name, emit)`: renames the entry and
+      rewrites tags across composer/video/edit/edit-video prompts, each edit
+      node, tween action blocks, and magic prompts; id-based wiring (pipes,
+      keyframes, sources, canvas layout) untouched.
+- [x] IPC: `production:renameReference` contract entry + `CascadeApi.
+      renameReference` + thin `index.ts` handler (deleteReference pattern).
+- [x] Design page: `updateRef` calls the atomic op; `RefFigure` commits the
+      rename on blur/Enter (local draft) instead of per keystroke, so a
+      half-typed name never triggers a rewrite.
+- [x] Tests: `ref-rename.test.ts` (entry+tags across stores, other refs
+      untouched, no-op/unknown/empty) + grammar `renameRefTag` cases.
+- [x] Verified: 742 pass + 1 skip, `npm run build` clean. Pre-existing
+      `character-builder-refs.test.ts` tsc error unchanged.
+
+## Review
+
+Done. The rename is one atomic main-side op whose snapshot is authoritative
+(same shape as delete), so the renderer never holds a renamed entry beside
+old tags. Committing on blur/Enter is a deliberate, minimal UX change: it
+removes per-keystroke whole-production writes and avoids rewriting tags from a
+half-typed intermediate.

@@ -12,8 +12,10 @@ import { composePromptBoxes, isTagOnlyDiff, parsePromptBoxes, type PromptBoxes }
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
-export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentRef, styleControl, brandControl, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentLabel, contentRef, styleControl, brandControl, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
   value: string;
+  /** Label above the content box (defaults to "Content"). */
+  contentLabel?: string;
   /** When false the Brand box is hidden (the brand checkbox/node owns existence). */
   includeBrand: boolean;
   /** Applied to all three boxes so they share the surface styling. */
@@ -187,7 +189,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
           )}
         </>
       )}
-      <span className="prod-prompt-box-label content">Content</span>
+      <span className="prod-prompt-box-label content">{contentLabel ?? "Content"}</span>
       <PromptContentEditor
         ref={(el) => { if (contentRef) contentRef.current = el; }}
         className={`prod-prompt-box content${cls}`}

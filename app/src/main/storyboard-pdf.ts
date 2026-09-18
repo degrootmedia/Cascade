@@ -13,15 +13,59 @@
  * missing or isn't embeddable (webp/gif). Shots with no frame at all render
  * a placeholder box so the Audio/Visual text still prints. Frames are always
  * exact 16:9 — borderless, image cover-cropped (center) to fill edge to edge.
+ *
+ * Every PNG embedded in the PDF is re-encoded as JPEG first (`compressForPdf`),
+ * so a lossless PNG original still prints as a compact JPEG. This is a
+ * bytes-in/bytes-out step — the on-disk original is never touched.
  */
 import { PDFDocument, StandardFonts, rgb, grayscale, pushGraphicsState, popGraphicsState, rectangle, clip, endPath, type PDFFont, type PDFPage, type PDFImage } from "pdf-lib";
 import type { Production, ProductionShot } from "../shared/ipc.js";
 import { assetPath, originalForJpegRel } from "./pipeline.js";
 
+// Soft dependency: re-encoding PNG→JPEG needs Electron's nativeImage, but this
+// module must also load outside Electron (test harness). Without it, PNGs embed
+// uncompressed (the pre-existing behavior).
+let nativeImage: typeof import("electron").nativeImage | undefined;
+void import("electron")
+  .then((m) => {
+    nativeImage = m.nativeImage;
+  })
+  .catch(() => {});
+
 /** Raw image bytes plus the only two kinds pdf-lib can embed. */
 export interface StoryboardPdfImage {
   bytes: Uint8Array;
   kind: "png" | "jpg";
+}
+
+/** PNG → JPEG transcoder. Null means "leave it as PNG" (unavailable/failed). */
+export type ToJpegFn = (bytes: Uint8Array) => Uint8Array | null;
+
+/** JPEG quality for converted board art — high enough to print cleanly. */
+export const STORYBOARD_JPEG_QUALITY = 85;
+
+/** Default transcoder backed by Electron's nativeImage (soft-imported above). */
+export function pngBytesToJpeg(bytes: Uint8Array): Uint8Array | null {
+  if (!nativeImage) return null;
+  try {
+    const img = nativeImage.createFromBuffer(Buffer.from(bytes));
+    if (img.isEmpty()) return null;
+    const jpeg = img.toJPEG(STORYBOARD_JPEG_QUALITY);
+    return jpeg && jpeg.length ? new Uint8Array(jpeg) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-encode a PNG as JPEG so the exported PDF only carries JPEGs; JPEGs pass
+ * through untouched. Falls back to the original PNG when transcoding is
+ * unavailable or yields nothing (better an uncompressed frame than none).
+ */
+export function compressForPdf(image: StoryboardPdfImage, toJpeg: ToJpegFn): StoryboardPdfImage {
+  if (image.kind !== "png") return image;
+  const jpeg = toJpeg(image.bytes);
+  return jpeg && jpeg.length ? { bytes: jpeg, kind: "jpg" } : image;
 }
 
 /** One printable panel: still frame (optional) + Audio/Visual direction. */
@@ -38,6 +82,8 @@ export interface StoryboardPdfOptions {
   version: string;
   panelsPerPage: 1 | 3;
   logo?: StoryboardPdfImage | null;
+  /** Override the PNG→JPEG transcoder (tests); defaults to nativeImage. */
+  toJpeg?: ToJpegFn;
 }
 
 /** File reads go through this seam so tests can fake the disk. */
@@ -236,7 +282,8 @@ async function drawFrame(
   w: number,
   h: number,
   image: StoryboardPdfImage | null | undefined,
-  shotNumber: string
+  shotNumber: string,
+  toJpeg: ToJpegFn
 ): Promise<void> {
   if (!image) {
     page.drawRectangle({
@@ -254,7 +301,8 @@ async function drawFrame(
     page.drawText(msg, { x: x + (w - tw) / 2, y: y + (h - size) / 2, size, font: fonts.regular, color: MUTED });
     return;
   }
-  const embedded = image.kind === "png" ? await doc.embedPng(image.bytes) : await doc.embedJpg(image.bytes);
+  const embeddable = compressForPdf(image, toJpeg);
+  const embedded = embeddable.kind === "png" ? await doc.embedPng(embeddable.bytes) : await doc.embedJpg(embeddable.bytes);
   const placed = coverImageRect(x, y, w, h, embedded.width, embedded.height);
   page.pushOperators(pushGraphicsState(), rectangle(x, y, w, h), clip(), endPath());
   page.drawImage(embedded, { x: placed.x, y: placed.y, width: placed.width, height: placed.height });
@@ -303,7 +351,8 @@ async function drawSinglePanelPage(
   fonts: Fonts,
   panel: StoryboardPdfPanel,
   pageW: number,
-  pageH: number
+  pageH: number,
+  toJpeg: ToJpegFn
 ): Promise<void> {
   const contentW = pageW - MARGIN * 2;
   const contentTop = pageH - MARGIN;
@@ -320,7 +369,7 @@ async function drawSinglePanelPage(
   const frameX = MARGIN + (contentW - frameW) / 2;
   const boxesH = availH - frameH - gap * 2;
   const boxH = boxesH / 2;
-  await drawFrame(doc, page, fonts, frameX, cursor - frameH, frameW, frameH, panel.image, panel.number);
+  await drawFrame(doc, page, fonts, frameX, cursor - frameH, frameW, frameH, panel.image, panel.number, toJpeg);
   cursor -= frameH + gap;
   drawLabeledBox(page, fonts, MARGIN, cursor - boxH, contentW, boxH, "Audio:", panel.audio, 9.5);
   cursor -= boxH + gap;
@@ -333,7 +382,8 @@ async function drawTriplePanelPage(
   fonts: Fonts,
   panels: StoryboardPdfPanel[],
   pageW: number,
-  pageH: number
+  pageH: number,
+  toJpeg: ToJpegFn
 ): Promise<void> {
   const contentW = pageW - MARGIN * 2;
   const contentTop = pageH - MARGIN;
@@ -349,7 +399,7 @@ async function drawTriplePanelPage(
     const frameW = fitted.w;
     const frameH = fitted.h;
     const frameY = rowY + (rowH - frameH) / 2;
-    await drawFrame(doc, page, fonts, MARGIN, frameY, frameW, frameH, panel.image, panel.number);
+    await drawFrame(doc, page, fonts, MARGIN, frameY, frameW, frameH, panel.image, panel.number, toJpeg);
     const textX = MARGIN + frameW + 10;
     const textW = contentW - frameW - 10;
     const headSize = 11;
@@ -386,11 +436,13 @@ export async function buildStoryboardPdf(
   const perPage = opts.panelsPerPage === 3 ? 3 : 1;
   const groups = paginatePanels(panels, perPage);
   const [pageW, pageH] = STORYBOARD_PAGE_SIZE;
+  const toJpeg = opts.toJpeg ?? pngBytesToJpeg;
 
   let logo: PDFImage | null = null;
   if (opts.logo) {
     try {
-      logo = opts.logo.kind === "png" ? await doc.embedPng(opts.logo.bytes) : await doc.embedJpg(opts.logo.bytes);
+      const embeddable = compressForPdf(opts.logo, toJpeg);
+      logo = embeddable.kind === "png" ? await doc.embedPng(embeddable.bytes) : await doc.embedJpg(embeddable.bytes);
     } catch {
       logo = null;
     }
@@ -414,9 +466,9 @@ export async function buildStoryboardPdf(
   for (let i = 0; i < groups.length; i++) {
     const page = doc.addPage(STORYBOARD_PAGE_SIZE);
     if (perPage === 3) {
-      await drawTriplePanelPage(doc, page, fonts, groups[i], pageW, pageH);
+      await drawTriplePanelPage(doc, page, fonts, groups[i], pageW, pageH, toJpeg);
     } else {
-      await drawSinglePanelPage(doc, page, fonts, groups[i][0], pageW, pageH);
+      await drawSinglePanelPage(doc, page, fonts, groups[i][0], pageW, pageH, toJpeg);
     }
     drawFooter(page, fonts, pageW, opts, i, groups.length, logo);
   }

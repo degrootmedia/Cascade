@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
+import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 
 /** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
@@ -230,7 +231,7 @@ export function VolumeSlider({ value, onCommit, audioRef, title }: {
 
 export function AnimaticTimeline({
   prodId, scenes, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
-  onUpdateDurations, onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute,
+  onUpdateDurations, onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onSaveAsReference,
 }: {
   prodId: string;
   scenes: Production["scenes"];
@@ -247,6 +248,9 @@ export function AnimaticTimeline({
   onRemoveVideo: (shotId: string) => void;
   /** Toggle whether a shot's own embedded audio plays in the preview. */
   onToggleMute: (shotId: string) => void;
+  /** Copy the previewed shot's generated clip/frame into the production as a
+   *  new reference (right-click the preview). */
+  onSaveAsReference?: (shotId: string, rel: string) => void;
 }) {
   const shots = flatShots(scenes);
   const sumDur = totalDuration(scenes);
@@ -263,6 +267,7 @@ export function AnimaticTimeline({
   const previewRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [previewHeight, setPreviewHeight] = useState(440);
+  const genMenu = useGenerationMenu();
 
   // ---- Zoomable strip + per-shot video pool (state) ----------------------
   // The strip scales from a "fit" baseline (whole runtime at 1x). Wheel-zooming
@@ -896,6 +901,11 @@ export function AnimaticTimeline({
         className="prod-animatic-preview"
         ref={previewRef}
         style={{ height: `${previewHeight}px` }}
+        title={activeShot?.videoPath || activeShot?.artwork ? "Right-click to save the previewed media as a reference" : undefined}
+        onContextMenu={(e) => {
+          const rel = activeShot?.videoPath ?? activeShot?.artwork;
+          if (activeShot && rel && onSaveAsReference) genMenu.open(e, rel);
+        }}
       >
         {/* One mounted <video> per recently-active shot (LRU-capped); only the
             active clip is visible, so cuts swap pixels instead of reloading
@@ -1093,6 +1103,11 @@ export function AnimaticTimeline({
         if (Number.isFinite(duration) && duration > 0) onVoDurationKnown(duration);
       }} />
       <audio ref={musicAudioRef} src={musicUrl ?? ""} preload="auto" loop hidden />
+      <GenerationMenu
+        menu={genMenu.menu}
+        onClose={genMenu.close}
+        onSaveAsReference={onSaveAsReference && activeShot ? (rel) => onSaveAsReference(activeShot.id, rel) : undefined}
+      />
     </div>
   );
 }

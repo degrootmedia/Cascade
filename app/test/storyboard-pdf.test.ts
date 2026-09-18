@@ -22,6 +22,7 @@ vi.mock("../src/main/scripting.js", () => ({
 
 import {
   buildStoryboardPdf,
+  compressForPdf,
   contain16x9,
   coverImageRect,
   detectImageKind,
@@ -34,7 +35,9 @@ import {
   storyboardPdfFileName,
   wrapText,
   type ReadFileFn,
+  type StoryboardPdfImage,
   type StoryboardPdfPanel,
+  type ToJpegFn,
 } from "../src/main/storyboard-pdf.js";
 
 // ---- fixtures --------------------------------------------------------------
@@ -48,6 +51,11 @@ const PNG_1X1 = Buffer.from(
 // Minimal bytes pdf-lib's sniffer accepts as JPEG (only used for kind
 // detection + loadPanelImage, never embedded).
 const FAKE_JPG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+// A real 1×1 JPEG — pdf-lib's embedJpg parses it, so transcoded panels render.
+const JPEG_1X1 = Buffer.from(
+  "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==",
+  "base64"
+);
 
 function makeProduction(overrides: Partial<Production> = {}): Production {
   return {
@@ -122,6 +130,28 @@ describe("detectImageKind", () => {
     expect(detectImageKind(new Uint8Array(Buffer.from("RIFF....WEBP", "ascii")))).toBeNull();
     expect(detectImageKind(new Uint8Array(Buffer.from("GIF89a", "ascii")))).toBeNull();
     expect(detectImageKind(new Uint8Array(0))).toBeNull();
+  });
+});
+
+describe("compressForPdf", () => {
+  it("re-encodes PNG bytes as JPEG via the injected transcoder", () => {
+    const png: StoryboardPdfImage = { bytes: new Uint8Array(PNG_1X1), kind: "png" };
+    const toJpeg = vi.fn<ToJpegFn>(() => new Uint8Array(JPEG_1X1));
+    const out = compressForPdf(png, toJpeg);
+    expect(toJpeg).toHaveBeenCalledWith(png.bytes);
+    expect(out.kind).toBe("jpg");
+    expect(Buffer.from(out.bytes)).toEqual(JPEG_1X1);
+  });
+  it("passes JPEGs through untouched without invoking the transcoder", () => {
+    const jpg: StoryboardPdfImage = { bytes: new Uint8Array(FAKE_JPG), kind: "jpg" };
+    const toJpeg = vi.fn<ToJpegFn>(() => new Uint8Array(JPEG_1X1));
+    expect(compressForPdf(jpg, toJpeg)).toBe(jpg);
+    expect(toJpeg).not.toHaveBeenCalled();
+  });
+  it("keeps the PNG when transcoding is unavailable or empty", () => {
+    const png: StoryboardPdfImage = { bytes: new Uint8Array(PNG_1X1), kind: "png" };
+    expect(compressForPdf(png, () => null)).toBe(png);
+    expect(compressForPdf(png, () => new Uint8Array(0))).toBe(png);
   });
 });
 
@@ -270,6 +300,18 @@ describe("buildStoryboardPdf", () => {
     });
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(2);
+  });
+  it("embeds PNG panels as JPEGs when a transcoder is available", async () => {
+    const toJpeg = vi.fn<ToJpegFn>(() => new Uint8Array(JPEG_1X1));
+    const bytes = await buildStoryboardPdf([makePanel(0)], {
+      productionName: "Test Production",
+      version: "v1",
+      panelsPerPage: 1,
+      toJpeg,
+    });
+    expect(toJpeg).toHaveBeenCalledTimes(1);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
   });
   it("renders placeholder panels without frames", async () => {
     const bytes = await buildStoryboardPdf(

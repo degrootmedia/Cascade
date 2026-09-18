@@ -5,7 +5,7 @@ import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 import { NodesIcon } from "../icons.js";
 
-export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, styleControl, brandControl, onKeyDown, onFocus, onBlur }: {
+export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, onKeyDown, onFocus, onBlur }: {
   value: string;
   includeBrand: boolean;
   onChange: (value: string) => void;
@@ -15,6 +15,11 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   resizable?: boolean;
   autoFocus?: boolean;
   placeholder: string;
+  /** Label above the content box (defaults to "Content"). */
+  contentLabel?: string;
+  /** Supply to drive the content editor from outside (e.g. inserting a
+   *  dropped reference tag at the caret). */
+  contentRef?: { current: PromptContentHandle | null };
   /** Optional control under the Style label / next to the Brand identity label (see TriplePrompt). */
   styleControl?: ReactNode;
   brandControl?: ReactNode;
@@ -22,7 +27,8 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   onFocus?: () => void;
   onBlur?: () => void;
 }) {
-  const contentRef = useRef<PromptContentHandle>(null);
+  const internalContentRef = useRef<PromptContentHandle>(null);
+  const contentRef = externalContentRef ?? internalContentRef;
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
@@ -79,6 +85,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         value={value}
         includeBrand={includeBrand}
         placeholder={placeholder}
+        contentLabel={contentLabel}
         styleControl={styleControl}
         brandControl={brandControl}
         onChange={onChange}

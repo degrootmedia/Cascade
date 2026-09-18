@@ -74,6 +74,7 @@ function cascadeMock(): Record<string, unknown> {
     checkExternalEdits: async () => {},
     loadProduction: async () => disk,
     boardImage: async () => "data:image/png;base64,AAAA",
+    addBoardFrameReference: async () => ({ path: "references/Frame 0001.jpg" }),
     addReferenceImage: async () => ({ path: "references/Frame 0001.png" }),
     getBoardPrompt: async (_id: string, shotId: string) => effectivePrompt(disk ?? freshProd(), shotId),
     saveProduction: async (p: Record<string, unknown>) => { disk = JSON.parse(JSON.stringify(p)) as Record<string, unknown>; savedProds.push(disk); },

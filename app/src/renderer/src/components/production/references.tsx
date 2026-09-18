@@ -1,14 +1,16 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ChangeEvent, DragEvent } from "react";
+import type { DragEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
+import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { isQuotableCostModel } from "./generation-cost.js";
 import { GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
+import type { PromptContentHandle } from "../TriplePrompt.js";
 import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
@@ -18,6 +20,39 @@ interface RefItem {
   id: string;
   name: string;
   artwork?: string;
+}
+
+/** Resolve a dragged-in reference's name against the existing ones: a base
+ *  name that is already taken gets a two-digit suffix ("Gondola" → "Gondola
+ *  01", then "Gondola 02", …). Matching is case-insensitive; the base is
+ *  trimmed and falls back to "Reference" when empty. */
+export function uniqueRefName(existingNames: Iterable<string>, base: string): string {
+  const trimmed = base.trim() || "Reference";
+  const taken = new Set<string>();
+  for (const n of existingNames) taken.add(n.trim().toLowerCase());
+  if (!taken.has(trimmed.toLowerCase())) return trimmed;
+  for (let n = 1; ; n++) {
+    const candidate = `${trimmed} ${String(n).padStart(2, "0")}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/** Move `draggedId` to sit immediately before/after `targetId`, preserving
+ *  every other entry's relative order. Returns the input array unchanged when
+ *  either id is missing or they are equal. (Callers group by categoryId, so
+ *  the helper repositions only — a caller that wants a category change sets
+ *  it too.) */
+export function reorderRefs<T extends { id: string }>(refs: T[], draggedId: string, targetId: string, after: boolean): T[] {
+  if (draggedId === targetId) return refs;
+  const from = refs.findIndex((r) => r.id === draggedId);
+  if (from < 0 || !refs.some((r) => r.id === targetId)) return refs;
+  const next = refs.slice();
+  const [moved] = next.splice(from, 1);
+  let insert = next.findIndex((r) => r.id === targetId);
+  if (insert < 0) return refs;
+  if (after) insert += 1;
+  next.splice(insert, 0, moved);
+  return next;
 }
 
 /** Grid of named reference slots: pick a name (populated from the script) and
@@ -147,7 +182,7 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onGenerate, onEditRef, onRescan }: {
+export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
@@ -158,6 +193,9 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onMove: (id: string, categoryId?: string) => void;
+  /** Drop one tile before/after another to reorder (and, if they sit in
+   *  different categories, move it there). */
+  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
   /** Open the reference-image generation modal targeting a category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
@@ -200,7 +238,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onGenerate={onGenerate} onEditRef={onEditRef} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} />
         ))}
       </div>
       <div className="prod-ref-new form">
@@ -219,7 +257,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onGenerate, onEditRef }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
@@ -229,6 +267,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onA
   onRename: (id: string, name: string) => void;
   onRenameCategory: (id: string, name: string) => void;
   onMove: (id: string, categoryId?: string) => void;
+  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
   /** Open the reference-image generation modal targeting this category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
@@ -258,7 +297,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onA
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onEditRef={onEditRef} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -298,18 +337,26 @@ function areRefItemsEqual(a: CustomRef, b: CustomRef): boolean {
   );
 }
 
+/** Which half of a tile a drag is over: the left half inserts before it, the
+ *  right half after. Grid is a horizontal wrap flow, so X is the axis. */
+function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
+  const rect = e.currentTarget.getBoundingClientRect();
+  return e.clientX < rect.left + rect.width / 2 ? "before" : "after";
+}
+
 /** Perf 1.5 + 2.4: one reference tile. Memoized on data (never on callback
  *  identity) so a rename keystroke re-renders O(1) tile, not O(all). Zoom is
  *  fully local state so it never bubbles to the parent. `contentVisibility`
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onEditRef }: {
+const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onReorder, onEditRef }: {
   prodId: string;
   refItem: CustomRef;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
+  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
   onEditRef?: (ref: CustomRef) => void;
 }) {
   const r = refItem;
@@ -317,6 +364,8 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
   const isVideo = r.media === "video" && !!r.mediaPath;
   const hasImage = !!imgUrl && !isVideo;
   const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
+  // Which edge a dragged tile currently hovers — drives the insert marker.
+  const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
   // Perf 2.4: video element mounts only on first hover/expand; before that a
   // static glyph stands in (no metadata fetch storm for large libraries).
   const [videoActive, setVideoActive] = useState(false);
@@ -331,11 +380,50 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
   const handleCloseZoom = useCallback(() => setZoom(null), []);
   const handleAttach = useCallback(() => void onAttach(r.id), [onAttach, r.id]);
   const handleRemove = useCallback(() => onRemove(r.id), [onRemove, r.id]);
-  const handleRename = useCallback((e: ChangeEvent<HTMLInputElement>) => onRename(r.id, e.target.value), [onRename, r.id]);
+  // Rename commits once (on blur/Enter), not per keystroke: main rewrites the
+  // reference's `@[name]` tags across every prompt store in one atomic op, so
+  // the node graph follows the new name rather than breaking on a half-typed
+  // intermediate. The draft keeps typing snappy and local to this tile.
+  const [nameDraft, setNameDraft] = useState(r.name);
+  useEffect(() => { setNameDraft(r.name); }, [r.name]);
+  const commitRename = useCallback(() => {
+    const next = nameDraft.trim();
+    if (next && next !== r.name) onRename(r.id, next);
+    else setNameDraft(r.name);
+  }, [nameDraft, onRename, r.id, r.name]);
   const handleEditRef = useCallback(() => onEditRef?.(r), [onEditRef, r]);
   const handleDragStart = useCallback((e: DragEvent) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }, [r.id]);
+  // Tile-level drop: dropping another reference tile on an edge inserts it
+  // before/after this one. stopPropagation keeps the category panel from also
+  // treating the drop as a plain move-to-category.
+  const handleTileDragOver = useCallback((e: DragEvent<HTMLElement>) => {
+    if (!e.dataTransfer.types.includes("application/x-cascade-reference")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    setDropSide(dropSideFor(e));
+  }, []);
+  const handleTileDragLeave = useCallback((e: DragEvent<HTMLElement>) => {
+    // Ignore bubbling leaves as the pointer moves onto a child element.
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setDropSide(null);
+  }, []);
+  const handleTileDrop = useCallback((e: DragEvent<HTMLElement>) => {
+    const id = e.dataTransfer.getData("application/x-cascade-reference");
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDropSide(null);
+    if (id !== r.id) onReorder(id, r.id, dropSideFor(e) === "after");
+  }, [onReorder, r.id]);
   return (
-    <figure className="prod-ref" style={{ contentVisibility: "auto", containIntrinsicSize: "220px 240px" }}>
+    <figure
+      className={"prod-ref" + (dropSide ? ` drop-${dropSide}` : "")}
+      style={{ contentVisibility: "auto", containIntrinsicSize: "220px 240px" }}
+      onDragOver={handleTileDragOver}
+      onDragLeave={handleTileDragLeave}
+      onDrop={handleTileDrop}
+    >
       {imgUrl
         ? <img src={imgUrl} alt={r.name} draggable onDragStart={handleDragStart} onContextMenu={hasImage ? menu.onContextMenu : undefined} />
         : isVideo
@@ -349,7 +437,7 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
         {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
         <button className="prod-ref-del" title="Delete this reference" onClick={handleRemove}><XIcon size={12} /></button>
       </div>
-      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={r.name} onChange={handleRename} /></figcaption>
+      <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
       {zoom && createPortal(
         <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
           <figure className="prod-ref-lightbox-card">
@@ -398,6 +486,19 @@ export function allPromptRefs(prod: Production): PromptReference[] {
   return out;
 }
 
+/** Id → citable name for EVERY character/product/custom reference, including
+ *  the mirrored entries `allPromptRefs` dedupes away. Resolving a reference
+ *  tile dragged onto a prompt needs this: the tile carries the CustomRef id of
+ *  a mirrored character, which the name-deduped autocomplete list may not
+ *  contain. */
+export function referenceNamesById(prod: Production): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const r of prod.characters) if (r.id && r.name) map.set(r.id, r.name);
+  for (const r of prod.products) if (r.id && r.name) map.set(r.id, r.name);
+  for (const r of prod.references ?? []) if (r.id && r.name) map.set(r.id, r.name);
+  return map;
+}
+
 export function promptRefsForShot(prod: Production, _shotId: string): PromptReference[] {
   return allPromptRefs(prod);
 }
@@ -439,10 +540,16 @@ export function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
  *  front + back) view, neutral pose/expression/lighting on a plain gray
  *  background (characterSheetPrompt in pipeline.ts). The finished sheet is
  *  attached to the character (created on first build) and shown below. */
-export function CharacterBuilderSection({ prodId, characters, models, productionQuality, onGenerate }: {
+export function CharacterBuilderSection({ prodId, characters, models, references, refNameById, productionQuality, onGenerate }: {
   prodId: string;
   characters: CharacterSheet[];
   models: OpenArtModelChoice[];
+  /** Artwork-bearing references for the description box's @ autocomplete +
+   *  tag previews (characters, products, custom references). */
+  references: PromptReference[];
+  /** Raw id → name lookup (incl. mirrored refs) for resolving a dragged
+   *  reference tile, whose id `references` may not carry after name-dedup. */
+  refNameById: Map<string, string>;
   /** Production quality tier — sheets bill it (the provider reads it off the
    *  production), so the quote must price it too. */
   productionQuality?: string;
@@ -452,6 +559,7 @@ export function CharacterBuilderSection({ prodId, characters, models, production
   const [characterId, setCharacterId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const descRef = useRef<PromptContentHandle | null>(null);
   const [view, setView] = useState<CharacterSheetView>("front");
   // Start where the user last left this dropdown (remembered globally across
   // characters and productions).
@@ -504,15 +612,33 @@ export function CharacterBuilderSection({ prodId, characters, models, production
     ...(Object.keys(charParams).length ? { params: { ...charParams } } : {}),
   } : null;
   const refine = async () => {
-    if (!description.trim() || refining) return;
+    // The LLM refines prose only — @[name] tags are stripped before the call
+    // and re-attached after, so refining never drops the cited references.
+    const tags = refTagNames(description);
+    const plain = stripRefTags(description).trim();
+    if (!plain || refining) return;
     setRefining(true); setError(null);
     try {
-      const refined = await window.cascade.refineCharacterDescription(prodId, description.trim());
-      setDescription(refined);
+      const refined = await window.cascade.refineCharacterDescription(prodId, plain);
+      setDescription(tags.reduce((text, tag) => addRefTag(text, tag), refined));
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
     }
     setRefining(false);
+  };
+  /** Dropping a reference tile from the References panel cites it in the
+   *  description as an @[name] tag (same tag the @ autocomplete inserts). The
+   *  tile id is resolved through the raw lookup so a mirrored character's tile
+   *  (a CustomRef id absent from the name-deduped `references`) still works. */
+  const dropReference = (e: DragEvent<HTMLDivElement>) => {
+    const id = e.dataTransfer.getData("application/x-cascade-reference");
+    if (!id) return;
+    const name = refNameById.get(id);
+    if (!name) return;
+    e.preventDefault();
+    e.currentTarget.classList.remove("dragover");
+    setDescription((prev) => addRefTag(prev, name));
+    requestAnimationFrame(() => descRef.current?.focus());
   };
   /** Recall a character's last-used description + generation settings from the
    *  dropdown; "＋ New character…" resets the form to the remembered defaults. */
@@ -549,13 +675,33 @@ export function CharacterBuilderSection({ prodId, characters, models, production
         <label className="prod-label">Character name
           <input className="prod-refgen-name" placeholder="e.g. Captain Mara" value={name} onChange={(e) => { setName(e.target.value); if (characterId && characters.find((c) => c.id === characterId)?.name !== e.target.value) setCharacterId(""); }} />
         </label>
-        <label className="prod-label">Description</label>
-        <div className="prod-char-desc-row">
-          <textarea className="prod-refgen-prompt prod-char-desc" rows={4} placeholder="Describe the character — appearance, outfit, distinguishing features…" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <button className="prod-btn prod-char-refine" title="Refine this description via the model" disabled={!description.trim() || refining} onClick={() => void refine()}>
+        <div
+          className="prod-char-desc-row"
+          onDragOver={(e) => {
+            if (!e.dataTransfer.types.includes("application/x-cascade-reference")) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            e.currentTarget.classList.add("dragover");
+          }}
+          onDragLeave={(e) => e.currentTarget.classList.remove("dragover")}
+          onDrop={dropReference}
+        >
+          <ReferencePromptEditor
+            className="prod-refgen-prompt prod-char-desc"
+            rows={4}
+            value={description}
+            includeBrand={false}
+            contentLabel="Description"
+            contentRef={descRef}
+            references={references}
+            placeholder="Describe the character — appearance, outfit, distinguishing features… type @ to add a reference"
+            onChange={setDescription}
+          />
+          <button className="prod-btn prod-char-refine" title="Refine this description via the model" disabled={!stripRefTags(description).trim() || refining} onClick={() => void refine()}>
             {refining ? "Refining…" : "✨ Refine"}
           </button>
         </div>
+        <p className="hint">Cite references with <code>@</code> — or drag one in from the References panel below. Sheets always generate 16:9.</p>
         <div className="prod-char-view">
           <span className="prod-label">Sheet views</span>
           <div className="prod-char-view-options">

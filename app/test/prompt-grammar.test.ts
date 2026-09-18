@@ -16,12 +16,14 @@ import {
   IMAGE_URL_RX,
   insertBrandParagraph,
   isTagOnlyDiff,
+  mirrorStyleParagraph,
   parseJsonLooseArray,
   parseJsonLooseObject,
   parsePromptBoxes,
   refTagMatches,
   refTagNames,
   removeRefTag,
+  renameRefTag,
   replaceRefTagAt,
   stripBrandParagraph,
   stripReferenceClause,
@@ -61,6 +63,20 @@ describe("addRefTag / removeRefTag / hasRefTag", () => {
   it("removes every occurrence and tidies blank lines", () => {
     const p = "A @[Gandalf] B\n\n\n\nC @[gandalf] D";
     expect(removeRefTag(p, "Gandalf")).toBe("A  B\n\nC  D");
+  });
+});
+
+describe("renameRefTag", () => {
+  it("renames every occurrence case-insensitively, preserving position", () => {
+    expect(renameRefTag("A @[Hero] B and @[hero] again", "Hero", "Champion")).toBe("A @[Champion] B and @[Champion] again");
+  });
+
+  it("is a no-op for equal names (modulo case) and leaves other tags alone", () => {
+    expect(renameRefTag("A @[Hero] B @[Villain]", "Hero", "hero")).toBe("A @[Hero] B @[Villain]");
+  });
+
+  it("treats the old name literally, not as a regex", () => {
+    expect(renameRefTag("see @[A.B (alt)]", "A.B (alt)", "A B")).toBe("see @[A B]");
   });
 });
 
@@ -113,6 +129,16 @@ describe("Brand / Style paragraph helpers", () => {
     // replacing an existing style keeps the rest
     expect(addStyleParagraph("Style: Old\n\nAction here.", "New")).toBe("Style: New\n\nAction here.");
     expect(stripStyleParagraph("Style: Heroic 3D\n\nAction here.")).toBe("Action here.");
+  });
+
+  it("mirrors a plugged prompt to the style node's live text", () => {
+    // A style is chosen: the paragraph is replaced wherever it sits.
+    expect(mirrorStyleParagraph("Style: Old\n\nAction here.", "New look", true)).toBe("Style: New look\n\nAction here.");
+    // None: the paragraph is stripped.
+    expect(mirrorStyleParagraph("Style: Old\n\nAction here.", "", true)).toBe("Action here.");
+    // Not plugged: the prompt is untouched, None included.
+    expect(mirrorStyleParagraph("Style: Node's own\n\nAction here.", "", false)).toBe("Style: Node's own\n\nAction here.");
+    expect(mirrorStyleParagraph("Style: Node's own\n\nAction here.", "New look", false)).toBe("Style: Node's own\n\nAction here.");
   });
 });
 

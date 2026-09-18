@@ -33,6 +33,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Production store | `app/src/main/productions.ts` | Production document persistence + migration. |
 | Shotter | `app/src/main/shotter.ts` | The 4-digit shot-numbering module: 100-grid derivation (`nextNumber`/`insertMid`/`renumber`), mid-numbered shot inserts with a full-renumber escape hatch, cross-scene reorder with board-folder relocation, and the manual `setShotNumber` override (one shot only — rejects malformed/sub-0100 numbers and any slot another shot already owns, since assembly keys `shots/<number>.*` filenames on it; board folder relocates to follow), and the scene-level surface (`blankScenes` — the 1-scene × 5-blank-shots skeleton for script-less productions — and `insertScene`, which splices an empty scene and renumbers later scene ordinals 1..N; scene ordinals are display-only, shot numbers untouched). |
 | Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), per-production entry files (`userData/ledger/<productionId>.json`, each with its own `userData/ledger/<productionId>.csv` mirror), and the global rules singleton (`userData/ledger.json`, `version: 2` — pricing is per-model, never per-project). Entries are scoped to the `productionId` that produced them; a generation with no production is dropped rather than shown everywhere, and hard-deleting/archiving a production removes/archives its ledger (`removeProject`/`archiveProject`). Loading a `version: 1` file splits its entries per production (unscoped legacy rows discarded). Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
+| Generation management | `app/src/shared/generations.ts` (+ `deleteGeneration` in `pipeline.ts`) | The one home for stored-take ownership: `findGeneration(shot, rel)` locates a `GraphGenItem` across the image/video/edit/edit-video histories and tween blocks, `generationInUse` reports what a take currently feeds (output frame/clip, video/edit source, tween keyframe, stitched output) so deletion can be blocked, and `removeGeneration` prunes the entry + repairs the selection + purges the legacy `artworkHistory` mirror. Main's `deleteGeneration` unlinks the file (and the frame's same-tag archived original) behind the same guard; the renderer's right-click menus confirm with one shared warning. Any generated image or clip can also be saved as a reference — `saveGenerationAsReference` (channel `production:saveGenerationAsReference`) copies the file into `referencesDir` as a new `CustomRef` named `Saved Ref_00`, `_01`, … (`savedRefName`) without tagging a prompt, so the copy survives deleting the source generation. The one renderer menu (`components/generation-menu.tsx`) is shared by every media surface. `artworkHistory`/imported frames aren't generations and aren't offered for deletion. |
 | Document store | `app/src/main/store.ts` | The generic JSON-document store (`createStore`) behind sessions, productions, and agents: atomic temp+rename writes, newest-first list, archive/ soft-deletes, decode/encode hooks, side-file hooks. Settings stays a bespoke singleton (encryption + memo cache). |
 | IPC contract | `app/src/shared/ipc.ts` | The single channel map (`ipcContract`) that derives the renderer API, drives the preload adapter, and validates every main-process handler. Adding a channel = one contract entry, not three files. |
 | Look contract | `app/src/shared/look.ts` | The storyboard-cohesion vocabulary every image path shares: the verbatim LOOK clause (`buildLookClause`/`withLookClause`), prompt assembly order (`assembleImagePrompt`), per-shot style resolution (`resolveShotStyleEntry`/`styleFrameForShot`), board seed (`ensureLookSeed`), the neutral-subject frame prompt (`styleFramePrompt`), and the adapter-level `GenerationRequest` (frame at index 0, 16:9, frozen model/resolution). Adapters do transport only — no private LOOK copies. |
@@ -60,6 +61,13 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 - **Scene** — ordinal grouping of shots (display only).
 - **Reference** — a character / product / custom-referenced image. Artwork lives
   on disk (`imagePath` under `referencesDir`); legacy inline data URLs still read.
+  Custom references render in the saved `prod.references` array order (the
+  Design grid groups by category preserving that order, and the node editor's
+  shelf uses the same array), so dragging a tile onto another's left/right half
+  reorders it (`reorderRefs` in `references.tsx`, persisted by `saveField`); a
+  drop across categories also adopts the target's category. A dragged-in image
+  whose derived name already exists gets a two-digit suffix (`uniqueRefName`:
+  "Gondola" → "Gondola 01") instead of colliding/merging.
 - **Character sheet** — the generated reference image for a character (built by
   the Step 2 character builder): a full body shot (front, or front + back) with a
   face-closeup inset, always neutral pose/expression/lighting on a plain gray
@@ -67,7 +75,11 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   (`pipeline.ts`); sheets are always generated 16:9. The builder's last
   description + generation settings persist per character (`CharacterSheet.builder`),
   and every generated sheet is mirrored into the references panel's **Characters**
-  category (`upsertCharacterSheetRef`) so it's citable as `@[name]`.
+  category (`upsertCharacterSheetRef`) so it's citable as `@[name]`. The
+  description box is a full `ReferencePromptEditor`: `@[name]` tags cite other
+  references as visual inputs (typed via @ autocomplete, or dropped in from the
+  references panel as `application/x-cascade-reference`), resolved by
+  `resolvePromptRefs` in the generation handler and uploaded alongside the sheet; Refine strips the tags, refines the prose, and re-attaches them.
 - **Style** — a named generation prompt (up to 5); `styles[0]` is the master.
 - **Style frame** — a style's look anchor: one conditioning image on disk
   (`ProductionStyle.imagePath` under `styles/`, with `frameSource`
@@ -225,7 +237,12 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   `graphVideoSourceEditNodeId`. The classic Edit-frame popup appends a new edit
   node to whatever chain currently feeds the output (`chainSourceForEdit` +
   `recordBoardEdit` in `pipeline.ts`) and binds it as the output — the wiring
-  shows up in the graph automatically.
+  shows up in the graph automatically. A prompt node's leading `Style:`
+  paragraph is **rebuilt from the live style** while it is plugged into the
+  style node (`mirrorStyleParagraph`, `shared/prompt-grammar.ts`): the style
+  node is a passthrough, so editing a style's description on the Design page
+  mirrors into every plugged prompt (composer, video, and each edit node) — not
+  only the text baked in at connect time.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes
   into one continuous shot. A keyframe is a **source id** stored in
   `graphTweenRefIds` (`TweenBlock.startRefId`/`endRefId`): a reference id

@@ -8,6 +8,7 @@ import { CostValue, GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
+import { findGeneration } from "../../../../shared/generations.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
@@ -15,7 +16,7 @@ import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onPromoteHistory, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
+function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -41,8 +42,15 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
   onDropFrame: (shotId: string, source: { prodId: string; shotId: string; number: number }) => void;
+  /** Import an OS file dropped onto this panel as the shot's frame. */
+  onDropFiles?: (shotId: string, files: FileList | File[]) => void;
   /** Select the browsed frame on its owning node and wire it to the output. */
   onPromoteHistory: (shotId: string, framePath: string) => void;
+  /** Permanently delete the browsed history frame (only when it's a stored
+   *  generation); confirmation + in-use blocking live in the workspace. */
+  onDeleteGeneration?: (shotId: string, rel: string) => void;
+  /** Copy the displayed frame/clip into the production as a new reference. */
+  onSaveAsReference?: (shotId: string, rel: string) => void;
   draggable?: boolean;
   onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
   onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
@@ -148,6 +156,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   // The card can show the shot's video instead of a frame — "Open file folder"
   // reveals whichever file is actually on screen.
   const relForFolder = histIdx === null && shot.videoPath && !videoFailed ? shot.videoPath : relForExternal;
+  // The generation actually on screen — a browsed history frame, the shot's
+  // video, or the current frame — is what "Save as reference" copies.
+  const saveableRel = relForFolder ?? shot.artwork;
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
@@ -185,6 +196,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
     }
     onDelete?.(shot.id);
   }
+  function deleteMenuGeneration() {
+    setMenu(null);
+    if (histPath && onDeleteGeneration) onDeleteGeneration(shot.id, histPath);
+  }
   function saveMenuImage() {
     if (!nativeSrc) return;
     const src = nativeSrc;
@@ -207,6 +222,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   function openMenuFolder() {
     setMenu(null);
     if (relForFolder) void window.cascade.showInFolder({ productionId: prod.meta.id, relPath: relForFolder });
+  }
+  function saveMenuReference() {
+    setMenu(null);
+    if (saveableRel && onSaveAsReference) onSaveAsReference(shot.id, saveableRel);
   }
 
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
@@ -266,11 +285,13 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         onClick={() => onPromptFocus(shot.id, "")}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-cascade-frame")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
+          else if (onDropFiles && Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
         }}
         onDragLeave={(e) => e.currentTarget.classList.remove("dragover")}
         onDrop={(e) => {
           e.preventDefault();
           e.currentTarget.classList.remove("dragover");
+          if (onDropFiles && e.dataTransfer.files?.length) { onDropFiles(shot.id, e.dataTransfer.files); return; }
           const raw = e.dataTransfer.getData("application/x-cascade-frame");
           if (!raw) return;
           try { const src = JSON.parse(raw) as { prodId: string; shotId: string; number: number }; if (src.shotId !== shot.id) void onDropFrame(shot.id, src); } catch { /* ignore malformed drag payload */ }
@@ -473,7 +494,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         </div>
       )}
       {expanded && (expandedImg || expandedVideo) && (
-        <div className="prod-ref-lightbox" onClick={() => setExpanded(false)}>
+        <div className="prod-ref-lightbox" onClick={() => setExpanded(false)} onContextMenu={openPanelMenu}>
           <figure className="prod-ref-lightbox-card">
             {expandedVideo ? (
               <video
@@ -532,6 +553,22 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
               )}
               <div className="ctx-sep" />
             </>
+          )}
+          {onSaveAsReference && saveableRel && (
+            <button
+              className="ctx-item"
+              onClick={saveMenuReference}
+            >
+              Save as reference
+            </button>
+          )}
+          {histPath && onDeleteGeneration && findGeneration(shot, histPath) && (
+            <button
+              className="ctx-item danger"
+              onClick={deleteMenuGeneration}
+            >
+              Delete generation…
+            </button>
           )}
           <button
             className="ctx-item danger"

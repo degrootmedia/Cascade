@@ -5,14 +5,15 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
-import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
+import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, mirrorStyleParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
+import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
 import { NodeGraphModal, VIDEO_PROMPT_DEFAULT, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
-import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, brandClause, promptRefsForShot, shotStyleSelectValue } from "./production/references.js";
+import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, brandClause, promptRefsForShot, shotStyleSelectValue, reorderRefs, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
@@ -31,6 +32,10 @@ import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, Re
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
+
+/** The one warning shown before any generation is deleted. */
+const DELETE_GENERATION_WARNING =
+  "Are you sure you want to delete this generation? This permanently removes it from your disk, but you can always access it again on your Higgsfield/OpenArt account.";
 
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
  * identity / References) so each reads as its own block. Collapse state is
@@ -119,6 +124,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const boardDragRef = useRef<string | null>(null);
   const [magicBusy, setMagicBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
+  /** Reference ids with a delete in flight — guards double-clicks while the
+   *  atomic main-side delete runs. */
+  const [removingRefIds, setRemovingRefIds] = useState<Set<string>>(new Set());
   const [mediaOk, setMediaOk] = useState<boolean | null>(null);
   const [mediaModels, setMediaModels] = useState<OpenArtModelChoice[]>([]);
   /** The dropdowns' remembered last choices are async-loaded once — the
@@ -201,7 +209,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     textChange: (id: string, patch: { audio: string; visual: string }) => void;
     promptFocus: (id: string, prompt: string) => void;
     dropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => void;
+    dropFiles: (id: string, files: FileList | File[]) => void;
     promoteHistory: (id: string, framePath: string) => void;
+    deleteGeneration: (id: string, rel: string) => void;
+    saveAsReference: (id: string, rel: string) => void;
     reorderDragStart: (id: string, e: React.DragEvent) => void;
     reorderDrop: (id: string, e: React.DragEvent) => void;
     reorderDragOver: (id: string) => void;
@@ -218,7 +229,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     textChange: (id, patch) => void saveShotText(id, patch),
     promptFocus: (id, prompt) => focusPrompt(id, prompt),
     dropFrame: (id, source) => void dropFrameAsReference(id, source),
+    dropFiles: (id, files) => void dropBoardFiles(id, files),
     promoteHistory: (id, framePath) => void promoteHistory(id, framePath),
+    deleteGeneration: (id, rel) => deleteGeneration(id, rel),
+    saveAsReference: (id, rel) => saveAsReference(id, rel),
     reorderDragStart: (id, e) => {
       boardDragRef.current = id;
       setBoardDragId(id);
@@ -258,7 +272,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
     onPromptFocus: (id: string, prompt: string) => boardHandlerRef.current.promptFocus(id, prompt),
     onDropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => boardHandlerRef.current.dropFrame(id, source),
+    onDropFiles: (id: string, files: FileList | File[]) => boardHandlerRef.current.dropFiles(id, files),
     onPromoteHistory: (id: string, framePath: string) => boardHandlerRef.current.promoteHistory(id, framePath),
+    onDeleteGeneration: (id: string, rel: string) => boardHandlerRef.current.deleteGeneration(id, rel),
+    onSaveAsReference: (id: string, rel: string) => boardHandlerRef.current.saveAsReference(id, rel),
     onReorderDragStart: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDragStart(id, e),
     onReorderDrop: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDrop(id, e),
     onReorderDragOver: (id: string) => boardHandlerRef.current.reorderDragOver(id),
@@ -636,53 +653,99 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Attach/remove a reference image on a character or product. Images are
-   *  saved into the production's referencesDir on disk (imagePath), not inline. */
+   *  saved into the production's referencesDir on disk (imagePath), not inline.
+   *  Lists are read from prodRef (never the render-scope prod): tiles are
+   *  memoized past membership changes, so a stale closure must not resurrect
+   *  or clobber entries. */
   async function attachArtwork(kind: "characters" | "products", id: string) {
-    if (!prod) return;
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return;
-    const item = prod[kind].find((c) => c.id === id);
+    const current = prodRef.current;
+    if (!current) return;
+    const item = current[kind].find((c) => c.id === id);
     const imagePath = await persistRefImage(dataUrl, item?.name ?? kind);
-    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, imagePath, artwork: undefined } : c)) } as Partial<Production>);
+    const latest = prodRef.current;
+    if (!latest) return;
+    saveField({ [kind]: latest[kind].map((c) => (c.id === id ? { ...c, imagePath, artwork: undefined } : c)) } as Partial<Production>);
   }
   function removeArtwork(kind: "characters" | "products", id: string) {
-    if (!prod) return;
-    const item = prod[kind].find((c) => c.id === id);
-    if (item?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, item.imagePath).catch(() => {});
-    saveField({ [kind]: prod[kind].map((c) => (c.id === id ? { ...c, artwork: undefined, imagePath: undefined } : c)) } as Partial<Production>);
+    const current = prodRef.current;
+    if (!current) return;
+    const item = current[kind].find((c) => c.id === id);
+    if (item?.imagePath) void window.cascade.removeReferenceFile(current.meta.id, item.imagePath).catch(() => {});
+    saveField({ [kind]: current[kind].map((c) => (c.id === id ? { ...c, artwork: undefined, imagePath: undefined } : c)) } as Partial<Production>);
   }
 
-  /** Add a brand-new custom reference (materials, textures, hero props). */
+  /** Add a brand-new custom reference (materials, textures, hero props). A
+   *  dragged-in name that already exists gets a two-digit suffix so the drop
+   *  never silently merges into (or collides with) the existing reference. */
   async function addRef(name: string, categoryId?: string, artwork?: string) {
-    if (!prod || !name.trim()) return;
-    const imagePath = artwork ? await persistRefImage(artwork, name) : undefined;
-    saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name: name.trim(), categoryId, imagePath, shotIds: [] }] });
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const imagePath = artwork ? await persistRefImage(artwork, trimmed) : undefined;
+    const current = prodRef.current;
+    if (!current) return;
+    const finalName = uniqueRefName((current.references ?? []).map((r) => r.name), trimmed);
+    saveField({ references: [...(current.references ?? []), { id: uid("ref"), name: finalName, categoryId, imagePath, shotIds: [] }] });
   }
-  function removeRef(id: string) {
-    if (!prod) return;
-    const ref = (prod.references ?? []).find((r) => r.id === id);
-    if (ref?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, ref.imagePath).catch(() => {});
-    if (ref?.mediaPath) void window.cascade.removeReferenceFile(prod.meta.id, ref.mediaPath).catch(() => {});
-    saveField({ references: (prod.references ?? []).filter((r) => r.id !== id) });
+  /** Delete a custom reference entirely — entry, files, and every node +
+   *  connection it had — via one atomic main-side op. The returned snapshot
+   *  is authoritative: never filter locally, so a memoized tile holding a
+   *  stale callback can't resurrect a deleted entry (zombie broken tile). */
+  async function removeRef(id: string) {
+    const current = prodRef.current;
+    if (!current || removingRefIds.has(id)) return;
+    setRemovingRefIds((prev) => new Set(prev).add(id));
+    setErr(null);
+    try {
+      const next = await window.cascade.deleteReference(current.meta.id, id);
+      applySnapshot(next);
+      bustAll();
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setRemovingRefIds((prev) => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    }
   }
-  /** Rename a custom reference in place. */
-  function updateRef(id: string, patch: Partial<{ name: string }>) {
-    if (!prod) return;
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, ...patch } : r)) });
+  /** Rename a custom reference in place. Main rewrites the reference's
+   *  `@[name]` tags across every prompt store in the same atomic op, so its
+   *  node graph follows the new name instead of disconnecting. */
+  async function updateRef(id: string, name: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const ref = (current.references ?? []).find((r) => r.id === id);
+    if (!ref || ref.name === name) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.renameReference(current.meta.id, id, name);
+      applySnapshot(next);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
   }
   async function attachRefArtwork(id: string) {
-    if (!prod) return;
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return;
-    const ref = (prod.references ?? []).find((r) => r.id === id);
+    const current = prodRef.current;
+    if (!current) return;
+    const ref = (current.references ?? []).find((r) => r.id === id);
     const imagePath = await persistRefImage(dataUrl, ref?.name ?? "reference");
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, imagePath, artwork: undefined } : r)) });
+    const latest = prodRef.current;
+    if (!latest) return;
+    saveField({ references: (latest.references ?? []).map((r) => (r.id === id ? { ...r, imagePath, artwork: undefined } : r)) });
   }
   function removeRefArtwork(id: string) {
-    if (!prod) return;
-    const ref = (prod.references ?? []).find((r) => r.id === id);
-    if (ref?.imagePath) void window.cascade.removeReferenceFile(prod.meta.id, ref.imagePath).catch(() => {});
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
+    const current = prodRef.current;
+    if (!current) return;
+    const ref = (current.references ?? []).find((r) => r.id === id);
+    if (ref?.imagePath) void window.cascade.removeReferenceFile(current.meta.id, ref.imagePath).catch(() => {});
+    saveField({ references: (current.references ?? []).map((r) => (r.id === id ? { ...r, artwork: undefined, imagePath: undefined } : r)) });
   }
 
   /** Step 2: rescan the production's references folder — images added externally
@@ -739,6 +802,21 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   function moveReference(id: string, categoryId?: string) {
     if (!prod) return;
     saveField({ references: (prod.references ?? []).map((r) => r.id === id ? { ...r, categoryId } : r) });
+  }
+
+  /** Drag one reference tile onto another to reorder it. The saved array order
+   *  is what both the Design grid and the node editor's shelf render from; the
+   *  dragged ref also adopts the target's category, so dropping across
+   *  categories both moves and positions it. */
+  function reorderReference(draggedId: string, targetId: string, after: boolean) {
+    const current = prodRef.current;
+    if (!current) return;
+    const refs = current.references ?? [];
+    const reordered = reorderRefs(refs, draggedId, targetId, after);
+    if (reordered === refs) return;
+    const target = refs.find((r) => r.id === targetId);
+    const next = reordered.map((r) => (r.id === draggedId ? { ...r, categoryId: target?.categoryId } : r));
+    saveField({ references: next });
   }
 
   function approveSuggestion(suggestion: SuggestedReference) {
@@ -1204,6 +1282,49 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
+  /** Step 3: import one OS file dropped onto a panel as that shot's frame
+   *  (image) or clip (video). Browser File drops carry no disk path: images
+   *  are read as a data URL and sent via `importBoardImage` (the picker's
+   *  disk-path `importBoards` can't consume them); videos ride raw bytes via
+   *  `importBoardVideo`, which saves the clip as a reference video piped to
+   *  the frame output. */
+  async function dropBoardFiles(shotId: string, files: FileList | File[]) {
+    if (!prod || importBusy) return;
+    const list = Array.from(files);
+    if (!list.length) return;
+    const media = list.find((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+    if (!media) { setErr("Only image or video files can be dropped onto panels."); return; }
+    if (media.type.startsWith("video/")) {
+      setImportBusy(true); setErr(null);
+      try {
+        const bytes = await media.arrayBuffer();
+        const next = await window.cascade.importBoardVideo(prod.meta.id, shotId, media.name, media.type, bytes);
+        setProd(next);
+        bustOne(shotId);
+        void refreshList();
+      } catch (e) {
+        setErr(String(e).replace(/^Error:\s*/, ""));
+      } finally {
+        setImportBusy(false);
+      }
+      return;
+    }
+    const file = media;
+    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
+    setImportBusy(true); setErr(null);
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const next = await window.cascade.importBoardImage(prod.meta.id, shotId, file.name, dataUrl);
+      setProd(next);
+      bustOne(shotId);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
   /** Step 3: scan boards/import/ for shot-numbered images dropped there. */
   async function scanImportFolder() {
     if (!prod || importBusy) return;
@@ -1512,9 +1633,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
    *  production's referencesDir on disk and return its workspace-relative
    *  path — image references live as files, not JSON data URLs. */
   async function persistRefImage(dataUrl: string, baseName: string): Promise<string | undefined> {
-    if (!prod) return undefined;
+    const current = prodRef.current;
+    if (!current) return undefined;
     try {
-      const res = await window.cascade.addReferenceImage(prod.meta.id, `${baseName}.png`, dataUrl);
+      const res = await window.cascade.addReferenceImage(current.meta.id, `${baseName}.png`, dataUrl);
       return res?.path;
     } catch {
       return undefined;
@@ -1522,14 +1644,15 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   /** Step 3: a completed frame dragged onto another frame becomes a reference
-   *  and is tagged at the end of the destination prompt. */
+   *  and is tagged at the end of the destination prompt. The reference is the
+   *  frame's original file (full resolution), not the board thumbnail. */
   async function dropFrameAsReference(shotId: string, source: { prodId: string; shotId: string; number: number }) {
     if (!prod) return;
     try {
-      const dataUrl = await window.cascade.boardImage(source.prodId, source.shotId);
-      if (!dataUrl) { setErr("Couldn't load the dropped frame."); return; }
-      const imagePath = await persistRefImage(dataUrl, `Frame ${String(source.number).padStart(4, "0")}`);
-      await attachReferenceToPrompt(shotId, `Frame ${String(source.number).padStart(4, "0")}`, { imagePath });
+      const name = `Frame ${String(source.number).padStart(4, "0")}`;
+      const saved = await window.cascade.addBoardFrameReference(prod.meta.id, source.prodId, source.shotId, name);
+      if (!saved?.path) { setErr("Couldn't load the dropped frame."); return; }
+      await attachReferenceToPrompt(shotId, name, { imagePath: saved.path });
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -1544,7 +1667,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return null;
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
     if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return null; }
-    const name = forcedName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
+    const baseName = forcedName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
+    // A dropped name that already exists becomes "Name 01", "Name 02", … so a
+    // fresh drop is always a distinct reference (saveRefOnly would otherwise
+    // merge it into the same-named one).
+    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), baseName);
     try {
       if (kind === "image") {
         const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -2109,7 +2236,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphEditNodes ?? []).find((n) => n.id === nodeId);
       const editParams = params ?? node?.params;
-      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: node?.prompt ?? "", model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
+      // Rebuild the Style paragraph from the live style at submit time — the
+      // style node is a passthrough, so an edit node must not send the style
+      // text that was baked when it was wired up.
+      const styleValue = cur ? shotStyleSelectValue(cur, prod) : "";
+      const styleText = (prod.styles ?? []).find((s) => s.id === styleValue)?.prompt.trim() ?? "";
+      const editPrompt = mirrorStyleParagraph(node?.prompt ?? "", styleText, node?.styleConnected ?? /^Style:/m.test(node?.prompt ?? ""));
+      const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: editPrompt, model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2351,6 +2484,32 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   function deleteBoardShot(shotId: string) {
     if (!prod) return;
     apply(window.cascade.deleteShot(prod.meta.id, shotId));
+  }
+
+  /** Step 3: permanently delete one stored generation (right-click on a board
+   *  history frame, a node-graph take, or a tween take). Blocks while the take
+   *  still feeds the storyboard/animatic/a pipe, then confirms before unlinking. */
+  function deleteGeneration(shotId: string, rel: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const shot = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const gen = findGeneration(shot, rel);
+    if (!gen) return;
+    const reason = generationInUse(shot, gen);
+    if (reason) { setErr(generationInUseMessage(reason)); return; }
+    if (!window.confirm(DELETE_GENERATION_WARNING)) return;
+    apply(window.cascade.deleteGeneration(current.meta.id, shotId, rel));
+  }
+
+  /** Step 3/4: copy any generated image or clip into the production as a new
+   *  "Saved Ref_NN" reference (right-click → Save as reference on a board frame,
+   *  node-graph take, or tween take). Main does the copy + naming; the updated
+   *  production comes back through `apply`. */
+  function saveAsReference(shotId: string, rel: string) {
+    const current = prodRef.current;
+    if (!current || !rel) return;
+    apply(window.cascade.saveGenerationAsReference(current.meta.id, shotId, rel));
   }
 
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
@@ -2861,6 +3020,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 prodId={prod.meta.id}
                 characters={prod.characters}
                 models={imageCharacterModels}
+                references={allPromptRefs(prod)}
+                refNameById={referenceNamesById(prod)}
                 productionQuality={prod.openArt?.quality}
                 onGenerate={runCharacterGen}
               />
@@ -2893,8 +3054,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onAddReference={addRef}
                 onAttach={(id) => void attachRefArtwork(id)}
                 onRemove={removeRef}
-                onRename={(id, name) => updateRef(id, { name })}
+                onRename={(id, name) => void updateRef(id, name)}
                 onMove={moveReference}
+                onReorder={reorderReference}
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
                 onRescan={rescanRefFolder}
@@ -3101,7 +3263,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     onPromptFocus={boardActions.onPromptFocus}
                     selected={promptShotId === shot.id}
                     onDropFrame={boardActions.onDropFrame}
+                    onDropFiles={boardActions.onDropFiles}
                     onPromoteHistory={boardActions.onPromoteHistory}
+                    onDeleteGeneration={boardActions.onDeleteGeneration}
+                    onSaveAsReference={boardActions.onSaveAsReference}
                     draggable
                     isDragging={boardDragId === shot.id}
                     isReorderTarget={boardDropTarget === shot.id}
@@ -3215,6 +3380,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   tweenStitching={graphShotId ? tweenStitchingIds.has(graphShotId) : false}
                   onSelectGraphGen={(kind, index, nodeId) => { if (graphShotId) selectGraphGen(graphShotId, kind, index, nodeId); }}
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
+                  onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
+                  onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
@@ -3402,6 +3569,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     onUpdateTotal={(sec) => fitShotsToTotal(sec)}
                     onRemoveVideo={(shotId) => void removeShotVideo(shotId)}
                     onToggleMute={toggleShotMuted}
+                    onSaveAsReference={(shotId, rel) => saveAsReference(shotId, rel)}
                   />
                 </section>
               </>

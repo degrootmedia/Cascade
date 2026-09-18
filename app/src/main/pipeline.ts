@@ -22,13 +22,16 @@ import {
   parseJsonLooseObject,
   parsePromptBoxes,
   refTagMatches,
+  removeRefTag,
+  renameRefTag,
   stripBrandParagraph,
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
 import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
+import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
 import { styleFrameForShot, withLookClause, ensureLookSeed } from "../shared/look.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1424,6 +1427,95 @@ export function selectBoardFrame(shot: ProductionShot, rel: string): void {
   recordBoardArtwork(shot, rel);
 }
 
+/** Delete a board frame's archived original when it shares the JPEG's tag.
+ *  Strict (no legacy newest-file guess): a frame without a matching original
+ *  leaves the originals folder alone rather than destroying another take. */
+function deleteBoardOriginal(p: Production, jpegRel: string): void {
+  const esc = p.assets.boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`^${esc}/(\\d{4})/shot-\\d{4}-([^/]+)\\.jpg$`, "i").exec(jpegRel);
+  if (!m) return;
+  const originalsDir = `${p.assets.boardsDir}/${m[1]}/originals`;
+  const prefix = `shot-${m[1]}-${m[2]}.`;
+  let files: string[];
+  try {
+    files = fs.readdirSync(assetPath(p, originalsDir));
+  } catch {
+    return;
+  }
+  for (const f of files) {
+    if (!f.startsWith(prefix)) continue;
+    try { fs.unlinkSync(assetPath(p, `${originalsDir}/${f}`)); } catch { /* already gone */ }
+  }
+}
+
+/**
+ * Permanently delete one stored generation: remove its history entry, repair
+ * the node's selection, and unlink the file (plus a board frame's archived
+ * original). Throws when `rel` isn't a generation or is currently feeding the
+ * storyboard/animatic/a pipe, so nothing else is left pointing at a missing
+ * file. Callers save the production.
+ */
+export function deleteGeneration(p: Production, shot: ProductionShot, rel: string): void {
+  const gen = findGeneration(shot, rel);
+  if (!gen) throw new Error("That frame isn't a stored generation — nothing to delete.");
+  const reason = generationInUse(shot, gen);
+  if (reason) throw new Error(generationInUseMessage(reason));
+  if (!removeGeneration(shot, gen)) throw new Error("That generation's owner no longer exists.");
+  try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already removed */ }
+  deleteBoardOriginal(p, rel);
+}
+
+/** Extensions treated as video (not image) when a saved reference is stored. */
+const VIDEO_REF_EXTS = new Set([".mp4", ".mov", ".webm", ".m4v", ".mkv", ".avi"]);
+
+/** The reference name for a "Save as reference" action: "Saved Ref_00", then
+ *  "Saved Ref_01", … — the first suffix no existing reference already uses
+ *  (case-insensitive). Pure; exposed for tests. */
+export function savedRefName(existingNames: Iterable<string>): string {
+  const taken = new Set<string>();
+  for (const n of existingNames) taken.add(n.trim().toLowerCase());
+  for (let i = 0; ; i++) {
+    const candidate = `Saved Ref_${String(i).padStart(2, "0")}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/**
+ * Save a stored production media file (any generated image or clip) as a new
+ * reference: copy the file into referencesDir and append a CustomRef pointing
+ * at the copy, so deleting the original generation later can't orphan the
+ * reference. The reference is NOT tagged into any prompt — attaching it is an
+ * explicit action. Returns the created reference. Callers save the production.
+ */
+export function saveGenerationAsReference(p: Production, rel: string): CustomRef {
+  const src = assetPath(p, rel);
+  if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+    throw new Error(`That file isn't on disk, so it can't be saved as a reference: ${rel}`);
+  }
+  const ext = path.extname(rel).toLowerCase() || ".png";
+  const media = VIDEO_REF_EXTS.has(ext) ? "video" as const : "image" as const;
+  const name = savedRefName((p.references ?? []).map((r) => r.name));
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let destRel = `${dir}/${name}${ext}`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, destRel))) {
+    destRel = `${dir}/${name} (${i})${ext}`;
+    i++;
+  }
+  fs.copyFileSync(src, assetPath(p, destRel));
+  const ref: CustomRef = media === "video"
+    ? { id: newRefId(), name, media, mediaPath: destRel, shotIds: [] }
+    : { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+  p.references = [...(p.references ?? []), ref];
+  return ref;
+}
+
+/** A fresh reference id (same shape the other reference-creation paths use). */
+function newRefId(): string {
+  return `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
 /**
  * Every workspace-relative media path a shot can hold (frames, histories,
  * node-generation entries, clips). The relocation below moves each backing
@@ -2431,6 +2523,280 @@ export function importBoards(
       : "Nothing was imported.",
     assigned ? "done" : "error"
   );
+  return p;
+}
+
+/**
+ * Step 3 panel drop-target: import one renderer-supplied image (data URL)
+ * onto a single shot. Same frame write + history wiring as `importBoards`'
+ * per-shot path, but the bytes arrive inline because browser File drops
+ * carry no disk path for main to read.
+ */
+/**
+ * Step 3 panel drop-target for images: save a dropped file as a reference
+ * image and pipe it into the frame output — the same end state as dragging
+ * the image into the node graph (reference node) and wiring it to the
+ * output node (board frame). Deliberately NOT the image-generator
+ * node/history path (`recordGraphImageGen`): a drop is an explicit
+ * reference, not a generation. The stale clip clears, mirroring
+ * `pipeRefToOutput`; the frame's generation history is untouched, so it can
+ * be re-piped from the graph.
+ */
+export function importBoardDataUrl(
+  p: Production,
+  shotId: string,
+  fileName: string,
+  dataUrl: string,
+  emit: EmitFn
+): Production {
+  const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+  if (!shot) throw new Error("Shot not found.");
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) throw new Error("Not a data-URL image.");
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1) throw new Error("Not a data-URL image.");
+  const mime = dataUrl.slice(5, comma).split(";")[0].toLowerCase();
+  const ext = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : null;
+  if (!ext) throw new Error("Only PNG/JPG/WebP images can be imported as frames.");
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(dataUrl.slice(comma + 1), "base64");
+  } catch {
+    throw new Error("Couldn't decode the image.");
+  }
+  if (!bytes.length) throw new Error("The image is empty.");
+  const base = path.basename(String(fileName ?? "frame")).trim() || "frame";
+  const stem = (path.parse(base).name.trim() || "frame").replace(/\s+/g, " ").slice(0, 60);
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let rel = `${dir}/${stem}.${ext}`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, rel))) {
+    rel = `${dir}/${stem} (${i}).${ext}`;
+    i++;
+  }
+  fs.writeFileSync(assetPath(p, rel), bytes);
+  const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  p.references = [...(p.references ?? []), { id: refId, name: stem, imagePath: rel, shotIds: [] }];
+  // Board frame from the same bytes — mirrors the image branch of
+  // `applyGraphRefOutput` (reference piped to output renders the frame).
+  const { jpegRel } = writeBoardFrame(p, shot, bytes, ext);
+  recordBoardArtwork(shot, jpegRel);
+  shot.graphOutputSource = "ref";
+  shot.graphOutputRefId = refId;
+  shot.videoPath = undefined;
+  placeRefNode(shot, refId);
+  markBoardsStatus(p);
+  emit(`Shot ${shot.number}: imported ${base} as a reference image piped to the output.`);
+  return p;
+}
+
+/**
+ * Stack a reference node in the node graph's untagged reference column so a
+ * programmatically piped ref (`graphOutputSource === "ref"`) actually renders
+ * as a node wired to the output. Without a `graphLayout.positions` entry the
+ * `e-ref-out` edge dangles — nodes only materialize for `@[name]`-tagged
+ * refs or placed ones (see NodeGraphModal's `placedRefIds`). Column metrics
+ * mirror the graph's REF_X / REF_COL_TOP / REF_STEP layout.
+ */
+function placeRefNode(shot: ProductionShot, refId: string): void {
+  const key = `ref:${refId}`;
+  const positions = { ...(shot.graphLayout?.positions ?? {}) };
+  let n = 0;
+  for (const k of Object.keys(positions)) if (k.startsWith("ref:") && k !== key) n++;
+  positions[key] = { x: 0, y: 116 + n * 128 };
+  shot.graphLayout = { ...shot.graphLayout, positions };
+}
+
+/**
+ * Step 3 panel drop-target for video: save a dropped clip as a reference
+ * video and pipe it into the frame output — the same end state as dragging
+ * the clip into the node graph (reference node) and wiring it to the output
+ * node (videoPath). The stale still frame clears, mirroring
+ * `pipeRefToOutput`; the frame's generation history is untouched, so it can
+ * be re-piped from the graph.
+ */
+export function importBoardVideo(
+  p: Production,
+  shotId: string,
+  fileName: string,
+  mime: string,
+  bytes: Buffer | Uint8Array | ArrayBuffer,
+  emit: EmitFn
+): Production {
+  const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+  if (!shot) throw new Error("Shot not found.");
+  if (typeof mime !== "string" || !mime.toLowerCase().startsWith("video/")) {
+    throw new Error("Only video files can be dropped as clips.");
+  }
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes as Uint8Array);
+  if (!buf.length) throw new Error("The video is empty.");
+  const base = path.basename(String(fileName || "clip")).trim() || "clip";
+  const parsed = path.parse(base);
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let rel = `${dir}/${base}`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, rel))) {
+    rel = `${dir}/${parsed.name} (${i})${parsed.ext}`;
+    i++;
+  }
+  fs.writeFileSync(assetPath(p, rel), buf);
+  const name = parsed.name.trim().replace(/\s+/g, " ").slice(0, 60) || "Dropped clip";
+  const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  p.references = [...(p.references ?? []), { id: refId, name, media: "video" as const, mediaPath: rel, shotIds: [] }];
+  shot.graphOutputSource = "ref";
+  shot.graphOutputRefId = refId;
+  shot.artwork = undefined;
+  shot.videoPath = rel;
+  placeRefNode(shot, refId);
+  emit(`Shot ${shot.number}: imported ${base} as a reference video piped to the output.`);
+  return p;
+}
+
+/**
+ * Step 2 Design-page delete: remove a custom reference entirely — JSON entry,
+ * on-disk files, and every node + connection it had across all shots. The
+ * output pipe unbinds (a piped clip pointed at the deleted file and can't
+ * survive; a piped still moves into frame history so it stops showing but
+ * stays recoverable), video
+ * and edit-video sources fall back, extra ref inputs / tween keyframes drop
+ * (blocks re-derive with histories surviving the pair match), edit-node
+ * sources clear, per-shot attach lists filter, `@[name]` tags strip from
+ * every prompt store, and the canvas placement is forgotten so no dangling
+ * node or `e-ref-out` edge renders. The write-side `syncTweenBlocks` guard
+ * runs as belt-and-braces.
+ */
+export function deleteReference(p: Production, refId: string, emit: EmitFn): Production {
+  const ref = (p.references ?? []).find((r) => r.id === refId);
+  if (!ref) throw new Error("Reference not found.");
+  const name = ref.name;
+  p.references = (p.references ?? []).filter((r) => r.id !== refId);
+  for (const rel of [ref.imagePath, ref.mediaPath]) {
+    if (typeof rel !== "string" || !rel) continue;
+    try {
+      fs.unlinkSync(assetPath(p, rel));
+    } catch {
+      /* missing file is already gone */
+    }
+  }
+  const strip = (text: string): string => removeRefTag(text, name);
+  for (const shot of p.scenes.flatMap((s) => s.shots)) {
+    if (shot.graphOutputSource === "ref" && shot.graphOutputRefId === refId) {
+      shot.graphOutputSource = undefined;
+      shot.graphOutputRefId = undefined;
+      // Mirror unpipeOutput: the rendered output belonged to the deleted
+      // node, so it can't stay active. The still moves into frame history
+      // (recoverable via Make Primary, files untouched); the clip pointed
+      // at the deleted file and is dropped below.
+      if (shot.artwork) {
+        shot.artworkHistory = [shot.artwork, ...(shot.artworkHistory ?? [])]
+          .filter((v, i, a): v is string => !!v && a.indexOf(v) === i)
+          .slice(0, BOARD_HISTORY_CAP);
+        shot.artwork = undefined;
+      }
+    }
+    if (typeof ref.mediaPath === "string" && ref.mediaPath && shot.videoPath === ref.mediaPath) {
+      shot.videoPath = undefined;
+    }
+    if (shot.graphVideoSourceRefId === refId) shot.graphVideoSourceRefId = undefined;
+    if (shot.graphEditVideoSourceRefId === refId) shot.graphEditVideoSourceRefId = undefined;
+    if (shot.graphVideoRefIds?.includes(refId)) {
+      shot.graphVideoRefIds = shot.graphVideoRefIds.filter((id) => id !== refId);
+    }
+    if (shot.graphEditVideoRefIds?.includes(refId)) {
+      shot.graphEditVideoRefIds = shot.graphEditVideoRefIds.filter((id) => id !== refId);
+    }
+    if (shot.graphTweenRefIds?.includes(refId)) {
+      const ids = shot.graphTweenRefIds.filter((id) => id !== refId);
+      shot.graphTweenRefIds = ids;
+      shot.graphTweenBlocks = deriveTweenBlocks(ids, Array.isArray(shot.graphTweenBlocks) ? shot.graphTweenBlocks : []);
+    }
+    if (Array.isArray(shot.graphEditNodes)) {
+      shot.graphEditNodes = shot.graphEditNodes.map((n) => {
+        const prompt = typeof n.prompt === "string" ? strip(n.prompt) : n.prompt;
+        const source = n.source?.kind === "ref" && n.source.refId === refId ? undefined : n.source;
+        return prompt !== n.prompt || source !== n.source ? { ...n, prompt, source } : n;
+      });
+    }
+    if (shot.graphEditSourceRefId === refId) shot.graphEditSourceRefId = undefined;
+    if (shot.refIds?.includes(refId)) shot.refIds = shot.refIds.filter((id) => id !== refId);
+    if (shot.refExcluded?.includes(refId)) shot.refExcluded = shot.refExcluded.filter((id) => id !== refId);
+    if (shot.refPromptOverrides && refId in shot.refPromptOverrides) {
+      const { [refId]: _drop, ...rest } = shot.refPromptOverrides;
+      shot.refPromptOverrides = rest;
+    }
+    if (typeof shot.prompt === "string") shot.prompt = strip(shot.prompt);
+    if (typeof shot.graphVideoPrompt === "string") shot.graphVideoPrompt = strip(shot.graphVideoPrompt);
+    if (typeof shot.graphEditPrompt === "string") shot.graphEditPrompt = strip(shot.graphEditPrompt);
+    if (typeof shot.graphEditVideoPrompt === "string") shot.graphEditVideoPrompt = strip(shot.graphEditVideoPrompt);
+    const posKey = `ref:${refId}`;
+    if (shot.graphLayout?.positions?.[posKey]) {
+      const { [posKey]: _dropPos, ...rest } = shot.graphLayout.positions;
+      shot.graphLayout = { ...shot.graphLayout, positions: rest };
+    }
+    if (shot.graphLayout?.sizes?.[posKey]) {
+      const { [posKey]: _dropSize, ...rest } = shot.graphLayout.sizes;
+      shot.graphLayout = { ...shot.graphLayout, sizes: rest };
+    }
+  }
+  if (p.magicPrompts) {
+    for (const [key, value] of Object.entries(p.magicPrompts)) {
+      if (typeof value === "string") p.magicPrompts[key] = strip(value);
+    }
+  }
+  for (const shot of p.scenes.flatMap((s) => s.shots)) syncTweenBlocks(p, shot);
+  emit(`Deleted reference "${name}".`);
+  return p;
+}
+
+/**
+ * Step 2 Design-page rename: change a custom reference's name and rewrite every
+ * `@[oldName]` tag across the prompt stores that can cite it (composer, video,
+ * edit, edit-video, each edit node, tween action blocks, magic prompts). Tag
+ * resolution — and therefore every reference node and its edges — is name-based
+ * (NodeGraphModal's `unionTagged`), so without the rewrite a rename would leave
+ * the old tag dangling and the reference's node "missing" (disconnected).
+ * Node/connection identity is id-based, so canvas placement is untouched.
+ */
+export function renameReference(p: Production, refId: string, newName: string, emit: EmitFn): Production {
+  const ref = (p.references ?? []).find((r) => r.id === refId);
+  if (!ref) throw new Error("Reference not found.");
+  const name = newName.trim();
+  if (!name) throw new Error("Reference name can't be empty.");
+  const oldName = ref.name;
+  if (oldName === name) return p;
+  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name } : r));
+  const rename = (text: string): string => renameRefTag(text, oldName, name);
+  for (const shot of p.scenes.flatMap((s) => s.shots)) {
+    if (Array.isArray(shot.graphEditNodes)) {
+      shot.graphEditNodes = shot.graphEditNodes.map((n) => {
+        if (typeof n.prompt === "string" && n.prompt.includes("@[")) {
+          const prompt = rename(n.prompt);
+          if (prompt !== n.prompt) return { ...n, prompt };
+        }
+        return n;
+      });
+    }
+    if (typeof shot.prompt === "string") shot.prompt = rename(shot.prompt);
+    if (typeof shot.graphVideoPrompt === "string") shot.graphVideoPrompt = rename(shot.graphVideoPrompt);
+    if (typeof shot.graphEditPrompt === "string") shot.graphEditPrompt = rename(shot.graphEditPrompt);
+    if (typeof shot.graphEditVideoPrompt === "string") shot.graphEditVideoPrompt = rename(shot.graphEditVideoPrompt);
+    if (Array.isArray(shot.graphTweenBlocks)) {
+      shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) => {
+        if (typeof b.prompt === "string" && b.prompt.includes("@[")) {
+          const prompt = rename(b.prompt);
+          if (prompt !== b.prompt) return { ...b, prompt };
+        }
+        return b;
+      });
+    }
+  }
+  if (p.magicPrompts) {
+    for (const [key, value] of Object.entries(p.magicPrompts)) {
+      if (typeof value === "string") p.magicPrompts[key] = rename(value);
+    }
+  }
+  emit(`Renamed reference "${oldName}" to "${name}".`);
   return p;
 }
 

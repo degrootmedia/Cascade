@@ -19,6 +19,7 @@ import { ModelOptionsForm, type ModelOptionValues } from "./ModelOptionsForm.js"
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
+import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
 
 export const TWEEN_MIN_REFS = 2;
 export const TWEEN_MAX_REFS = 5;
@@ -222,6 +223,11 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   onParamsChange: (params: GenParams) => void;
   /** Persist block edits (prompt, timing, history selection). */
   onBlocksChange: (blocks: TweenBlock[]) => void;
+  /** Permanently delete a block's selected take (right-click the take list).
+   *  The workspace confirms and blocks takes still feeding the stitch. */
+  onDeleteGen?: (rel: string) => void;
+  /** Copy a block's selected take into the production as a new reference. */
+  onSaveAsRef?: (rel: string) => void;
   /** Generate one block's clip. `model` is the dropdown's CURRENT selection
    *  (effectiveModel) — passed explicitly so the submission can never diverge
    *  from what the user sees selected, even when the persisted pick fell back
@@ -248,7 +254,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const {
     prodId, shotNumber, refIds, blocks, keyframes, model, resolution, videoModels,
     onModelOptions, onModelSchema, onModelChange, onResolutionChange,
-    params, onParamsChange, onBlocksChange,
+    params, onParamsChange, onBlocksChange, onDeleteGen, onSaveAsRef,
     onRunBlock, busyBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
     stitchUrl, onPipeToOutput, piped, onClose,
   } = props;
@@ -259,6 +265,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [drag, setDrag] = useState<{ index: number; t: number } | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const genMenu = useGenerationMenu();
 
   // Escape closes the timeline (the graph owns Escape otherwise — it yields
   // when this overlay is present).
@@ -505,6 +512,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   className={"prod-tween-block" + (focus?.id === b.id ? " focus" : "")}
                   style={{ left: `${left}%`, width: `${width}%` }}
                   onClick={() => setFocusId(b.id)}
+                  onContextMenu={(e) => { if (sel) genMenu.open(e, sel.path); }}
                   title={`${start?.name ?? ""} → ${keyframes.find((k) => k.id === b.endRefId)?.name ?? ""} · ${b.durationSec}s`}
                 >
                   <div className="prod-tween-block-label">{b.startSec.toFixed(0)}s → {(b.startSec + b.durationSec).toFixed(0)}s</div>
@@ -557,7 +565,10 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                         const v = e.target.value;
                         onBlocksChange(display.map((x) => (x.id === b.id ? { ...x, genIndex: v === "key" ? undefined : Number(v) } : x)));
                       }}
-                      title="View a previous generation, or the original keyframes"
+                      onContextMenu={(e) => {
+                        if (sel) genMenu.open(e, sel.path);
+                      }}
+                      title="View a previous generation, or the original keyframes (right-click for the selected take's options)"
                     >
                       <option value="key">Keyframes</option>
                       {(b.gens ?? []).map((g, gi) => (
@@ -591,6 +602,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
           <div className="prod-tween-empty">Connect 2–5 keyframes — reference images, the image node's frame, or the edit node's output — to the in-betweener node's sockets, then reopen the timeline.</div>
         )}
       </div>
+      <GenerationMenu menu={genMenu.menu} onClose={genMenu.close} onSaveAsReference={onSaveAsRef} onDelete={onDeleteGen} />
     </div>
   );
 });

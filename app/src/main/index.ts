@@ -13,7 +13,7 @@ import * as sessions from "./sessions.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { styleFramePrompt } from "../shared/look.js";
 import { McpManager } from "./mcp.js";
 import { resolveProductionFile } from "./media-menu.js";
@@ -2273,6 +2273,27 @@ function registerIpc() {
     return p;
   });
 
+  // Step 3 panel drop-target: one renderer-supplied image (data URL) onto one
+  // shot. Thin wiring — the frame write lives in pipeline.importBoardDataUrl.
+  handle("production:importBoardImage", (_e, id: string, shotId: string, fileName: string, dataUrl: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    importBoardDataUrl(p, shotId, fileName, dataUrl, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Step 3 panel drop-target: one dropped video file onto one shot — saved
+  // as a reference video and piped into the frame output. Thin wiring — the
+  // ref creation + output bind live in pipeline.importBoardVideo.
+  handle("production:importBoardVideo", (_e, id: string, shotId: string, fileName: string, mime: string, bytes: ArrayBuffer) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    importBoardVideo(p, shotId, fileName, mime, Buffer.from(bytes), (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
   // Board thumbnails for the contact sheet — the PNGs live in the production
   // folder; the renderer gets a small data URL (like chat image thumbs).
   handle("production:boardImage", (_e, id: string, shotId: string, framePath?: string) => {
@@ -2393,6 +2414,34 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     selectBoardFrame(shot, framePath);
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: history frame restored as the primary frame.`);
+    return p;
+  });
+
+  // Permanently delete one stored generation (a node history take or a tween
+  // block take) — removes the entry and unlinks the file. Rejected while the
+  // take still feeds the storyboard, the animatic, or a node pipe.
+  handle("production:deleteGeneration", (_e, id: string, shotId: string, rel: string): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    deleteGeneration(p, shot, rel);
+    productions.saveProduction(p);
+    productionEmit(id, `Shot ${shot.number}: generation deleted.`);
+    return p;
+  });
+
+  // Save any stored generated image/clip as a new reference: copy the file
+  // into referencesDir and add a "Saved Ref_NN" reference (no prompt tag).
+  // The source generation can then be deleted without orphaning the reference.
+  handle("production:saveGenerationAsReference", (_e, id: string, shotId: string, rel: string): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const ref = saveGenerationAsReference(p, rel);
+    productions.saveProduction(p);
+    productionEmit(id, `Saved "${ref.name}" as a reference.`, "done");
     return p;
   });
 
@@ -3218,6 +3267,56 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return { path: rel };
   });
 
+  // Step 3: a completed frame dragged onto another frame becomes a reference.
+  // Copy the source frame's ORIGINAL file into this production's referencesDir
+  // — byte-identical to the board frame, never the 640px data-URL thumbnail
+  // `boardImage` returns. The source shot may live in a different production.
+  handle("production:addBoardFrameReference", (_e, id: string, sourceProdId: string, sourceShotId: string, fileName: string): { path: string } | null => {
+    const p = productions.loadProduction(id);
+    if (!p) return null;
+    const src = productions.loadProduction(sourceProdId);
+    if (!src) throw new Error("Source production not found.");
+    const resolved = resolveBoardFrame(src, sourceShotId);
+    if (!resolved) throw new Error("Couldn't find that frame.");
+    if (!fs.existsSync(resolved.abs) || !fs.statSync(resolved.abs).isFile()) throw new Error("That frame isn't on disk.");
+    const ext = path.extname(resolved.rel).toLowerCase() || ".png";
+    const base = path.basename(String(fileName ?? "Frame")).replace(/\.[^.]+$/, "").trim() || "Frame";
+    const dir = p.assets.referencesDir;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    let rel = `${dir}/${base}${ext}`;
+    let i = 2;
+    while (fs.existsSync(assetPath(p, rel))) {
+      rel = `${dir}/${base} (${i})${ext}`;
+      i++;
+    }
+    fs.copyFileSync(resolved.abs, assetPath(p, rel));
+    productionEmit(id, `Added image reference → ${rel}.`);
+    return { path: rel };
+  });
+
+  // Step 2 Design-page delete: remove the reference entry + files and scrub
+  // every node/connection it had across all shots. Thin wiring — the scrub
+  // lives in pipeline.deleteReference.
+  handle("production:deleteReference", (_e, id: string, refId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    deleteReference(p, refId, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Step 2 Design-page rename: change the reference's name and rewrite its
+  // `@[name]` tags across every prompt store so its node graph follows the
+  // new name instead of disconnecting. Thin wiring — the rewrite lives in
+  // pipeline.renameReference.
+  handle("production:renameReference", (_e, id: string, refId: string, name: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    renameReference(p, refId, name, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
   // Step 2: generate (or AI-edit) a reference image via OpenArt. Generation
   // adds a brand-new reference (named by opts.name) into the given category;
   // editing (opts.sourceRefId) replaces that reference's image in place. The
@@ -3317,9 +3416,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const gen = sheetMedia.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"), "16:9");
       if (!gen) throw new Error(`${sheetMedia.displayName} MCP isn't connected (no image-generation tool found), so character sheets can't be generated in-app.`);
 
-      const promptText = characterSheetPrompt(description, view);
-      emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}…`);
-      const buf = await gen(promptText, [], undefined, sanitizeGenParams(opts?.params));
+      // @[name] tags in the description cite other references (characters,
+      // products, custom references) as visual inputs — resolved exactly like
+      // every other image path, then wrapped in the sheet framing.
+      const { resolved, extras } = resolvePromptRefs(p, description, 0);
+      const promptText = characterSheetPrompt(resolved, view);
+      emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}${extras.length ? ` with ${extras.length} reference${extras.length === 1 ? "" : "s"}` : ""}…`);
+      const buf = await gen(promptText, extras, undefined, sanitizeGenParams(opts?.params));
 
       const base = name.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "character";
       const dir = p.assets.referencesDir;

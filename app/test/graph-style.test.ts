@@ -11,7 +11,7 @@
  * NodeGraphModal is driven through the same seams the app uses.
  */
 import { describe, it, expect } from "vitest";
-import { createElement, useRef, useState } from "react";
+import { createElement, Fragment, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
@@ -53,13 +53,14 @@ function makeProd(prompt: string, patch?: Record<string, unknown>): any {
   };
 }
 
-function Harness({ initialPrompt, initialConnected, initialStyle }: {
+function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
   initialPrompt: string;
   initialConnected?: boolean;
   initialStyle?: string;
+  editNodes?: any[];
 }) {
   const [prompt, setPrompt] = useState(initialPrompt);
-  const [prod, setProd] = useState(() => makeProd(initialPrompt, { graphStyleConnected: initialConnected ?? true, style: initialStyle }));
+  const [prod, setProd] = useState(() => makeProd(initialPrompt, { graphStyleConnected: initialConnected ?? true, style: initialStyle, ...(editNodes ? { graphEditNodes: editNodes } : {}) }));
   const cacheRef = useRef<Record<string, string>>({ [SHOT]: initialPrompt });
 
   // Mirror of ProductionWorkspace.setGraphStyle (same logic, same seams).
@@ -83,9 +84,9 @@ function Harness({ initialPrompt, initialConnected, initialStyle }: {
     } else if (!target.promptManual && target.graphStyleConnected && styleText) {
       if (!/^Style:/m.test(basePrompt ?? "")) nextPrompt = addStyleParagraph(basePrompt ?? "", styleText);
     }
-    const patch: Record<string, unknown> = { style: styleId || undefined };
+    const patch: Record<string, unknown> = { style: styleId || undefined, styleNone: !styleId };
     if (nextPrompt !== target.prompt) { patch.prompt = nextPrompt; patch.promptManual = nextManual; }
-    setProd((p: any) => makeProd(nextPrompt ?? "", { graphStyleConnected: p.scenes[0].shots[0].graphStyleConnected, style: styleId || undefined, ...patch }));
+    setProd((p: any) => makeProd(nextPrompt ?? "", { graphStyleConnected: p.scenes[0].shots[0].graphStyleConnected, style: styleId || undefined, ...(p.scenes[0].shots[0].graphEditNodes ? { graphEditNodes: p.scenes[0].shots[0].graphEditNodes } : {}), ...patch }));
     if (nextPrompt !== basePrompt) {
       setPrompt(nextPrompt ?? "");
       if (nextPrompt != null) cacheRef.current[SHOT] = nextPrompt;
@@ -95,11 +96,19 @@ function Harness({ initialPrompt, initialConnected, initialStyle }: {
   const onPromptChange = (v: string) => {
     setPrompt(v);
     cacheRef.current[SHOT] = v;
-    setProd((p: any) => makeProd(v, { graphStyleConnected: p.scenes[0].shots[0].graphStyleConnected }));
+    // Mirrors saveShotPrompt: only the prompt changes — style/styleNone and the
+    // node graph survive (a live-draft composer rewrite must not reset them).
+    setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, prompt: v, promptManual: true } : s) })) }));
   };
 
   const onGraphField = (patch: Record<string, unknown>) => {
     setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, ...patch } : s) })) }));
+  };
+
+  // Simulates editing the style's description on the Design page — the live
+  // style text changes with no node-graph interaction at all.
+  const setStyleText = (t: string) => {
+    setProd((p: any) => ({ ...p, styles: p.styles.map((s: any, i: number) => (i === 0 ? { ...s, prompt: t } : s)) }));
   };
 
   const onStyleDetached = () => {
@@ -107,10 +116,12 @@ function Harness({ initialPrompt, initialConnected, initialStyle }: {
   };
 
   const shot = prod.scenes[0].shots[0];
-  return createElement(NodeGraphModal, {
+  return createElement(Fragment, null,
+    createElement("button", { className: "test-set-style-text", onClick: () => setStyleText("Updated cinematic style") }, "set style text"),
+    createElement(NodeGraphModal, {
     prod, shot, bust: 0, prompt,
     references: [{ id: "r1", name: "Hero", artwork: "data:image/png;base64,AAAA" }] as never,
-    styles: prod.styles, styleValue: shot.style ?? prod.styles[0].id ?? "", includeBrand: true,
+    styles: prod.styles, styleValue: shot.styleNone ? "" : (shot.style ?? prod.styles[0].id ?? ""), includeBrand: true,
     onPromptChange, onStyleChange: setGraphStyle, onToggleBrand: () => {}, onDropFile: () => {},
     onStyleDetached, imageModels: [], videoModels: [],
     defaultImageModel: "auto", defaultImageResolution: "1k",
@@ -119,7 +130,7 @@ function Harness({ initialPrompt, initialConnected, initialStyle }: {
     onPipeImageToVideo: () => {}, onPipeImageToOutput: () => {}, onPipeVideoToOutput: () => {}, onPipeEditToOutput: () => {}, onPipeRefToOutput: () => {},
     onUnpipeImageGen: () => {}, onUnpipeImageToVideo: () => {}, onUnpipeVideoGen: () => {}, onUnpipeEditGen: () => {}, onUnpipeOutput: () => {},
     onSaveLayout: () => {}, onClose: () => {},
-  } as never);
+  } as never));
 }
 
 function styleSelect(host: HTMLDivElement) { return host.querySelector(".prod-graph-style select") as HTMLSelectElement; }
@@ -134,6 +145,13 @@ function composerPrompt(host: HTMLDivElement): string {
   if (content.trim()) paras.push(content);
   if (brandBox) paras.push(`Brand identity: ${brandBox.value}`);
   return paras.join("\n\n");
+}
+/** The connected edit prompt node's Style box / content box. */
+function editStyleBox(host: HTMLDivElement): HTMLTextAreaElement | null {
+  return host.querySelector(".prod-graph-editprompt textarea[placeholder*='Visual style']") as HTMLTextAreaElement | null;
+}
+function editContentBox(host: HTMLDivElement): HTMLElement | null {
+  return host.querySelector(".prod-graph-editprompt .prompt-content-editor") as HTMLElement | null;
 }
 function render(initial: Partial<Parameters<typeof Harness>[0]> = {}): { root: Root; host: HTMLDivElement } {
   const host = document.createElement("div");
@@ -203,6 +221,59 @@ describe("node-graph style dropdown → None", () => {
     const submitted = composerPrompt(host);
     expect(submitted).toContain(`Style: ${STYLE_TEXT}`);
     expect(submitted).toContain(CONTENT);
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph style node → edit nodes", () => {
+  const EDIT_PROMPT = `Style: ${STYLE_TEXT}\n\nmake it blue`;
+
+  it("mirrors the selected style into a connected edit node and strips it on None", async () => {
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
+    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
+    await flush();
+    expect(editStyleBox(host)?.value ?? "").toBe("");
+    expect(editContentBox(host)?.textContent ?? "").toContain("make it blue");
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("mirrors a Design-page style text change into a connected edit node", async () => {
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
+    // No node-graph interaction — the Design page's style description changes.
+    act(() => { (host.querySelector(".test-set-style-text") as HTMLButtonElement).click(); });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe("Updated cinematic style");
+    expect(editContentBox(host)?.textContent ?? "").toContain("make it blue");
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("leaves an unplugged edit node's own Style paragraph untouched", async () => {
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: "Style: Node's own look\n\nmake it blue", styleConnected: false }] });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe("Node's own look");
+    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe("Node's own look");
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("re-adds the live style after None on a connected edit node", async () => {
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
+    await flush();
+    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
+    await flush();
+    expect(editStyleBox(host)?.value ?? "").toBe("");
+    act(() => { const sel = styleSelect(host); sel.value = STYLE_ID; sel.dispatchEvent(new Event("change", { bubbles: true })); });
+    await flush();
+    expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });

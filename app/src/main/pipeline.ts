@@ -17,7 +17,6 @@ void import("electron")
 import { ChatClient } from "@core";
 import {
   escapeRegExp,
-  insertBrandParagraph,
   parseJsonLooseArray,
   parseJsonLooseObject,
   parsePromptBoxes,
@@ -30,9 +29,11 @@ import {
 } from "../shared/prompt-grammar.js";
 import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
 import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
-import { styleFrameForShot, withLookClause, ensureLookSeed } from "../shared/look.js";
+import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
+import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
+import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
 
@@ -693,7 +694,9 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // No auto-appended period — style texts usually end with their own, and
   // adding another produced "render..". Used verbatim, matching the
   // renderer's style paragraph composer.
-  if (style) paras.push(`Style: ${style}`);
+  // A detached style (stored graph, no style edge) suppresses the paragraph —
+  // the edge is the plug now. Graph-less shots keep the legacy always-on.
+  if (style && (!shot.graph || styleEdgePresent(shot.graph, "composer"))) paras.push(`Style: ${style}`);
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
   // explicitly attached character/product refs). Artwork-bearing refs are
@@ -702,7 +705,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
    // which each provider's citePrompt anchors to the submitted position;
    // exports keep the literal token next to a numbered reference list.
   const consistency: string[] = [];
-   const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
+  const brand = isBrandAttached(shot, "composer", "") ? brandPrompt(p) : "";
   if (brand) consistency.push(`Brand identity: ${brand}`);
   const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
   const excludedIds = new Set(shot.refExcluded ?? []);
@@ -718,16 +721,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
 
 /** The global brand clause (palette + font) appended to every board prompt. */
 export function brandPrompt(p: Production): string {
-  const colors = (p.brand?.colors ?? [])
-    .map((c) => String(c).trim().replace(/^#/, ""))
-    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
-    .slice(0, 5)
-    .map((c) => `#${c.toLowerCase()}`);
-  const font = (p.brand?.font ?? "").trim();
-  const parts: string[] = [];
-  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
-  if (font) parts.push(`Font: ${font}.`);
-  return parts.join(" ");
+  return brandClauseText(p.brand);
 }
 
 /** The always-on framing for the Step 2 character builder. The user's
@@ -788,9 +782,10 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     const content = stripMagicLeakage(p.magicPrompts[shot.id].trim());
     const paras: string[] = [];
     const style = effectiveShotStyle(p, shot);
-    if (style) paras.push(`Style: ${style}`);
+    // A detached style (stored graph, no style edge) suppresses the paragraph.
+    if (style && (!shot.graph || styleEdgePresent(shot.graph, "composer"))) paras.push(`Style: ${style}`);
     const consistency: string[] = [];
-    const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
+    const brand = isBrandAttached(shot, "composer", "") ? brandPrompt(p) : "";
     if (brand) consistency.push(`Brand identity: ${brand}`);
     const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
     const excludedIds = new Set(shot.refExcluded ?? []);
@@ -800,20 +795,15 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     if (consistency.length) paras.push(consistency.join("\n"));
     paras.push(content || "Establishing frame for this moment.");
     const base = paras.join("\n\n").slice(0, 2000);
-    // Respect includeBrandIdentity flag (magic content is brand-aware)
-    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
+    // Respect the brand plug (explicit false detaches even magic content).
+    if (!isBrandAttached(shot, "composer", "")) return stripBrandParagraph(base);
     return base;
   }
   if (shot.prompt?.trim()) {
-    const base = shot.prompt.trim();
-    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
-    // Brand identity is opt-in: only an explicit true appends it to a manual
-    // prompt (an unset flag leaves hand-written text exactly as written).
-    if (shot.includeBrandIdentity === true) {
-      const brand = brandPrompt(p);
-      if (brand) return insertBrandParagraph(base, brand);
-    }
-    return base;
+    // Manual prompts store content only; shared sections and reference tags
+    // render from the stored graph (edges), so this and the preview are the
+    // same projection. Legacy (graph-less) shots keep tag-driven output.
+    return renderShotPrompt(p, shot, "composer");
   }
   return boardPrompt(p, shot);
 }
@@ -2346,39 +2336,38 @@ export async function generateBoards(
 
   let done = 0;
   let failed = 0;
-  let next = 0;
-  const worker = async () => {
-    while (next < targets.length) {
-      const shot = targets[next++];
-      emit(`Shot ${shot.number}: ${shot.visual.slice(0, 80) || "frame"}…`);
-      try {
-        const refs = shotReferences(p, shot)
-          .filter((r) => r.artwork)
-          .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
-        // The style frame uploads unconditionally at @image1 (a
-        // production-level input, not a tag-driven content ref) so every shot
-        // shares the same visual anchor; content refs shift positionally.
-        const frameStyle = styleFrameForShot(p, shot);
-        const frameDataUrl = frameStyle ? styleFrameDataUrl(p, frameStyle) : undefined;
-        const genRefs = frameDataUrl
-          ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
-          : refs;
-        const genPrompt = openArtPrompt(p, shot);
-        const png = await generate(genPrompt, genRefs, shot);
-        const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-        recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
-        // Classic flow: the storyboard frame comes from the output pipe — if
-        // nothing is piped yet, hook the image node in so the new frame shows
-        // in the storyboard AND the node view (never displaces a pipe).
-        hookImageGenToOutput(shot);
-        done++;
-      } catch (e) {
-        failed++;
-        emit(`Shot ${shot.number} failed: ${String(e).replace(/^Error:\s*/, "").slice(0, 160)}`, "error");
-      }
+  // One shared bounded queue governs the batch (step 07 T4). Jobs are
+  // independent and keyed by shot id; a per-shot failure is caught inside the
+  // job, so it never cancels siblings.
+  const queue = createGenerationQueue(concurrency);
+  await Promise.all(targets.map((shot) => queue.run(shot.id, async () => {
+    emit(`Shot ${shot.number}: ${shot.visual.slice(0, 80) || "frame"}…`);
+    try {
+      const refs = shotReferences(p, shot)
+        .filter((r) => r.artwork)
+        .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
+      // The style frame uploads unconditionally at @image1 (a
+      // production-level input, not a tag-driven content ref) so every shot
+      // shares the same visual anchor; content refs shift positionally.
+      const frameStyle = styleFrameForShot(p, shot);
+      const frameDataUrl = frameStyle ? styleFrameDataUrl(p, frameStyle) : undefined;
+      const genRefs = frameDataUrl
+        ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
+        : refs;
+      const genPrompt = openArtPrompt(p, shot);
+      const png = await generate(genPrompt, genRefs, shot);
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
+      // Classic flow: the storyboard frame comes from the output pipe — if
+      // nothing is piped yet, hook the image node in so the new frame shows
+      // in the storyboard AND the node view (never displaces a pipe).
+      hookImageGenToOutput(shot);
+      done++;
+    } catch (e) {
+      failed++;
+      emit(`Shot ${shot.number} failed: ${String(e).replace(/^Error:\s*/, "").slice(0, 160)}`, "error");
     }
-  };
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  })));
   markBoardsStatus(p);
   emit(
     failed

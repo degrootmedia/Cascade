@@ -4,6 +4,7 @@ import type { DragEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
+import { isStyleAttached } from "../../../../shared/graph/render.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { isQuotableCostModel } from "./generation-cost.js";
 import { GenerationCostSuffix } from "./generation-cost-label.js";
@@ -503,27 +504,16 @@ export function promptRefsForShot(prod: Production, _shotId: string): PromptRefe
   return allPromptRefs(prod);
 }
 
-/** The generated brand clause (palette + font) — mirrors brandPrompt() in
- *  pipeline.ts so the renderer can insert it into manual prompts on toggle. */
-
-export function brandClause(prod: Production): string {
-  const colors = (prod.brand?.colors ?? [])
-    .map((c) => String(c).trim().replace(/^#/, ""))
-    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
-    .slice(0, 5)
-    .map((c) => `#${c.toLowerCase()}`);
-  const font = (prod.brand?.font ?? "").trim();
-  const parts: string[] = [];
-  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
-  if (font) parts.push(`Font: ${font}.`);
-  return parts.join(" ");
-}
-
-/** Select value for a shot's style dropdown: "" = None (manual prompt with
- *  no Style section), otherwise the shot's style or the master fallback. */
-
+/** Select value for a shot's style dropdown: "" = None (no style section),
+ *  otherwise the shot's style or the master fallback. With a stored graph the
+ *  edge is the plug (step 04) — a detached prompt shows None. Graph-less shots
+ *  keep the legacy heuristic (a manual prompt without a Style section). */
 export function shotStyleSelectValue(shot: ProductionShot, prod: Production): string {
   if (shot.styleNone) return "";
+  if (shot.graph) {
+    if (!isStyleAttached(shot, "composer", shot.prompt ?? "")) return "";
+    return shot.style ?? prod.styles?.[0]?.id ?? "";
+  }
   if (!shot.style && shot.promptManual && shot.prompt && !/^Style:/m.test(shot.prompt)) return "";
   return shot.style ?? prod.styles?.[0]?.id ?? "";
 }

@@ -2726,6 +2726,59 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .tool-images { display: flex; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
 .tool-images img { max-height: 220px; max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
 
+/* ---------- task list panel (durable todos, model-maintained, read-only) ---------- */
+.todo-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: 0.85rem;
+  margin: 8px 10% 0;
+  overflow: hidden;
+}
+.todo-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.todo-title { color: var(--text); font-weight: 600; }
+.todo-count { margin-left: auto; font-size: 0.78rem; }
+.todo-list { list-style: none; margin: 0; padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 4px; }
+.todo-item { display: flex; align-items: baseline; gap: 8px; }
+.todo-glyph { color: var(--text-dim); font-size: 0.8rem; }
+.todo-item.todo-done .todo-glyph { color: var(--accent); }
+.todo-item.todo-done .todo-text { text-decoration: line-through; color: var(--text-dim); }
+.todo-item.todo-blocked .todo-glyph { color: var(--danger); }
+.todo-item.todo-running .todo-glyph { color: var(--accent); }
+.todo-note { color: var(--text-dim); font-size: 0.78rem; }
+
+/* ---------- session goal panel (durable objective + opt-in continuation) ---------- */
+.goal-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: 0.85rem;
+  margin: 8px 10% 0;
+  padding-bottom: 6px;
+}
+.goal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.goal-title { color: var(--text); font-weight: 600; }
+.goal-status { margin-left: auto; font-size: 0.78rem; color: var(--text-dim); }
+.goal-status.goal-active { color: var(--accent); }
+.goal-status.goal-blocked { color: var(--danger); }
+.goal-text { margin: 8px 12px 4px; color: var(--text); }
+.goal-checkpoint, .goal-production { margin: 2px 12px; color: var(--text-dim); font-size: 0.78rem; }
+.goal-actions { display: flex; align-items: center; gap: 8px; padding: 6px 12px 0; }
+.goal-auto { margin-left: auto; color: var(--text-dim); font-size: 0.78rem; display: flex; align-items: center; gap: 4px; }
+
 /* ---------- composer ---------- */
 .composer {
   display: flex;
@@ -3947,11 +4000,26 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 /* The edit-video node's Source / Reference sockets sit on its left edge. */
 .prod-graph-editvideo { padding-left: 84px; }
 
-.prod-graph-ref { display: flex; align-items: center; gap: 9px; }
-.prod-graph-ref > img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 64px; height: 48px; flex-shrink: 0; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
+.prod-graph-ref { display: flex; flex-direction: column; gap: 6px; width: 100%; height: 100%; }
+.prod-graph-ref-head { display: flex; justify-content: flex-start; margin: -2px 0 0 -2px; }
+.prod-graph-ref-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.prod-graph-ref-eye:hover { border-color: var(--border); color: var(--text); }
+.prod-graph-ref-media { display: block; flex: 1; min-height: 104px; }
+.prod-graph-ref-media > img, .prod-graph-ref-video, .prod-graph-ref-blank { width: 100%; height: 100%; display: block; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
 .prod-graph-ref-video { background: #000; }
 .prod-graph-ref-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-weight: 700; }
-.prod-graph-ref-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
 .prod-graph-ref-name { font-size: 0.72rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prod-graph-ref-btn {
   align-self: flex-start;
@@ -3970,7 +4038,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   justify-content: center;
 }
 .prod-graph-ref-btn:hover { border-color: var(--accent); color: var(--accent); }
-.prod-graph-ref-actions { display: flex; gap: 6px; }
 .prod-graph-ref-zoom {
   display: inline-flex;
   align-items: center;

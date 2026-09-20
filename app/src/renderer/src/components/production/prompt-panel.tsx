@@ -5,7 +5,7 @@ import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 import { NodesIcon } from "../icons.js";
 
-export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, onKeyDown, onFocus, onBlur }: {
+export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, styleReadOnly, brandReadOnly, onKeyDown, onFocus, onBlur }: {
   value: string;
   includeBrand: boolean;
   onChange: (value: string) => void;
@@ -23,6 +23,9 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   /** Optional control under the Style label / next to the Brand identity label (see TriplePrompt). */
   styleControl?: ReactNode;
   brandControl?: ReactNode;
+  /** Shared-reference previews are read-only (step 04). */
+  styleReadOnly?: boolean;
+  brandReadOnly?: boolean;
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
@@ -88,6 +91,8 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         contentLabel={contentLabel}
         styleControl={styleControl}
         brandControl={brandControl}
+        styleReadOnly={styleReadOnly}
+        brandReadOnly={brandReadOnly}
         onChange={onChange}
         onContentChange={updateQuery}
         onContentKeyDown={keyDown}
@@ -149,6 +154,8 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
           references={references}
           placeholder="Generation prompt — type @ to add a reference"
           onChange={onChange}
+          styleReadOnly
+          brandReadOnly
           styleControl={
             <select
               className="prod-openart-select prod-prompt-style"

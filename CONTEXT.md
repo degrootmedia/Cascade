@@ -29,7 +29,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | Pipeline | `app/src/main/pipeline.ts` | Prompt derivation + deterministic transforms (script breakdown, board prompts, animatic planning). Receives `ImageGenFn` from the active `MediaProvider` — never imports a vendor. |
 | Assembly | `app/src/main/assembly.ts` | Step 5 editor handoff + render: media gathering into `out/assembly/`, CMX3600 EDL, After Effects rebuild `.jsx`, manifest, and the 3-pass ffmpeg render. Pure builders are unit-tested; `assemble()`/`renderAnimatic()` take an injected ffmpeg `run`/`probe` seam (`app/src/main/ffmpeg.ts`). |
 | ffmpeg seam | `app/src/main/ffmpeg.ts` | Locating the ffmpeg binary (bundled `ffmpeg-static`, asar-unpacked when packaged, else PATH) + `runFfmpeg`/`probeMedia` that `assembly.ts` injects. Pure node — never imports Electron. |
-| Reference thumbnails | `app/src/main/thumbnails.ts` | The `?thumb=1` query on `cascade-media://` URLs: `loadRefThumbnail` resizes a reference image to a 256px long edge and compresses to JPEG (~65), served from a bounded memory cache then a versioned durable cache under `userData/thumb-cache/` (`<sha1>-<mtimeMs>-<size>.jpg` — valid exactly while its source is unchanged), then a fresh encode; any failure falls through to the full file. `regenerateRefThumbnails` pre-encodes every production's reference images (`referenceImagePaths` in `productions.ts`) from Settings → Regenerate thumbnail cache and prunes stale entries. Node-graph tiles use it (`refThumbUrl` in `NodeGraphModal.tsx`) — zoom/lightbox URLs keep the full-res file, and prompt sends read the original from disk, so nothing downstream sees the thumb. |
+| Reference thumbnails | `app/src/main/thumbnails.ts` | The `?thumb=1` query on `cascade-media://` URLs: `loadRefThumbnail` resizes a reference image to a 256px long edge and compresses to JPEG (~65), served from a bounded memory cache then a versioned durable cache under `userData/thumb-cache/` (`<sha1>-<mtimeMs>-<size>.jpg` — valid exactly while its source is unchanged), then a fresh encode; any failure falls through to the full file. `regenerateRefThumbnails` pre-encodes every production's reference images (`referenceImagePaths` in `productions.ts`) from Settings → Regenerate thumbnail cache and prunes stale entries. The node-graph side shelf's tiles use it (`refThumbUrl` in `NodeGraphModal.tsx`) — canvas reference nodes render the full-res file (the graph is a working surface), zoom/lightbox URLs keep the full-res file, and prompt sends read the original from disk, so nothing downstream sees the thumb. |
 | Production store | `app/src/main/productions.ts` | Production document persistence + migration. |
 | Shotter | `app/src/main/shotter.ts` | The 4-digit shot-numbering module: 100-grid derivation (`nextNumber`/`insertMid`/`renumber`), mid-numbered shot inserts with a full-renumber escape hatch, cross-scene reorder with board-folder relocation, and the manual `setShotNumber` override (one shot only — rejects malformed/sub-0100 numbers and any slot another shot already owns, since assembly keys `shots/<number>.*` filenames on it; board folder relocates to follow), and the scene-level surface (`blankScenes` — the 1-scene × 5-blank-shots skeleton for script-less productions — and `insertScene`, which splices an empty scene and renumbers later scene ordinals 1..N; scene ordinals are display-only, shot numbers untouched). |
 | Expense ledger | `app/src/main/ledger.ts` | The running tally of every AI generation + manual purchased-asset rows: price-rule matching (`matchPriceRule`), per-production entry files (`userData/ledger/<productionId>.json`, each with its own `userData/ledger/<productionId>.csv` mirror), and the global rules singleton (`userData/ledger.json`, `version: 2` — pricing is per-model, never per-project). Entries are scoped to the `productionId` that produced them; a generation with no production is dropped rather than shown everywhere, and hard-deleting/archiving a production removes/archives its ledger (`removeProject`/`archiveProject`). Loading a `version: 1` file splits its entries per production (unscoped legacy rows discarded). Receives generations via `OpenArtClient`'s `onGeneration` constructor seam — that injection IS the test surface. |
@@ -242,7 +242,20 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   style node (`mirrorStyleParagraph`, `shared/prompt-grammar.ts`): the style
   node is a passthrough, so editing a style's description on the Design page
   mirrors into every plugged prompt (composer, video, and each edit node) — not
-  only the text baked in at connect time.
+  only the text baked in at connect time. Each generator's prompt→generation
+  wire is **structural** (emitted by the materializer, and by `ensurePromptPipe`
+  when a tool is dragged onto the canvas mid-session — it is not hand-connectable).
+  Dragging a generation node's output onto any prompt reference socket copies the
+  selected take into the production as a new reference
+  (`production:saveGenerationAsReference`) and wires the new ref node into that
+  socket (tagging the prompt), so a generated frame/clip can be reused as input
+  without a separate right-click Save as reference. **Reference nodes** show the
+  artwork with its editable name beneath it (renaming rides the same
+  `renameReference` atomic tag rewrite as the Design page) and an eye button that
+  collapses the tile to name-only; their size and collapsed state persist in
+  `GraphLayout.sizes`/`GraphLayout.collapsed` (a collapsed ref keeps only its
+  width, so the expanded height survives the collapse). Double-clicking the
+  artwork opens the lightbox.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes
   into one continuous shot. A keyframe is a **source id** stored in
   `graphTweenRefIds` (`TweenBlock.startRefId`/`endRefId`): a reference id

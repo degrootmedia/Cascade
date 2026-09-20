@@ -1,9 +1,11 @@
 /**
  * Three stacked prompt boxes — Style / Content / Brand — that decompose the
- * prompt text into editable sections. The composed text stays the single
- * source of truth: editing any box re-composes the whole prompt and clearing
- * a box removes its section. Purely a view over the text; nothing here is
- * stored separately.
+ * prompt text into sections. Content is the shot's own editable text; the
+ * Style and Brand boxes are live previews of the plugged shared references
+ * (step 04) — read-only wherever the shared source lives elsewhere (the
+ * Design page owns style text, the brand set owns the clause). Clearing the
+ * content box removes its section. Purely a view over the text; nothing here
+ * is stored separately.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PromptContentEditor, type PromptContentHandle } from "./PromptContentEditor.js";
@@ -12,7 +14,7 @@ import { composePromptBoxes, isTagOnlyDiff, parsePromptBoxes, type PromptBoxes }
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
-export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentLabel, contentRef, styleControl, brandControl, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentLabel, contentRef, styleControl, brandControl, styleReadOnly, brandReadOnly, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
   value: string;
   /** Label above the content box (defaults to "Content"). */
   contentLabel?: string;
@@ -34,6 +36,11 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
    *  sidebar's brand toggle). When provided, the label row stays visible
    *  even while the brand is excluded so it can be toggled back on. */
   brandControl?: ReactNode;
+  /** Shared-reference previews are read-only: the Style box mirrors the
+   *  plugged library style (edited in Design, Step 2), the Brand box the
+   *  brand set. Content stays editable — it is the node's own text. */
+  styleReadOnly?: boolean;
+  brandReadOnly?: boolean;
   onChange: (value: string) => void;
   /** Fires with the raw content-box text on every content edit. */
   onContentChange?: (content: string) => void;
@@ -173,6 +180,8 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
             style={sideStyle(styleH)}
             value={boxes.style}
             placeholder="Visual style — empty runs without a style section"
+            readOnly={styleReadOnly}
+            title={styleReadOnly ? "Shared style preview — edit the style in Design (Step 2)" : undefined}
             onChange={(e) => emitPartial({ style: e.target.value })}
             onFocus={onFocus}
             onBlur={onBlur}
@@ -222,6 +231,8 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
             style={sideStyle(brandH)}
             value={boxes.brand}
             placeholder="Palette & typography — empty regenerates from the brand set"
+            readOnly={brandReadOnly}
+            title={brandReadOnly ? "Shared brand preview — edited in the brand set" : undefined}
             onChange={(e) => emitPartial({ brand: e.target.value })}
             onFocus={onFocus}
             onBlur={onBlur}

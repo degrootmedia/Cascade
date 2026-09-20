@@ -6,7 +6,7 @@
  * rewrite — it would thread a provider id through Production + every IPC).
  */
 import type { McpManager } from "../mcp.js";
-import { OpenArtClient } from "../openart.js";
+import { OpenArtClient } from "./openart.js";
 import { HiggsfieldCliProvider } from "./higgsfield-cli.js";
 import { OpenArtCliProvider } from "./openart-cli.js";
 import type { GenerationRecorder, MediaProvider, MediaProviderId } from "./types.js";

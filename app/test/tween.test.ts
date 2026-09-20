@@ -30,7 +30,7 @@ import {
   unstitchTween,
 } from "../src/main/pipeline.js";
 import { applyKeyframeDrag, deriveTweenBlocksClient, filterTweenModels, filterTweenModelsByDuration, tweenPreviewTake, tweenSupportedLabel, tweenSupportsDuration } from "../src/renderer/src/components/TweenTimelineModal.js";
-import { videoRefsAssign } from "../src/main/openart.js";
+import { videoRefsAssign } from "../src/main/providers/openart.js";
 import { assemblyPlan, buildEdl, edlReelFor } from "../src/main/assembly.js";
 
 function block(overrides: Partial<TweenBlock> = {}): TweenBlock {

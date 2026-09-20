@@ -1,21 +1,21 @@
 /**
- * Regression tests for the node-graph style bugs:
- * 1. Changing the style dropdown to "None" must remove the Style section from
- *    the prompt that is submitted for generation — even when the composer
- *    holds an unsynced draft (the blur-sync race) and even when the edge is
- *    detached but a leftover paragraph survives.
- * 2. Choosing a style rewrites the Style paragraph of a plugged prompt.
+ * Step 04 node-graph style tests: the style node is a shared reference — the
+ * dropdown selects the library entry (persisted on the shot + the stored
+ * graph's style edge) and every plugged prompt re-renders from the library on
+ * read. Nothing pastes a Style paragraph into a prompt; a detached prompt
+ * keeps its own prose as an explicit override.
  *
  * The harness mirrors ProductionWorkspace.setGraphStyle / onGraphField /
- * onPromptChange / onStyleDetached and the prompt cache, so the real
- * NodeGraphModal is driven through the same seams the app uses.
+ * onPromptChange and the prompt cache, so the real NodeGraphModal is driven
+ * through the same seams the app uses.
  */
 import { describe, it, expect } from "vitest";
 import { createElement, Fragment, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
-import { addStyleParagraph, removeStyleParagraph } from "../src/shared/prompt-grammar.js";
+import { setStyleEdge } from "../src/shared/graph/connect.js";
+import { renderShotPrompt, stripSharedSections } from "../src/shared/graph/render.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as any).ResizeObserver = ROStub;
@@ -30,8 +30,9 @@ const SHOT = "s1";
 const STYLE_ID = "st1";
 const STYLE_TEXT = "Heroic 3D render style";
 const CONTENT = "hello world";
-const BRAND = "Brand identity: Color palette: #123456. Font: Helvetica.";
-const WITH_STYLE = `Style: ${STYLE_TEXT}\n\n${CONTENT}\n\n${BRAND}`;
+// Stored prompts are content-only in the new model; the Style section is
+// rendered from the plugged library entry (graph edge) on read.
+const WITH_STYLE = CONTENT;
 
 function makeProd(prompt: string, patch?: Record<string, unknown>): any {
   return {
@@ -59,46 +60,30 @@ function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
   initialStyle?: string;
   editNodes?: any[];
 }) {
-  const [prompt, setPrompt] = useState(initialPrompt);
   const [prod, setProd] = useState(() => makeProd(initialPrompt, { graphStyleConnected: initialConnected ?? true, style: initialStyle, ...(editNodes ? { graphEditNodes: editNodes } : {}) }));
   const cacheRef = useRef<Record<string, string>>({ [SHOT]: initialPrompt });
+  const [prompt, setPrompt] = useState(initialPrompt);
 
-  // Mirror of ProductionWorkspace.setGraphStyle (same logic, same seams).
+  // Mirror of ProductionWorkspace.setGraphStyle (step 04): selection + edge,
+  // no pasted paragraph; the rendered prompt is re-derived for the composer.
   const setGraphStyle = (styleId: string) => {
-    const styleText = prod.styles.find((s: { id: string; prompt: string }) => s.id === styleId)?.prompt.trim() ?? "";
-    const target = prod.scenes[0].shots[0];
-    const basePrompt = cacheRef.current[SHOT] ?? target.prompt;
-    const isPlugged = (flag: boolean | undefined, cur: string | undefined) => flag ?? /^Style:/m.test(cur ?? "");
-    const rewritePlugged = (cur: string | undefined, plugged: boolean | undefined): string | undefined => {
-      if (cur == null) return cur;
-      if (!styleText) return /^Style:/m.test(cur) ? removeStyleParagraph(cur) : cur;
-      if (!isPlugged(plugged, cur)) return cur;
-      return addStyleParagraph(cur, styleText);
-    };
-    let nextPrompt: string | undefined = basePrompt;
-    let nextManual = target.promptManual;
-    const baseIsManual = target.promptManual || !!cacheRef.current[SHOT];
-    if (baseIsManual && basePrompt?.trim() && (isPlugged(target.graphStyleConnected, basePrompt) || !styleText)) {
-      nextPrompt = styleText ? addStyleParagraph(basePrompt, styleText) : removeStyleParagraph(basePrompt);
-      nextManual = true;
-    } else if (!target.promptManual && target.graphStyleConnected && styleText) {
-      if (!/^Style:/m.test(basePrompt ?? "")) nextPrompt = addStyleParagraph(basePrompt ?? "", styleText);
-    }
+    const cur = prod.scenes[0].shots[0];
     const patch: Record<string, unknown> = { style: styleId || undefined, styleNone: !styleId };
-    if (nextPrompt !== target.prompt) { patch.prompt = nextPrompt; patch.promptManual = nextManual; }
-    setProd((p: any) => makeProd(nextPrompt ?? "", { graphStyleConnected: p.scenes[0].shots[0].graphStyleConnected, style: styleId || undefined, ...(p.scenes[0].shots[0].graphEditNodes ? { graphEditNodes: p.scenes[0].shots[0].graphEditNodes } : {}), ...patch }));
-    if (nextPrompt !== basePrompt) {
-      setPrompt(nextPrompt ?? "");
-      if (nextPrompt != null) cacheRef.current[SHOT] = nextPrompt;
-    }
+    if (cur.graph) patch.graph = setStyleEdge(cur.graph, "composer", !!styleId);
+    else patch.graphStyleConnected = !!styleId;
+    const next = { ...prod, scenes: prod.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, ...patch } : s) })) };
+    setProd(next);
+    const rendered = renderShotPrompt(next, next.scenes[0].shots[0], "composer");
+    cacheRef.current[SHOT] = rendered;
+    setPrompt(rendered);
   };
 
   const onPromptChange = (v: string) => {
-    setPrompt(v);
-    cacheRef.current[SHOT] = v;
-    // Mirrors saveShotPrompt: only the prompt changes — style/styleNone and the
-    // node graph survive (a live-draft composer rewrite must not reset them).
-    setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, prompt: v, promptManual: true } : s) })) }));
+    // Mirrors updateBoardPrompt: stored prompts are content-only.
+    const stored = stripSharedSections(v);
+    setPrompt(stored);
+    cacheRef.current[SHOT] = stored;
+    setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, prompt: stored, promptManual: true } : s) })) }));
   };
 
   const onGraphField = (patch: Record<string, unknown>) => {
@@ -119,7 +104,7 @@ function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
   return createElement(Fragment, null,
     createElement("button", { className: "test-set-style-text", onClick: () => setStyleText("Updated cinematic style") }, "set style text"),
     createElement(NodeGraphModal, {
-    prod, shot, bust: 0, prompt,
+    prod, shot, bust: 0, prompt: renderShotPrompt(prod, shot, "composer"),
     references: [{ id: "r1", name: "Hero", artwork: "data:image/png;base64,AAAA" }] as never,
     styles: prod.styles, styleValue: shot.styleNone ? "" : (shot.style ?? prod.styles[0].id ?? ""), includeBrand: true,
     onPromptChange, onStyleChange: setGraphStyle, onToggleBrand: () => {}, onDropFile: () => {},
@@ -162,94 +147,59 @@ function render(initial: Partial<Parameters<typeof Harness>[0]> = {}): { root: R
 }
 function flush() { return act(async () => { await new Promise((r) => setTimeout(r, 0)); }); }
 
-describe("node-graph style dropdown → None", () => {
-  it("removes the Style section when the composer is idle", async () => {
+describe("node-graph style dropdown (step 04: shared reference)", () => {
+  it("removes the Style section when attached, then re-adds it on re-pick", async () => {
     const { root, host } = render();
     await flush();
+    expect(composerPrompt(host)).toContain(`Style: ${STYLE_TEXT}`);
     act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
     await flush();
     expect(composerPrompt(host)).not.toContain("Style:");
     expect(composerPrompt(host)).toContain(CONTENT);
-    await act(async () => { root.unmount(); });
-    document.body.removeChild(host);
-  });
-
-  it("removes the Style section even when the composer holds an unsynced draft", async () => {
-    const { root, host } = render();
-    await flush();
-    // Real browser timing: typing creates a local draft; the blur handler
-    // schedules a syncToParent via setTimeout(0). The timeout fires AFTER the
-    // dropdown change (i.e. React's passive effects must not flush first).
-    act(() => { contentBox(host).focus(); });
-    act(() => { const ed = contentBox(host); ed.textContent = "hellox world"; ed.dispatchEvent(new Event("input", { bubbles: true })); });
-    act(() => { styleSelect(host).focus(); });
-    const sel = styleSelect(host);
-    sel.value = "";
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 5));
-    await flush();
-    const submitted = composerPrompt(host);
-    expect(submitted).not.toContain("Style:");
-    expect(submitted).toContain("hellox world");
-    await act(async () => { root.unmount(); });
-    document.body.removeChild(host);
-  });
-
-  it("removes a leftover Style paragraph even when the edge is detached", async () => {
-    const { root, host } = render({ initialConnected: false });
-    await flush();
-    // The edge is detached (graphStyleConnected false) but the prompt still
-    // carries a Style paragraph — "None" must still strip it.
-    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
-    await flush();
-    expect(composerPrompt(host)).not.toContain("Style:");
-    expect(composerPrompt(host)).toContain(CONTENT);
-    await act(async () => { root.unmount(); });
-    document.body.removeChild(host);
-  });
-
-  it("choosing a style re-adds the Style paragraph after None", async () => {
-    const { root, host } = render();
-    await flush();
-    // None first — the Style section disappears.
-    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
-    await flush();
-    expect(composerPrompt(host)).not.toContain("Style:");
-    // Then re-pick the style — it must come back on the plugged prompt.
     act(() => { const sel = styleSelect(host); sel.value = STYLE_ID; sel.dispatchEvent(new Event("change", { bubbles: true })); });
     await flush();
-    const submitted = composerPrompt(host);
-    expect(submitted).toContain(`Style: ${STYLE_TEXT}`);
-    expect(submitted).toContain(CONTENT);
+    expect(composerPrompt(host)).toContain(`Style: ${STYLE_TEXT}`);
+    expect(composerPrompt(host)).toContain(CONTENT);
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("unplugged (detached) prompt keeps its own Style prose as an override", async () => {
+    const { root, host } = render({ initialConnected: false, initialPrompt: `Style: My own custom look\n\n${CONTENT}` });
+    await flush();
+    // Detached: the stored prose is the user's explicit override, not a copy.
+    expect(composerPrompt(host)).toContain("Style: My own custom look");
+    expect(composerPrompt(host)).toContain(CONTENT);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
 });
 
-describe("node-graph style node → edit nodes", () => {
-  const EDIT_PROMPT = `Style: ${STYLE_TEXT}\n\nmake it blue`;
+describe("node-graph style node → edit nodes (step 04)", () => {
+  const EDIT_CONTENT = "make it blue";
 
-  it("mirrors the selected style into a connected edit node and strips it on None", async () => {
-    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
+  it("renders the shared style into a connected edit node and drops it on None", async () => {
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_CONTENT, styleConnected: true }] });
     await flush();
     expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
+    expect(editContentBox(host)?.textContent ?? "").toContain(EDIT_CONTENT);
     act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
     await flush();
     expect(editStyleBox(host)?.value ?? "").toBe("");
-    expect(editContentBox(host)?.textContent ?? "").toContain("make it blue");
+    expect(editContentBox(host)?.textContent ?? "").toContain(EDIT_CONTENT);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
 
   it("mirrors a Design-page style text change into a connected edit node", async () => {
-    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
+    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_CONTENT, styleConnected: true }] });
     await flush();
     expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
     // No node-graph interaction — the Design page's style description changes.
     act(() => { (host.querySelector(".test-set-style-text") as HTMLButtonElement).click(); });
     await flush();
     expect(editStyleBox(host)?.value).toBe("Updated cinematic style");
-    expect(editContentBox(host)?.textContent ?? "").toContain("make it blue");
+    expect(editContentBox(host)?.textContent ?? "").toContain(EDIT_CONTENT);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
@@ -261,19 +211,6 @@ describe("node-graph style node → edit nodes", () => {
     act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
     await flush();
     expect(editStyleBox(host)?.value).toBe("Node's own look");
-    await act(async () => { root.unmount(); });
-    document.body.removeChild(host);
-  });
-
-  it("re-adds the live style after None on a connected edit node", async () => {
-    const { root, host } = render({ editNodes: [{ id: "edit0", prompt: EDIT_PROMPT, styleConnected: true }] });
-    await flush();
-    act(() => { const sel = styleSelect(host); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); });
-    await flush();
-    expect(editStyleBox(host)?.value ?? "").toBe("");
-    act(() => { const sel = styleSelect(host); sel.value = STYLE_ID; sel.dispatchEvent(new Event("change", { bubbles: true })); });
-    await flush();
-    expect(editStyleBox(host)?.value).toBe(STYLE_TEXT);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });

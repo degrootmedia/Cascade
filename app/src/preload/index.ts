@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type ProductionEvent } from "../shared/ipc.js";
+import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type ProductionEvent, type SessionTasks, type SessionGoal } from "../shared/ipc.js";
 
 /**
  * Build `window.cascade` mechanically from the shared channel contract
@@ -31,6 +31,16 @@ function buildApi(): CascadeApi {
     const listener = (_e: unknown, e: { sessionId: string; dataUrl: string; filename: string }) => cb(e);
     ipcRenderer.on("mention:added", listener);
     return () => ipcRenderer.removeListener("mention:added", listener);
+  };
+  api.onTodosChanged = (cb: (e: { sessionId: string; tasks: SessionTasks }) => void) => {
+    const listener = (_e: unknown, e: { sessionId: string; tasks: SessionTasks }) => cb(e);
+    ipcRenderer.on("todos:changed", listener);
+    return () => ipcRenderer.removeListener("todos:changed", listener);
+  };
+  api.onGoalChanged = (cb: (e: { sessionId: string; goal: SessionGoal }) => void) => {
+    const listener = (_e: unknown, e: { sessionId: string; goal: SessionGoal }) => cb(e);
+    ipcRenderer.on("goals:changed", listener);
+    return () => ipcRenderer.removeListener("goals:changed", listener);
   };
   api.onOpenSettings = (cb: () => void) => {
     const listener = () => cb();

@@ -14,12 +14,12 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { McpManager } from "./mcp.js";
-import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "./pipeline.js";
-import { citePrompt, resolvePromptRefs, styleRefNames } from "./providers/refs.js";
-import type { MediaProvider, ProviderEmit } from "./providers/types.js";
-import { uploadDataUrlReference } from "./openart-upload.js";
-import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "./video-ref.js";
+import type { McpManager } from "../mcp.js";
+import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "../pipeline.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import type { MediaProvider, ProviderEmit } from "./types.js";
+import { uploadDataUrlReference } from "../openart-upload.js";
+import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 import {
   describeOpenArtDurations,
   extractOpenArtVideoOptions,
@@ -29,7 +29,7 @@ import {
   parseOpenArtFormProperties,
   parseOpenArtModels,
   shapeOpenArtModelChoices,
-} from "./providers/openart-core.js";
+} from "./openart-core.js";
 import {
   IMAGE_URI_EXT_RX,
   IMAGE_URL_RX,
@@ -37,7 +37,7 @@ import {
   parseJsonLooseObject,
   VIDEO_URI_EXT_RX,
   VIDEO_URL_RX,
-} from "../shared/prompt-grammar.js";
+} from "../../shared/prompt-grammar.js";
 import type {
   CliModelSchema,
   ImageGenAspectRatio,
@@ -50,7 +50,7 @@ import type {
   ProductionShot,
   VideoGenOptions,
   VideoModelOptions,
-} from "../shared/ipc.js";
+} from "../../shared/ipc.js";
 
 const SERVER = "openart";
 

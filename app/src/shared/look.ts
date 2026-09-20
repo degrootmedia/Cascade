@@ -54,6 +54,22 @@ export function buildLookClause(): string {
   return LOOK_CLAUSE;
 }
 
+/** The global brand clause (palette + font). Single home for the wording —
+ *  pipeline.brandPrompt and the renderer's brandClause delegate here so every
+ *  surface renders byte-identical brand text. */
+export function brandClauseText(brand?: { colors?: string[]; font?: string }): string {
+  const colors = (brand?.colors ?? [])
+    .map((c) => String(c).trim().replace(/^#/, ""))
+    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
+    .slice(0, 5)
+    .map((c) => `#${c.toLowerCase()}`);
+  const font = (brand?.font ?? "").trim();
+  const parts: string[] = [];
+  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
+  if (font) parts.push(`Font: ${font}.`);
+  return parts.join(" ");
+}
+
 /** True when the prompt already carries the LOOK clause (idempotency guard). */
 export function hasLookClause(prompt: string): boolean {
   return prompt.includes(LOOK_CLAUSE);

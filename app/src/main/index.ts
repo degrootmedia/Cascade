@@ -7,9 +7,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, type ChatMessage, type AgentTool } from "@core";
+import { Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, planContinuation, continuationPrompt, type ChatMessage, type AgentTool, type GoalRecord } from "@core";
 import * as settings from "./settings.js";
 import * as sessions from "./sessions.js";
+import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
@@ -20,8 +21,7 @@ import { resolveProductionFile } from "./media-menu.js";
 import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, shotVideoDir, shotVideoRelPath } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
-import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary } from "./providers/higgsfield-cli.js";
-import { getOpenArtCliStatus, resolveOpenArtCliBinary } from "./providers/openart-cli.js";
+import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
@@ -30,14 +30,16 @@ import { assemble, renderAnimatic } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
+import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
+import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, styleFrameOverride, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
 import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
+import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
-import { applyOptionExposure } from "./providers/model-schema.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -473,6 +475,28 @@ function ensureAgent(entry: LiveChat): Agent {
     }
     lazyTools["openart_upload_reference"] = openArtUpload;
     if (skillsList.length) extraTools["read_skill"] = makeReadSkillTool(skillsDir);
+    // Session todo list (step 02): same tool names as core's workspace-backed
+    // defaults, so these session-scoped versions shadow them for app chats.
+    // Reads the entry's session id live; emits todos:changed after persisting.
+    const sessionTodos = makeSessionTodoTools(
+      () => entry.session.id,
+      (tasks) => {
+        win?.webContents.send("todos:changed", { sessionId: entry.session.id, tasks });
+      }
+    );
+    extraTools["todo_read"] = sessionTodos.todo_read;
+    extraTools["todo_write"] = sessionTodos.todo_write;
+    // Session goal (step 08): same tool names as core's workspace-backed
+    // defaults, so these session-scoped versions shadow them for app chats.
+    const sessionGoals = makeSessionGoalTools(
+      () => entry.session.id,
+      (goal) => {
+        win?.webContents.send("goals:changed", { sessionId: entry.session.id, goal });
+      }
+    );
+    extraTools["goal_read"] = sessionGoals.goal_read;
+    extraTools["goal_set"] = sessionGoals.goal_set;
+    extraTools["goal_update_status"] = sessionGoals.goal_update_status;
     if (mcpTools["openart__openart_upload_pick"]) {
       lazyTools["openart__openart_upload_pick"] = openArtUpload;
     }
@@ -529,7 +553,7 @@ function ensureAgent(entry: LiveChat): Agent {
       for (const k of Object.keys(t.tools)) {
         if (!builtinAllowed(k) && !extraTools[k] && !lazyTools[k]) {
           // This is a built-in that the agent didn't allow
-          if (["read_file","write_file","edit_file","list_directory","glob","grep","run_command","read_skill"].includes(k)) {
+          if (["read_file","write_file","edit_file","list_directory","glob","grep","run_command","read_skill","todo_read","todo_write","goal_read","goal_set","goal_update_status"].includes(k)) {
             delete t.tools[k];
           }
         }
@@ -650,9 +674,9 @@ function registerIpc() {
     });
   }
 
-  handle("chat:send", async (_e, sessionId: string, text: string, attachments?: ChatAttachment[]) => {
-    const entry = live(sessionId);
-    curId = sessionId;
+  /** Run one user turn on a chat through the normal agent path (approval gate
+   *  and all). Shared by `chat:send` and goal auto-continuation. */
+  async function sendTurn(entry: LiveChat, text: string, attachments?: ChatAttachment[]): Promise<void> {
     if (entry.running) throw new Error("BUSY");
     entry.running = true;
     const token = ++entry.sendToken;
@@ -675,7 +699,48 @@ function registerIpc() {
     } finally {
       if (token === entry.sendToken) entry.running = false;
     }
+  }
+
+  handle("chat:send", async (_e, sessionId: string, text: string, attachments?: ChatAttachment[]) => {
+    const entry = live(sessionId);
+    curId = sessionId;
+    await sendTurn(entry, text, attachments);
   });
+
+  // Sessions already offered a goal continuation this launch — so switching
+  // back to a chat never re-runs it. Reset on app restart (the point of the
+  // opt-in flag).
+  const goalContinuedThisLaunch = new Set<string>();
+  /**
+   * Opt-in auto-continuation (step 08 T3): only when the goal explicitly set
+   * autoContinue AND is active. Continuation is an ordinary agent turn, so the
+   * approval gate still governs every mutating action — it can never bypass it.
+   * Off by default; a goal without the flag never continues.
+   */
+  function maybeContinueGoal(sessionId: string): void {
+    if (!settings.getApiKey()) return;
+    if (goalContinuedThisLaunch.has(sessionId)) return;
+    let goal: ReturnType<typeof loadSessionGoal>;
+    try {
+      goal = loadSessionGoal(sessionId);
+    } catch {
+      return;
+    }
+    const record: GoalRecord = {
+      goal: goal.goal,
+      status: goal.status,
+      updatedAt: goal.updatedAt,
+      ...(goal.lastCheckpoint ? { lastCheckpoint: goal.lastCheckpoint } : {}),
+      ...(goal.productionId ? { productionId: goal.productionId } : {}),
+      ...(goal.autoContinue ? { autoContinue: true } : {}),
+    };
+    if (!planContinuation(record, !!goal.autoContinue).continue) return;
+    const entry = chats.get(sessionId);
+    if (!entry || entry.running) return;
+    goalContinuedThisLaunch.add(sessionId);
+    entry.agent = null; // rebuild fresh so the continuation turn reads the goal
+    void sendTurn(entry, continuationPrompt(record)).catch(() => { /* surfaced via the normal error event */ });
+  }
 
   on("chat:stop", (_e, sessionId: string) => {
     const entry = chats.get(sessionId);
@@ -1043,6 +1108,10 @@ function registerIpc() {
 
   handle("sessions:list", () => sessions.listSessions());
 
+  // Full-text search over existing session JSON (step 09 T1) — read-only, an
+  // in-memory cache only; no storage change.
+  handle("sessions:search", (_e, query: string, limit?: number) => searchSessions(typeof query === "string" ? query : "", { limit }));
+
   handle("sessions:load", (_e, id: string) => {
     const entry = live(id);
     curId = id;
@@ -1062,6 +1131,10 @@ function registerIpc() {
       }
     }
     s.display = display;
+    // Opt-in goal continuation (step 08): fires at most once per launch, and
+    // only for a goal that explicitly set autoContinue. An ordinary turn, so
+    // approvals still gate every mutating action.
+    maybeContinueGoal(id);
     return display;
   });
 
@@ -1081,6 +1154,19 @@ function registerIpc() {
   });
 
   handle("sessions:current", () => curId);
+
+  // Durable per-chat task list (step 02): the file is the truth, so the panel
+  // restores from disk on mount/restart; live updates arrive via todos:changed.
+  handle("todos:get", (_e, sessionId: string) => loadSessionTasks(sessionId));
+
+  // Durable per-chat goal (step 08): the file is the truth; the renderer reads
+  // it on mount and mutates via goals:set (status / opt-in continuation).
+  handle("goals:get", (_e, sessionId: string) => loadSessionGoal(sessionId));
+  handle("goals:set", (_e, sessionId: string, patch: import("../shared/ipc.js").SessionGoalPatch) => {
+    const goal = patchSessionGoal(sessionId, patch ?? {});
+    win?.webContents.send("goals:changed", { sessionId, goal });
+    return goal;
+  });
 
   handle("sessions:remove", (_e, id: string, mode: "delete" | "archive") => {
     chats.delete(id);
@@ -2067,7 +2153,9 @@ function registerIpc() {
         return p;
       }
       if (clean) {
-        shot.prompt = clean;
+        // Store content only — Style/Brand render from the plugged references
+        // on read (step 04), so the sidebar/graph never persist shared copies.
+        shot.prompt = stripSharedSections(clean);
         shot.promptManual = true; // manual: survives re-ingestion & design changes
       } else if (text && !clean) {
         // User erased everything except the auto-appended clause — treat as cleared.

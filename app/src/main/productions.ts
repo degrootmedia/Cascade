@@ -7,9 +7,16 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock } from "../shared/ipc.js";
+import type { Graph, GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock }
+from "../shared/ipc.js";
 import { sanitizeGenParams } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations, relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath } from "./pipeline.js";
+import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations,
+relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath }
+from "./pipeline.js";
+import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
+import { normalizeGraph } from "../shared/graph/normalize.js";
+import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
+import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
 
 export interface ProductionFile extends Production {}
@@ -90,9 +97,24 @@ export function listProductions(): ProductionMeta[] {
  *  to migrateBoardArtwork; loads with >= this value skip the board walk. */
 export const PRODUCTION_SCHEMA_VERSION = 2;
 
+/** Oldest production schema the loader can migrate. Data below this cannot be
+ *  brought forward safely, so it fails loudly with the version named instead
+ *  of silently dropping fields. (v1 and unversioned legacy docs migrate.) */
+export const MIN_PRODUCTION_SCHEMA_VERSION = 1;
+
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
+  if (
+    typeof p.schemaVersion === "number" &&
+    Number.isFinite(p.schemaVersion) &&
+    p.schemaVersion < MIN_PRODUCTION_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `This production uses schema version ${p.schemaVersion}, older than the minimum supported version ${MIN_PRODUCTION_SCHEMA_VERSION}. ` +
+        `It can't be migrated automatically — reopen it with the app version that created it, or restore it from a backup.`
+    );
+  }
   // The store caches parsed documents and hands out the cached object graph
   // by reference. Every caller gets a private copy instead: long-running
   // generation jobs hold shot/node references across awaits while the
@@ -445,6 +467,7 @@ function migrateBoardArtwork(p: Production): boolean {
       if (relocateBoardLayout(p, s)) changed = true;
       if (relocateVideoLayout(p, s)) changed = true;
       if (syncBoardOutputToPipe(s)) changed = true;
+      if (migrateShotGraph(p, s)) changed = true;
       if (s.artworkHistory) {
         const next = s.artworkHistory.map((rel) => rel);
         let hChanged = false;
@@ -467,6 +490,65 @@ function migrateBoardArtwork(p: Production): boolean {
   }
   if (migrateReferenceArtwork(p)) changed = true;
   return changed;
+}
+
+/** One-time migration: legacy flag/text wiring → the stored `shot.graph`.
+ *  Runs after the edit-node/tween/output migrations so it reads settled
+ *  state. Old fields are left untouched (step 10 deletes them); the graph is
+ *  the only writer from here on. Step 04 additionally strips the pasted
+ *  Style:/Brand copies the new edges cover (exact style matches; any brand
+ *  paragraph — the edge re-renders the canonical clause), so no consumer
+ *  stores shared text. Custom prose that merely looks like a section is left
+ *  in storage (render normalizes attached prompts at read; the next edit
+ *  converges). Idempotent via `graph.migrated`. */
+export function migrateShotGraph(p: Production, shot: ProductionShot): boolean {
+  if (shot.graph?.migrated) return false;
+  const { graph } = normalizeGraph(materializeGraph(shot, graphRefViews(p)));
+  stripMigratedCopies(p, shot, graph);
+  graph.migrated = true;
+  shot.graph = graph;
+  return true;
+}
+
+/** Drop shared-text copies covered by the freshly materialized edges. */
+function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph): void {
+  const styleText = resolveNodeStyleText(p, shot);
+  const stripField = (text: string | undefined, target: StylePromptTarget): string | undefined => {
+    if (text == null) return text;
+    let out = text;
+    if (styleEdgePresent(graph, target)) {
+      const body = parsePromptBoxes(out).style.trim();
+      if (!styleText || body === styleText.trim()) out = stripStyleParagraph(out);
+    }
+    if (brandEdgePresent(graph, target) && hasBrandParagraph(out)) out = stripBrandParagraph(out);
+    return out;
+  };
+  shot.prompt = stripField(shot.prompt, "composer");
+  shot.graphVideoPrompt = stripField(shot.graphVideoPrompt, "videoprompt");
+  shot.graphEditVideoPrompt = stripField(shot.graphEditVideoPrompt, "editvideoprompt");
+  // graphEditPrompt (the classic draft for the NEXT edit) is left verbatim —
+  // it seeds a future node, not a current consumer.
+  for (const n of shot.graphEditNodes ?? []) {
+    const next = stripField(n.prompt, { editprompt: n.id });
+    if (next !== n.prompt) n.prompt = next ?? "";
+  }
+}
+
+/** Tag-resolution views for migration: characters → products → custom refs,
+ *  deduped by name (first wins), mirroring the canvas `references` prop. */
+function graphRefViews(p: Production): GraphRefView[] {
+  const out: GraphRefView[] = [];
+  const seen = new Set<string>();
+  const push = (id: string, name: string, media?: "video" | "audio", artwork?: string): void => {
+    const key = (name ?? "").trim().toLowerCase();
+    if (!id || !key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ id, name: name.trim(), media, artwork });
+  };
+  for (const c of p.characters ?? []) push(c.id, c.name, undefined, c.artwork ?? c.imagePath);
+  for (const pr of p.products ?? []) push(pr.id, pr.name, undefined, pr.artwork ?? pr.imagePath);
+  for (const r of p.references ?? []) push(r.id, r.name, r.media, r.artwork ?? r.imagePath ?? r.mediaPath);
+  return out;
 }
 
 /** One-time field migration: the image gen node used to route its single

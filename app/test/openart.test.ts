@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
-import { OpenArtClient, videoRefsAssign } from "../src/main/openart.js";
+import { OpenArtClient, videoRefsAssign } from "../src/main/providers/openart.js";
 import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";

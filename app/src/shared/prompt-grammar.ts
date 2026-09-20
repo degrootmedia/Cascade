@@ -120,6 +120,13 @@ export function replaceRefTagAt(text: string, index: number, name: string): stri
 }
 
 // ---- Style / Brand identity paragraphs ------------------------------------
+//
+// LEGACY / EXTERNAL TEXT ONLY (master plan step 05). These parsers read the
+// serialized wire format — used by the one-time graph migration
+// (materialize.ts), the manifest/EDL export, and to normalize stored legacy
+// text. They must never DECIDE wiring: attachment is a graph edge
+// (shared/graph/render.ts isStyleAttached/isBrandAttached). Do not add new
+// call sites that derive live state from a stored prompt.
 
 /** The whole `Brand identity:` paragraph (leading or following a blank line). */
 export const BRAND_PARA_RE = /(?:^|\n\n)Brand identity: [^\n]*(?=\n\n|$)/;
@@ -162,18 +169,6 @@ export function addStyleParagraph(text: string, styleText: string): string {
 
 /** Alias for stripStyleParagraph (paragraph-scoped Style section). */
 export const removeStyleParagraph = stripStyleParagraph;
-
-/** Mirror a plugged prompt's leading `Style:` paragraph to the style node's
- *  live text — insert/replace it when a style is chosen, strip it for "None".
- *  Unplugged prompts are returned untouched, so a prompt that isn't wired to
- *  the style node keeps whatever it carries. This is the one place a style
- *  paragraph is rebuilt from the live selection; the style node is a pure
- *  passthrough, so every consumer (composer, video, edit nodes) mirrors the
- *  Design page through it. */
-export function mirrorStyleParagraph(text: string, styleText: string, plugged: boolean): string {
-  if (!plugged) return text;
-  return styleText ? addStyleParagraph(text, styleText) : stripStyleParagraph(text);
-}
 
 /** Split a prompt into its Style / content / Brand paragraphs. The first
  *  `Style:` and `Brand identity:` paragraphs become the boxes; everything

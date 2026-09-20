@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
-import { addRefTag, addStyleParagraph, composePromptBoxes, hasBrandParagraph, insertBrandParagraph, mirrorStyleParagraph, parsePromptBoxes, refTagNames, removeStyleParagraph, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
+import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
@@ -13,7 +13,7 @@ import { NodeGraphModal, VIDEO_PROMPT_DEFAULT, type GraphRef } from "./NodeGraph
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
-import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, brandClause, promptRefsForShot, shotStyleSelectValue, reorderRefs, uniqueRefName } from "./production/references.js";
+import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefs, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
@@ -28,6 +28,8 @@ import { StyleParamsForm } from "./production/style-params.js";
 import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
+import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
+import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -1445,50 +1447,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     });
   }
 
-  /** Step 3: pick one shot's render style (stores the style's stable id).
-   *  Only the style section of the prompt may change: on an auto-derived
-   *  prompt that happens naturally; on a manually edited prompt we swap just
-   *  its leading "Style:" paragraph and keep every other edit intact. */
+  /** Step 3: pick one shot's render style (stores the style's stable id and
+   *  syncs the stored graph's style edge). The prompt itself stays content-only
+   *  — the Style section renders from the plugged library entry on read, so
+   *  editing the style in Design reaches every consumer with no stored copy. */
   async function updateShotStyle(shotId: string, styleId: string) {
     if (!prod) return;
-    // "None": strip the style section entirely. On an auto-derived prompt we
-    // manualize it (with the Style paragraph removed) so the master style
-    // doesn't sneak back on the next derive — the equivalent of dragging the
-    // style link off in the node graph.
-    if (!styleId) {
-      const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      if (!target) return;
-      const base = target.promptManual && target.prompt?.trim()
-        ? target.prompt
-        : await window.cascade.getBoardPrompt(prod.meta.id, shotId).then((p) => p ?? "").catch(() => "");
-      const stripped = base.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").replace(/\n{3,}/g, "\n\n").trim();
-      const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
-        ...sc,
-        shots: sc.shots.map((s) => s.id === shotId ? { ...s, style: undefined, styleNone: true, prompt: stripped, promptManual: true } : s),
-      })) };
-      setProd(next);
-      // Keep the prompt cache in sync so the focused side panel / node graph
-      // can't resurrect the removed Style section from a stale cache entry.
-      promptCacheRef.current[shotId] = stripped;
-      if (promptShotId === shotId) setFocusedPrompt(stripped);
-      void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
-      return;
-    }
-    const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
+    const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!target) return;
+    const patch: Partial<ProductionShot> = { style: styleId || undefined, styleNone: !styleId };
+    if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", !!styleId);
+    else patch.graphStyleConnected = !!styleId; // pre-graph fallback
     const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
       ...sc,
-      shots: sc.shots.map((s) => {
-        if (s.id !== shotId) return s;
-        if (!(s.promptManual && s.prompt?.trim())) return { ...s, style: styleId || undefined, styleNone: false };
-        const para = styleText ? `Style: ${styleText}` : "";
-        const rest = s.prompt.replace(/(?:^|\n\n)Style:[\s\S]*?(?=\n\n|$)/, "").trim();
-        return { ...s, style: styleId || undefined, styleNone: false, prompt: para ? (rest ? `${para}\n\n${rest}` : para) : s.prompt };
-      }),
+      shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s),
     })) };
     setProd(next);
-    const changed = next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-    if (changed?.prompt != null) promptCacheRef.current[shotId] = changed.prompt;
-    if (promptShotId === shotId) setFocusedPrompt(changed?.prompt ?? "");
+    // Re-derive the focused prompt from the new selection (content-only cache).
+    if (promptShotId === shotId) {
+      const rerendered = renderShotPrompt(next, next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId)!, "composer");
+      promptCacheRef.current[shotId] = rerendered;
+      setFocusedPrompt(rerendered);
+    }
     void window.cascade.saveProduction(next).then(async () => {
       await refreshList();
       if (promptShotId === shotId) {
@@ -1498,65 +1478,27 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }).catch(() => {});
   }
 
-  /** Node-graph style picker: updates the shot's style field and, like the
-   *  classic board's style dropdown, rewrites the Style paragraph in any prompt
-   *  that is currently plugged — the connection itself is unchanged, only the
-   *  text is refreshed. Plugged state is tracked via graphStyleConnected flags
-   *  so switching to "None" removes the paragraph but keeps the edge. */
+  /** Node-graph style picker: same as the classic dropdown — selection + the
+   *  stored graph's style edge, never a pasted paragraph. */
   function setGraphStyle(shotId: string, styleId: string) {
     if (!prod) return;
-    const styleText = (prod.styles ?? []).find((st) => st.id === styleId)?.prompt.trim() ?? "";
     const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
-    // Use the latest prompt string (including unsaved tag drags) as the
-    // base, not the stale on-disk `target.prompt`. The prompt cache holds
-    // the most recent composed prompt for the focused shot (side panel or
-    // graph), and focusedPrompt is the live value for that shot.
-    const basePrompt = promptCacheRef.current[shotId] ?? target.prompt;
-    const isPlugged = (flag: boolean | undefined, cur: string | undefined) => flag ?? /^Style:/m.test(cur ?? "");
-    // Choosing a style rewrites the paragraph only when the edge is plugged;
-    // "None" strips it from any prompt that carries one, plugged or not — a
-    // leftover/detached edge must never keep the paragraph alive.
-    const rewritePlugged = (cur: string | undefined, plugged: boolean | undefined): string | undefined => {
-      if (cur == null) return cur;
-      if (!styleText) return /^Style:/m.test(cur) ? removeStyleParagraph(cur) : cur;
-      if (!isPlugged(plugged, cur)) return cur;
-      return addStyleParagraph(cur, styleText);
-    };
-    // For the image prompt we preserve the classic manual/auto distinction
-    let nextPrompt: string | undefined = basePrompt;
-    let nextManual = target.promptManual;
-    // If the base came from the cache (which is always a full prompt string
-    // with Style/Content/Brand), treat it as manual for the purpose of
-    // rewriting — otherwise a cached auto-derived prompt would be mistaken
-    // for non-manual and we'd create a prompt with only Style and no content.
-    const baseIsManual = target.promptManual || !!promptCacheRef.current[shotId];
-    if (baseIsManual && basePrompt?.trim() && (isPlugged(target.graphStyleConnected, basePrompt) || !styleText)) {
-      nextPrompt = styleText ? addStyleParagraph(basePrompt, styleText) : removeStyleParagraph(basePrompt);
-      nextManual = true;
-    } else if (!target.promptManual && target.graphStyleConnected && styleText) {
-      if (!/^Style:/m.test(basePrompt ?? "")) nextPrompt = addStyleParagraph(basePrompt ?? "", styleText);
-    }
-    const nextVideo = rewritePlugged(target.graphVideoPrompt, target.graphVideoStyleConnected);
-    const nextEdit = rewritePlugged(target.graphEditPrompt, target.graphEditStyleConnected);
     const patch: Partial<ProductionShot> = { style: styleId || undefined, styleNone: !styleId };
-    if (nextPrompt !== target.prompt) { patch.prompt = nextPrompt; patch.promptManual = nextManual; }
-    if (nextVideo !== target.graphVideoPrompt) patch.graphVideoPrompt = nextVideo;
-    if (nextEdit !== target.graphEditPrompt) patch.graphEditPrompt = nextEdit;
+    if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", !!styleId);
+    else patch.graphStyleConnected = !!styleId;
     saveField({
       scenes: prod.scenes.map((sc) => ({
         ...sc,
         shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s),
       })),
     });
-    if (nextPrompt !== basePrompt) {
-      // Keep both side-panel and graph prompt caches in sync — the graph's
-      // prompt is also `focusedPrompt` (shared), so either shot being
-      // focused should update the live prompt.
-      if (promptShotId === shotId || graphShotId === shotId) {
-        setFocusedPrompt(nextPrompt ?? "");
-      }
-      if (nextPrompt != null) promptCacheRef.current[shotId] = nextPrompt;
+    // Refresh the shared live prompt (the modal reads it as its composer value).
+    const nextShot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (nextShot) {
+      const rerendered = renderShotPrompt(prod, { ...nextShot, ...patch }, "composer");
+      promptCacheRef.current[shotId] = rerendered;
+      if (promptShotId === shotId || graphShotId === shotId) setFocusedPrompt(rerendered);
     }
   }
 
@@ -2169,7 +2111,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           ? cur.graphImageGens?.[cur.graphImageGenIndex ?? 0]?.path
           : refSource?.imagePath;
       const videoParams = params ?? cur?.graphVideoParams;
-      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: cur?.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [], ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
+      // Render the video prompt from the plugged references at submit time.
+      const videoPrompt = cur
+        ? renderPromptText(cur.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, promptRefsFor(prod, cur, "videoprompt"))
+        : VIDEO_PROMPT_DEFAULT;
+      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [], ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2200,10 +2146,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       } else sourcePath = cur?.videoPath;
       if (!sourcePath) { setErr("The edit-video node needs a source video — wire a clip into its source socket or generate one first."); return; }
       const editParams = params ?? cur?.graphEditVideoParams;
-      // References are cited by the prompt node's @[name] tags and resolved
-      // main-side inside the provider (like the video node), so no refIds here.
+      // Render the edit-video prompt from the plugged references at submit time.
+      const editVideoPrompt = cur ? renderShotPrompt(prod, cur, "editvideoprompt") : prompt;
       const next = await window.cascade.generateEditVideoNode(prod.meta.id, shotId, {
-        prompt,
+        prompt: editVideoPrompt,
         model,
         resolution: cur?.graphEditVideoResolution ?? "",
         sourcePath,
@@ -2236,12 +2182,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphEditNodes ?? []).find((n) => n.id === nodeId);
       const editParams = params ?? node?.params;
-      // Rebuild the Style paragraph from the live style at submit time — the
-      // style node is a passthrough, so an edit node must not send the style
-      // text that was baked when it was wired up.
-      const styleValue = cur ? shotStyleSelectValue(cur, prod) : "";
-      const styleText = (prod.styles ?? []).find((s) => s.id === styleValue)?.prompt.trim() ?? "";
-      const editPrompt = mirrorStyleParagraph(node?.prompt ?? "", styleText, node?.styleConnected ?? /^Style:/m.test(node?.prompt ?? ""));
+      // Render the edit prompt from the plugged references at submit time —
+      // the stored node prompt is content-only, so the live style/brand text
+      // is always current (no baked copy from connect time).
+      const editPrompt = cur ? renderShotPrompt(prod, cur, { editprompt: nodeId }) : (node?.prompt ?? "");
       const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: editPrompt, model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
       setProd(next);
       bustOne(shotId);
@@ -2332,24 +2276,19 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }
 
   async function setBrandForShot(shotId: string, include: boolean) {
-    if (!prod) return;
-    const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    // Read the freshest snapshot (prodRef), not the render closure: this is now
+    // also called from a node-graph connect/detach, which saves the graph edge
+    // just before it, and a stale `prod` would drop that write.
+    const current = prodRef.current;
+    if (!current) return;
+    const target = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
-    const basePrompt = promptCacheRef.current[shotId] ?? target.prompt;
-    let prompt = basePrompt?.trim() ?? "";
-    // Manual prompts carry their own Brand paragraph: physically add/remove
-    // it so the toggle is real — OFF strips it, ON inserts the freshly
-    // generated clause (picking up current wording). Auto-derived prompts
-    // handle the flag at derive time.
-    if (target.promptManual && prompt) {
-      if (!include) {
-        prompt = stripBrandParagraph(prompt);
-      } else if (!hasBrandParagraph(prompt)) {
-        const clause = brandClause(prod);
-        if (clause) prompt = insertBrandParagraph(prompt, clause);
-      }
-    }
-    const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, includeBrandIdentity: include, ...(target.promptManual ? { prompt } : {}) } : s) })) };
+    // The plug is the stored graph's brand edge (step 04); the clause renders
+    // from the brand set on read, so no paragraph is ever pasted into the
+    // prompt. Graph-less shots keep the legacy shot-level flag.
+    const patch: Partial<ProductionShot> = { includeBrandIdentity: include };
+    if (target.graph) patch.graph = setBrandEdge(target.graph, "composer", include);
+    const next: Production = { ...current, scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) };
     setProd(next);
     try {
       await window.cascade.saveProduction(next);
@@ -2393,7 +2332,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     setVideoBusyIds((ids) => [...ids, shotId]);
     setErr(null);
     try {
-      const next = await window.cascade.generateVideo(prod.meta.id, shotId, opts);
+      // Render style/brand from the plugged references at submit time (the
+      // stored prompt is content-only) — slice 04's single renderer.
+      const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+      const prompt = cur
+        ? renderPromptText(opts.prompt ?? cur.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, promptRefsFor(prod, cur, "videoprompt"))
+        : opts.prompt;
+      const next = await window.cascade.generateVideo(prod.meta.id, shotId, { ...opts, prompt });
       setProd(next);
       void refreshList();
     } catch (e) {
@@ -2510,6 +2455,31 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     const current = prodRef.current;
     if (!current || !rel) return;
     apply(window.cascade.saveGenerationAsReference(current.meta.id, shotId, rel));
+  }
+
+  /** Same copy as `saveAsReference`, but resolves the created reference so the
+   *  node graph can place its node and wire it to the socket it was dropped on. */
+  async function saveGenerationAsReferenceRef(shotId: string, rel: string): Promise<GraphRef | null> {
+    const current = prodRef.current;
+    if (!current || !rel) return null;
+    try {
+      const next = await window.cascade.saveGenerationAsReference(current.meta.id, shotId, rel);
+      applySnapshot(next);
+      void refreshList();
+      const refs = next.references ?? [];
+      const ref = refs[refs.length - 1];
+      if (!ref) return null;
+      return {
+        id: ref.id,
+        name: ref.name,
+        artwork: ref.imagePath ? cascadeMedia(next.meta.id, ref.imagePath) : ref.artwork ?? "",
+        media: ref.media,
+        mediaPath: ref.mediaPath,
+      };
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      return null;
+    }
   }
 
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
@@ -3382,7 +3352,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
                   onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
+                  onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
+                  onRenameRef={(id, name) => void updateRef(id, name)}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={() => { if (graphShotId) pipeImageToVideo(graphShotId); }}
                   onPipeEditToVideo={(nodeId) => { if (graphShotId) pipeEditToVideo(graphShotId, nodeId); }}

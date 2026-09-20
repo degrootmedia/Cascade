@@ -8,6 +8,78 @@ import { agentChannels } from "./ipc-channels/agents.js";
 import { productionChannels } from "./ipc-channels/production.js";
 import { ledgerChannels } from "./ipc-channels/ledger.js";
 import { modelCustomizerChannels } from "./ipc-channels/model-customizer.js";
+import { todoChannels } from "./ipc-channels/todos.js";
+import { goalChannels } from "./ipc-channels/goals.js";
+import type {
+  GenParams,
+  GraphLayout,
+  Graph,
+  GraphEditNode,
+  GraphGenItem,
+  TweenBlock,
+  PendingImageGen,
+} from "./ipc/graph.js";
+import type { SessionTasks } from "./ipc/todos.js";
+import type { SessionGoal, SessionGoalPatch } from "./ipc/goal.js";
+import type { SessionSearchHit } from "./ipc/search.js";
+import type { LedgerView, ExpensePriceRule } from "./ipc/ledger.js";
+import type {
+  ProductionMeta,
+  ProductionScene,
+  ProductionShot,
+  ProductionStyle,
+  ProductionModel,
+  ProductionAssembly,
+  Production,
+  CharacterSheet,
+  CharacterSheetBuilder,
+  ProductRef,
+  CustomRef,
+  ReferenceCategory,
+  SuggestedReference,
+  OpenArtBoardConfig,
+  ImageGenAspectRatio,
+  ReferenceImageGenOptions,
+  CharacterSheetView,
+  CharacterSheetGenOptions,
+  Model3dViewType,
+  Model3dViewImage,
+  Model3dGenOptions,
+  StoryboardPdfSettings,
+  StoryboardPdfExportOptions,
+  StoryboardPdfExportResult,
+  ProductionEvent,
+} from "./ipc/production.js";
+import type {
+  MediaProviderId,
+  MediaProviderInfo,
+  HiggsfieldCliStatus,
+  OpenArtCliStatus,
+  ModelSurface,
+  OpenArtModelChoice,
+  MediaDefaultChoice,
+  MediaDefaultCtx,
+  ModelParamExposure,
+  ModelParamDefaultValue,
+  VideoGenOptions,
+  GenerationCostRequest,
+  VideoModelOptions,
+  ImageModelOptions,
+  CliModelSchema,
+  MediaModelLadder,
+  ModelProbeResult,
+} from "./ipc/media.js";
+
+// Domain type modules (step 06 T1). Re-exported here so every existing
+// `shared/ipc.js` import path keeps working.
+export * from "./ipc/goal.js";
+export * from "./ipc/graph.js";
+export * from "./ipc/ledger.js";
+export * from "./ipc/media.js";
+export * from "./ipc/production.js";
+export * from "./ipc/search.js";
+export * from "./ipc/todos.js";
+
 
 export interface ApprovalRequestIpc {
   id: number;
@@ -124,64 +196,6 @@ export interface McpStatusIpc {
   error?: string;
 }
 
-/** Which vendor serves image/video generation (global setting).
- *  `higgsfield-cli` is the Higgsfield account driven through the local
- *  `higgsfield` CLI binary; its model ids are namespaced
- *  `higgsfield-cli:<job_type>`. Legacy `higgsfield:…` picks (removed MCP
- *  transport) route to the CLI, which accepts the old prefix as an alias.
- *  `openart-cli` is likewise the OpenArt account via the local `openart`
- *  CLI binary (`openart-cli:<id>`); it cannot send end frames or multiple
- *  video references, so those requests fail loudly with an MCP redirect. */
-export type MediaProviderId = "openart" | "higgsfield-cli" | "openart-cli";
-
-/** Which transport the media-provider pickers show: MCP servers or CLI binaries. */
-export type ProviderTransportMode = "mcp" | "cli";
-
-/** Single shared predicate for the transport toggle: the `-cli` suffix is the
- *  source of truth — CLI ids show in "cli" mode, the rest in "mcp" mode. */
-export function isProviderVisible(id: MediaProviderId, mode: ProviderTransportMode): boolean {
-  return mode === "cli" ? id.endsWith("-cli") : !id.endsWith("-cli");
-}
-
-/** Canonicalize a per-style model/resolution override for generation:
- *  absent, blank, or "auto" inherits the production default (sent as
- *  undefined — the provider treats undefined and "auto" alike). */
-export function styleFrameOverride(value: string | undefined): string | undefined {
-  return value && value !== "auto" ? value : undefined;
-}
-
-/** One generation vendor for the Settings picker. */
-export interface MediaProviderInfo {
-  id: MediaProviderId;
-  displayName: string;
-  /** Whether the vendor's generation tools are currently connected. */
-  available: boolean;
-}
-
-/** The Higgsfield CLI transport status (Settings → Media generation). */
-export interface HiggsfieldCliStatus {
-  /** Resolved binary path, or null when no `higgsfield` binary was found. */
-  binary: string | null;
-  /** `higgsfield version` output, or null when the binary is missing. */
-  version: string | null;
-  /** Whether `account status` succeeds (signed in with a workspace). */
-  authenticated: boolean;
-  /** The signed-in account email, when known. */
-  account: string | null;
-}
-
-/** The OpenArt CLI transport status (Settings → Media generation). */
-export interface OpenArtCliStatus {
-  /** Resolved binary path, or null when no `openart` binary was found. */
-  binary: string | null;
-  /** `openart version` output, or null when the binary is missing. */
-  version: string | null;
-  /** Whether `account` succeeds (signed in). */
-  authenticated: boolean;
-  /** The signed-in account email, when known. */
-  account: string | null;
-}
-
 export interface AgentMeta {
   id: string;
   name: string;
@@ -203,1164 +217,6 @@ export interface AgentDetail {
 /* ---------- Production Assistant ---------- */
 
 /** Summary of a saved production (sidebar/list payload). */
-export interface ProductionMeta {
-  id: string;
-  name: string;
-  /** Absolute path of the production's own folder. */
-  folder: string;
-  createdAt: string;
-  updatedAt: string;
-  /** Highest pipeline step that has produced output (0 = nothing run yet). */
-  stepDone: number;
-  shotCount: number;
-}
-
-/** One shot row: the smallest Audio/Visual unit. */
-/** Step 3 node graph: saved canvas state for one shot's graph, so it reopens
- *  the way the user left it. */
-export interface GraphLayout {
-  /** Node positions keyed by graph node id (ref/composer/style/brand/output). */
-  positions?: Record<string, { x: number; y: number }>;
-  /** Node sizes keyed by graph node id (the frame output — the generation
-   *  nodes size themselves from their content). */
-  sizes?: Record<string, { width: number; height: number }>;
-  /** Canvas pan/zoom as last left by the user. */
-  viewport?: { x: number; y: number; zoom: number };
-}
-
-/** One node-graph edit-image node. A shot may hold several and daisy-chain
- *  them (an edit node's output feeds another's source). The list is the source
- *  of truth; the legacy flat `graphEdit*` fields migrate into `edit0`. */
-export interface GraphEditNode {
-  /** Stable identity within the shot: "edit0", "edit1", …. */
-  id: string;
-  /** The node's own edit instructions (its `editprompt` node's text). */
-  prompt: string;
-  /** Stored edits (newest first) + the selected index. */
-  gens?: GraphGenItem[];
-  genIndex?: number;
-  /** What feeds this node's source input. Absent = the shot's current frame. */
-  source?:
-    | { kind: "imagegen" }
-    | { kind: "editgen"; nodeId: string }
-    | { kind: "ref"; refId: string };
-  /** Whether the style node is plugged into this node's prompt node. */
-  styleConnected?: boolean;
-  /** The node's own model/resolution picks (per-node, win over the global
-   *  media-default; unset falls back to it). */
-  model?: string;
-  resolution?: string;
-  /** Schema-driven advanced/variant params for this edit node (keyed by
-   *  canonical flag). Optional/additive. */
-  params?: GenParams;
-}
-
-export interface ProductionShot {
-  /** Stable identity — survives renumbering and reordering. */
-  id: string;
-  /** Displayed 4-digit number ("0100"), derived, never the identity. */
-  number: string;
-  /** Column A: dialogue, VO, or SFX. */
-  audio: string;
-  /** Column B: what we see. */
-  visual: string;
-  /** Workspace-relative artwork path once boards exist. */
-  artwork?: string;
-  /** Previous frames for this shot (workspace-relative paths), newest first,
-   * capped at BOARD_HISTORY_CAP. The active frame is always `artwork`. */
-  artworkHistory?: string[];
-  /** Step 4: workspace-relative path to a generated video for this shot. When
-   *  present, the animatic timeline plays it for this shot's duration window. */
-  videoPath?: string;
-  /** Step 4: mute the clip's own embedded audio in the animatic preview
-   *  (speaker button on its timeline block). VO and music are unaffected. */
-  muted?: boolean;
-  /** Step 4: planned screen time in seconds (animatic). */
-  durationSec?: number;
-  /** Optional per-shot render-style override: the id of a ProductionStyle
-   *  from the Step 2 set (legacy productions may store raw prompt text —
-   *  resolved by name/prompt at generation time). When absent, the master
-   *  style (styles[0]) applies. */
-  style?: string;
-  /** True when the user picked "None" for this shot's render style: the Style
-   *  paragraph is suppressed entirely, even though a master style exists. */
-  styleNone?: boolean;
-  /** Character/product reference ids explicitly attached to this frame in
-   *  Step 3 — beyond those auto-matched by name from the shot's text. */
-  refIds?: string[];
-  /** Auto-matched (by name) character/product ids the user unchecked for this
-   *  frame. The entry stays visible so it can be re-checked later; excluded
-   *  ids are skipped at generation/export time too. */
-  refExcluded?: string[];
-  /** The board generation prompt, editable in Step 3. When empty/absent the
-   *  prompt is derived from the master/per-shot style, brand, and references;
-   *  when set, this exact text drives the shot's generation. */
-  prompt?: string;
-  /** True once the user has edited `prompt` by hand: a manual prompt survives
-   *  script re-ingestion and design changes (it never auto-regenerates). */
-  promptManual?: boolean;
-  /** Whether the generated prompt includes the production brand identity.
-   *  Opt-in: brand identity is excluded by default and only appears when this
-   *  is explicitly true. */
-  includeBrandIdentity?: boolean;
-  /** Per-reference prompt overrides for this frame, keyed by reference id
-   *  (character, product, or custom reference). A non-blank entry replaces
-   *  that reference's Design-page description in this shot's prompts; an
-   *  empty/absent entry falls back to the Design-page text. */
-  refPromptOverrides?: Record<string, string>;
-  /** Step 3 node graph: last saved node positions + canvas viewport. */
-  graphLayout?: GraphLayout;
-  /** Step 3 node graph: stored outputs of the image generation node (newest
-   *  first), plus the cycled selection index. */
-  graphImageGens?: GraphGenItem[];
-graphImageGenIndex?: number;
-  /** Schema-driven advanced/variant params for the image gen node (keyed by
-   *  canonical flag). Optional/additive. */
-  graphImageParams?: GenParams;
-  /** Node graph video generation node: stored clips (newest first) + index. */
-  graphVideoGens?: GraphGenItem[];
-  graphVideoGenIndex?: number;
-  /** The video-prompt node's text (motion prompt for the video gen node). */
-  graphVideoPrompt?: string;
-  /** Per-shot video-gen selections (the classic modal and the graph's video
-   *  node both read/write them; they win over the global media-default, so a
-   *  change in one shot never propagates to the others). */
-  graphVideoModel?: string;
-  graphVideoResolution?: string;
-  graphVideoDurationSec?: number;
-  /** Schema-driven advanced/variant params for the video gen node (keyed by
-   *  canonical flag). Optional/additive — absent on old documents. */
-  graphVideoParams?: GenParams;
-  /** Node graph edit-image nodes (zero or more, daisy-chainable). The list is
-   *  the source of truth; the legacy flat `graphEdit*` fields below migrate
-   *  into a single `edit0` entry on load. */
-  graphEditNodes?: GraphEditNode[];
-  /** Which edit node feeds the output when `graphOutputSource === "editgen"`. */
-  graphOutputEditNodeId?: string;
-  /** Which edit node feeds the video node's image input when
-   *  `graphEditToVideo` is set. */
-  graphVideoSourceEditNodeId?: string;
-  /** @deprecated Migrated into `graphEditNodes[0].gens`. */
-  graphEditGens?: GraphGenItem[];
-  /** @deprecated Migrated into `graphEditNodes[0].genIndex`. */
-  graphEditGenIndex?: number;
-  /** The classic Edit-frame popup's draft prompt. Seeds `graphEditNodes[0]`
-   *  on migration; afterwards it is the text for the NEXT classic edit, which
-   *  appends a new node to the chain. */
-  graphEditPrompt?: string;
-  /** @deprecated Migrated into `graphEditNodes[0].source`. */
-  graphEditImageSource?: boolean;
-  /** @deprecated Migrated into `graphEditNodes[0].source`. */
-  graphEditSourceRefId?: string;
-  /** Reference ids feeding the video gen node's extra reference inputs (beyond
-   *  the main image pipe), in connection order. Only image refs connect. */
-  graphVideoRefIds?: string[];
-  /** Whether the image generation node's output also feeds the video node's
-   *  image input. Independent of the output feed — the image node can pipe to
-   *  the video node AND the output simultaneously. */
-  graphImageToVideo?: boolean;
-  /** Whether an edit-image node's output feeds the video node's image input
-   *  (the frame the clip is animated from). Which node is named by
-   *  `graphVideoSourceEditNodeId`. Mutually exclusive with `graphImageToVideo`
-   *  — the video node's source input accepts any image output, and connecting
-   *  one replaces the other. */
-  graphEditToVideo?: boolean;
-  /** A reference feeding the video node's image input (the frame the clip is
-   *  animated from). Mutually exclusive with `graphImageToVideo` /
-   *  `graphEditToVideo` — the source input accepts one image at a time. */
-  graphVideoSourceRefId?: string;
-  /** Keyframe source ids wired into the in-betweener node's keyframe sockets,
-   *  in timeline order (2–5). Each is a bare reference id OR a generation-node
-   *  sentinel (`TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN`), so keyframes can be
-   *  reference images, the image node's selected frame, or the edit node's
-   *  selected edit. Each adjacent pair forms an action block (see
-   *  `graphTweenBlocks`). */
-  graphTweenRefIds?: string[];
-  /** Action blocks derived from `graphTweenRefIds` (one per adjacent pair).
-   *  Prompts and per-block generation history survive re-derivation when
-   *  keyframes are reordered. */
-  graphTweenBlocks?: TweenBlock[];
-  /** The in-betweener node's video model id ("auto" when Cascade picks). */
-  graphTweenModel?: string;
-  /** The in-betweener node's output resolution label (e.g. "1080p"). */
-  graphTweenResolution?: string;
-  /** Node-graph edit-video node: stored edited clips (newest first) + index. */
-  graphEditVideoGens?: GraphGenItem[];
-  graphEditVideoGenIndex?: number;
-  /** The edit-video node's prompt. */
-  graphEditVideoPrompt?: string;
-  /** The edit-video node's model (a video-edit model). */
-  graphEditVideoModel?: string;
-  graphEditVideoResolution?: string;
-  /** Schema-driven advanced params for the edit-video node. */
-  graphEditVideoParams?: GenParams;
-  /** Reference ids feeding the edit-video node (beyond the mandatory source). */
-  graphEditVideoRefIds?: string[];
-  /** A video reference feeding the edit-video source input (the video to
-   *  edit). Absent = the shot's video, or a clip piped from the video node
-   *  (`graphVideoToEditVideo`). */
-  graphEditVideoSourceRefId?: string;
-  /** Whether the video generation node's output feeds the edit-video source. */
-  graphVideoToEditVideo?: boolean;
-  /** Schema-driven advanced/variant params for the in-betweener (keyed by
-   *  canonical flag; `aspect_ratio` lives here). Optional/additive. */
-  graphTweenParams?: GenParams;
-  /** Workspace-relative path of the last stitched tween output (the single
-   *  continuous clip previewed by the output node and the animatic). */
-  graphTweenOutput?: string;
-  /** True when the stitched preview clip was re-encoded (block codecs
-   *  differed, so lossless `-c copy` concat failed). The assembly package
-   *  always uses the original per-block clips regardless. */
-  graphTweenReencoded?: boolean;
-  /** Whether the style node is plugged into the image prompt (composer). When
-   *  false the Style paragraph is absent from that prompt but the plug is
-   *  remembered — switching the style to None removes the paragraph without
-   *  disconnecting. */
-  graphStyleConnected?: boolean;
-  /** Whether the style node is plugged into the video-prompt node. */
-  graphVideoStyleConnected?: boolean;
-  /** @deprecated Migrated into the edit node's `styleConnected`. */
-  graphEditStyleConnected?: boolean;
-  /** Which node is piped into the output (becomes the shot's primary
-   *  artwork/videoPath): an image/video generation node, the in-betweener
-   *  node, or a reference. */
-  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "editvideo" | "tween" | "ref";
-  /** The reference feeding the output when `graphOutputSource === "ref"`. */
-  graphOutputRefId?: string;
-  /** One-time marker: classic generations were moved into the gen nodes. */
-  graphMigrated?: boolean;
-  /** An OpenArt frame job that outlived the generating call (timed out or the
-   *  finished image couldn't be downloaded). The job keeps rendering
-   *  server-side, so the frame can be reclaimed later instead of re-paid.
-   *  Cleared when a fresh generation supersedes it or the recheck recovers it. */
-  pendingImageGen?: PendingImageGen;
-}
-
-/** In-betweener keyframe source sentinels that read a generation node's output
- *  instead of a production reference's artwork. They are stored in
- *  `graphTweenRefIds` (and `TweenBlock.startRefId`/`endRefId`) alongside bare
- *  reference ids — a reference id (base36 timestamp + random suffix, see
- *  `store.newId`) can never equal these node ids, so the two are
- *  unambiguous. The image node is structural and always present; each edit
- *  node is addressed as `editgen:<nodeId>` (the bare `"editgen"` is the legacy
- *  single-node form migrated to `editgen:edit0`). */
-export const TWEEN_KEY_IMGGEN = "imagegen";
-export const TWEEN_KEY_EDITGEN = "editgen";
-export const TWEEN_KEY_EDITGEN_PREFIX = "editgen:";
-
-/** The in-betweener keyframe source id for an edit node. */
-export function editNodeKeyframe(nodeId: string): string {
-  return `${TWEEN_KEY_EDITGEN_PREFIX}${nodeId}`;
-}
-
-/** The edit node id a keyframe source refers to, or null. Handles the legacy
- *  bare `"editgen"` as `"edit0"` so pre-migration wiring keeps resolving. */
-export function parseEditNodeKeyframe(id: string): string | null {
-  if (id === TWEEN_KEY_EDITGEN) return "edit0";
-  return id.startsWith(TWEEN_KEY_EDITGEN_PREFIX) ? id.slice(TWEEN_KEY_EDITGEN_PREFIX.length) : null;
-}
-
-/** True when an in-betweener keyframe source id refers to a generation node's
- *  output rather than a production reference. */
-export function isTweenGenKeyframe(id: string): boolean {
-  return id === TWEEN_KEY_IMGGEN || id === TWEEN_KEY_EDITGEN || id.startsWith(TWEEN_KEY_EDITGEN_PREFIX);
-}
-
-/** One stored output of a node-graph generation node. */
-export interface GraphGenItem {
-  /** Workspace-relative path (boards JPEG for frames, videos file for clips). */
-  path: string;
-  /** The prompt used for this generation. */
-  prompt: string;
-  /** The model id used ("auto" when Cascade picked). */
-  model: string;
-  /** ISO timestamp. */
-  at: string;
-}
-
-/** One action block on the in-betweener timeline: a start keyframe, an end
- *  keyframe, and the action prompt describing the motion between them. Each
- *  block generates its own clip (start→end interpolation); the selected clips
- *  stitch into the shot's continuous output. History lives on the block so the
- *  per-block dropdown (Keyframes + previous generations) is independent. */
-export interface TweenBlock {
-  /** Stable identity ("tw0", "tw1", … in keyframe order). */
-  id: string;
-  /** Keyframe source id of the start keyframe (reference id or a
-   *  `TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN` sentinel). */
-  startRefId: string;
-  /** Keyframe source id of the end keyframe (reference id or a
-   *  `TWEEN_KEY_IMGGEN` / `TWEEN_KEY_EDITGEN` sentinel). */
-  endRefId: string;
-  /** Action prompt describing the motion from start to end. */
-  prompt: string;
-  /** Timeline position of the block start in seconds (1s grid). */
-  startSec: number;
-  /** Block length in seconds (1–15, 1s grid). */
-  durationSec: number;
-  /** Generated clips for this block (newest first). */
-  gens?: GraphGenItem[];
-  /** Selected generation index (0 = newest). Absent = show keyframes. */
-  genIndex?: number;
-}
-
-/** An OpenArt async image job that outlived the generating call — the wait
- *  timed out or the finished image couldn't be downloaded, but the job keeps
- *  rendering server-side. Kept on the shot so the finished frame can be
- *  reclaimed (recheck + download) instead of paying for a second generation. */
-export interface PendingImageGen {
-  /** The async job id to re-poll (`openart_creation_get`/`wait`). */
-  historyId?: string;
-  /** Direct result URL to re-download when the submission returned one
-   *  (no historyId) and the first download failed. */
-  url?: string;
-  /** The prompt this job was submitted with. */
-  prompt: string;
-  /** The model id used ("auto" when Cascade picked). */
-  model: string;
-  /** The resolution the job was submitted at — kept so a reclaimed frame can be
-   *  billed to the ledger exactly as the original generation would have been. */
-  resolution?: string;
-  /** The aspect ratio the job was submitted at (same purpose as resolution). */
-  aspectRatio?: string;
-  /** The quality tier the job was submitted at (same purpose as resolution). */
-  quality?: string;
-  /** Schema-driven options the job was submitted with (same purpose as
-   *  resolution) — lets a reclaimed frame bill exactly like the original. */
-  params?: Record<string, string | number | boolean | string[]>;
-  /** ISO timestamp of when the job was orphaned. */
-  at: string;
-}
-
-export interface ProductionScene {
-  /** Scene ordinal 1..N (display only). */
-  number: number;
-  title: string;
-  shots: ProductionShot[];
-}
-
-/** Populated by Step 2 (later milestone). */
-export interface CharacterSheet {
-  id: string;
-  name: string;
-  /** Canonical descriptor prepended to every prompt using this character. */
-  key: string;
-  /** Reference image (data URL) attached in Step 2. */
-  artwork?: string;
-  /** Workspace-relative path of the reference image on disk (the modern
-   *  storage — images live in referencesDir, not as inline data URLs). */
-  imagePath?: string;
-  /** Step 2 character builder: the last description + generation settings used
-   *  for this character's sheet, so the builder panel can recall them. Re-running
-   *  the builder overwrites — no history is kept. */
-  builder?: CharacterSheetBuilder;
-}
-
-/** The character builder's last-used form state for one character. */
-export interface CharacterSheetBuilder {
-  /** The character description (as typed/refined) that produced the sheet. */
-  description: string;
-  /** View layout of the last sheet (front, or front + back). */
-  view: CharacterSheetView;
-  /** OpenArt model id used ("auto" when Cascade picked). */
-  model: string;
-  /** Output resolution bucket used. */
-  resolution: string;
-  /** Schema-driven model options used (absent = vendor defaults). */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** A product whose look must stay consistent (label, packaging, hero item). */
-export interface ProductRef {
-  id: string;
-  name: string;
-  /** Reference image (data URL) attached in Step 2. */
-  artwork?: string;
-  /** Workspace-relative path of the reference image on disk. */
-  imagePath?: string;
-}
-
-/** A user-added reference (material, texture, mood, hero prop) that must be
- *  applied to specific shots. Created in Step 2; associated to shots in Step 3. */
-export interface CustomRef {
-  /** Stable identity. */
-  id: string;
-  /** User label, e.g. "Gondola Interior". */
-  name: string;
-  /** Reference image (data URL) attached in Step 2. Legacy storage — modern
-   *  references keep their image in `imagePath` instead. */
-  artwork?: string;
-  /** Workspace-relative path of the reference image on disk (referencesDir). */
-  imagePath?: string;
-  /** Non-image media kind when the reference is a dropped video/audio file. */
-  media?: "video" | "audio";
-  /** Workspace-relative path of the dropped video/audio file (on disk, not in
-   *  the JSON — data URLs are only used for images). */
-  mediaPath?: string;
-  /** Shot ids this reference applies to. Empty until toggled on specific shots. */
-  shotIds?: string[];
-  /** User-created category; absent means uncategorized. */
-  categoryId?: string;
-  /** Style-only override: auto-attaches with a style-only clause. */
-  styleOnly?: boolean;
-}
-
-export interface ReferenceCategory {
-  id: string;
-  name: string;
-  /** "style" refs auto-attach to every submission with a style-only clause. */
-  kind?: "content" | "style";
-}
-
-/** A character or prop found during ingest, awaiting explicit user approval. */
-export interface SuggestedReference {
-  id: string;
-  name: string;
-  kind: "character" | "product";
-  key?: string;
-}
-
-/** OpenArt generation choices made on the Step 3 board controls. */
-export interface OpenArtBoardConfig {
-  /** OpenArt model id, or "auto" for Cascade to pick per run. */
-  model: string;
-  /** Output resolution bucket fed to the generate tool's sizing param. */
-  resolution: "1k" | "2k" | "4k";
-  /** Quality tier fed to the generate tool's quality param (Higgsfield models
-   *  that declare one, e.g. Seedream basic/high). Omitted when the model
-   *  declares no quality options — the vendor default then applies. */
-  quality?: string;
-  /**
-   * Per-model, schema-driven option values keyed by canonical flag name
-   * (see `CliModelSchema`). Optional and additive — old configs load with
-   * `params` undefined and unknown keys from newer schemas are ignored by
-   * older readers. The generic arg builder drops values the active model's
-   * schema doesn't allow, so switching models never carries stale keys
-   * into the next submission.
-   */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** One named visual style in the Step 2 style set. A production keeps up to 5.
- *  The first entry is the master/fallback style; the named styles populate the
- *  per-shot style dropdown in Storyboard (Step 3). */
-export interface ProductionStyle {
-  /** Stable identity. */
-  id: string;
-  /** 1-based display position (1..5). */
-  index: number;
-  /** Short human label appended after the number (e.g. "Heroic 3D"). */
-  name: string;
-  /** The full generation prompt for this style. */
-  prompt: string;
-  /** Workspace-relative path of the style frame (the look anchor reused on
-   *  every shot that resolves to this style). Absent = text-only behavior. */
-  imagePath?: string;
-  /** The seed reused for the board (defaults to the production lookSeed). */
-  seed?: number;
-  /** How the frame was authored — the UI only auto-regenerates generated frames. */
-  frameSource?: "upload" | "generated" | "reference" | "anchor";
-  /** Per-style image-model override for style-frame generation. Absent (or
-   *  "auto") = inherit the production default (`prod.openArt`). */
-  model?: string;
-  /** Per-style resolution override for style-frame generation. Absent =
-   *  inherit the production default. */
-  resolution?: "1k" | "2k" | "4k";
-  /** Per-style schema-driven model options (variant, seed, …) for
-   *  style-frame generation. Absent/empty = vendor defaults. */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** The generation surfaces a model can be offered on. Each picker filters by
- *  its own surface key (see `modelOnSurface`); the dev Model Customizer lets
- *  the user assign them per model.
- *
- *  Surfaces are deliberately coarse — every picker that should share a model
- *  pool shares a key:
- *  - `image:generate` — Step 3 master picker, generate-image node, Step 2
- *    reference generation, character sheets, and style-frame generation (one
- *    image-generation pool).
- *  - `image:edit` — classic edit-frame popup and the node-graph edit-image node.
- *  - `video:generate` — classic video modal and the node-graph video node.
- *  - `video:tween` — in-betweener timeline (opt-in end-frame declaration).
- *  - `video:editnode` — node-graph edit-video node. */
-export type ModelSurface =
-  | "image:generate" // image generation: master board / node / references / characters / style frames
-  | "image:edit"     // image editing: classic edit popup + edit-image node
-  | "video:generate" // video generation: classic video modal + video node
-  | "video:tween"    // in-betweener timeline
-  | "video:editnode"; // node-graph edit-video node
-
-/** Every surface key, in display order. */
-export const MODEL_SURFACES: readonly ModelSurface[] = [
-  "image:generate", "image:edit", "video:generate", "video:tween", "video:editnode",
-];
-
-/** Legacy surface keys from before surfaces were collapsed into pools. Each
- *  maps to the single surface that now owns its pickers. */
-const LEGACY_MODEL_SURFACES: Record<string, ModelSurface> = {
-  "image:master": "image:generate",
-  "image:node": "image:generate",
-  "image:reference": "image:generate",
-  "image:character": "image:generate",
-  "image:edit": "image:edit",
-  "image:editnode": "image:edit",
-  "video:modal": "video:generate",
-  "video:node": "video:generate",
-  "video:tween": "video:tween",
-  "video:editnode": "video:editnode",
-};
-
-/** Coerce a stored/legacy surface list to the current keys, dropping unknowns.
- *  The single home for surface-key migration (settings read/write and the
- *  main-side surface application both go through here). */
-export function normalizeModelSurfaces(list: unknown): ModelSurface[] {
-  if (!Array.isArray(list)) return [];
-  const out = new Set<ModelSurface>();
-  for (const raw of list) {
-    const key = String(raw);
-    const mapped = LEGACY_MODEL_SURFACES[key] ?? (MODEL_SURFACES.includes(key as ModelSurface) ? (key as ModelSurface) : null);
-    if (mapped) out.add(mapped);
-  }
-  return [...out];
-}
-
-/** Whether a model is offered on a surface. Undefined/absent `surfaces` means
- *  "everywhere it can go" (the default until the user restricts it). */
-export function modelOnSurface(
-  m: Pick<OpenArtModelChoice, "surfaces">,
-  surface: ModelSurface
-): boolean {
-  return !m.surfaces || m.surfaces.includes(surface);
-}
-
-/** An OpenArt model surfaced in the Step 3 model dropdown. */
-export interface OpenArtModelChoice {
-  id: string;
-  displayName: string;
-  description: string;
-  /** Whether the model accepts reference images (extra meta for Auto). */
-  imageInput: boolean;
-  /** Whether the model generates video (surfaced in the video-generation modal). */
-  videoInput: boolean;
-  /** Base credit cost for one job (may be null for metadata). */
-  cost: number | null;
-  /** Advertised video-mode spellings from the model list (e.g. `image2video`,
-   *  `element2video`). Used to submit in the mode that actually carries
-   *  references; absent for non-video models. */
-  videoModes?: string[];
-  /** Surfaces this model is allowed on, applied main-side from settings. */
-  surfaces?: ModelSurface[];
-}
-
-/** The one kind classification every dropdown follows: a model is IMAGE only
- *  when it outputs images and is not a video generator — video models accept
- *  an input image (image-to-video), so the imageInput flag alone can't
- *  classify. Matches the auto-detected kind in Models & expenses and what an
- *  "image" manual override bakes (videoInput cleared). */
-export const isImageModel = (m: Pick<OpenArtModelChoice, "imageInput" | "videoInput">): boolean =>
-  m.imageInput && !m.videoInput;
-/** A model the video dropdowns offer — any video-capable generator. */
-export const isVideoModel = (m: Pick<OpenArtModelChoice, "videoInput">): boolean => m.videoInput;
-
-/** True when a shot carries anything worth confirming before delete: written
- *  text/prompts or visible media/generations. Blank shots delete immediately;
- *  anything with Audio/Visual direction, a custom prompt, a frame/history, a
- *  video clip, node-graph generations, tween wiring/output, or a pending frame
- *  job asks first. */
-export function shotHasContent(s: ProductionShot): boolean {
-  if (s.audio?.trim() || s.visual?.trim()) return true;
-  if (s.prompt?.trim() || s.graphVideoPrompt?.trim() || s.graphEditPrompt?.trim()) return true;
-  if (s.artwork || (s.artworkHistory?.length ?? 0) > 0) return true;
-  if (s.videoPath || s.graphTweenOutput || s.pendingImageGen) return true;
-  if ((s.graphImageGens?.length ?? 0) > 0) return true;
-  if ((s.graphVideoGens?.length ?? 0) > 0) return true;
-  if ((s.graphEditGens?.length ?? 0) > 0) return true;
-  if (s.graphEditNodes?.some((n) => n.prompt?.trim() || (n.gens?.length ?? 0) > 0 || n.source)) return true;
-  if ((s.refIds?.length ?? 0) > 0) return true;
-  if ((s.graphTweenRefIds?.length ?? 0) > 0) return true;
-  if (s.graphTweenBlocks?.some((b) => b.prompt?.trim() || (b.gens?.length ?? 0) > 0)) return true;
-  return false;
-}
-
-/** Order a model list by the user's saved arrangement (Settings → Models &
- *  expenses drag-to-reorder). Models missing from the order keep their
- *  relative discovery order after the known ones, so a fresh model appends
- *  instead of jumping. Stable sort — ties never reshuffle. */
-export function sortByModelOrder<T>(items: T[], order: string[], id: (t: T) => string): T[] {
-  if (!order || !order.length) return items;
-  const rank = new Map(order.map((mid, i) => [mid, i]));
-  return [...items].sort((a, b) => (rank.get(id(a)) ?? Infinity) - (rank.get(id(b)) ?? Infinity));
-}
-
-/** One generation dropdown's remembered last choice (Settings-backed, global
- *  per context): each dropdown starts where the user last left it. */
-export interface MediaDefaultChoice {
-  model?: string;
-  resolution?: string;
-  durationSec?: number;
-  aspectRatio?: string;
-}
-/** The dropdown contexts a media default is remembered for. */
-export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "character" | "tween";
-
-/** The one aspect-ratio default every generation surface shares. The vendor
- *  image default is 1:1; Cascade deliberately forces 16:9 unless the user
- *  picks another ratio the model lists. Never send "16x9" — the wire value
- *  is "16:9". */
-export const DEFAULT_ASPECT_RATIO = "16:9";
-
-/** Normalize a chosen aspect ratio to the shared default. Empty/whitespace
- *  falls back to 16:9; otherwise the caller's value is returned verbatim
- *  (only values the model lists is ever submitted). */
-export function resolveAspectRatio(chosen?: string | null): string {
-  return chosen && chosen.trim() ? chosen : DEFAULT_ASPECT_RATIO;
-}
-
-/** A per-node/per-block model-option bag. Values are CLI-ready strings keyed
- *  by canonical flag (e.g. `{ variant: "sunburst", aspect_ratio: "16:9" }`). */
-export type GenParams = Record<string, string>;
-
-/** Keep only CLI-safe scalar option values (string/number/boolean/string[])
- *  from an untrusted params bag. Providers ignore unknown keys for the active
- *  model, but non-scalar shapes (objects from a corrupt doc or a raw IPC
- *  payload) must never reach argv or persisted state. Undefined for
- *  absent/empty bags so callers can omit the field. */
-export function sanitizeGenParams(params: unknown): Record<string, string | number | boolean | string[]> | undefined {
-  if (!params || typeof params !== "object" || Array.isArray(params)) return undefined;
-  const out: Record<string, string | number | boolean | string[]> = {};
-  for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
-    else if (Array.isArray(v) && v.every((e) => typeof e === "string")) out[k] = [...v];
-  }
-  return Object.keys(out).length ? out : undefined;
-}
-
-/** Where a model parameter renders in the options form. "hidden" removes it
- *  from the UI entirely; core/advanced place it in the exposed list or the
- *  collapsible Advanced panel. */
-export type ModelParamExposure = "core" | "advanced" | "hidden";
-
-/** One user-configured parameter default (dev Model Customizer). Kept in the
- *  same scalar shapes the options form edits: enum/string as string, numeric
- *  as number, boolean as boolean, repeatable as string[]. */
-export type ModelParamDefaultValue = string | number | boolean | string[];
-
-/** A provider parameter that is not a first-class exposed control. Derived
- *  from the provider's live schema as a projection (see CliOptionField). */
-export interface ModelParamOption {
-  /** CLI flag as consumed by the provider layer, e.g. "--variant". */
-  flag: string;
-  /** Stable storage key inside a params map, e.g. "variant". */
-  key: string;
-  /** Ordered values offered by the UI. */
-  values: string[];
-  /** Value used when the user has not chosen one. */
-  defaultValue?: string;
-  /** Presentation class. "advanced" renders inside the collapsible panel. */
-  exposure: "exposed" | "advanced";
-  /** Human label for the control. */
-  label?: string;
-}
-
-/** Choices made in the per-shot video-generation modal. */
-export interface VideoGenOptions {
-  /** OpenArt video model id, or "auto" for Cascade to pick. */
-  model: string;
-  /** Output resolution label (e.g. "480p", "720p", "1080p"). */
-  resolution: string;
-  /** Desired clip length in seconds. */
-  durationSec: number;
-  /** Motion/animation prompt (may contain @[name] reference tags). */
-  prompt: string;
-  /**
-   * Per-model, schema-driven option values keyed by canonical flag name
-   * (see `CliModelSchema`). Optional and additive — same semantics as
-   * `OpenArtBoardConfig.params` for the video path.
-   */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** Per-config credit quote for one generation (Higgsfield CLI `generate
- *  cost` preflight — mirrors `generate create` args but submits nothing).
- *  Only structural price drivers travel: prompt text and reference bytes
- *  never affect the price, so the probe sends a constant placeholder prompt
- *  and no media flags (zero uploads). */
-export interface GenerationCostRequest {
-  /** Provider-namespaced model id (only `higgsfield-cli:*` quotes; anything
-   *  else resolves null with zero spawns). */
-  model: string;
-  /** Whether this is an image or video quote (gates `--duration`). */
-  kind: "image" | "video";
-  /** Output resolution label (e.g. "720p", "2k"). */
-  resolution?: string;
-  /** Desired clip length in seconds (video only). */
-  durationSec?: number;
-  /** Aspect ratio wire value (e.g. "16:9"). */
-  aspectRatio?: string;
-  /** Quality tier label (image models that declare one). */
-  quality?: string;
-  /** Schema-driven extras (variant, mode, …) keyed by canonical flag. */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** The resolution / length options a video model actually accepts, read from
- *  its live form schema. Used to populate the video modal per model. */
-export interface VideoModelOptions {
-  /** Resolution labels the model accepts (e.g. ["720p","1080p"]). */
-  resolutions: string[];
-  /** Clip lengths in seconds the model accepts. */
-  durations: number[];
-  /** Accepted aspect ratios. The UI default is forced by
-   *  `DEFAULT_ASPECT_RATIO` regardless of the vendor default. */
-  aspectRatios?: string[];
-  /** Accepted quality labels (models that declare a quality/definition enum). */
-  qualities?: string[];
-  defaultQuality?: string;
-  defaultResolution?: string;
-  /** Remaining provider params rendered in the Advanced panel. */
-  params?: ModelParamOption[];
-}
-
-/** The quality options an image model actually accepts, read from its live
- *  catalog detail. Used to populate the storyboard quality dropdown per
- *  model. Null when the model (or its options) can't be read. */
-export interface ImageModelOptions {
-  /** Quality labels the model accepts (e.g. ["basic","high"]). */
-  qualities: string[];
-  /** The model's declared default quality, when it names one we recognize. */
-  defaultQuality?: string | null;
-  /** Accepted aspect ratios. UI default is forced by `DEFAULT_ASPECT_RATIO`. */
-  aspectRatios?: string[];
-  /** Accepted --resolution values. */
-  resolutions?: string[];
-  defaultResolution?: string;
-  /** GPT Image 2.5 "--variant" values ("submodels" in UI copy). */
-  submodels?: string[];
-  defaultSubmodel?: string;
-  /** Remaining provider params rendered in the Advanced panel. */
-  params?: ModelParamOption[];
-}
-
-/** How a schema-driven model option value is rendered and emitted. */
-export type CliOptionKind =
-  | "enum"      // values[] present — a closed pick list
-  | "integer"   // whole numbers (duration, seed, batch_size)
-  | "number"    // free numeric input
-  | "boolean"   // explicit true/false flag
-  | "string"    // free text
-  | "array"     // repeatable flag / list value (reference arrays)
-  | "json";     // structured payload (passed inline or via @file)
-
-/** Display grouping for the schema-driven options form. */
-export type CliOptionGroup = "core" | "reference" | "control" | "advanced";
-
-/** How a schema field's value reaches the CLI argv. */
-export type CliOptionEmit =
-  | "value"        // --flag <value>
-  | "boolean-flag" // --flag true | --flag false (always explicit)
-  | "repeat"       // --flag <v> repeated per item
-  | "json-file";   // JSON written to a temp file, emitted as --flag @<path>
-
-/** One normalized model parameter from `model get <job_type> --json`. */
-export interface CliOptionField {
-  /** Canonical folded name, e.g. "aspect_ratio". */
-  name: string;
-  /** Emitted flag without dashes, e.g. "aspect_ratio". */
-  flag: string;
-  /** Folded aliases for value lookup (["aspectratio", ...]). */
-  aliases: string[];
-  kind: CliOptionKind;
-  group: CliOptionGroup;
-  /** Enum member set (kind === "enum" only). */
-  values?: string[];
-  default?: string | number | boolean | string[] | null;
-  min?: number;
-  max?: number;
-  step?: number;
-  /** Whether the CLI requires the flag (or only conditionally). */
-  required?: boolean | "conditional";
-  /** Raw human constraint text from the CLI, if any. */
-  constraint?: string;
-  /** Media role for reference fields (e.g. "image_references"). */
-  mediaRole?: string;
-  repeatable?: boolean;
-  /** Max accepted items for repeatable fields (e.g. 16). */
-  maxItems?: number;
-  emit: CliOptionEmit;
-  /** Provenance for debugging. */
-  source: "parameters" | "topLevel";
-}
-
-/** The normalized per-model option schema, derived live from
- *  `model get <job_type> --json`. Rendered by `<ModelOptionsForm>` and
- *  consumed by the generic arg builder. */
-export interface CliModelSchema {
-  jobType: string;
-  /** CLI version that produced the schema (support-report provenance). */
-  cliVersion: string | null;
-  /** Epoch ms of the fetch (TTL + staleness display). */
-  fetchedAt: number;
-  fields: CliOptionField[];
-  aspectRatios: string[];
-  durations: number[];
-  roles: string[];
-  /** Last raw `model get --json` payload (for constraint parsing). */
-  raw: unknown;
-}
-
-/** A discovered media model with its pricing ladder baked — the read model for
- *  the Settings → Models & expenses tab. One entry per model from EITHER
- *  vendor (ids are provider-namespaced, so the union can't collide). */
-export interface MediaModelLadder {
-  /** Which vendor surfaced this model (the settings tab groups by it). */
-  provider: MediaProviderId;
-  /** The model choice as surfaced by its vendor (display name, capabilities). */
-  choice: OpenArtModelChoice;
-  /** Resolution ladder, low → high (image: fixed 1k/2k/4k buckets; video:
-   *  read from the model's live form options, kind defaults when unreadable). */
-  resolutions: string[];
-  /** Cheapest video length in seconds this model accepts (null for images). */
-  durMin: number | null;
-  /** Most expensive video length in seconds this model accepts (null for images). */
-  durMax: number | null;
-}
-
-/** One probed model in the dev Model Customizer. */
-export interface ModelProbeEntry {
-  /** The provider namespaced choice (id, display name, capabilities). */
-  choice: OpenArtModelChoice;
-  /** Whether the user hides this model from generation dropdowns. */
-  hidden: boolean;
-  /** Manual kind override, when set. */
-  kindOverride?: "image" | "video";
-}
-
-/** One provider's probe result for the dev Model Customizer. */
-export interface ModelProbeResult {
-  provider: MediaProviderId;
-  displayName: string;
-  available: boolean;
-  error?: string;
-  models: ModelProbeEntry[];
-}
-
-/** One row in the expenses ledger — a priced AI generation or a manual
- *  "purchased asset" entry the user adds by hand. */
-export interface LedgerEntry {
-  /** Stable identity. */
-  id: string;
-  /** What was generated: image / video, or "manual" for custom purchased-asset rows. */
-  kind: "image" | "video" | "manual";
-  /** Resolved OpenArt model id (empty for manual rows). */
-  model: string;
-  /** Resolution label: "1k"/"2k"/"4k" bucket for images, e.g. "1080p" for video. */
-  resolution: string;
-  /** Clip length in seconds (video only). */
-  durationSec?: number;
-  /** Aspect ratio for images (e.g. "16:9"). */
-  aspectRatio?: string;
-  /** The price stamped when the entry was recorded ($0 when no rule matched).
-   *  For credit-tracked rows (Higgsfield CLI) this is credits × the credit
-   *  rate at record/reprice time — the row's `credits` is the source of
-   *  truth and the rate is recomputable, same philosophy as the $ rules. */
-  price: number;
-  /** Credits the generation cost (Higgsfield CLI `generate cost` preflight at
-   *  submit time). Rows carrying this render in credits; `price` is the
-   *  dollar conversion. Absent for $ rule rows and manual rows. */
-  credits?: number;
-  /** When the generation completed / the manual row was added. */
-  at: number;
-  /** Custom label for manual entries. */
-  label?: string;
-  /** Production the generation belongs to. */
-  productionId?: string;
-  /** Shot the generation belongs to. */
-  shotId?: string;
-}
-
-/** A pricing rule: kind + model → a dollar range. One range per model: the
- *  price interpolates between minPrice (cheapest config) and maxPrice (most
- *  expensive config) based on the generation's resolution and (video) length
- *  against the model's baked option ladder (resolutions[] + durMin/durMax).
- *  An empty model acts as "*" (any model). Exact models beat the wildcard;
- *  generations matching no rule are priced at $0. */
-export interface ExpensePriceRule {
-  id: string;
-  kind: "image" | "video";
-  model: string;
-  /** Price at the cheapest config (lowest resolution, shortest video). */
-  minPrice: number;
-  /** Price at the most expensive config (highest resolution, longest video). */
-  maxPrice: number;
-  /** The model's resolution ladder, low → high (baked from its live form
-   *  options at edit time; kind defaults when unknown). */
-  resolutions: string[];
-  /** Shortest video length in seconds this range prices (null for images). */
-  durMin: number | null;
-  /** Longest video length in seconds this range prices (null for images). */
-  durMax: number | null;
-}
-
-/** The renderer read model for the Expenses page. */
-export interface LedgerView {
-  entries: LedgerEntry[];
-  total: number;
-  imageCount: number;
-  videoCount: number;
-  /** Dollar value of one Higgsfield credit used for `total` (null when the
-   *  user hasn't set a rate — credit rows then contribute $0). */
-  creditUsd: number | null;
-}
-
-/** Metadata handed to the generation seam for one successful AI generation. */
-export interface LedgerGenMeta {
-  kind: "image" | "video";
-  model: string;
-  resolution: string;
-  durationSec?: number;
-  aspectRatio?: string;
-  /** Credits the generation cost (Higgsfield CLI preflight at submit time).
-   *  Recorded on the entry so credit-tracked rows never need $ rules. */
-  credits?: number;
-  at: number;
-  productionId?: string;
-  shotId?: string;
-}
-
-/** Aspect ratios offered when generating reference images (Design, Step 2). */
-export type ImageGenAspectRatio = "1:1" | "4:3" | "16:9";
-
-/** Choices made in the reference-image generation/edit modal (Step 2). */
-export interface ReferenceImageGenOptions {
-  /** OpenArt model id, or "auto" for Cascade to pick. */
-  model: string;
-  /** Output resolution bucket fed to the generate tool's sizing param. */
-  resolution: string;
-  /** The desired aspect ratio for the generated image. */
-  aspectRatio: ImageGenAspectRatio;
-  /** Generation/edit prompt (may contain @[name] reference tags). */
-  prompt: string;
-  /** Name for a freshly generated reference (ignored when editing). */
-  name?: string;
-  /** Category the generated reference lands in (ignored when editing). */
-  categoryId?: string;
-  /** When set, the reference's current image is edited in place. */
-  sourceRefId?: string;
-  /** Schema-driven advanced/variant params (keyed by canonical flag). */
-  params?: GenParams;
-}
-
-/** The view layout a character-sheet generation produces: front view only, or
- *  front + back views (both with a face-closeup inset). */
-export type CharacterSheetView = "front" | "front-back";
-
-/** Choices made in the Step 2 character-builder panel. The generated image is
- *  attached to a character reference (`prod.characters`), creating the
- *  character when one with that name doesn't exist yet. Sheets are always
- *  generated 16:9. */
-export interface CharacterSheetGenOptions {
-  /** OpenArt model id, or "auto" for Cascade to pick. */
-  model: string;
-  /** Output resolution bucket fed to the generate tool's sizing param. */
-  resolution: string;
-  /** Character name — the sheet is attached to this character. */
-  name: string;
-  /** The user's description of the character. May cite references with
-   *  `@[name]` tags (typed via the editor's @ autocomplete or dropped in from
-   *  the references panel); each cited reference is uploaded as a visual input.
-   *  The generation prompt always wraps it in the character-sheet framing:
-   *  full body shot + face-closeup inset, neutral pose/expression/lighting on a
-   *  plain gray background. */
-  description: string;
-  /** Front only, or front + back (both with the face inset). */
-  view: CharacterSheetView;
-  /** Schema-driven model options (variant, seed, …); absent = defaults. */
-  params?: Record<string, string | number | boolean | string[]>;
-}
-
-/** A generated 3D model stored in the production's models folder. */
-export interface ProductionModel {
-  /** Stable identity. */
-  id: string;
-  /** Workspace-relative path of the .glb file. */
-  glbPath: string;
-  /** The prompt (or description) this model was generated from. */
-  prompt: string;
-  /** Tencent Hunyuan edition ("pro"). */
-  edition: string;
-  /** Whether PBR textures were enabled. */
-  pbr: boolean;
-  /** Whether the generation ran text-to-3D (true) or image-to-3D (false). */
-  fromImage: boolean;
-  /** ISO timestamp of generation completion. */
-  at: string;
-}
-
-/** Choices made in the Step 2 3D-model generator. Tencent Hunyuan Pro
- *  (text-to-3D / image-to-3D / multi-view, GLB output). */
-export type Model3dViewType =
-  | "front" | "left" | "right" | "back"
-  | "top" | "bottom" | "left_front" | "right_front";
-
-/** One multi-view reference image for 3D generation. The Tencent Pro API
- *  requires a "front" view; the other angles are optional and version-limited
- *  (3.0: front/left/right/back, 3.1 adds top/bottom/left_front/right_front). */
-export interface Model3dViewImage {
-  viewType: Model3dViewType;
-  /** Data URL of the view image. */
-  dataUrl: string;
-}
-
-export interface Model3dGenOptions {
-  /** The prompt (text-to-3D). For Sketch mode a prompt is sent alongside the
-   *  image; for Normal/Geometry/LowPoly image-to-3D it is omitted (the API
-   *  rejects a prompt+image pair outside Sketch). */
-  prompt: string;
-  /** Single reference image for image-to-3D, as a data URL. */
-  imageDataUrl?: string;
-  /** Multi-view reference images for multi-view image-to-3D (must include
-   *  "front"). Takes precedence over `imageDataUrl`. */
-  multiViewImages?: Model3dViewImage[];
-  /** Model version: "3.0" or "3.1". */
-  version: "3.0" | "3.1";
-  /** Enable PBR textures (adds credits). */
-  enablePbr: boolean;
-  /** Generation mode: "Normal" (textured), "Geometry" (white, no texture),
-   *  "LowPoly" (3.0 only), "Sketch" (3.0 only, requires prompt + image). */
-  generateType: "Normal" | "Geometry" | "LowPoly" | "Sketch";
-  /** Target polygon count (40,000 to 1,500,000). */
-  faceCount: number;
-}
-
-/** Step 5 assembly configuration + last-run bookkeeping.
- *  `fps`/`width`/`height` describe the exported timeline and the MP4 render;
- *  `exportDir` is workspace-relative (defaults to `<outDir>/assembly`). */
-export interface ProductionAssembly {
-  fps: number;
-  width: number;
-  height: number;
-  /** Workspace-relative export folder (media + EDL + AEScript + manifest + render). */
-  exportDir: string;
-  /** ISO timestamp of the last package build (gather + EDL + AEScript + manifest). */
-  assembledAt?: string;
-  /** Workspace-relative path of the last rendered MP4. */
-  renderPath?: string;
-  /** ISO timestamp of the last successful render. */
-  renderedAt?: string;
-  /** Total runtime of the assembled timeline in seconds. */
-  totalSec?: number;
-  /** Shot numbers rendered as black slots at the last build (no frame, no clip). */
-  skippedShots?: string[];
-}
-
-export interface Production {
-  meta: ProductionMeta;
-  /** Pipeline step the user is focused on (1..5). */
-  currentStep: 1 | 2 | 3 | 4 | 5;
-  /** Master visual style applied to all generation prompts. */
-  visualStyle: string;
-  /** Step 2 style set (up to 5 named styles). styles[0] doubles as the master;
-   *  when empty, `visualStyle` back-fills the master for older productions. */
-  styles: ProductionStyle[];
-  scenes: ProductionScene[];
-  /**
-   * Manual board prompts carried across re-ingestion, keyed by shot number.
-   * When a re-ingested shot lands on a number that has an entry here (and the
-   * user had edited that prompt by hand), the manual text is restored instead
-   * of being lost with the old shot list. Cleared per-shot by "refresh".
-   */
-  promptOverrides?: Record<string, string>;
-  characters: CharacterSheet[];
-  products: ProductRef[];
-  /** User-added per-shot references (materials, textures, hero props). */
-  references?: CustomRef[];
-  /** Script discoveries shown for approval at the end of Step 1. */
-  suggestedReferences?: SuggestedReference[];
-  /** User-created groups for manual reference images. */
-  referenceCategories?: ReferenceCategory[];
-  /** Step 3 OpenArt generation preferences. */
-  openArt?: OpenArtBoardConfig;
-  /** Step 4: workspace-relative path to the single voiceover clip for the whole production. */
-  voiceoverPath?: string;
-  /** Step 4: voiceover playback volume (0..1). Defaults to 1 when voiceoverPath is set. */
-  voiceoverVolume?: number;
-  /** Step 4: workspace-relative path to an imported background music track. */
-  musicPath?: string;
-  /** Step 4: music playback volume (0..1). Defaults to 0.5 when musicPath is set. */
-  musicVolume?: number;
-  /**
-   * Global brand look applied to every frame: up to 5 palette swatches plus an
-   * optional font. Set in Design (Step 2); appended to every board prompt.
-   */
-  brand?: { colors: string[]; font?: string };
-  /** Magic Prompt: alternate content-only prompts generated for the full storyboard.
-   *  When `magicEnabled` is true the storyboard prompt editors show `magicPrompts`
-   *  content instead of the normal/manual prompts; style and brand paragraphs
-   *  remain separate. The original prompts stay in `shot.prompt` untouched. */
-  magicPrompts?: Record<string, string>;
-  magicEnabled?: boolean;
-  /** Board-wide storyboard seed: fixed once per production so the same style
-   *  frame + frozen model/resolution repeats as closely as the vendor allows. */
-  lookSeed?: number;
-  /** The approved hero frame the look was locked to (its file backs a style frame). */
-  anchorShotId?: string;
-  status: Record<number, "todo" | "running" | "done" | "error">;
-  /** Step 2: generated 3D models (design-page generator). Newest first. */
-  models3d?: ProductionModel[];
-  /** Which source was last ingested (shown in the Step 1 card). */
-  scriptSource?: string;
-  /** Step 5 assembly configuration + last-run bookkeeping. */
-  assembly?: ProductionAssembly;
-  /**
-   * Step 3 storyboard-PDF export settings, remembered per production: the
-   * last-used version label + panel layout, and the workspace-relative logo
-   * asset (`logoRel`, copied into the production folder on pick) printed in
-   * the lower-right corner of every page.
-   */
-  storyboardPdf?: StoryboardPdfSettings;
-  assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string; /** @deprecated Legacy flat video folder; clips now live in each shot's board folder under `video/`. Read only by the one-time relocation migration. */ videosDir?: string };
-  /** Schema version gating the one-time board-artwork migrations (perf 1.2):
-   *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk
-   *  entirely. Missing/older runs the idempotent migrations once, then stamps. */
-  schemaVersion?: number;
-  /** Monotonic write revision stamped by saveProduction. Never set by the
-   *  renderer — the renderer's applySnapshot guard uses it to reject stale
-   *  whole-object snapshots (a prompt-save response produced before an
-   *  insert/delete must not overwrite the newer structural state). */
-  rev?: number;
-}
-
-/** Remembered Step 3 storyboard-PDF export settings (see `Production.storyboardPdf`). */
-export interface StoryboardPdfSettings {
-  /** Last-used version label (free-typed, e.g. "v3"). */
-  version?: string;
-  /** 1-panel or 3-panels-per-page layout. */
-  panelsPerPage?: 1 | 3;
-  /** Workspace-relative logo image copied into the production folder. */
-  logoRel?: string;
-}
-
-/** Options the renderer passes for one storyboard-PDF export. */
-export interface StoryboardPdfExportOptions {
-  panelsPerPage: 1 | 3;
-  version: string;
-}
-
-/** Result of a storyboard-PDF export: saved path (null when cancelled) + updated production. */
-export interface StoryboardPdfExportResult {
-  filePath: string | null;
-  production: Production;
-}
-
-/** Log line streamed to the Production UI while a step runs. */
-export interface ProductionEvent {
-  id: string;
-  message: string;
-  level: "info" | "error" | "done";
-}
-
-/** A file attached to a chat message (image, PDF, document, etc.). */
 export interface ChatAttachment {
   /** Data URL of the file (any MIME: `data:image/png;base64,…`, `data:application/pdf;base64,…`, …). */
   dataUrl: string;
@@ -1481,6 +337,8 @@ export interface CascadeApi {
   getOpenArtCredits(): Promise<number | null>;
 
   listSessions(): Promise<SessionMeta[]>;
+  /** Full-text search across every chat's transcript (read-only; no storage change). */
+  searchSessions(query: string, limit?: number): Promise<SessionSearchHit[]>;
   loadSession(id: string): Promise<DisplayItem[]>;
   /** Tell main which chat is now focused (keeps its active-chat pointer in sync). */
   activateSession(id: string): void;
@@ -1492,6 +350,16 @@ export interface CascadeApi {
   /** Re-derive a chat's title from its context via Arya. Resolves to the new title. */
   renameSession(id: string): Promise<string | null>;
   onSessionRenamed(cb: (e: { id: string; title: string }) => void): () => void;
+  /** Read a chat's durable task list (restored from disk — survives restarts). */
+  getSessionTodos(sessionId: string): Promise<SessionTasks>;
+  /** Fired after a chat's todo_write persists, so the panel updates live. */
+  onTodosChanged(cb: (e: { sessionId: string; tasks: SessionTasks }) => void): () => void;
+  /** Read a chat's durable goal (objective + status + continuation flag). */
+  getSessionGoal(sessionId: string): Promise<SessionGoal>;
+  /** Pause/resume/mark done the goal, or toggle opt-in auto-continuation. */
+  setSessionGoal(sessionId: string, patch: SessionGoalPatch): Promise<SessionGoal>;
+  /** Fired after a chat's goal changes (model tools or the UI). */
+  onGoalChanged(cb: (e: { sessionId: string; goal: SessionGoal }) => void): () => void;
 
   listSkills(): Promise<SkillInfo[]>;
   openSkillsFolder(): Promise<void>;
@@ -2002,6 +870,8 @@ export const ipcContract = {
   ...productionChannels,
   ...ledgerChannels,
   ...modelCustomizerChannels,
+  ...todoChannels,
+  ...goalChannels,
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */
@@ -2012,6 +882,8 @@ type SubscriptionMethod =
   | "onOpenSettings"
   | "onZoomChanged"
   | "onSessionRenamed"
+  | "onTodosChanged"
+  | "onGoalChanged"
   | "onAgentSwitched"
   | "onBoardExternalUpdate"
   | "onProductionEvent";

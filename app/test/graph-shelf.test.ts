@@ -28,10 +28,11 @@ const REFS = [
   { id: "r3", name: "Potion", artwork: "data:image/png;base64,CCCC" },
 ] as never;
 
-let savedLayouts: Array<{ positions?: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } }> = [];
+let savedLayouts: Array<{ positions?: Record<string, { x: number; y: number }>; sizes?: Record<string, { width: number; height: number }>; collapsed?: Record<string, boolean>; viewport?: { x: number; y: number; zoom: number } }> = [];
 let lastEmittedPrompt: string | null = null;
+let renames: Array<[string, string]> = [];
 
-function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS }) {
+function Harness({ initial, shotPatch, prodPatch, refs, layout }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown> }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
   // Merge `onGraphField` patches back into the shot so graph mutations (adding
   // an edit node, piping) round-trip like the real workspace.
@@ -58,6 +59,7 @@ function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; sh
     styles: [],
     styleValue: "",
     includeBrand: true,
+    initialLayout: layout,
     onPromptChange: (v) => { lastEmittedPrompt = v; setPrompt(v); },
     onStyleChange: () => {},
     onToggleBrand: () => {},
@@ -73,6 +75,7 @@ function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; sh
     onSelectGraphGen: () => {},
     onCycleGraphGen: () => {},
     onGraphField: (patch: Record<string, unknown>) => setShotState((prev) => ({ ...prev, ...patch })),
+    onRenameRef: (id: string, name: string) => { renames.push([id, name]); },
     onPipeImageToVideo: () => {},
     onPipeImageToOutput: () => {},
     onPipeVideoToOutput: () => {},
@@ -88,7 +91,7 @@ function Harness({ initial, shotPatch, prodPatch, refs }: { initial?: string; sh
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown> } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -217,11 +220,96 @@ describe("node-graph reference shelf", () => {
     expect(host.querySelectorAll(".prod-graph-shelf-item.on-canvas").length).toBe(2);
     expect(Object.keys(savedLayouts[savedLayouts.length - 1].positions ?? {})).toContain("ref:r2");
 
-    const removeBtn = host.querySelector('.prod-graph-ref-btn[title="Remove this reference from the canvas"]') as HTMLButtonElement;
-    expect(removeBtn).toBeTruthy();
-    await act(async () => { removeBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
+    // The node has no remove button — select it and press Delete to return it.
+    selectNode(host, '.prod-graph-node.prod-graph-ref img[src="data:image/png;base64,BBBB"]');
+    await pressDeleteKey(host, "Delete");
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(refNodeCount(host)).toBe(1);
     expect(host.querySelectorAll(".prod-graph-shelf-item.on-canvas").length).toBe(1);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph reference rename", () => {
+  it("edits a reference name in place and commits it once on blur", async () => {
+    renames = [];
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const input = host.querySelector(".prod-graph-node.prod-graph-ref .prod-ref-edit-name") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(input.value).toBe("Hero");
+
+    // Typing updates the local draft only; nothing commits until blur/Enter.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, "Champion");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(renames).toEqual([]);
+
+    await act(async () => {
+      input.dispatchEvent(new Event("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(renames).toEqual([["r1", "Champion"]]);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("leaves a dangling tag non-editable", async () => {
+    const { root, host } = renderModal({ initial: "Style: S\n\nhello @[Ghost]\n\nBrand identity: B" });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const missing = host.querySelector(".prod-graph-node.prod-graph-ref.missing") as HTMLElement;
+    expect(missing).toBeTruthy();
+    expect(missing.querySelector(".prod-ref-edit-name")).toBeNull();
+    expect(missing.querySelector(".prod-graph-ref-name")?.textContent).toBe("@[Ghost]");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph reference collapse + resize", () => {
+  it("collapses to a name-only tile via the eye and persists the state", async () => {
+    savedLayouts = [];
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeTruthy();
+    const eye = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
+    expect(eye).toBeTruthy();
+
+    await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
+    // The image is hidden; the (editable) name remains.
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeNull();
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-ref-edit-name")).toBeTruthy();
+    expect(savedLayouts[savedLayouts.length - 1]?.collapsed?.["ref:r1"]).toBe(true);
+
+    // Clicking again expands it.
+    const eyeAgain = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
+    await act(async () => { eyeAgain.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("honors a saved collapsed state and saved size on open", async () => {
+    const { root, host } = renderModal({
+      layout: { collapsed: { "ref:r1": true }, sizes: { "ref:r1": { width: 300, height: 220 } } },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeNull();
+    // The saved width is applied to the node wrapper (resizable ref).
+    const wrapper = host.querySelector(".react-flow__node") as HTMLElement;
+    expect(wrapper.style.width).toBe("300px");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

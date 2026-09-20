@@ -831,3 +831,21 @@ describe("importProduction", () => {
     expect(() => importProduction(path.join(dataDir, "external", "no-such-folder"))).toThrow(/doesn't exist/);
   });
 });
+
+describe("too-old production guard (step 10 T5)", () => {
+  it("a production below the minimum schema fails loudly with the version named", () => {
+    const p = baseProduction({ schemaVersion: 0 });
+    saveProduction(p);
+    expect(() => loadProduction(p.meta.id)).toThrow(/schema version 0.*minimum supported version 1/);
+  });
+
+  it("v1 and unversioned legacy documents still migrate", () => {
+    const v1 = baseProduction({ schemaVersion: 1 });
+    saveProduction(v1);
+    expect(loadProduction(v1.meta.id)?.schemaVersion).toBe(2);
+    const legacy = baseProduction();
+    delete (legacy as { schemaVersion?: number }).schemaVersion;
+    saveProduction(legacy);
+    expect(loadProduction(legacy.meta.id)?.schemaVersion).toBe(2);
+  });
+});

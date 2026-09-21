@@ -92,7 +92,18 @@ export function parseTodoList(raw: unknown, now: string = new Date().toISOString
         return { ok: false, error: `ERROR: todo item ${i} ("${id}") note exceeds ${MAX_TODO_NOTE_CHARS} chars` };
       }
     }
-    items.push(note === undefined ? { id, text: r.text, status: r.status, updatedAt: now } : { id, text: r.text, status: r.status, note, updatedAt: now });
+    // Preserve a valid stored timestamp so merely reading/rewriting the list
+    // never mutates change times; only new/changed items get the current one.
+    const updatedAt =
+      typeof r.updatedAt === "string" && r.updatedAt.length > 0 && !Number.isNaN(Date.parse(r.updatedAt))
+        ? r.updatedAt
+        : now;
+    // Carry unknown (future-version) properties through a round-trip rather
+    // than stripping them; the validated fields above win where present.
+    const item = { ...(r as Partial<TodoItem>), id, text: r.text, status: r.status, updatedAt } as TodoItem;
+    if (note === undefined) delete item.note;
+    else item.note = note;
+    items.push(item);
   }
   return { ok: true, items };
 }

@@ -15,7 +15,7 @@ describe("createGenerationQueue", () => {
     let peak = 0;
     const started: string[] = [];
     const job = (id: string, ms = 5) =>
-      q.run(id, async () => {
+      q.run(async () => {
         started.push(id);
         active++;
         peak = Math.max(peak, active);
@@ -38,7 +38,7 @@ describe("createGenerationQueue", () => {
     let active = 0;
     await Promise.all(
       [1, 2, 3].map(() =>
-        q.run("x", async () => {
+        q.run(async () => {
           active++;
           peak = Math.max(peak, active);
           await tick();
@@ -52,9 +52,9 @@ describe("createGenerationQueue", () => {
   it("isolates a rejection — siblings still complete", async () => {
     const q = createGenerationQueue(2);
     const jobs = [
-      { id: "ok1", run: async () => "one" },
-      { id: "boom", run: async () => { throw new Error("vendor 500"); } },
-      { id: "ok2", run: async () => "two" },
+      async () => "one",
+      async () => { throw new Error("vendor 500"); },
+      async () => "two",
     ];
     const settled = await runBatch(q, jobs);
     expect(settled[0]).toEqual({ ok: true, value: "one" });
@@ -65,8 +65,8 @@ describe("createGenerationQueue", () => {
 
   it("a synchronous throw in fn is caught, not crashed", async () => {
     const q = createGenerationQueue(1);
-    await expect(q.run("t", () => { throw new Error("sync"); })).rejects.toThrow("sync");
+    await expect(q.run(() => { throw new Error("sync"); })).rejects.toThrow("sync");
     // The slot was released, so the next job runs.
-    await expect(q.run("n", async () => "ok")).resolves.toBe("ok");
+    await expect(q.run(async () => "ok")).resolves.toBe("ok");
   });
 });

@@ -50,10 +50,12 @@ export function setSessionGoalFromModel(sessionId: string, goalRaw: unknown, pro
   const doc: SessionGoal = {
     sessionId,
     goal: parsed.goal,
-    status: prev && prev.goal && prev.status !== "done" ? prev.status : "active",
+    // A replaced objective always starts fresh: never inherit a prior status
+    // (a "blocked" goal would otherwise refuse to continue) or its checkpoint
+    // (which describes the old objective).
+    status: "active",
     updatedAt: new Date().toISOString(),
     ...(parsed.productionId ? { productionId: parsed.productionId } : prev?.productionId ? { productionId: prev.productionId } : {}),
-    ...(prev?.lastCheckpoint ? { lastCheckpoint: prev.lastCheckpoint } : {}),
     ...(prev?.autoContinue ? { autoContinue: true } : {}),
   };
   store.save(doc);
@@ -71,8 +73,9 @@ export function updateSessionGoalStatus(sessionId: string, statusRaw: unknown, c
     ...prev,
     status: parsed.patch.status,
     updatedAt: new Date().toISOString(),
-    ...(parsed.patch.lastCheckpoint !== undefined ? { lastCheckpoint: parsed.patch.lastCheckpoint } : {}),
   };
+  if (parsed.patch.clearCheckpoint) delete doc.lastCheckpoint;
+  else if (parsed.patch.lastCheckpoint !== undefined) doc.lastCheckpoint = parsed.patch.lastCheckpoint;
   store.save(doc);
   return doc;
 }

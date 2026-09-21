@@ -3,9 +3,9 @@
  *
  * One shared limiter for every batch submission ("generate N shots") so the
  * provider seam is the only place concurrency is governed — the previous
- * hand-rolled worker pools each had their own cap. Jobs are independent and
- * keyed by an id; a failure is reported per job and never cancels siblings
- * (the queue resolves each job's promise with a settled result).
+ * hand-rolled worker pools each had their own cap. Jobs are independent; a
+ * failure is reported per job and never cancels siblings (the queue resolves
+ * each job's promise with a settled result).
  *
  * No timers, no polling: a slot is handed to the next queued job the moment a
  * running one settles, so the limit is exact.
@@ -14,7 +14,7 @@
 export interface GenerationQueue {
   /** Run `fn` under the bound. Resolves/rejects with `fn`'s own outcome; a
    *  rejection never affects other jobs. */
-  run<T>(id: string, fn: () => Promise<T>): Promise<T>;
+  run<T>(fn: () => Promise<T>): Promise<T>;
   /** Jobs currently executing. */
   readonly active: number;
   /** Jobs waiting for a slot. */
@@ -24,7 +24,6 @@ export interface GenerationQueue {
 }
 
 interface Waiter {
-  id: string;
   start: () => void;
 }
 
@@ -55,7 +54,7 @@ export function createGenerationQueue(limit = 4): GenerationQueue {
     get limit() {
       return max;
     },
-    run<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    run<T>(fn: () => Promise<T>): Promise<T> {
       return new Promise<T>((resolve, reject) => {
         const start = () => {
           // Run on a microtask so a synchronous throw can't settle the queue
@@ -68,7 +67,7 @@ export function createGenerationQueue(limit = 4): GenerationQueue {
               next();
             });
         };
-        waiters.push({ id, start });
+        waiters.push({ start });
         next();
       });
     },
@@ -82,11 +81,11 @@ export function createGenerationQueue(limit = 4): GenerationQueue {
  */
 export async function runBatch<T>(
   queue: GenerationQueue,
-  jobs: { id: string; run: () => Promise<T> }[]
+  jobs: (() => Promise<T>)[]
 ): Promise<({ ok: true; value: T } | { ok: false; error: unknown })[]> {
   return Promise.all(
-    jobs.map((j) =>
-      queue.run(j.id, j.run).then(
+    jobs.map((run) =>
+      queue.run(run).then(
         (value) => ({ ok: true as const, value }),
         (error) => ({ ok: false as const, error })
       )

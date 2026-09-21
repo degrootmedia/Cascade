@@ -55,6 +55,24 @@ describe("session-goals store", () => {
     expect(() => updateSessionGoalStatus(SID, "done")).toThrow("no goal is set");
   });
 
+  it("a replaced objective resets status to active and drops the old checkpoint", () => {
+    setSessionGoalFromModel(SID, "First objective", "prod-1");
+    updateSessionGoalStatus(SID, "blocked", "waiting on user");
+    const next = setSessionGoalFromModel(SID, "Second objective");
+    expect(next.status).toBe("active");
+    expect(next.lastCheckpoint).toBeUndefined();
+    expect(next.productionId).toBe("prod-1");
+  });
+
+  it("an explicit empty checkpoint clears it", () => {
+    setSessionGoalFromModel(SID, "Objective");
+    updateSessionGoalStatus(SID, "active", "midway");
+    expect(loadSessionGoal(SID).lastCheckpoint).toBe("midway");
+    const cleared = updateSessionGoalStatus(SID, "active", "");
+    expect(cleared.lastCheckpoint).toBeUndefined();
+    expect(loadSessionGoal(SID).lastCheckpoint).toBeUndefined();
+  });
+
   it("restart restores from disk: the file is the truth", () => {
     const saved = setSessionGoalFromModel(SID, "survive restart");
     const raw = JSON.parse(fs.readFileSync(path.join(dataDir, "session-goals", `${SID}.json`), "utf8"));

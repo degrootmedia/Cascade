@@ -2337,10 +2337,10 @@ export async function generateBoards(
   let done = 0;
   let failed = 0;
   // One shared bounded queue governs the batch (step 07 T4). Jobs are
-  // independent and keyed by shot id; a per-shot failure is caught inside the
-  // job, so it never cancels siblings.
+  // independent; a per-shot failure is caught inside the job, so it never
+  // cancels siblings.
   const queue = createGenerationQueue(concurrency);
-  await Promise.all(targets.map((shot) => queue.run(shot.id, async () => {
+  await Promise.all(targets.map((shot) => queue.run(async () => {
     emit(`Shot ${shot.number}: ${shot.visual.slice(0, 80) || "frame"}…`);
     try {
       const refs = shotReferences(p, shot)

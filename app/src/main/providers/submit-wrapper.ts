@@ -14,6 +14,9 @@ export interface NormalizedRef {
   dataUrl: string;
   role: RefRecord["role"];
   downscaled: boolean;
+  /** Whether the source ref was a video before any downscale (kept on the ref
+   *  itself so downstream metadata never re-derives it by name). */
+  isVideo: boolean;
 }
 
 export interface SubmissionInput {
@@ -62,12 +65,13 @@ export async function normalizeRefs(
           dataUrl: resized,
           role: r.role ?? "reference",
           downscaled: resized !== r.dataUrl,
+          isVideo: true,
         });
       } catch {
-        out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false });
+        out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false, isVideo: true });
       }
     } else {
-      out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false });
+      out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false, isVideo: false });
     }
   }
   return out;
@@ -106,10 +110,10 @@ export async function prepareSubmission(
     refs: refs.map((r) => ({
       name: r.name,
       role: r.role,
-      media: isVideoDataUrl(r.dataUrl) ? ("video" as const) : ("image" as const),
+      media: r.isVideo ? ("video" as const) : ("image" as const),
       source: redactSource(r.dataUrl),
       bytes: r.dataUrl.length,
-      downscaled: isVideoDataUrl(input.refs.find((o) => o.name === r.name)?.dataUrl ?? "") ? r.downscaled : undefined,
+      downscaled: r.isVideo ? r.downscaled : undefined,
       height: r.downscaled ? VIDEO_REF_MAX_HEIGHT : undefined,
     })),
     params: input.params ?? {},

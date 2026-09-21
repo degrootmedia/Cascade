@@ -66,5 +66,7 @@ export function normalizeGraph(graph: Graph): NormalizedGraph {
     seenEdges.add(key);
     edges.push(e);
   }
-  return { graph: { version: 1, nodes, edges, migrated: graph.migrated }, issues };
+  // Echo the input version (falling back to 1 only for a legacy/absent field)
+  // so normalizing never silently downgrades a graph.
+  return { graph: { version: graph.version ?? 1, nodes, edges, migrated: graph.migrated }, issues };
 }

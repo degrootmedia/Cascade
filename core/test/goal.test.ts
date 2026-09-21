@@ -123,6 +123,41 @@ describe("makeGoalTools over an injected store", () => {
     expect(String(out)).toContain("ERROR");
     expect(store.saved).toHaveLength(0);
   });
+
+  it("a replaced objective starts active with no stale checkpoint/flags lost", async () => {
+    const store = memStore(
+      rec({ status: "blocked", lastCheckpoint: "old objective, waiting on user", productionId: "p1", autoContinue: true })
+    );
+    const tools = makeGoalTools(() => store);
+    await tools.goal_set.run({ goal: "A brand new objective" }, "/ws");
+    const saved = store.saved.at(-1)!;
+    expect(saved.goal).toBe("A brand new objective");
+    expect(saved.status).toBe("active");
+    expect(saved.lastCheckpoint).toBeUndefined();
+    // productionId and autoContinue carry over (they describe the session, not
+    // the old objective).
+    expect(saved.productionId).toBe("p1");
+    expect(saved.autoContinue).toBe(true);
+  });
+
+  it("an explicit empty checkpoint clears it; absent leaves it", async () => {
+    const parsed = parseGoalStatus("active", "");
+    expect(parsed.ok && parsed.patch.clearCheckpoint).toBe(true);
+    // absent checkpoint does not set a clear flag
+    const absent = parseGoalStatus("active");
+    expect(absent.ok && absent.patch.clearCheckpoint === undefined).toBe(true);
+    const absentCheckpoint = parseGoalStatus("active", undefined);
+    expect(absentCheckpoint.ok && absentCheckpoint.patch.lastCheckpoint === undefined).toBe(true);
+
+    const store = memStore();
+    const tools = makeGoalTools(() => store);
+    await tools.goal_set.run({ goal: "G" }, "/ws");
+    await tools.goal_update_status.run({ status: "active", lastCheckpoint: "midway" }, "/ws");
+    expect(store.saved.at(-1)!.lastCheckpoint).toBe("midway");
+    const out = await tools.goal_update_status.run({ status: "active", lastCheckpoint: "" }, "/ws");
+    expect(store.saved.at(-1)!.lastCheckpoint).toBeUndefined();
+    expect(String(out)).not.toContain("Checkpoint:");
+  });
 });
 
 describe("workspaceGoalPersistence", () => {

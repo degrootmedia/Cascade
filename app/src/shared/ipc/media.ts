@@ -104,13 +104,14 @@ export function normalizeModelSurfaces(list: unknown): ModelSurface[] {
   return [...out];
 }
 
-/** Whether a model is offered on a surface. Undefined/absent `surfaces` means
- *  "everywhere it can go" (the default until the user restricts it). */
+/** Whether a model is offered on a surface. Undefined/absent `surfaces`, or an
+ *  empty list, means "everywhere it can go" (the default until the user
+ *  restricts it) — an empty array must never hide a model from every picker. */
 export function modelOnSurface(
   m: Pick<OpenArtModelChoice, "surfaces">,
   surface: ModelSurface
 ): boolean {
-  return !m.surfaces || m.surfaces.includes(surface);
+  return !m.surfaces || m.surfaces.length === 0 || m.surfaces.includes(surface);
 }
 
 /** An OpenArt model surfaced in the Step 3 model dropdown. */

@@ -65,6 +65,26 @@ describe("submission-log", () => {
     expect(fs.readFileSync(path.join(dir, "submissions.jsonl"), "utf8")).toContain('"modelId":"m"');
   });
 
+  it("keeps per-ref media even when two refs share a name", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-sublog-"));
+    const { record } = await prepareSubmission(
+      { logsDir: () => dir, devMode: () => false, dryRun: () => false },
+      {
+        providerId: "higgsfield-cli",
+        transport: "cli",
+        kind: "video",
+        modelId: "m",
+        prompt: "x",
+        refs: [
+          { name: "Hero", dataUrl: "data:image/png;base64,AAAA" },
+          { name: "Hero", dataUrl: "data:video/mp4;base64,AAAA" },
+        ],
+      }
+    );
+    expect(record.refs.map((r) => r.media)).toEqual(["image", "video"]);
+    expect(record.refs.map((r) => r.downscaled)).toEqual([undefined, false]);
+  });
+
   it("dry-run builds the real request then throws before spend", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-sublog-"));
     await expect(

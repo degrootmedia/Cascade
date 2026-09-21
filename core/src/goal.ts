@@ -71,6 +71,8 @@ export function parseGoalText(raw: unknown, productionIdRaw?: unknown): ParseGoa
 export interface GoalStatusPatch {
   status: GoalStatus;
   lastCheckpoint?: string;
+  /** True when the caller explicitly passed an empty checkpoint, meaning clear it. */
+  clearCheckpoint?: boolean;
 }
 
 export type ParseGoalStatus =
@@ -82,14 +84,17 @@ export function parseGoalStatus(raw: unknown, checkpointRaw?: unknown): ParseGoa
   if (!isStatus(raw)) {
     return { ok: false, error: `ERROR: invalid goal status ${JSON.stringify(raw)} — use one of: ${GOAL_STATUSES.join(", ")}` };
   }
-  let lastCheckpoint: string | undefined;
-  if (checkpointRaw !== undefined && checkpointRaw !== null && String(checkpointRaw).length > 0) {
-    lastCheckpoint = String(checkpointRaw);
-    if (lastCheckpoint.length > MAX_GOAL_CHECKPOINT_CHARS) {
+  if (checkpointRaw !== undefined && checkpointRaw !== null) {
+    const text = String(checkpointRaw);
+    // An explicit empty checkpoint clears the stored one (distinct from
+    // "absent", which leaves it untouched).
+    if (text.length === 0) return { ok: true, patch: { status: raw, clearCheckpoint: true } };
+    if (text.length > MAX_GOAL_CHECKPOINT_CHARS) {
       return { ok: false, error: `ERROR: checkpoint exceeds ${MAX_GOAL_CHECKPOINT_CHARS} chars` };
     }
+    return { ok: true, patch: { status: raw, lastCheckpoint: text } };
   }
-  return { ok: true, patch: lastCheckpoint === undefined ? { status: raw } : { status: raw, lastCheckpoint } };
+  return { ok: true, patch: { status: raw } };
 }
 
 /** Render the goal as the text the tools return. */
@@ -238,10 +243,12 @@ export function makeGoalTools(
       const prev = await store.load();
       const rec: GoalRecord = {
         goal: parsed.goal,
-        status: prev?.status && prev.status !== "done" ? prev.status : "active",
+        // A replaced objective always starts fresh: never inherit a prior
+        // status (a "blocked" goal would otherwise refuse to continue) or its
+        // checkpoint (which describes the old objective).
+        status: "active",
         updatedAt: new Date().toISOString(),
         ...(parsed.productionId ? { productionId: parsed.productionId } : prev?.productionId ? { productionId: prev.productionId } : {}),
-        ...(prev?.lastCheckpoint ? { lastCheckpoint: prev.lastCheckpoint } : {}),
         ...(prev?.autoContinue ? { autoContinue: true } : {}),
       };
       await store.save(rec);
@@ -276,8 +283,9 @@ export function makeGoalTools(
         ...prev,
         status: parsed.patch.status,
         updatedAt: new Date().toISOString(),
-        ...(parsed.patch.lastCheckpoint !== undefined ? { lastCheckpoint: parsed.patch.lastCheckpoint } : {}),
       };
+      if (parsed.patch.clearCheckpoint) delete rec.lastCheckpoint;
+      else if (parsed.patch.lastCheckpoint !== undefined) rec.lastCheckpoint = parsed.patch.lastCheckpoint;
       await store.save(rec);
       return formatGoal(rec);
     },

@@ -71,6 +71,29 @@ describe("parseTodoList", () => {
     expect(parseTodoList(["nope"]).ok).toBe(false);
     expect(parseTodoList({ items: [] } as unknown as unknown[]).ok).toBe(false);
   });
+
+  it("preserves a valid stored updatedAt; stamps only new/invalid ones", () => {
+    const r = parseTodoList(
+      [
+        { id: "a", text: "old", status: "todo", updatedAt: "2026-01-01T00:00:00.000Z" },
+        { id: "b", text: "new", status: "todo" },
+        { id: "c", text: "bad", status: "todo", updatedAt: "not-a-date" },
+      ],
+      "NOW"
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.items[0].updatedAt).toBe("2026-01-01T00:00:00.000Z");
+      expect(r.items[1].updatedAt).toBe("NOW");
+      expect(r.items[2].updatedAt).toBe("NOW");
+    }
+  });
+
+  it("round-trips unknown future properties instead of stripping them", () => {
+    const r = parseTodoList([{ id: "a", text: "x", status: "todo", futureField: 7 }], "NOW");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect((r.items[0] as unknown as Record<string, unknown>).futureField).toBe(7);
+  });
 });
 
 describe("formatTodoList", () => {
@@ -133,6 +156,13 @@ describe("workspaceTodoPersistence", () => {
     await p.save([item({ id: "a" }), item({ id: "b", status: "done" })]);
     expect(await p.load()).toHaveLength(2);
     expect(fs.existsSync(path.join(root, ".cascade", "tasks.json"))).toBe(true);
+  });
+
+  it("load preserves stored updatedAt (reading never mutates timestamps)", async () => {
+    const p = workspaceTodoPersistence(root);
+    await p.save([item({ id: "a", updatedAt: "2020-01-01T00:00:00.000Z" })]);
+    const loaded = await p.load();
+    expect(loaded[0].updatedAt).toBe("2020-01-01T00:00:00.000Z");
   });
 
   it("concurrent writes do not corrupt (temp+rename)", async () => {

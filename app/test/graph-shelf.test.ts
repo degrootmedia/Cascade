@@ -284,32 +284,47 @@ describe("node-graph reference collapse + resize", () => {
     expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeTruthy();
     const eye = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
     expect(eye).toBeTruthy();
+    const wrapper = () => host.querySelector(".react-flow__node") as HTMLElement;
+    expect(wrapper().style.width).toBe("236px");
 
     await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
-    // The image is hidden; the (editable) name remains.
+    // The big image is hidden; a small thumbnail sits to the RIGHT of the
+    // (editable) name field, and the tile narrows.
     expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeNull();
-    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-ref-edit-name")).toBeTruthy();
+    const row = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-collapsed") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.querySelector(".prod-ref-edit-name")).toBeTruthy();
+    expect(row.lastElementChild?.classList.contains("prod-graph-ref-thumb")).toBe(true);
+    expect(row.querySelector(".prod-graph-ref-thumb img")).toBeTruthy();
+    expect(wrapper().style.width).toBe("170px");
     expect(savedLayouts[savedLayouts.length - 1]?.collapsed?.["ref:r1"]).toBe(true);
 
-    // Clicking again expands it.
+    // Clicking again expands it and restores the remembered width.
     const eyeAgain = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
     await act(async () => { eyeAgain.click(); await new Promise((r) => setTimeout(r, 0)); });
     expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeTruthy();
+    expect(wrapper().style.width).toBe("236px");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
 
-  it("honors a saved collapsed state and saved size on open", async () => {
+  it("collapses narrow, then restores the remembered expanded size on expand", async () => {
     const { root, host } = renderModal({
       layout: { collapsed: { "ref:r1": true }, sizes: { "ref:r1": { width: 300, height: 220 } } },
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeNull();
-    // The saved width is applied to the node wrapper (resizable ref).
-    const wrapper = host.querySelector(".react-flow__node") as HTMLElement;
-    expect(wrapper.style.width).toBe("300px");
+    const wrapper = () => host.querySelector(".react-flow__node") as HTMLElement;
+    // Collapsed ignores the remembered width — it takes the compact width.
+    expect(wrapper().style.width).toBe("170px");
+
+    // Expanding restores the remembered 300px width.
+    const eye = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
+    await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media")).toBeTruthy();
+    expect(wrapper().style.width).toBe("300px");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

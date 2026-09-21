@@ -252,10 +252,10 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   without a separate right-click Save as reference. **Reference nodes** show the
   artwork with its editable name beneath it (renaming rides the same
   `renameReference` atomic tag rewrite as the Design page) and an eye button that
-  collapses the tile to name-only; their size and collapsed state persist in
-  `GraphLayout.sizes`/`GraphLayout.collapsed` (a collapsed ref keeps only its
-  width, so the expanded height survives the collapse). Double-clicking the
-  artwork opens the lightbox.
+  collapses the tile to a fixed narrow width with a small compressed thumbnail to
+  the right of the name; the expanded size stays in `GraphLayout.sizes` (restored
+  on expand) and `GraphLayout.collapsed` remembers the collapsed state.
+  Double-clicking the artwork opens the lightbox.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes
   into one continuous shot. A keyframe is a **source id** stored in
   `graphTweenRefIds` (`TweenBlock.startRefId`/`endRefId`): a reference id

@@ -208,4 +208,22 @@ describe("node-graph reference thumbnails", () => {
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
+
+  it("a collapsed ref node shows the compressed thumb beside the name", async () => {
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const eye = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
+    expect(eye).toBeTruthy();
+    await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    // The big full-res tile is gone; the small collapsed thumb uses ?thumb=1.
+    expect(host.querySelector(".prod-graph-ref-media")).toBeNull();
+    const thumb = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-thumb img") as HTMLImageElement;
+    expect(thumb).toBeTruthy();
+    expect(thumb.getAttribute("src")).toBe("cascade-media://p1/references/hero.png?thumb=1");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
 });

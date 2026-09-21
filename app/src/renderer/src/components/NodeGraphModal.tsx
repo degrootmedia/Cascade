@@ -145,12 +145,15 @@ function sizeStyle(layout: GraphLayout | undefined, id: string, defaultWidth: nu
   return saved ? { width: saved.width, height: saved.height } : { width: defaultWidth };
 }
 
-/** Reference-node size: resizable, but a collapsed node shows only its name, so
- *  a saved height would pin it open — collapsed refs get width only. */
+/** Reference-node size. A collapsed ref shows only the name + a small thumb, so
+ *  it takes a fixed narrow width — its expanded width/height stay in
+ *  `GraphLayout.sizes` and are restored on expand. */
+const REF_DEFAULT_WIDTH = 236;
+const REF_COLLAPSED_WIDTH = 170;
 function refSizeStyle(layout: GraphLayout | undefined, id: string, collapsed: boolean): { width: number; height?: number } {
+  if (collapsed) return { width: REF_COLLAPSED_WIDTH };
   const saved = layout?.sizes?.[id];
-  const width = saved?.width ?? 236;
-  return collapsed || !saved ? { width } : { width, height: saved.height };
+  return saved ? { width: saved.width, height: saved.height } : { width: REF_DEFAULT_WIDTH };
 }
 
 /** Fixed-width style for the content-sized generation nodes (height comes
@@ -518,41 +521,51 @@ const RefNodeView = memo(function RefNodeView({ id, data, selected }: NodeProps<
     if (data.media === "video" && data.mediaUrl) data.onZoom(data.name, data.mediaUrl, "video");
     else if (data.artwork) data.onZoom(data.name, data.artwork);
   }, [data]);
+  const mediaEl = (src: string) => data.artwork
+    ? <img src={src} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} />
+    : data.media === "video" && data.mediaUrl
+      ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
+      : data.media
+        ? <div className="prod-graph-ref-blank" title={data.media === "audio" ? "Audio reference" : "Video reference"}>{data.media === "audio" ? "♪" : "▶"}</div>
+        : <div className="prod-graph-ref-blank" title="Reference has no image">?</div>;
+  const nameEl = renameable
+    ? <input
+        className="prod-graph-ref-name prod-ref-edit-name nodrag"
+        value={nameDraft}
+        title={`Rename @[${data.name}]`}
+        onChange={(e) => setNameDraft(e.target.value)}
+        onBlur={commitRename}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      />
+    : <span className="prod-graph-ref-name" title={data.missing ? "No reference with this name exists (anymore)" : `Reference @[${data.name}]`}>@[{data.name}]</span>;
+  const zoomTitle = data.artwork || data.mediaUrl ? "Double-click to view larger" : undefined;
+  const eyeButton = (
+    <button
+      className="prod-graph-ref-eye nodrag"
+      title={collapsed ? "Expand — show the image" : "Collapse — hide the image"}
+      onClick={() => data.onToggleCollapse?.(id, !collapsed)}
+    >
+      {collapsed ? <EyeOffIcon size={12} /> : <EyeIcon size={12} />}
+    </button>
+  );
   return (
     <>
       <NodeResizer isVisible={selected && !collapsed} minWidth={150} minHeight={120} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
       <div className={"prod-graph-node prod-graph-ref" + (data.tagged ? "" : " avail") + (data.missing ? " missing" : "") + (collapsed ? " collapsed" : "")}>
         <Handle type="source" position={Position.Right} className="socket-ref" />
-        <div className="prod-graph-ref-head">
-          <button
-            className="prod-graph-ref-eye nodrag"
-            title={collapsed ? "Expand — show the image" : "Collapse — hide the image"}
-            onClick={() => data.onToggleCollapse?.(id, !collapsed)}
-          >
-            {collapsed ? <EyeOffIcon size={12} /> : <EyeIcon size={12} />}
-          </button>
-        </div>
-        {!collapsed && (
-          <div className="prod-graph-ref-media" onDoubleClick={zoom} title={data.artwork || data.mediaUrl ? "Double-click to view larger" : undefined}>
-            {data.artwork
-              ? <img src={data.artwork} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} />
-              : data.media === "video" && data.mediaUrl
-                ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
-                : data.media
-                  ? <div className="prod-graph-ref-blank" title={data.media === "audio" ? "Audio reference" : "Video reference"}>{data.media === "audio" ? "♪" : "▶"}</div>
-                  : <div className="prod-graph-ref-blank" title="Reference has no image">?</div>}
-          </div>
-        )}
-        {renameable
-          ? <input
-              className="prod-graph-ref-name prod-ref-edit-name nodrag"
-              value={nameDraft}
-              title={`Rename @[${data.name}]`}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={commitRename}
-              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-            />
-          : <span className="prod-graph-ref-name" title={data.missing ? "No reference with this name exists (anymore)" : `Reference @[${data.name}]`}>@[{data.name}]</span>}
+        {collapsed
+          ? <div className="prod-graph-ref-collapsed">
+              <div className="prod-graph-ref-collapsed-info">
+                <div className="prod-graph-ref-head">{eyeButton}</div>
+                {nameEl}
+              </div>
+              <div className="prod-graph-ref-thumb" onDoubleClick={zoom} title={zoomTitle}>{mediaEl(refThumbUrl(data.artwork))}</div>
+            </div>
+          : <>
+              <div className="prod-graph-ref-head">{eyeButton}</div>
+              <div className="prod-graph-ref-media" onDoubleClick={zoom} title={zoomTitle}>{mediaEl(data.artwork)}</div>
+              {nameEl}
+            </>}
       </div>
     </>
   );
@@ -1945,11 +1958,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  from being re-added by the reconcile effect while the parent's async prompt
    *  save is still in flight; re-dragging from the shelf clears the entry. */
   const removedRefIdsRef = useRef<Set<string>>(new Set());
-  /** Reference nodes collapsed to a name-only tile (persisted in the layout). */
+  /** Reference nodes collapsed to a name + thumb tile (persisted in the layout). */
   const collapsedRef = useRef<Record<string, boolean>>({ ...(initialLayout?.collapsed ?? {}) });
-  /** Expanded heights stashed while a ref node is collapsed, so expanding
-   *  restores the user's size instead of the collapsed content height. */
-  const refExpandedHeight = useRef<Record<string, number>>({});
+  /** Expanded size stashed while a ref node is collapsed, so expanding restores
+   *  the user's width/height instead of the collapsed tile's size. */
+  const refExpandedSize = useRef<Record<string, { width: number; height?: number }>>({});
   /** Paste stagger — each pasted reference lands offset from the last so a
    *  multi-image paste doesn't stack every node on the same point. */
   const pasteCountRef = useRef(0);
@@ -2193,23 +2206,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     },
     /** Rename a reference from its canvas node (Design-page semantics). */
     onRenameRef: (refId: string, name: string) => cb.current.onRenameRef?.(refId, name),
-    /** Collapse/expand a reference node: drop its height while collapsed (so the
-     *  tile shrinks to the name) and restore it on expand, then persist the
-     *  collapsed set in the graph layout. */
+    /** Collapse/expand a reference node. Collapsing narrows the tile to a fixed
+     *  compact width (its expanded width/height are stashed and kept in
+     *  `GraphLayout.sizes`), then persists the collapsed set. */
     onToggleRefCollapsed: (nodeId: string, collapsed: boolean) => {
       collapsedRef.current = { ...collapsedRef.current, [nodeId]: collapsed };
       const next = nodesRef.current.map((n): GraphNode => {
         if (n.id !== nodeId) return n;
         const ref = n as RefFlowNode;
         const style = (ref.style ?? {}) as { width?: number; height?: number };
-        const width = ref.width ?? ref.measured?.width ?? style.width ?? 236;
         if (collapsed) {
+          const liveWidth = ref.width ?? ref.measured?.width ?? style.width ?? REF_DEFAULT_WIDTH;
           const liveHeight = ref.height ?? ref.measured?.height ?? style.height;
-          if (typeof liveHeight === "number") refExpandedHeight.current[nodeId] = liveHeight;
-          return { ...ref, height: undefined, style: { width }, data: { ...ref.data, collapsed: true } };
+          refExpandedSize.current[nodeId] = { width: liveWidth, height: typeof liveHeight === "number" ? liveHeight : undefined };
+          return { ...ref, width: undefined, height: undefined, style: { width: REF_COLLAPSED_WIDTH }, data: { ...ref.data, collapsed: true } };
         }
-        const height = refExpandedHeight.current[nodeId];
-        return { ...ref, height, style: height ? { width, height } : { width }, data: { ...ref.data, collapsed: false } };
+        const prev = refExpandedSize.current[nodeId];
+        const saved = cb.current.initialLayout?.sizes?.[nodeId];
+        const width = prev?.width ?? saved?.width ?? REF_DEFAULT_WIDTH;
+        const height = prev?.height ?? saved?.height;
+        return { ...ref, width, height, style: height ? { width, height } : { width }, data: { ...ref.data, collapsed: false } };
       });
       nodesRef.current = next;
       setNodes(next);
@@ -2289,11 +2305,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       return;
     }
     removedRefIdsRef.current.delete(ref.id);
+    const collapsed = collapsedRef.current[id] === true;
     const node: RefFlowNode = {
       id,
       type: "ref",
       position: pos,
-      style: { width: 236 },
+      style: refSizeStyle(cb.current.initialLayout, id, collapsed),
       data: {
         name: ref.name,
         artwork: ref.artwork,
@@ -2301,7 +2318,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         mediaUrl: ref.media === "video" && ref.mediaPath ? graphMediaUrl(prod.meta.id, ref.mediaPath) : undefined,
         tagged: false,
         refId: ref.id,
-        collapsed: collapsedRef.current[id] === true,
+        collapsed,
         onToggleCollapse: stable.onToggleRefCollapsed,
         onRename: stable.onRenameRef,
         onZoom: stable.onZoom,

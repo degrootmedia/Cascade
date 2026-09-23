@@ -5,6 +5,7 @@
  * `../shared/ipc.js` import paths are unchanged.
  */
 import type {
+  CameraGridData,
   GenParams,
   GraphLayout,
   Graph,
@@ -12,6 +13,7 @@ import type {
   GraphGenItem,
   TweenBlock,
   PendingImageGen,
+  UpscaleData,
 } from "./graph.js";
 
 export interface ProductionMeta {
@@ -180,6 +182,14 @@ graphImageGenIndex?: number;
   /** Schema-driven advanced/variant params for the in-betweener (keyed by
    *  canonical flag; `aspect_ratio` lives here). Optional/additive. */
   graphTweenParams?: GenParams;
+  /** The 16-panel camera-grid node's state (sheet path + grid geometry). A
+   *  self-contained tool node with no ports; absent until the user drags one
+   *  out and generates. Optional/additive. */
+  graphCameraGrid?: CameraGridData;
+  /** The upscale node's state (source wiring, model picks, output history).
+   *  A generator node with a source-image input and an image output; absent
+   *  until the user drags one out. Optional/additive. */
+  graphUpscale?: UpscaleData;
   /** Workspace-relative path of the last stitched tween output (the single
    *  continuous clip previewed by the output node and the animatic). */
   graphTweenOutput?: string;
@@ -199,7 +209,7 @@ graphImageGenIndex?: number;
   /** Which node is piped into the output (becomes the shot's primary
    *  artwork/videoPath): an image/video generation node, the in-betweener
    *  node, or a reference. */
-  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "editvideo" | "tween" | "ref";
+  graphOutputSource?: "imagegen" | "videogen" | "editgen" | "editvideo" | "tween" | "ref" | "upscale";
   /** The reference feeding the output when `graphOutputSource === "ref"`. */
   graphOutputRefId?: string;
   /** One-time marker: classic generations were moved into the gen nodes. */
@@ -367,6 +377,7 @@ export function shotHasContent(s: ProductionShot): boolean {
   if ((s.refIds?.length ?? 0) > 0) return true;
   if ((s.graphTweenRefIds?.length ?? 0) > 0) return true;
   if (s.graphTweenBlocks?.some((b) => b.prompt?.trim() || (b.gens?.length ?? 0) > 0)) return true;
+  if (s.graphUpscale?.source || (s.graphUpscale?.gens?.length ?? 0) > 0) return true;
   return false;
 }
 
@@ -506,6 +517,70 @@ export interface ProductionAssembly {
   skippedShots?: string[];
 }
 
+/** A free-text card pinned to the reference moodboard. `text` is markdown,
+ *  sanitized at render time (never trusted as HTML). */
+export interface MoodboardNote {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+}
+
+/** One reference's placement on the Reference Moodboard canvas. */
+export interface MoodboardNodeLayout {
+  /** CustomRef id. Layouts whose reference no longer exists are pruned. */
+  refId: string;
+  /** World coordinates, px. */
+  x: number;
+  y: number;
+  /** Node size, px. Height is stored (not derived) so a node keeps its box
+   *  before the media's real aspect is known. */
+  w: number;
+  h: number;
+  /** Stacking order. */
+  z: number;
+  /** Hidden from the board — the reference itself still exists. */
+  hidden?: boolean;
+  /** Rotation in degrees (snapped to 15° when Shift is held). */
+  rotation?: number;
+}
+
+/** A colored, labeled container that groups moodboard references. Created by
+ *  multi-selecting nodes and grouping them (Ctrl/Cmd+G); the frame is a region
+ *  whose `refIds` travel with it when the frame is dragged. */
+export interface MoodboardFrame {
+  id: string;
+  /** World coordinates of the frame's top-left (header included). */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Editable label shown in the frame's header. */
+  label: string;
+  /** Accent color key (see `MOODBOARD_FRAME_COLORS` in moodboard-layout.ts). */
+  color: string;
+  /** Member reference ids. Empty frames are pruned on reconcile. */
+  refIds: string[];
+}
+
+/** PureRef-style reference moodboard layout, persisted per production. Additive
+ *  and optional: older documents load with `moodboard` undefined and the board
+ *  auto-places every reference it sees. */
+export interface MoodboardLayout {
+  version: 1;
+  nodes: MoodboardNodeLayout[];
+  /** Saved viewport so reopening restores the exact view. */
+  viewport: { x: number; y: number; zoom: number };
+  /** Plain solid or tiled background. */
+  background?: "dark" | "mid" | "grid";
+  /** Free-text cards pinned to the board. */
+  notes?: MoodboardNote[];
+  /** Labeled colored groups of references. */
+  frames?: MoodboardFrame[];
+}
+
 export interface Production {
   meta: ProductionMeta;
   /** Pipeline step the user is focused on (1..5). */
@@ -560,7 +635,8 @@ export interface Production {
   status: Record<number, "todo" | "running" | "done" | "error">;
   /** Step 2: generated 3D models (design-page generator). Newest first. */
   models3d?: ProductionModel[];
-  /** Which source was last ingested (shown in the Step 1 card). */
+  /** The source last ingested — a Google Docs URL or a local file path —
+   *  refilled into the Step 1 controls so re-ingesting is one click. */
   scriptSource?: string;
   /** Step 5 assembly configuration + last-run bookkeeping. */
   assembly?: ProductionAssembly;
@@ -571,6 +647,10 @@ export interface Production {
    * the lower-right corner of every page.
    */
   storyboardPdf?: StoryboardPdfSettings;
+  /** The Reference Moodboard (PureRef-style canvas of every custom reference):
+   *  node placements, viewport, background, and notes. Optional/additive —
+   *  absent on documents that never opened the board. */
+  moodboard?: MoodboardLayout;
   assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string; /** @deprecated Legacy flat video folder; clips now live in each shot's board folder under `video/`. Read only by the one-time relocation migration. */ videosDir?: string };
   /** Schema version gating the one-time board-artwork migrations (perf 1.2):
    *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk

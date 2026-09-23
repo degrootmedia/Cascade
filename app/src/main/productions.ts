@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Graph, GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock }
+import type { CameraGridData, Graph, GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
 import { sanitizeGenParams } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations,
@@ -18,6 +18,7 @@ import { normalizeGraph } from "../shared/graph/normalize.js";
 import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
+import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
 
 export interface ProductionFile extends Production {}
 
@@ -67,6 +68,11 @@ function normalize(p: ProductionFile): ProductionFile {
   if (typeof (p as unknown as { musicVolume?: unknown }).musicVolume !== "number") {
     if (p.musicPath) (p as ProductionFile).musicVolume = 0.5;
   }
+  // The moodboard is renderer-normalized on read (`normalizeMoodboardLayout`);
+  // main only drops a non-object so a corrupt file can't poison the merge.
+  if (p.moodboard !== undefined && (p.moodboard === null || typeof p.moodboard !== "object")) {
+    delete (p as { moodboard?: unknown }).moodboard;
+  }
   return p;
 }
 
@@ -75,6 +81,13 @@ const store = createStore<ProductionFile>({
   idOf: (p) => p.meta.id,
   decode: normalize,
   sortKey: (p) => p.meta.updatedAt,
+  // The image-suite session is a side document of the production — removing or
+  // archiving the production removes/archives it in lockstep so no orphan
+  // suite timelines accumulate.
+  sideFiles: {
+    remove: (id) => removeSuiteSession(id),
+    archive: (id) => archiveSuiteSession(id),
+  },
 });
 
 /** List payload: just the meta plus a status peek. */
@@ -138,13 +151,18 @@ export function loadProduction(id: string): ProductionFile | null {
   return structuredClone(p);
 }
 
-/** Absolute paths of every artwork-bearing reference image (characters,
- *  products, custom references) — feeds the thumbnail-cache regenerator so
- *  the node graph's reference tiles are pre-generated for older projects. */
-export function referenceImagePaths(p: ProductionFile): string[] {
-  return [...(p.characters ?? []), ...(p.products ?? []), ...(p.references ?? [])]
+/** Absolute paths of every artwork-bearing reference — reference images
+ *  (characters, products, custom references) and video references' clips —
+ *  feeding the thumbnail-cache regenerator so the node graph's tiles (and the
+ *  moodboard shelf's video posters) are pre-generated for older projects. */
+export function referenceThumbnailPaths(p: ProductionFile): string[] {
+  const imagePaths = [...(p.characters ?? []), ...(p.products ?? []), ...(p.references ?? [])]
     .filter((r) => !!r.imagePath)
     .map((r) => assetPath(p, r.imagePath!));
+  const videoPaths = (p.references ?? [])
+    .filter((r) => r.media === "video" && !!r.mediaPath)
+    .map((r) => assetPath(p, r.mediaPath!));
+  return [...imagePaths, ...videoPaths];
 }
 
 export function saveProduction(p: ProductionFile): void {
@@ -175,6 +193,59 @@ function takeGenIndex(
   if (incomingIdx === undefined) return freshIdx;
   const same = JSON.stringify(incomingGens ?? []) === JSON.stringify(freshGens ?? []);
   return same ? incomingIdx : freshIdx;
+}
+
+/** Merge the camera-grid node: the fresh document owns the generated sheet,
+ *  its provenance, and the panel geometry (all written main-side by a
+ *  generation); the incoming snapshot owns the renderer-edited wiring
+ *  (`source`/`gridSource`/`refIds`), prompt, and generation picks.
+ *
+ *  The sheet itself is written by BOTH sides — main on a generation, the
+ *  renderer on a grid-image import — so `sheetAt` (the last sheet-write
+ *  timestamp) decides which `sheetPath` is newer. Without that, a generation
+ *  landing concurrently would revert a just-imported grid image (the imported
+ *  sheet vanished on the next save), and a stale renderer save would revert a
+ *  fresh generation. */
+function mergeCameraGrid(
+  freshGrid: CameraGridData | undefined,
+  incomingGrid: CameraGridData | undefined
+): CameraGridData | undefined {
+  if (!incomingGrid) return freshGrid;
+  if (!freshGrid) return incomingGrid;
+  const freshAt = typeof freshGrid.sheetAt === "string" ? freshGrid.sheetAt : "";
+  const incomingAt = typeof incomingGrid.sheetAt === "string" ? incomingGrid.sheetAt : "";
+  const merged: CameraGridData = {
+    ...freshGrid,
+    ...incomingGrid,
+    cols: freshGrid.cols,
+    rows: freshGrid.rows,
+    ...(freshGrid.panels ? { panels: freshGrid.panels } : {}),
+    ...(freshGrid.panelLabels ? { panelLabels: freshGrid.panelLabels } : {}),
+    ...(freshGrid.generation ? { generation: freshGrid.generation } : {}),
+  };
+  // The sheet (path + write timestamp) follows the newer write, whichever side
+  // produced it — a generation (main) or a grid-image import (renderer).
+  const sheet = incomingAt > freshAt ? incomingGrid : freshGrid;
+  if (sheet.sheetPath) merged.sheetPath = sheet.sheetPath;
+  else delete merged.sheetPath;
+  if (sheet.sheetAt) merged.sheetAt = sheet.sheetAt;
+  else delete merged.sheetAt;
+  return merged;
+}
+
+/** Merge the upscale node: the fresh document owns the stored output history
+ *  (main-side appends), the incoming snapshot owns the renderer-edited source
+ *  wiring and model/resolution/params picks. */
+function mergeUpscale(
+  freshNode: UpscaleData | undefined,
+  incomingNode: UpscaleData | undefined
+): UpscaleData | undefined {
+  if (!incomingNode) return freshNode;
+  if (!freshNode) return incomingNode;
+  const { gens: _gens, genIndex: _idx, ...rest } = incomingNode;
+  const node: UpscaleData = { ...freshNode, ...rest };
+  node.genIndex = takeGenIndex(incomingNode.genIndex, incomingNode.gens, freshNode.genIndex, freshNode.gens);
+  return node;
 }
 
 /** Merge one shot's edit-image nodes by stable node id: the fresh node owns
@@ -264,7 +335,7 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   for (const [key, value] of Object.entries(incomingRec)) {
     if (DENIED.has(key)) continue;
     if (key === "artwork" || key === "videoPath") continue; // explicit-null / editvideo rules below
-    if (key === "graphEditNodes" || key === "graphTweenBlocks") continue; // merged by id / pair below
+    if (key === "graphEditNodes" || key === "graphTweenBlocks" || key === "graphUpscale") continue; // merged by id / pair / state below
     mergedRec[key] = value;
   }
   merged.graphImageGenIndex = takeGenIndex(
@@ -281,6 +352,8 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   );
   merged.graphEditNodes = mergeEditNodes(freshShot.graphEditNodes, incoming.graphEditNodes);
   merged.graphTweenBlocks = mergeTweenBlocks(freshShot.graphTweenBlocks, incoming.graphTweenBlocks);
+  merged.graphCameraGrid = mergeCameraGrid(freshShot.graphCameraGrid, incoming.graphCameraGrid);
+  merged.graphUpscale = mergeUpscale(freshShot.graphUpscale, incoming.graphUpscale);
   // Explicit clears ride the whole-document save (unpipe flows send
   // artwork/videoPath as explicit nulls). A stale echo carries paths, never
   // nulls, so honouring nulls cannot resurrect or cross-wire frames.
@@ -434,6 +507,11 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     fresh.magicPrompts = fresh.magicPrompts ?? {};
   }
   if (typeof p.magicEnabled === "boolean") fresh.magicEnabled = p.magicEnabled;
+  // The reference moodboard (node placements, viewport, notes) is renderer-owned
+  // like the shot graph layouts. Its shape is repaired on read by the renderer's
+  // `normalizeMoodboardLayout`; main only stores it verbatim so a save never
+  // partitions it across two writers.
+  if (p.moodboard && typeof p.moodboard === "object") fresh.moodboard = p.moodboard;
   return fresh;
 }
 

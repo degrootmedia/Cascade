@@ -14,11 +14,11 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { styleFramePrompt } from "../shared/look.js";
+import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";
-import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, shotVideoDir, shotVideoRelPath } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, resolveOutputRef, resolveOutputRefByPath, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
@@ -33,16 +33,23 @@ import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./sk
 import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
 import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, styleFrameOverride, type DisplayItem, type ChatAttachment } from "../shared/ipc.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, styleFrameOverride, normalizeCanvasBusy, normalizeCameraGridData, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, CAMERA_GRID_COLS, CAMERA_GRID_ROWS, type DisplayItem, type GraphSource, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
-import { dataUrlToBytes, parsePromptBoxes, stripReferenceClause } from "../shared/prompt-grammar.js";
+import { DetachedCanvasController } from "./detached-window.js";
+import { pathToFileURL } from "node:url";
+import { dataUrlToBytes, parsePromptBoxes, refTagNames, stripReferenceClause } from "../shared/prompt-grammar.js";
 import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder } from "../shared/ipc.js";
+import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
+import { cutoutCameraGrid } from "./camera-grid.js";
+import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
+/** The single detached canvas window (Spec 03) — created in `whenReady`. */
+let detached: DetachedCanvasController | null = null;
 
 /** Perf 1.3: memoized 480px board thumbnails. Keyed by
  *  productionId:shotId:framePath, validated by artworkPath:mtimeMs so a
@@ -104,8 +111,8 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-import { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, serveMediaFile } from "./media-protocol.js";
-import { loadRefThumbnail, setThumbCacheDir, regenerateRefThumbnails } from "./thumbnails.js";
+import { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, serveMediaFile, etagFor, CACHE_REVALIDATE } from "./media-protocol.js";
+import { loadRefThumbnail, setThumbCacheDir, setVideoPosterDeps, regenerateRefThumbnails } from "./thumbnails.js";
 import { validateExternalEditor, openWithExternalEditor } from "./external-editor.js";
 export { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, validateExternalEditor, openWithExternalEditor };
 
@@ -125,8 +132,9 @@ function installCsp(): void {
  * streaming with Range support so <audio>/<video> can seek without buffering
  * whole multi-GB files in the main process. `assetPath` confines the path to
  * the production folder (realpath-verified). A `?thumb=1` query serves a
- * small compressed JPEG instead of the full file — the node graph's reference
- * tiles use it; zoom/lightbox URLs keep the original.
+ * small compressed JPEG instead of the full file — an image resized to a tile,
+ * or a video's middle-frame 720p poster — the node graph and moodboard tiles
+ * use it; zoom/lightbox URLs keep the original.
  */
 function registerMediaProtocol(): void {
   protocol.handle("cascade-media", async (req) => {
@@ -143,46 +151,94 @@ function registerMediaProtocol(): void {
       return new Response("Forbidden", { status: 403 });
     }
     if (thumb) {
+      // Thumbs are derived from the source file, so the source's stat is a
+      // valid strong validator. Answer a matching If-None-Match with 304 before
+      // regenerating (an image resize or an ffmpeg poster) — the renderer then
+      // reuses its cached decoded thumbnail.
+      let etag: string | null = null;
+      try { etag = etagFor(await fs.promises.stat(abs)); } catch { etag = null; }
+      if (etag && req.headers.get("if-none-match") === etag) {
+        return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": CACHE_REVALIDATE } });
+      }
       const jpeg = await loadRefThumbnail(abs);
       if (jpeg) {
         return new Response(new Uint8Array(jpeg), {
           status: 200,
-          headers: { "Content-Type": "image/jpeg", "Content-Length": String(jpeg.length), "Cache-Control": "no-store" },
+          headers: {
+            "Content-Type": "image/jpeg",
+            "Content-Length": String(jpeg.length),
+            ...(etag ? { ETag: etag } : {}),
+            "Cache-Control": CACHE_REVALIDATE,
+          },
         });
       }
     }
-    return serveMediaFile(abs, req.headers.get("range"));
+    return serveMediaFile(abs, req.headers.get("range"), req.headers.get("if-none-match"));
   });
 }
 
 /**
- * External-edit watch: the original (high-quality) file that was handed to
- * the editor, and the JPEG preview that must be re-encoded when the original
- * is edited externally. `mtimeMs/size` are captured at open time; on window
- * focus we compare and regenerate the JPEG when the file has changed.
+ * External-edit watch. A board frame hands its archived original to the editor
+ * and must re-encode the served JPEG when that original changes. A reference
+ * image (character/product/custom) has no JPEG pair — but a reference piped to
+ * a shot's frame output is a *copy* in the boards dir, so an external edit must
+ * re-apply it to the output or the storyboard stays stale while the node canvas
+ * (which reads the live reference) already shows the new pixels.
+ *
+ * `mtimeMs/size` are captured at open time; on window focus we compare and
+ * refresh when the file has changed.
  */
-interface ExternalEditWatch {
+interface BoardEditWatch {
+  kind: "board";
   productionId: string;
   jpegRel: string;
   originalRel: string;
-  jpegAbs: string;
   originalAbs: string;
   mtimeMs: number;
   size: number;
 }
+interface RefEditWatch {
+  kind: "ref";
+  productionId: string;
+  refId: string;
+  refRel: string;
+  abs: string;
+  mtimeMs: number;
+  size: number;
+}
+type ExternalEditWatch = BoardEditWatch | RefEditWatch;
 const externalEditWatches = new Map<string, ExternalEditWatch>();
 
 function trackExternalEdit(p: Production, jpegRel: string, originalRel: string): void {
   try {
     const originalAbs = assetPath(p, originalRel);
-    const jpegAbs = assetPath(p, jpegRel);
     const st = fs.statSync(originalAbs);
     externalEditWatches.set(originalAbs, {
+      kind: "board",
       productionId: p.meta.id,
       jpegRel,
       originalRel,
-      jpegAbs,
       originalAbs,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+    });
+  } catch {}
+}
+
+/** Watch a reference image opened in the external editor. No-op when the path
+ *  doesn't belong to a character/product/custom reference. */
+function trackReferenceEdit(p: Production, refRel: string): void {
+  const ref = resolveOutputRefByPath(p, refRel);
+  if (!ref) return;
+  try {
+    const abs = assetPath(p, refRel);
+    const st = fs.statSync(abs);
+    externalEditWatches.set(abs, {
+      kind: "ref",
+      productionId: p.meta.id,
+      refId: ref.id,
+      refRel,
+      abs,
       mtimeMs: st.mtimeMs,
       size: st.size,
     });
@@ -193,13 +249,14 @@ async function checkExternalEdits(): Promise<void> {
   for (const [key, w] of externalEditWatches) {
     let st: fs.Stats;
     try {
-      st = fs.statSync(w.originalAbs);
+      st = fs.statSync(w.kind === "board" ? w.originalAbs : w.abs);
     } catch {
       continue;
     }
-    if (st.mtimeMs > w.mtimeMs + 50 || st.size !== w.size) {
-      const p = productions.loadProduction(w.productionId);
-      if (!p) continue;
+    if (!(st.mtimeMs > w.mtimeMs + 50 || st.size !== w.size)) continue;
+    const p = productions.loadProduction(w.productionId);
+    if (!p) continue;
+    if (w.kind === "board") {
       const ok = regenerateBoardJpeg(p, w.originalRel, w.jpegRel);
       if (ok) {
         w.mtimeMs = st.mtimeMs;
@@ -207,6 +264,30 @@ async function checkExternalEdits(): Promise<void> {
         win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
         win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
       }
+      continue;
+    }
+    // Reference edit: refresh the storyboard copy wherever the reference feeds
+    // a shot's frame output. The node canvas reads the live reference, so it
+    // already shows the new pixels; the storyboard frame is a copy and would
+    // otherwise stay stale until the pipe was toggled.
+    const ref = resolveOutputRef(p, w.refId);
+    if (!ref) {
+      externalEditWatches.delete(key);
+      continue;
+    }
+    let touched = false;
+    for (const shot of p.scenes.flatMap((s) => s.shots)) {
+      if (shot.graphOutputSource !== "ref" || shot.graphOutputRefId !== w.refId) continue;
+      if (!refreshRefCopyFromFile(p, shot, w.refRel)) continue;
+      touched = true;
+      if (shot.artwork) {
+        win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: shot.artwork, originalRel: w.refRel });
+      }
+    }
+    w.mtimeMs = st.mtimeMs;
+    w.size = st.size;
+    if (touched) {
+      win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed the storyboard frame for reference ${w.refRel}`, level: "done" } satisfies ProductionEvent);
     }
   }
 }
@@ -259,6 +340,9 @@ async function openImageExternally(win: BrowserWindow, target: { productionId?: 
       }
       const abs = assetPath(p, file.relPath);
       if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${file.relPath}`);
+      // A reference image has no JPEG/original pair — watch it so an external
+      // edit re-applies any output pipe that copies it.
+      trackReferenceEdit(p, file.relPath);
       await openWithExternalEditor(abs);
       return;
     }
@@ -674,10 +758,37 @@ function registerIpc() {
     });
   }
 
+  // Detached canvas window (Spec 03): a single window, retargeted on reopen.
+  // `detached` is assigned in `whenReady` before registerIpc() runs, so these
+  // handlers always have a controller by the time the renderer can invoke them.
+  handle("window:openDetachedCanvas", (_e, ctx: DetachedCanvasContext) => detached!.open(ctx));
+  handle("window:closeDetachedCanvas", () => detached!.close());
+  handle("window:detachedState", () => detached!.state());
+  on("canvas:selectionChanged", (_e, frameId: string | null) => detached?.selectionChanged(frameId ?? null));
+
+  // Cross-window in-flight canvas jobs (Spec 03): whichever window publishes
+  // its local busy snapshot has it relayed to its sibling, so "Generating…"
+  // survives the graph living in the other window. The main window's latest
+  // snapshot is cached and replayed to the detached window on its first
+  // publish (a job started before the pop-out must still show there).
+  let lastMainCanvasBusy: CanvasBusySnapshot | null = null;
+  on("canvas:busyChanged", (event, raw: unknown) => {
+    let snapshot: CanvasBusySnapshot;
+    try { snapshot = normalizeCanvasBusy(raw); } catch { return; }
+    const fromMain = !!win && !win.isDestroyed() && event.sender.id === win.webContents.id;
+    if (fromMain) lastMainCanvasBusy = snapshot;
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.id === event.sender.id) continue;
+      w.webContents.send("canvas:busyChanged", snapshot);
+    }
+    if (!fromMain && lastMainCanvasBusy) {
+      event.sender.send("canvas:busyChanged", lastMainCanvasBusy);
+    }
+  });
+
   /** Run one user turn on a chat through the normal agent path (approval gate
    *  and all). Shared by `chat:send` and goal auto-continuation. */
-  async function sendTurn(entry: LiveChat, text: string, attachments?: ChatAttachment[]): Promise<void> {
-    if (entry.running) throw new Error("BUSY");
+  async function sendTurn(entry: LiveChat, text: string, attachments?: ChatAttachment[]): Promise<void> {    if (entry.running) throw new Error("BUSY");
     entry.running = true;
     const token = ++entry.sendToken;
     try {
@@ -919,6 +1030,14 @@ function registerIpc() {
 
   handle("settings:setMediaModelOrder", (_e, ids: string[]) => {
     settings.setMediaModelOrder(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
+  // Creative prompt-template overrides (Settings → Advanced → Prompts). Absent
+  // ids fall back to the built-ins in shared/prompt-templates.ts.
+  handle("settings:getPromptTemplates", () => settings.getPromptTemplates());
+
+  handle("settings:setPromptTemplates", (_e, overrides: Record<string, string>) => {
+    settings.setPromptTemplates(overrides ?? {});
   });
 
   // Dev Model Customizer: per-parameter placement (modelId::flag → placement).
@@ -1211,7 +1330,7 @@ function registerIpc() {
       const p = productions.loadProduction(meta.id);
       if (!p) continue;
       projects.add(p.meta.id);
-      paths.push(...productions.referenceImagePaths(p));
+      paths.push(...productions.referenceThumbnailPaths(p));
     }
     const counts = await regenerateRefThumbnails(paths);
     return { ...counts, projects: projects.size };
@@ -1581,7 +1700,7 @@ function registerIpc() {
       const resolutionOverride = styleFrameOverride(resolution);
       const gen = refMedia.imageGenFn(p, modelOverride, resolutionOverride, (m) => emit(m, "info"), "16:9");
       if (!gen) throw new Error(`${refMedia.displayName} isn't connected, so style frames can't be generated in-app.`);
-      const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p));
+      const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p), settings.getPromptTemplates().styleFrame);
       emit(`Generating a style frame for "${style.name || `Style ${style.index}`}” (16:9)…`);
       const buf = await gen(prompt, [], undefined, sanitizeGenParams(params));
       const ext = buf[0] === 0xff && buf[1] === 0xd8 ? "jpg" : "png";
@@ -1800,6 +1919,14 @@ function registerIpc() {
         if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
         node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
       }
+      // The upscale node owns its own history; re-anchor its selection too.
+      const prevUp = prev.graphUpscale;
+      const nextUp = next.graphUpscale;
+      if (prevUp && nextUp && shot.graphUpscale && JSON.stringify(prevUp.gens) !== JSON.stringify(nextUp.gens)) {
+        shot.graphUpscale.genIndex = rebaseGenIndex(
+          prevUp.gens, prevUp.genIndex, shot.graphUpscale.gens, shot.graphUpscale.genIndex, nextUp.gens, nextUp.genIndex,
+        );
+      }
     }
     return fresh;
   }
@@ -1910,13 +2037,13 @@ function registerIpc() {
     const gen = routed.imageGenFn(p, undefined, undefined, (m) => emit(m, "info"));
     if (!gen) {
       emit(`${routed.displayName} isn't connected (no image-generation tool found), so frames can't be generated in-app.`, "error");
-      exportBoardPrompts(p, emit);
+      exportBoardPrompts(p, emit, settings.getPromptTemplates().lookClause);
       emit("Generate the frames with those prompts, then use “Import frames…” (name each file with its shot number, e.g. 0100.png).", "info");
       p.status[3] = "todo";
       return;
     }
     emit(`Using ${routed.displayName} for image generation.`);
-    await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName });
+    await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName, lookClause: settings.getPromptTemplates().lookClause });
   };
 
   handle("production:generateBoards", (_e, id: string, opts?: { maxShots?: number; regenerateAll?: boolean }) =>
@@ -2009,7 +2136,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
     productionEmit(id, "Exporting storyboard prompts…");
-    exportBoardPrompts(p, (m, l) => productionEmit(id, m, l));
+    exportBoardPrompts(p, (m, l) => productionEmit(id, m, l), settings.getPromptTemplates().lookClause);
     productions.saveProduction(p);
     return p;
   });
@@ -2259,6 +2386,170 @@ function registerIpc() {
     } catch {
       return [];
     }
+  });
+
+  // Image Generation & Editing Suite (Spec 01): session persistence + a
+  // vendor-blind generate/edit submit. No suite code knows a vendor — the
+  // model id routes through the registry exactly like every other generation.
+  handle("suite:loadSession", (_e, id: string): SuiteSession => {
+    const p = productions.loadProduction(id);
+    if (!p) return emptySuiteSession();
+    return loadSuiteSession(id);
+  });
+
+  handle("suite:saveSession", (_e, id: string, session: SuiteSession): void => {
+    // Re-normalize at the boundary: the renderer may send any shape, and this
+    // is the same validator the on-disk read path uses.
+    saveSuiteSession(id, normalizeSuiteSession(session));
+  });
+
+  handle("suite:deleteEntry", (_e, id: string, entryId: string): SuiteSession => {
+    const session = loadSuiteSession(id);
+    const entry = session.entries.find((e) => e.id === entryId);
+    const p = productions.loadProduction(id);
+    if (p && entry) {
+      unlinkSuiteFile(p.meta.folder, entry.outputPath);
+    }
+    return removeSuiteEntry(id, entryId);
+  });
+
+  handle("suite:exportEntry", (_e, id: string, entryId: string, target: SuiteExportTarget): SuiteExportResult => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const entry = loadSuiteSession(id).entries.find((e) => e.id === entryId);
+    if (!entry) throw new Error("That suite entry wasn't found.");
+    const src = assetPath(p, entry.outputPath);
+    if (!fs.existsSync(src)) throw new Error("The suite entry's file is missing on disk.");
+    const ext = (path.extname(entry.outputPath) || ".png").replace(/^\./, "");
+    const base = entry.prompt.split("\n")[0].replace(/[^\w\- ]+/g, "").trim().slice(0, 48) || "Suite";
+    const dir = target === "boards" ? p.assets.boardsDir : p.assets.referencesDir;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    const rel = uniqueSuiteRel(dir, base, ext, (r) => fs.existsSync(assetPath(p, r)));
+    fs.copyFileSync(src, assetPath(p, rel));
+    if (target === "boards") return { path: rel, ref: null, production: p };
+    const ref: CustomRef = {
+      id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      name: base,
+      imagePath: rel,
+      shotIds: [],
+    };
+    p.references = [...(p.references ?? []), ref];
+    productions.saveProduction(p);
+    productionEmit(id, `Saved suite entry to references → ${rel}.`, "done");
+    return { path: rel, ref, production: p };
+  });
+
+  // Run one suite generation/edit through the active MediaProvider. The
+  // production is READ (references + asset dirs) but never mutated — the
+  // suite is non-destructive by design, so its outputs live in out/suite/ and
+  // no reference is created or replaced.
+  handle("suite:generate", async (_e, id: string, req: SuiteGenerateRequest): Promise<SuiteEntry> => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const text = typeof req?.prompt === "string" ? req.prompt.trim() : "";
+    const kind: "generate" | "edit" | "upscale" =
+      req?.kind === "edit" ? "edit" : req?.kind === "upscale" ? "upscale" : "generate";
+    // Upscale takes no prompt (the model enhances the source image), so only
+    // generate/edit require one.
+    if (!text && kind !== "upscale") {
+      throw new Error('Describe what to generate or edit first (e.g. "a red gondola interior, moody light").');
+    }
+    const modelId = typeof req?.model === "string" && req.model.trim() && req.model !== "auto" ? req.model.trim() : undefined;
+    const resolution = typeof req?.resolution === "string" && req.resolution.trim() ? req.resolution.trim() : undefined;
+    const aspectRatio: ReferenceImageGenOptions["aspectRatio"] =
+      req?.aspectRatio === "1:1" || req?.aspectRatio === "4:3" ? req.aspectRatio : "16:9";
+    const provider = mediaFor(modelId);
+    const gen = provider.imageGenFn(p, modelId, resolution, () => {}, aspectRatio);
+    if (!gen) throw new Error(`${provider.displayName} isn't connected (no image-generation tool found), so the suite can't generate in-app.`);
+
+    // Edit: the source image is uploaded first (@image1). The source is either
+    // a production reference or a production-relative frame path (a node-graph
+    // frame / shot board frame). Generate: only the cited references ride along.
+    let sourceRef: CustomRef | undefined;
+    let sourcePath: string | undefined;
+    let sourceLabel = "Suite";
+    let sourceDataUrl: string | undefined;
+    if (kind === "edit" || kind === "upscale") {
+      const verb = kind === "upscale" ? "upscale" : "edit";
+      if (typeof req.sourceRefId === "string" && req.sourceRefId) {
+        sourceRef = (p.references ?? []).find((r) => r.id === req.sourceRefId);
+        if (!sourceRef) throw new Error(`The reference to ${verb} wasn't found.`);
+        sourceLabel = sourceRef.name;
+        sourceDataUrl = refArtworkDataUrl(p, sourceRef);
+      } else if (typeof req.sourcePath === "string" && req.sourcePath) {
+        const abs = assetPath(p, req.sourcePath);
+        if (!fs.existsSync(abs)) throw new Error("The source image isn't on disk.");
+        sourcePath = req.sourcePath;
+        sourceLabel = path.basename(req.sourcePath).replace(/\.[^.]+$/, "") || "source";
+        sourceDataUrl = `data:${mediaMimeForPath(req.sourcePath)};base64,${fs.readFileSync(abs).toString("base64")}`;
+      } else {
+        throw new Error(`Pick a reference or frame to ${verb}.`);
+      }
+      if (!sourceDataUrl) throw new Error(`This source has no image to ${verb}.`);
+    }
+
+    let promptText: string;
+    let refs: { name: string; dataUrl: string }[];
+    if (kind === "upscale") {
+      // Upscalers reject `--prompt`; the source is the sole reference (models
+      // like Bytedance Image Upscale accept exactly one).
+      promptText = "";
+      refs = [{ name: sourceLabel, dataUrl: sourceDataUrl! }];
+    } else if (kind === "edit") {
+      const { resolved, extras } = resolvePromptRefs(p, text, 1);
+      promptText = buildEditGenPrompt(resolved, settings.getPromptTemplates().editImage);
+      refs = [{ name: sourceLabel, dataUrl: sourceDataUrl! }, ...extras];
+    } else {
+      const { resolved, extras } = resolvePromptRefs(p, text, 0);
+      promptText = resolved;
+      refs = extras;
+    }
+    // Explicitly attached reference ids (a handoff seed's refIds) upload too,
+    // deduped against the @tag-resolved refs already in `refs`. Ids may point
+    // at characters/products/custom references.
+    const refPool: { id: string; name: string; imagePath?: string; artwork?: string }[] = [
+      ...(p.characters ?? []),
+      ...(p.products ?? []),
+      ...(p.references ?? []),
+    ];
+    // Upscale submits exactly one image (the source) — extra references would
+    // fail the model's single-image rule, so its refIds are ignored.
+    if (kind !== "upscale") {
+      for (const id of Array.isArray(req?.refIds) ? req.refIds : []) {
+        if (typeof id !== "string" || !id) continue;
+        const r = refPool.find((x) => x.id === id);
+        if (!r) continue;
+        const dataUrl = refArtworkDataUrl(p, r);
+        if (!dataUrl || refs.some((e) => e.name.toLowerCase() === r.name.toLowerCase())) continue;
+        refs.push({ name: r.name, dataUrl });
+      }
+    }
+    const params = sanitizeGenParams(req?.params);
+    const buf = await gen(promptText, refs, undefined, params);
+
+    const dir = suiteDirRel(p.assets.outDir);
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    const rel = uniqueSuiteRel(dir, sourceLabel, imageExtFor(buf), (r) => fs.existsSync(assetPath(p, r)));
+    fs.writeFileSync(assetPath(p, rel), buf);
+    productionEmit(id, `Suite ${kind === "edit" ? "edit" : kind === "upscale" ? "upscale" : "generation"} → ${rel}.`, "done");
+
+    return {
+      id: `suite-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      parentId: typeof req?.parentId === "string" && req.parentId ? req.parentId : null,
+      kind,
+      createdAt: new Date().toISOString(),
+      model: typeof req?.model === "string" ? req.model : "",
+      resolution: resolution ?? req?.resolution ?? "1k",
+      ...(req?.aspectRatio === "1:1" || req?.aspectRatio === "4:3" ? { aspectRatio: req.aspectRatio } : {}),
+      prompt: text,
+      promptRefs: refTagNames(text),
+      outputPath: rel,
+      ...(sourceRef ? { sourceRefId: sourceRef.id } : {}),
+      ...(sourcePath ? { sourcePath } : {}),
+      refIds: Array.isArray(req?.refIds) ? req.refIds.filter((r): r is string => typeof r === "string") : [],
+      ...(params ? { params: params as GenParams } : {}),
+      ...(typeof req?.quotedCredits === "number" && Number.isFinite(req.quotedCredits) ? { quotedCredits: req.quotedCredits } : {}),
+    };
   });
 
   // Settings → Models & expenses: probe both vendors and bake every model's
@@ -2697,6 +2988,72 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     }
   }
 
+  /** Resolve a generation-source descriptor (`GraphSource`) to the uploadable
+   *  image it points at: the image node's selected frame, an edit node's
+   *  selected edit, or a reference's artwork. Null when unset/unresolvable.
+   *  Shared by the edit-image and camera-grid flows. */
+  function resolveGraphSourceImage(
+    p: Production,
+    shot: ProductionShot,
+    source: GraphSource | undefined | null
+  ): { name: string; dataUrl: string } | null {
+    if (source?.kind === "imagegen") {
+      const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+      const dataUrl = src ? fileDataUrl(p, src) : null;
+      return dataUrl ? { name: "Image node frame", dataUrl } : null;
+    }
+    if (source?.kind === "editgen") {
+      const sel = editNodeSelection(shot, source.nodeId);
+      const dataUrl = sel?.path ? fileDataUrl(p, sel.path) : null;
+      return dataUrl ? { name: "Edit node frame", dataUrl } : null;
+    }
+    if (source?.kind === "ref") {
+      const ref = [
+        ...p.characters.map((c) => ({ id: c.id, name: c.name, imagePath: c.imagePath, artwork: c.artwork })),
+        ...p.products.map((pr) => ({ id: pr.id, name: pr.name, imagePath: pr.imagePath, artwork: pr.artwork })),
+        ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, imagePath: r.imagePath, artwork: r.artwork })),
+      ].find((r) => r.id === source.refId);
+      const dataUrl = ref ? refArtworkDataUrl(p, ref) : undefined;
+      return dataUrl ? { name: ref!.name, dataUrl } : null;
+    }
+    return null;
+  }
+
+  /** Submit one image generation from a source frame + references — the shared
+   *  path the edit-image node and the camera-grid node both use, so their
+   *  submissions are identical apart from the prompt. The source occupies
+   *  reference 0, `@[name]` tags resolve from token 1, and extra references
+   *  (the camera grid's wired sockets) follow. No aspect override — the edit
+   *  node doesn't set one, so neither does this. Returns the finished bytes +
+   *  the serving provider. */
+  async function submitGraphImage(args: {
+    p: Production;
+    shot: ProductionShot;
+    source: GraphSource | undefined | null;
+    extraRefs?: { name: string; dataUrl: string }[];
+    prompt: string;
+    frame?: (resolved: string) => string;
+    modelId?: string;
+    resolution?: string;
+    params?: Record<string, string | number | boolean | string[]>;
+    emit: (m: string, l?: "info" | "error" | "done") => void;
+    describeSource: (sourceName: string) => string;
+  }): Promise<{ buf: Buffer; providerId: string }> {
+    const media = mediaFor(args.modelId);
+    const gen = media.imageGenFn(args.p, args.modelId, args.resolution, (m) => args.emit(m, "info"));
+    if (!gen) throw new Error(`${media.displayName} isn't connected (no image-generation tool found).`);
+    const resolvedSource = resolveGraphSourceImage(args.p, args.shot, args.source);
+    let dataUrl = resolvedSource?.dataUrl;
+    const sourceName = resolvedSource?.name ?? `Shot ${args.shot.number} frame`;
+    if (!dataUrl && args.shot.artwork) dataUrl = fileDataUrl(args.p, args.shot.artwork) ?? undefined;
+    if (!dataUrl) throw new Error("No source image — wire a frame or reference in, or generate a frame first.");
+    const { resolved, extras } = resolvePromptRefs(args.p, args.prompt, 1);
+    const refs = [{ name: sourceName, dataUrl }, ...(args.extraRefs ?? []), ...extras];
+    args.emit(args.describeSource(sourceName), "info");
+    const buf = await gen(args.frame ? args.frame(resolved) : resolved, refs, args.shot, args.params);
+    return { buf, providerId: media.id };
+  }
+
   /** Resolve an in-betweener keyframe source id to its display name + image
    *  data URL. A generation-node sentinel resolves to that node's selected
    *  generation (`@imagegen` → the image node's selected frame, `@editgen` →
@@ -2846,58 +3203,47 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!text) throw new Error('Describe the edit first (e.g. "make it night, add rain").');
       const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
       const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
-      const editMedia = mediaFor(modelId);
-      const gen = editMedia.imageGenFn(p, modelId, resolution, (m) => emit(m, "info"));
-      if (!gen) throw new Error(`${editMedia.displayName} MCP isn't connected, so frames can't be edited in-app.`);
       // Source: the node's own pipe (parent edit / image node / reference),
-      // then the shot's current frame.
-      const source = node.source;
-      let dataUrl: string | undefined;
-      let sourceName = `Shot ${shot.number} frame`;
-      if (source?.kind === "imagegen") {
-        const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
-        if (src) {
-          dataUrl = fileDataUrl(p, src) ?? undefined;
-          if (dataUrl) sourceName = "Piped frame";
-        }
-      } else if (source?.kind === "editgen") {
-        const sel = editNodeSelection(shot, source.nodeId);
-        if (sel?.path) {
-          dataUrl = fileDataUrl(p, sel.path) ?? undefined;
-          if (dataUrl) sourceName = "Piped edit";
-        }
-      } else if (source?.kind === "ref") {
-        const pool = [
-          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
-          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
-        ];
-        const ref = pool.find((r) => r.id === source.refId);
-        if (ref?.artwork) {
-          dataUrl = ref.artwork;
-          sourceName = ref.name;
-        }
-      }
-      if (!dataUrl && shot.artwork) {
-        dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
-      }
-      if (!dataUrl) throw new Error("No source image — pipe a frame or reference into the edit node, or generate a frame first.");
-      // Resolve @[name] tags in the edit text against the production's artwork,
-      // so the references cited in the edit-prompt node are uploaded alongside
-      // the source. The source occupies @image1 (token 0), so tags start at 1.
-      const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
-      emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}${extras.length ? ` (+${extras.length} reference${extras.length === 1 ? "" : "s"})` : ""}…`);
-      const png = await gen(
-        buildEditGenPrompt(editText),
-        [{ name: sourceName, dataUrl }, ...extras],
-        shot,
-        opts?.params
-      );
+      // then the shot's current frame. The submission is the shared
+      // `submitGraphImage` path (identical to the camera-grid node).
+      const { buf: png } = await submitGraphImage({
+        p, shot, source: node.source, prompt: text,
+        frame: (resolved) => buildEditGenPrompt(resolved, settings.getPromptTemplates().editImage),
+        modelId, resolution, params: opts?.params, emit,
+        describeSource: (sourceName) => `Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}…`,
+      });
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       node.prompt = text;
       recordGraphEditGen(shot, node.id, jpegRel, text, modelId ?? "auto");
       syncBoardOutputToPipe(shot);
       emit(`Shot ${shot.number}: node edit ready.`, "done");
+    }, { needsApiKey: false })
+  );
+
+  // Step 3 node graph: upscale the upscale node's source image (its source
+  // pipe, falling back to the shot's current frame) through an upscale-capable
+  // model. The source is the sole reference (upscalers reject a prompt), and
+  // the result is stored on the node — it becomes the shot's artwork only when
+  // the node is piped to the output.
+  handle("production:generateUpscaleNode", (_e, id: string, shotId: string, opts: { model?: string; resolution?: string; params?: Record<string, string | number | boolean | string[]> }) =>
+    runProductionStep(id, 3, "upscaling an image (node graph)", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const node = shot.graphUpscale;
+      if (!node) throw new Error("Upscale node not found — drag one onto the canvas first.");
+      const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
+      const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      // No prompt: upscalers reject `--prompt` and the node has no prompt UI.
+      const { buf: png, providerId } = await submitGraphImage({
+        p, shot, source: node.source, prompt: "",
+        modelId, resolution, params: opts?.params, emit,
+        describeSource: (sourceName) => `Shot ${shot.number}: upscaling ${sourceName}${modelId ? ` via ${modelId}` : ""}…`,
+      });
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordGraphUpscaleGen(shot, jpegRel, modelId ?? "auto");
+      shot.graphUpscale = { ...(shot.graphUpscale ?? {}), generation: { provider: providerId, model: modelId ?? "auto" } };
+      syncBoardOutputToPipe(shot);
+      emit(`Shot ${shot.number}: upscaled frame ready.`, "done");
     }, { needsApiKey: false })
   );
 
@@ -2931,26 +3277,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    const ref = [
-      ...p.characters.map((c) => ({ id: c.id, imagePath: c.imagePath, artwork: c.artwork, media: undefined as string | undefined, mediaPath: undefined as string | undefined })),
-      ...p.products.map((pr) => ({ id: pr.id, imagePath: pr.imagePath, artwork: pr.artwork, media: undefined as string | undefined, mediaPath: undefined as string | undefined })),
-      ...(p.references ?? []).map((r) => ({ id: r.id, imagePath: r.imagePath, artwork: r.artwork, media: r.media, mediaPath: r.mediaPath })),
-    ].find((r) => r.id === refId);
+    const ref = resolveOutputRef(p, refId);
     if (!ref) throw new Error("Reference not found.");
-    if (ref.media === "video" && ref.mediaPath) {
-      shot.videoPath = ref.mediaPath;
-      productions.saveProduction(p);
-      productionEmit(id, `Shot ${shot.number}: reference video applied to the output.`, "done");
-      return p;
-    }
-    // Image refs live on disk (imagePath) — read the bytes (legacy inline data
-    // URLs fall back).
-    const bytes = ref.imagePath ? (() => { try { return fs.readFileSync(assetPath(p, ref.imagePath!)); } catch { return null; } })() : ref.artwork ? dataUrlToBuffer(ref.artwork) : null;
-    if (!bytes || !bytes.length) throw new Error("This reference has no usable image — only image and video references can feed the output.");
-    const { jpegRel } = writeBoardFrame(p, shot, bytes, "png");
-    recordBoardArtwork(shot, jpegRel);
+    const jpegRel = applyRefToOutput(p, shot, ref);
     productions.saveProduction(p);
-    productionEmit(id, `Shot ${shot.number}: reference image applied to the output.`, "done");
+    productionEmit(id, jpegRel ? `Shot ${shot.number}: reference image applied to the output.` : `Shot ${shot.number}: reference video applied to the output.`, "done");
     return p;
   });
 
@@ -3103,6 +3434,27 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     }
   });
 
+  // Upscale node + Image Suite Upscale mode: which image models upscale an
+  // existing image. The live probe is unioned with the models the user
+  // explicitly assigned to the `image:upscale` surface (that assignment IS
+  // their capability declaration). Hidden and video-classified models are
+  // excluded.
+  handle("production:imageUpscaleModels", async (): Promise<string[]> => {
+    let proven: string[] = [];
+    try {
+      proven = (await media().imageUpscaleModels?.()) ?? [];
+    } catch {
+      proven = [];
+    }
+    const hidden = new Set(settings.getHiddenMediaModels());
+    const kinds = settings.getModelKindOverrides();
+    const declared = Object.entries(settings.getModelSurfaces())
+      .filter(([, list]) => list.includes("image:upscale"))
+      .map(([id]) => id);
+    const out = [...new Set([...proven, ...declared])];
+    return out.filter((id) => !hidden.has(id) && kinds[id] !== "video");
+  });
+
   // Step 3 per-frame edit (classic storyboard view): appends a new edit-image
   // node to the shot's graph, chained from whatever currently feeds the output
   // (the previous edit node, the image node, or a reference), then pipes the
@@ -3126,33 +3478,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // Create the node up front so the generation rides the same pipe the node
       // view will show: chained from the output edit node / image node / ref.
       const node = newEditNode(shot, text, chainSourceForEdit(shot));
-      const source = node.source;
-      let dataUrl: string | undefined;
-      let sourceName = `Shot ${shot.number} frame`;
-      if (source?.kind === "imagegen") {
-        const src = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
-        if (src) {
-          dataUrl = fileDataUrl(p, src) ?? undefined;
-          if (dataUrl) sourceName = "Piped frame";
-        }
-      } else if (source?.kind === "editgen") {
-        const sel = editNodeSelection(shot, source.nodeId);
-        if (sel?.path) {
-          dataUrl = fileDataUrl(p, sel.path) ?? undefined;
-          if (dataUrl) sourceName = "Piped edit";
-        }
-      } else if (source?.kind === "ref") {
-        const pool = [
-          ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
-          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-          ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
-        ];
-        const ref = pool.find((r) => r.id === source.refId);
-        if (ref?.artwork) {
-          dataUrl = ref.artwork;
-          sourceName = ref.name;
-        }
-      }
+      const resolvedSource = resolveGraphSourceImage(p, shot, node.source);
+      let dataUrl = resolvedSource?.dataUrl;
+      const sourceName = resolvedSource?.name ?? `Shot ${shot.number} frame`;
       if (!dataUrl && shot.artwork) {
         dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
       }
@@ -3163,7 +3491,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // occupies @image1 (token 0), so tags start at 1.
       const { resolved: editText, extras } = resolvePromptRefs(p, text, 1);
       const png = await gen(
-        buildEditGenPrompt(editText),
+        buildEditGenPrompt(editText, settings.getPromptTemplates().editImage),
         [{ name: sourceName, dataUrl }, ...extras],
         shot,
         editParams
@@ -3436,7 +3764,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       let refs: { name: string; dataUrl: string }[];
       if (sourceRef) {
         const { resolved, extras } = resolvePromptRefs(p, text, 1);
-        promptText = buildEditGenPrompt(resolved);
+        promptText = buildEditGenPrompt(resolved, settings.getPromptTemplates().editImage);
         refs = [{ name: sourceRef.name, dataUrl: sourceDataUrl! }, ...extras];
       } else {
         const { resolved, extras } = resolvePromptRefs(p, text, 0);
@@ -3482,6 +3810,148 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     })
   );
 
+  // Step 3: the camera-grid node. Generates a cols x rows sheet (4x4 / 3x3 /
+  // 2x2) of camera angles of the node's source image (plus its wired
+  // references) through the active media provider (vendor-blind) and writes it
+  // in place under referencesDir/grids — regenerating replaces `sheetPath`
+  // without adding a node. The sheet's panels are cut out later via
+  // `cameraGrid:cutout` (main/camera-grid.ts).
+  handle("cameraGrid:generate", (_e, id: string, shotId: string, opts: CameraGridGenOptions) =>
+    runProductionJob(id, "generating a camera grid", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const prev = normalizeCameraGridData(shot.graphCameraGrid);
+      // The geometry is the caller's (the node's live pick), else the saved one.
+      const cols = Number.isFinite(opts?.cols) ? Math.max(1, Math.floor(opts.cols as number)) : prev?.cols ?? CAMERA_GRID_COLS;
+      const rows = Number.isFinite(opts?.rows) ? Math.max(1, Math.floor(opts.rows as number)) : prev?.rows ?? CAMERA_GRID_ROWS;
+      // The prompt is the user-editable `cameraGrid` template (Settings →
+      // Prompts), rendered with the grid geometry so the cell count/arrangement
+      // and the shot-distribution clause match the chosen size; the node
+      // carries no prompt of its own.
+      const text = renderPromptTemplate(
+        resolvePromptTemplate("cameraGrid", settings.getPromptTemplates()).trim(),
+        cameraGridPromptVars(cols, rows),
+      ).trim();
+      if (!text) throw new Error("The camera-grid prompt is empty — set it in Settings → Advanced → Prompts.");
+      const modelId = typeof opts?.model === "string" && opts.model.trim() && opts.model !== "auto" ? opts.model.trim() : undefined;
+      const resolution = typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : undefined;
+      // Wired references, in socket order (deduped by name).
+      const socketRefs: { name: string; dataUrl: string }[] = [];
+      for (const refId of prev?.refIds ?? []) {
+        const ref = resolveGraphSourceImage(p, shot, { kind: "ref", refId });
+        if (ref && !socketRefs.some((r) => r.name === ref.name)) socketRefs.push(ref);
+      }
+      // Submission is the shared edit-image path — identical source/reference
+      // handling, no aspect override — with the camera-grid prompt instead of
+      // an edit instruction.
+      const { buf, providerId } = await submitGraphImage({
+        p, shot, source: prev?.source, extraRefs: socketRefs, prompt: text,
+        modelId, resolution, params: opts?.params, emit,
+        describeSource: () => `Generating a ${cols}x${rows} camera grid${modelId ? ` via ${modelId}` : ""}${socketRefs.length ? ` (+${socketRefs.length} reference${socketRefs.length === 1 ? "" : "s"})` : ""}…`,
+      });
+
+      const dir = `${p.assets.referencesDir}/grids`;
+      fs.mkdirSync(assetPath(p, dir), { recursive: true });
+      const ext = buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP" ? "webp"
+        : buf[0] === 0xff && buf[1] === 0xd8 ? "jpg"
+        : "png";
+      const rel = `${dir}/camera-grid-${shotId}-${Date.now().toString(36)}.${ext}`;
+      if (prev?.sheetPath && prev.sheetPath !== rel) {
+        try { fs.unlinkSync(assetPath(p, prev.sheetPath)); } catch { /* old sheet already gone */ }
+      }
+      fs.writeFileSync(assetPath(p, rel), buf);
+      // Carry the node's wiring + picks forward; replace only the sheet. A
+      // fresh generation supersedes any manually imported grid image. The
+      // geometry follows the generated size (panels/labels re-derive from it).
+      shot.graphCameraGrid = {
+        ...(prev ?? {}),
+        cols,
+        rows,
+        panels: undefined,
+        panelLabels: undefined,
+        sheetPath: rel,
+        sheetAt: new Date().toISOString(),
+        gridSource: undefined,
+        generation: { provider: providerId, model: modelId ?? "auto", prompt: text },
+      };
+      emit(`Camera grid ready → ${rel}.`, "done");
+    })
+  );
+
+  // Step 3: use a wired image (e.g. a grid downloaded from OpenArt by hand) as
+  // the sheet to cut panels out of — the manual fallback when the auto download
+  // fails. Main resolves the source to bytes and writes a copy under
+  // referencesDir/grids (the cutout handler requires the sheet to live in the
+  // references folder); the renderer then sets `sheetPath` + `gridSource`
+  // itself, so all production state stays renderer-owned (main only writes the
+  // file).
+  handle("cameraGrid:importGridImage", (_e, id: string, shotId: string, source: GraphSource): CameraGridImportResult => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const resolved = resolveGraphSourceImage(p, shot, source);
+    if (!resolved) throw new Error("That input has no usable image — wire a frame or reference into the Grid image socket.");
+    const bytes = dataUrlToBuffer(resolved.dataUrl);
+    if (!bytes || !bytes.length) throw new Error("Couldn't read the grid image.");
+    const dir = `${p.assets.referencesDir}/grids`;
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    const ext = bytes.slice(0, 4).toString("ascii") === "RIFF" && bytes.slice(8, 12).toString("ascii") === "WEBP" ? "webp"
+      : bytes[0] === 0xff && bytes[1] === 0xd8 ? "jpg"
+      : "png";
+    const rel = `${dir}/camera-grid-${shotId}-${Date.now().toString(36)}.${ext}`;
+    const prev = normalizeCameraGridData(shot.graphCameraGrid);
+    if (prev?.sheetPath && prev.sheetPath !== rel) {
+      try { fs.unlinkSync(assetPath(p, prev.sheetPath)); } catch { /* old sheet already gone */ }
+    }
+    fs.writeFileSync(assetPath(p, rel), bytes);
+    productionEmit(id, `Camera grid image imported → ${rel}.`, "done");
+    return { sheetPath: rel, sheetAt: new Date().toISOString() };
+  });
+
+  // Step 3: cut marqueed camera-grid panels into standalone references. Main
+  // decodes/crops the sheet (never the renderer canvas) so exports are
+  // pixel-identical to the source; refs land in the "Camera Grid" category.
+  handle("cameraGrid:cutout", (_e, req: CameraGridCutoutRequest): CameraGridCutoutResult => {
+    const p = productions.loadProduction(req.productionId);
+    if (!p) throw new Error("Production not found.");
+    const refsDir = p.assets.referencesDir;
+    const sheet = typeof req.sheetPath === "string" ? req.sheetPath : "";
+    if (sheet !== refsDir && !sheet.startsWith(`${refsDir}/`)) {
+      throw new Error("The camera-grid sheet must live in the production's references folder.");
+    }
+    const categoryId = typeof req.categoryId === "string" && req.categoryId ? req.categoryId : CAMERA_GRID_CATEGORY_ID;
+    if (!(p.referenceCategories ?? []).some((c) => c.id === categoryId)) {
+      p.referenceCategories = [...(p.referenceCategories ?? []), { id: categoryId, name: CAMERA_GRID_CATEGORY_NAME }];
+    }
+    const result = cutoutCameraGrid(
+      {
+        nodeId: req.nodeId,
+        referencesDir: refsDir,
+        sheetPath: sheet,
+        rects: req.rects,
+        labels: req.labels,
+        categoryId,
+      },
+      {
+        decodeImage: (abs) => nativeImage.createFromPath(abs),
+        resolvePath: (rel) => assetPath(p, rel),
+        writeFile: (rel, bytes) => {
+          const abs = assetPath(p, rel);
+          const tmp = `${abs}.${process.pid}.${Date.now().toString(36)}.tmp`;
+          fs.writeFileSync(tmp, bytes);
+          fs.renameSync(tmp, abs);
+        },
+        exists: (rel) => fs.existsSync(assetPath(p, rel)),
+        newRefId,
+      }
+    );
+    p.references = [...(p.references ?? []), ...result.refs];
+    productions.saveProduction(p);
+    productionEmit(req.productionId, `Exported ${result.refs.length} camera-grid panel${result.refs.length === 1 ? "" : "s"} as references.`, "done");
+    return { refs: result.refs, production: p };
+  });
+
   // Step 2 character builder: generate a character-sheet reference image via
   // OpenArt and attach it to a character reference — creating the character
   // when one with that name doesn't exist yet. The prompt is the user's
@@ -3508,7 +3978,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // products, custom references) as visual inputs — resolved exactly like
       // every other image path, then wrapped in the sheet framing.
       const { resolved, extras } = resolvePromptRefs(p, description, 0);
-      const promptText = characterSheetPrompt(resolved, view);
+      const promptText = characterSheetPrompt(resolved, view, settings.getPromptTemplates().characterSheet);
       emit(`Generating character "${name}" (${view === "front-back" ? "front + back + inset" : "front + inset"}, 16:9)${modelId ? ` via ${modelId}` : ""}${extras.length ? ` with ${extras.length} reference${extras.length === 1 ? "" : "s"}` : ""}…`);
       const buf = await gen(promptText, extras, undefined, sanitizeGenParams(opts?.params));
 
@@ -3890,6 +4360,41 @@ function saveWindowState(): void {
   }
 }
 
+/** Build the detached window's boot URL — the dev-server URL or the packaged
+ *  file URL, both carrying `?window=detached&target=…`. The rest of the context
+ *  (production + frame) arrives over `canvas:context`. */
+function detachedLoadUrl(target: "graph" | "moodboard"): string {
+  const query = `window=detached&target=${encodeURIComponent(target)}`;
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const u = new URL(process.env.ELECTRON_RENDERER_URL);
+    return `${u.origin}${u.pathname}?${query}`;
+  }
+  const file = pathToFileURL(path.join(__dirname, "../renderer/index.html")).toString();
+  return `${file}?${query}`;
+}
+
+/** Recenter the detached window when the display it was on was unplugged, so a
+ *  retarget never focuses an off-screen window. */
+function ensureDetachedOnScreen(w: import("./detached-window.js").DetachedWindow): void {
+  try {
+    const bw = w as unknown as BrowserWindow;
+    const b = bw.getBounds();
+    const wa = screen.getDisplayMatching(b).workArea;
+    const off = b.x >= wa.x + wa.width || b.x + b.width <= wa.x || b.y >= wa.y + wa.height || b.y + b.height <= wa.y;
+    if (!off) return;
+    const width = Math.min(b.width, wa.width - 80);
+    const height = Math.min(b.height, wa.height - 80);
+    bw.setBounds({
+      x: wa.x + Math.round((wa.width - width) / 2),
+      y: wa.y + Math.round((wa.height - height) / 2),
+      width,
+      height,
+    });
+  } catch {
+    /* window metrics must never break focus */
+  }
+}
+
 function createWindow() {
   const saved = settings.getWindowState();
   const restored = saved && saved.x !== null && saved.y !== null
@@ -3929,6 +4434,10 @@ function createWindow() {
   win.on("maximize", saveSoon);
   win.on("unmaximize", saveSoon);
   win.on("close", () => saveWindowState());
+
+  // Closing the main window takes the detached canvas with it (Spec 03) so it
+  // never lingers as a zombie window after the app's primary surface is gone.
+  win.on("closed", () => { detached?.close(); });
 
   // Zoom shortcuts. Chromium's built-in binding misses Ctrl+= / Ctrl++ on
   // some layouts, so handle the whole family explicitly (and swallow the key
@@ -4018,7 +4527,39 @@ app.whenReady().then(async () => {
     : path.join(app.getAppPath(), "skills");
   seedSkills(path.join(app.getPath("userData"), "skills"), bundledSkillsDir);
   setThumbCacheDir(path.join(app.getPath("userData"), "thumb-cache"));
+  // Video reference posters (`?thumb=1` on a clip) ride the same cache; wire
+  // the ffmpeg seam so a middle frame can be extracted on demand.
+  setVideoPosterDeps({
+    resolveBin: resolveFfmpeg,
+    run: (bin, argv) => runFfmpeg(bin, argv),
+    probe: (bin, p) => probeMedia(bin, p),
+  });
   registerMediaProtocol();
+  // The single detached canvas window (Spec 03), wired before registerIpc() so
+  // its handlers always find a controller.
+  detached = new DetachedCanvasController({
+    preload: path.join(__dirname, "../preload/index.js"),
+    createWindow: (opts) => {
+      const bw = new BrowserWindow(opts as Electron.BrowserWindowConstructorOptions);
+      // Same navigation hardening as the main window: external links open in the
+      // default browser, and the renderer can never navigate off the app origin.
+      bw.webContents.setWindowOpenHandler(({ url }) => {
+        if (/^https?:/.test(url)) void shell.openExternal(url);
+        return { action: "deny" };
+      });
+      bw.webContents.on("will-navigate", (e, url) => {
+        const devUrl = process.env.ELECTRON_RENDERER_URL;
+        const trusted = devUrl ? url.startsWith(devUrl) : url.startsWith("file://");
+        if (!trusted) e.preventDefault();
+      });
+      return bw as unknown as import("./detached-window.js").DetachedWindow;
+    },
+    resolveLoadUrl: (ctx) => detachedLoadUrl(ctx.target),
+    ensureVisible: ensureDetachedOnScreen,
+    onClosed: () => {
+      if (win && !win.isDestroyed()) win.webContents.send("window:detachedClosed", {});
+    },
+  });
   registerIpc();
   installCsp();
   createWindow();
@@ -4030,6 +4571,9 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  // Never quit while any app window (e.g. a detached canvas on another monitor)
+  // is still open (Spec 03).
+  if (BrowserWindow.getAllWindows().length > 0) return;
   if (process.platform !== "darwin") app.quit();
 });
 

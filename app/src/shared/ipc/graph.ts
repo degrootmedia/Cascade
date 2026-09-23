@@ -39,7 +39,9 @@ export type GraphNodeKind =
   | "output"
   | "videoprompt"
   | "editprompt"
-  | "editvideoprompt";
+  | "editvideoprompt"
+  | "cameraGrid"
+  | "upscale";
 
 /** Media flowing over a connection. Declared on the port — never inferred
  *  from a node label or prompt text. */
@@ -75,6 +77,93 @@ export interface Graph {
   migrated?: boolean;
 }
 
+/** What feeds a generation node's source input. `imagegen` = the image node's
+ *  selected frame, `editgen` = an edit node's selected edit, `ref` = a
+ *  reference's artwork. */
+export type GraphSource =
+  | { kind: "imagegen" }
+  | { kind: "editgen"; nodeId: string }
+  | { kind: "ref"; refId: string };
+
+/** One panel rect on a camera-grid sheet, in normalized [0..1] sheet
+ *  coordinates (row-major). Stored generically for any cols x rows grid. */
+export interface CameraGridPanel {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** The camera-grid node's state (one per shot). It generates a cols x rows
+ *  sheet of camera angles (4x4 / 3x3 / 2x2) from a source image (+ optional
+ *  references), then lets the user marquee panels out into standalone
+ *  references. Its wiring (source image + reference sockets) lives here rather
+ *  than in `GraphNode.data`, which owns topology + positions only. */
+export interface CameraGridData {
+  /** Production-relative path of the grid sheet image. Absent before the
+   *  first generation (the node shows a broken-media state + Regenerate CTA). */
+  sheetPath?: string;
+  /** ISO timestamp of the last sheet write — a generation (main-side) or a
+   *  grid-image import (renderer-side). The save merge uses it to decide which
+   *  side's `sheetPath` is newer, so a generation landing concurrently can
+   *  never revert a just-imported grid image (and vice versa). */
+  sheetAt?: string;
+  /** Grid geometry (4x4 / 3x3 / 2x2; also settable to match an imported
+   *  grid image). The prompt and the export editor's division follow it. */
+  cols: number;
+  rows: number;
+  /** Panel rects in normalized sheet coordinates, row-major. Optional: when
+   *  absent the renderer derives them as cols x rows cells. */
+  panels?: CameraGridPanel[];
+  /** Labels shown on hover / used to name exported references (e.g. "Front").
+   *  Absent entries fall back to "Angle N". */
+  panelLabels?: string[];
+  /** What feeds the source-image socket (`in-image`). Absent = the shot's
+   *  current frame, or text-only when neither exists. */
+  source?: GraphSource;
+  /** What feeds the grid-image socket (`in-grid`): an already-made grid image
+   *  to cut panels out of instead of generating one (the manual fallback when
+   *  the auto download fails). When set, `sheetPath` points at a copy of that
+   *  image written into the references folder. */
+  gridSource?: GraphSource;
+  /** Reference ids wired into the reference sockets, in socket order. */
+  refIds?: string[];
+  /** The node's own model pick (per-node; wins over the media default). */
+  model?: string;
+  /** The node's own resolution tier. */
+  resolution?: string;
+  /** Schema-driven advanced params (keyed by canonical flag). Optional. */
+  params?: GenParams;
+  /** Proportion (0..0.45) each exported panel is shrunk by on every edge, so
+   *  the gutters/borders between generated cells are cropped out. */
+  inset?: number;
+  /** The prompt/model used, for provenance and the regenerate form's seed. */
+  generation?: { provider: string; model: string; prompt: string };
+}
+
+/** The node-graph upscale node's state (one per shot). A generator with a
+ *  source-image input and an image output: it upscales whatever image feeds
+ *  its `in-image` socket (falling back to the shot's current frame) through an
+ *  upscale-capable model. Its wiring and picks live here rather than in
+ *  `GraphNode.data`, which owns topology + positions only. */
+export interface UpscaleData {
+  /** What feeds the source-image socket (`in-image`). Absent = the shot's
+   *  current frame. */
+  source?: GraphSource;
+  /** The node's own model pick (an upscale-capable id; wins over the media
+   *  default). */
+  model?: string;
+  /** The node's own resolution tier. */
+  resolution?: string;
+  /** Schema-driven advanced params (keyed by canonical flag). Optional. */
+  params?: GenParams;
+  /** Stored upscaled outputs (newest first) + the selected index. */
+  gens?: GraphGenItem[];
+  genIndex?: number;
+  /** The provider/model used, for provenance. */
+  generation?: { provider: string; model: string };
+}
+
 /** One node-graph edit-image node. A shot may hold several and daisy-chain
  *  them (an edit node's output feeds another's source). The list is the source
  *  of truth; the legacy flat `graphEdit*` fields migrate into `edit0`. */
@@ -87,10 +176,7 @@ export interface GraphEditNode {
   gens?: GraphGenItem[];
   genIndex?: number;
   /** What feeds this node's source input. Absent = the shot's current frame. */
-  source?:
-    | { kind: "imagegen" }
-    | { kind: "editgen"; nodeId: string }
-    | { kind: "ref"; refId: string };
+  source?: GraphSource;
   /** Whether the style node is plugged into this node's prompt node. */
   styleConnected?: boolean;
   /** The node's own model/resolution picks (per-node, win over the global

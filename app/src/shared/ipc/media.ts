@@ -24,6 +24,16 @@ export function isProviderVisible(id: MediaProviderId, mode: ProviderTransportMo
   return mode === "cli" ? id.endsWith("-cli") : !id.endsWith("-cli");
 }
 
+/** Whether the active provider offers an image-upscale path. Only the
+ *  Higgsfield CLI probes upscale families; the OpenArt MCP transport has none,
+ *  so the upscale node and the Image Suite's Upscale mode are disabled for it. */
+export function providerSupportsUpscale(id: MediaProviderId): boolean {
+  return id !== "openart";
+}
+
+/** Tooltip shown wherever the upscale path is disabled for the active provider. */
+export const UPSCALE_UNAVAILABLE_HINT = "Not available when using OpenArt MCP";
+
 /** Canonicalize a per-style model/resolution override for generation:
  *  absent, blank, or "auto" inherits the production default (sent as
  *  undefined — the provider treats undefined and "auto" alike). */
@@ -66,13 +76,14 @@ export interface OpenArtCliStatus {
 export type ModelSurface =
   | "image:generate" // image generation: master board / node / references / characters / style frames
   | "image:edit"     // image editing: classic edit popup + edit-image node
+  | "image:upscale"  // image upscaling: the upscale node + the Image Suite's Upscale mode
   | "video:generate" // video generation: classic video modal + video node
   | "video:tween"    // in-betweener timeline
   | "video:editnode"; // node-graph edit-video node
 
 /** Every surface key, in display order. */
 export const MODEL_SURFACES: readonly ModelSurface[] = [
-  "image:generate", "image:edit", "video:generate", "video:tween", "video:editnode",
+  "image:generate", "image:edit", "image:upscale", "video:generate", "video:tween", "video:editnode",
 ];
 
 /** Legacy surface keys from before surfaces were collapsed into pools. Each
@@ -152,7 +163,7 @@ export interface MediaDefaultChoice {
   aspectRatio?: string;
 }
 /** The dropdown contexts a media default is remembered for. */
-export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "character" | "tween";
+export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "character" | "tween" | "upscale";
 
 /** The one aspect-ratio default every generation surface shares. The vendor
  *  image default is 1:1; Cascade deliberately forces 16:9 unless the user

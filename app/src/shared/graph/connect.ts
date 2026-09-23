@@ -16,6 +16,7 @@
  */
 import type { Graph, GraphEdge, GraphNode, GraphNodeKind } from "../ipc.js";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX } from "../ipc.js";
+import { REF_SOCKET_RE } from "./ports.js";
 
 /** Structural canvas connection (ReactFlow Connection shape, no UI import). */
 export interface FlowConnection {
@@ -30,7 +31,7 @@ const EDITPROMPT_PREFIX = "editprompt:";
 
 const STRUCTURAL_KINDS = new Set([
   "composer", "style", "brand", "output", "imagegen",
-  "videogen", "videoprompt", "tween", "editvideo", "editvideoprompt",
+  "videogen", "videoprompt", "tween", "editvideo", "editvideoprompt", "cameraGrid", "upscale",
 ]);
 
 /** Resolve a canvas node id to its graph kind (null = unknown). */
@@ -156,6 +157,40 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     return null;
   }
 
+  // Camera-grid source socket (a single image input, like the video node's
+  // frame feed) and grid-image socket (a manually supplied sheet to cut up).
+  // Reference sockets are positional and rebuilt from the node's ordered
+  // `refIds` via `applyCameraGridRefs`, so they carry no single edge here
+  // (mirroring tween keyframes).
+  if (target === "cameraGrid" && (handle === "in-image" || handle === "in-grid")) {
+    const suffix = handle === "in-grid" ? "-grid" : "";
+    if (source === "imagegen") {
+      return { edge: mkEdge(`e-img-camgrid${suffix}`, "imagegen", "out", "cameraGrid", handle), dropIds: edgesInto(graph, "cameraGrid", handle).map((e) => e.id) };
+    }
+    if (srcKind === "editgen") {
+      return { edge: mkEdge(`e-edit-camgrid${suffix}`, source, "out", "cameraGrid", handle), dropIds: edgesInto(graph, "cameraGrid", handle).map((e) => e.id) };
+    }
+    if (srcKind === "ref") {
+      return { edge: mkEdge(`e-ref-camgrid${suffix}`, source, "out", "cameraGrid", handle), dropIds: edgesInto(graph, "cameraGrid", handle).map((e) => e.id) };
+    }
+    return null;
+  }
+  if (target === "cameraGrid" && REF_SOCKET_RE.test(handle)) return null;
+
+  // Upscale node source socket (a single image input, like the camera grid's).
+  if (target === "upscale" && handle === "in-image") {
+    if (source === "imagegen") {
+      return { edge: mkEdge("e-img-upscale", "imagegen", "out", "upscale", "in-image"), dropIds: edgesInto(graph, "upscale", "in-image").map((e) => e.id) };
+    }
+    if (srcKind === "editgen") {
+      return { edge: mkEdge("e-edit-upscale", source, "out", "upscale", "in-image"), dropIds: edgesInto(graph, "upscale", "in-image").map((e) => e.id) };
+    }
+    if (srcKind === "ref") {
+      return { edge: mkEdge("e-ref-upscale", source, "out", "upscale", "in-image"), dropIds: edgesInto(graph, "upscale", "in-image").map((e) => e.id) };
+    }
+    return null;
+  }
+
   // Generation pipes out of the image node.
   if (source === "imagegen") {
     if (target === "videogen" && handle === "in-image") {
@@ -177,6 +212,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
   }
   if (source === "tween" && target === "output") {
     return { edge: mkEdge("e-tween-out", "tween", "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
+  }
+  if (source === "upscale" && target === "output") {
+    return { edge: mkEdge("e-upscale-out", "upscale", "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
   }
 
   // Edit-node outputs.
@@ -357,6 +395,15 @@ export function graphEdgesForDetach(
     if (from.nodeId === "videogen" && from.handleId === "in-image") {
       return dropInto("videogen", "in-image");
     }
+    if (from.nodeId === "cameraGrid") {
+      if (from.handleId === "in-image" || from.handleId === "in-grid") return dropInto("cameraGrid", from.handleId);
+      // Reference sockets are positional and rebuilt from the node's refIds by
+      // the caller (applyCameraGridRefs), not dropped edge-by-edge.
+      return null;
+    }
+    if (from.nodeId === "upscale" && from.handleId === "in-image") {
+      return dropInto("upscale", "in-image");
+    }
     if (kind === "editgen" && from.handleId === "in-image") {
       return dropInto(canonicalNodeId(from.nodeId), "in-image");
     }
@@ -389,6 +436,7 @@ export function graphEdgesForDetach(
       return hit ? { ...graph, edges: graph.edges.filter((e) => !(e.from.node === "tween" && e.to.node === "output")) } : null;
     }
     if (nodeKindForId(node) === "editgen") return dropFrom(node);
+    if (node === "upscale") return dropFrom("upscale");
     if (node === "style" || node === "brand") return dropFrom(node);
     if (node.startsWith("ref:")) return dropFrom(node);
     return null;
@@ -407,6 +455,20 @@ export function applyTweenKeys(
   keys.forEach((keyId, i) => {
     const nodeId = resolveNode(keyId);
     if (nodeId) fresh.push(mkEdge(`e-tween-${i}`, nodeId, "out", "tween", `in-tween-${i}`));
+  });
+  return { ...graph, edges: [...kept, ...fresh] };
+}
+
+/** Rebuild the camera-grid node's reference-socket edges from its ordered ref
+ *  ids (positions are slots). Only refs with nodes on the canvas get an edge. */
+export function applyCameraGridRefs(graph: Graph, refIds: string[]): Graph {
+  const kept = graph.edges.filter((e) => !(e.to.node === "cameraGrid" && REF_SOCKET_RE.test(e.to.port)));
+  const fresh: GraphEdge[] = [];
+  refIds.forEach((refId, i) => {
+    const nodeId = `ref:${refId}`;
+    if (graph.nodes.some((n) => n.id === nodeId)) {
+      fresh.push(mkEdge(`e-${nodeId}-cameraGrid-${i}`, nodeId, "out", "cameraGrid", `in-ref-${i}`));
+    }
   });
   return { ...graph, edges: [...kept, ...fresh] };
 }

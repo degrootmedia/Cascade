@@ -160,6 +160,64 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   for (const n of editNodes) { addNode(editPromptId(n.id), "editprompt"); addNode(editGenId(n.id), "editgen"); }
   if (hasTween) addNode("tween", "tween");
   if (hasEditVideo) { addNode("editvideoprompt", "editvideoprompt"); addNode("editvideo", "editvideo"); }
+  // The camera-grid tool is self-contained (no legacy flags): it is present
+  // when it holds state or has a saved position.
+  if (shot.graphCameraGrid || positions.cameraGrid) addNode("cameraGrid", "cameraGrid");
+  // The upscale node is likewise self-contained: present when it holds state
+  // or has a saved position.
+  if (shot.graphUpscale || positions.upscale) addNode("upscale", "upscale");
+
+  // Rebuild the camera-grid node's wiring from `graphCameraGrid` (the domain
+  // state — it has no legacy flags/text projection). Without this the
+  // first-open ensure pass would rebuild a graph with no camera-grid edges and
+  // strip every connection the user made.
+  const ensureRefNode = (refId: string): string | null => {
+    const nodeId = `ref:${refId}`;
+    if (nodeIds.has(nodeId)) return nodeId;
+    const r = refs.find((x) => x.id === refId);
+    if (!r) return null;
+    addNode(nodeId, "ref", r.name);
+    return nodeId;
+  };
+  if (shot.graphCameraGrid) {
+    const grid = shot.graphCameraGrid;
+    const src = grid.source;
+    if (src?.kind === "imagegen") {
+      edge("e-img-camgrid", "imagegen", "out", "cameraGrid", "in-image");
+    } else if (src?.kind === "editgen" && editNodes.some((n) => n.id === src.nodeId)) {
+      edge("e-edit-camgrid", editGenId(src.nodeId), "out", "cameraGrid", "in-image");
+    } else if (src?.kind === "ref") {
+      const nodeId = ensureRefNode(src.refId);
+      if (nodeId) edge("e-ref-camgrid", nodeId, "out", "cameraGrid", "in-image");
+    }
+    const gridSrc = grid.gridSource;
+    if (gridSrc?.kind === "imagegen") {
+      edge("e-img-camgrid-grid", "imagegen", "out", "cameraGrid", "in-grid");
+    } else if (gridSrc?.kind === "editgen" && editNodes.some((n) => n.id === gridSrc.nodeId)) {
+      edge("e-edit-camgrid-grid", editGenId(gridSrc.nodeId), "out", "cameraGrid", "in-grid");
+    } else if (gridSrc?.kind === "ref") {
+      const nodeId = ensureRefNode(gridSrc.refId);
+      if (nodeId) edge("e-ref-camgrid-grid", nodeId, "out", "cameraGrid", "in-grid");
+    }
+    (grid.refIds ?? []).forEach((refId, i) => {
+      const nodeId = ensureRefNode(refId);
+      if (nodeId) edge(`e-${nodeId}-cameraGrid-${i}`, nodeId, "out", "cameraGrid", `in-ref-${i}`);
+    });
+  }
+
+  // Rebuild the upscale node's source wire from `graphUpscale` (domain state,
+  // no legacy flags) — otherwise the first-open ensure pass strips it.
+  if (shot.graphUpscale) {
+    const src = shot.graphUpscale.source;
+    if (src?.kind === "imagegen") {
+      edge("e-img-upscale", "imagegen", "out", "upscale", "in-image");
+    } else if (src?.kind === "editgen" && editNodes.some((n) => n.id === src.nodeId)) {
+      edge("e-edit-upscale", editGenId(src.nodeId), "out", "upscale", "in-image");
+    } else if (src?.kind === "ref") {
+      const nodeId = ensureRefNode(src.refId);
+      if (nodeId) edge("e-ref-upscale", nodeId, "out", "upscale", "in-image");
+    }
+  }
 
   // Reference → prompt edges, in each prompt's tag order (socket index = order).
   const tagNodeId = (name: string): string => {
@@ -236,6 +294,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   if (shot.graphOutputSource === "imagegen") edge("e-img-out", "imagegen", "out", "output", "in-out");
   if (shot.graphOutputSource === "videogen" && hasVideo) edge("e-vid-out", "videogen", "out", "output", "in-out");
   if (shot.graphOutputSource === "tween" && hasTween) edge("e-tween-out", "tween", "out", "output", "in-out");
+  if (shot.graphOutputSource === "upscale" && shot.graphUpscale) edge("e-upscale-out", "upscale", "out", "output", "in-out");
   if (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId && editNodes.some((n) => n.id === shot.graphOutputEditNodeId)) {
     edge("e-edit-out", editGenId(shot.graphOutputEditNodeId), "out", "output", "in-out");
   }

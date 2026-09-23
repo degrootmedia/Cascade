@@ -4,6 +4,25 @@
  * one per call from the global settings selection. Selection is global-only
  * by decision (per-production/per-shot scoping is a future expansion, not a
  * rewrite — it would thread a provider id through Production + every IPC).
+ *
+ * ## Adding a provider
+ *
+ * The Image Suite (and every other generation surface) is vendor-blind: it
+ * lists models from `listModelChoices` and submits through the active
+ * `MediaProvider`, so a new backend needs **no** renderer changes. To add one:
+ *
+ * 1. Add its id to `MediaProviderId` in `shared/ipc/media.ts`.
+ * 2. Implement the `MediaProvider` interface in `main/providers/<vendor>.ts`
+ *    (a CLI vendor builds its argv through `cli-run.ts` — never a shell
+ *    string; an API vendor injects its HTTP fetch as a constructor seam).
+ * 3. Register it here: `PROVIDER_IDS`, `PROVIDER_META`, `PROVIDER_CAPABILITIES`
+ *    (the conservative matrix — a transport opts into each capability), and
+ *    instantiate it in `createProviders`.
+ * 4. For a CLI, add its binary resolver + arg parser in `cli-run.ts`.
+ *
+ * That is the whole change: the suite's model dropdown then offers the new
+ * vendor's models (namespaced `<vendor>:<id>`) with zero edits under
+ * `features/suite/`.
  */
 import type { McpManager } from "../mcp.js";
 import { OpenArtClient } from "./openart.js";
@@ -15,8 +34,12 @@ import { isImageModel, isVideoModel, normalizeModelSurfaces, type MediaModelLadd
 
 /** Every surface an image / video model can be offered on. Pickers that must
  *  share a model pool share a key (see ModelSurface). */
-const IMAGE_SURFACES: ModelSurface[] = ["image:generate", "image:edit"];
+const IMAGE_SURFACES: ModelSurface[] = ["image:generate", "image:edit", "image:upscale"];
 const VIDEO_SURFACES: ModelSurface[] = ["video:generate", "video:tween", "video:editnode"];
+/** Default surfaces for an unassigned image model — `image:upscale` is opt-in
+ *  (most image models don't upscale; the CLI's live probe supplies the capable
+ *  ones, so assigning it is the manual capability declaration). */
+const IMAGE_DEFAULT_SURFACES: ModelSurface[] = ["image:generate", "image:edit"];
 /** Default surfaces for an unassigned video model — `video:tween` is opt-in:
  *  assigning it is the user's end-frame capability declaration. */
 const VIDEO_DEFAULT_SURFACES: ModelSurface[] = ["video:generate", "video:editnode"];
@@ -34,7 +57,7 @@ export function applyModelSurfaces(
     const isVideo = isVideoModel(c);
     const isImage = isImageModel(c);
     const applicable = isVideo ? VIDEO_SURFACES : isImage ? IMAGE_SURFACES : [];
-    const defaults = isVideo ? VIDEO_DEFAULT_SURFACES : applicable;
+    const defaults = isVideo ? VIDEO_DEFAULT_SURFACES : IMAGE_DEFAULT_SURFACES;
     const explicit = normalizeModelSurfaces(map?.[c.id]);
     const surfaces = explicit.length ? explicit.filter((s) => applicable.includes(s)) : defaults;
     // No assignments at all → leave `surfaces` off so callers treat it as

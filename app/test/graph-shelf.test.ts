@@ -30,10 +30,14 @@ const REFS = [
 
 let savedLayouts: Array<{ positions?: Record<string, { x: number; y: number }>; sizes?: Record<string, { width: number; height: number }>; collapsed?: Record<string, boolean>; viewport?: { x: number; y: number; zoom: number } }> = [];
 let lastEmittedPrompt: string | null = null;
+let lastGraph: { edges: Array<{ id: string }> } | null = null;
 let renames: Array<[string, string]> = [];
 
-function Harness({ initial, shotPatch, prodPatch, refs, layout }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown> }) {
+function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
+  // References are stateful here so a "Save as reference" action can append the
+  // created ref and the shelf re-render, like the real workspace's `apply()`.
+  const [refsState, setRefsState] = useState<Array<{ id: string; name: string; artwork: string }>>((refs as unknown as Array<{ id: string; name: string; artwork: string }>) ?? (REFS as unknown as Array<{ id: string; name: string; artwork: string }>));
   // Merge `onGraphField` patches back into the shot so graph mutations (adding
   // an edit node, piping) round-trip like the real workspace.
   const [shotState, setShotState] = useState<Record<string, unknown>>({});
@@ -55,7 +59,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout }: { initial?: st
     shot: shot as never,
     bust: 0,
     prompt,
-    references: refs ?? REFS,
+    references: refsState as never,
     styles: [],
     styleValue: "",
     includeBrand: true,
@@ -69,13 +73,19 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout }: { initial?: st
     videoModels: [],
     defaultImageModel: "auto",
     defaultImageResolution: "1k",
+    upscaleUnavailable,
     onRunImageGen: async () => {},
     onRunVideoGen: async () => {},
     onRunEditGen: async () => {},
     onSelectGraphGen: () => {},
     onCycleGraphGen: () => {},
-    onGraphField: (patch: Record<string, unknown>) => setShotState((prev) => ({ ...prev, ...patch })),
+    onGraphField: (patch: Record<string, unknown>) => { if (patch.graph) lastGraph = patch.graph as { edges: Array<{ id: string }> }; setShotState((prev) => ({ ...prev, ...patch })); },
     onRenameRef: (id: string, name: string) => { renames.push([id, name]); },
+    onSaveGenerationAsReference: async () => {
+      const ref = saveRef?.() ?? null;
+      if (ref) setRefsState((prev) => [...prev, ref]);
+      return ref as never;
+    },
     onPipeImageToVideo: () => {},
     onPipeImageToOutput: () => {},
     onPipeVideoToOutput: () => {},
@@ -91,7 +101,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout }: { initial?: st
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown> } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -115,6 +125,22 @@ function dropOnCanvas(host: HTMLDivElement, type: string, data: string): void {
     files: [],
   } as unknown as DataTransfer;
   canvas.dispatchEvent(ev);
+}
+
+/** Attach a reference node's output to a prompt socket, using React Flow's
+ *  click-to-connect path (start on the source handle, finish on the target
+ *  handle) — the same `onConnect` the drag fires. */
+async function connectRefToSocket(host: HTMLDivElement, refName: string, targetHandle: string): Promise<void> {
+  const node = [...host.querySelectorAll(".prod-graph-node.prod-graph-ref")]
+    .find((n) => (n.querySelector("input.prod-ref-edit-name") as HTMLInputElement | null)?.value === refName);
+  const source = node?.querySelector(".react-flow__handle.react-flow__handle-right") as HTMLElement | null;
+  const target = host.querySelector(`.prod-graph-composer .react-flow__handle[data-handleid="${targetHandle}"]`) as HTMLElement | null;
+  if (!source || !target) throw new Error("handle not found");
+  await act(async () => {
+    source.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, clientX: 1, clientY: 1 }));
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, clientX: 1, clientY: 1 }));
+    await new Promise((r) => setTimeout(r, 0));
+  });
 }
 
 const refNodeCount = (host: HTMLDivElement) => host.querySelectorAll(".prod-graph-node.prod-graph-ref").length;
@@ -413,15 +439,51 @@ describe("node-graph tool panel", () => {
 
     expect(toolNodeCount(host)).toBe(0);
     const tiles = host.querySelectorAll(".prod-graph-tools-item");
-    expect(tiles.length).toBe(4);
+    expect(tiles.length).toBe(6);
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
 
-  it("keeps the video/edit nodes present when they are in use", async () => {
-    const { root, host } = renderModal({
+  it("disables the upscale tile with a hint when the provider has no upscale path", async () => {
+    const { root, host } = renderModal({ upscaleUnavailable: true });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const tile = Array.from(host.querySelectorAll<HTMLElement>(".prod-graph-tools-item"))
+      .find((el) => el.textContent?.includes("Upscale"))!;
+    expect(tile).toBeTruthy();
+    expect(tile.classList.contains("disabled")).toBe(true);
+    expect(tile.getAttribute("aria-disabled")).toBe("true");
+    expect(tile.getAttribute("draggable")).toBe("false");
+    expect(tile.title).toBe("Not available when using OpenArt MCP");
+
+    // A drop that slips past the palette still can't add the node.
+    await act(async () => {
+      dropOnCanvas(host, "application/x-cascade-tool", "upscale");
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelector(".prod-graph-node.prod-graph-upscale")).toBeFalsy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("leaves the upscale tile enabled when the provider supports upscale", async () => {
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const tile = Array.from(host.querySelectorAll<HTMLElement>(".prod-graph-tools-item"))
+      .find((el) => el.textContent?.includes("Upscale"))!;
+    expect(tile.classList.contains("disabled")).toBe(false);
+    expect(tile.getAttribute("draggable")).toBe("true");
+    expect(tile.title).toBe("Drag onto the canvas to add the upscale node");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("keeps the video/edit nodes present when they are in use", async () => {    const { root, host } = renderModal({
       shotPatch: {
         graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
         graphEditNodes: [{ id: "edit0", prompt: "edit", genIndex: 0, gens: [{ path: "boards/edit1.jpg", prompt: "edit", model: "auto", at: "2026-01-01T00:00:00.000Z" }] }],
@@ -565,6 +627,223 @@ describe("node-graph delete key", () => {
     expect(lastEmittedPrompt).not.toContain("@[Hero]");
     expect(lastEmittedPrompt).toContain("@[Villain]");
     expect(host.querySelectorAll(".prod-graph-shelf-item.on-canvas").length).toBe(1);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph shelf resize + grid", () => {
+  it("drags the right edge to resize, persists the width, and switches to a grid past default", async () => {
+    window.localStorage.clear();
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
+
+    const shelf = host.querySelector(".prod-graph-shelf") as HTMLElement;
+    expect(shelf.style.width).toBe("220px");
+    expect(host.querySelector(".prod-graph-shelf-list.grid")).toBeNull();
+
+    const handle = host.querySelector(".prod-graph-shelf-resize") as HTMLElement;
+    expect(handle).toBeTruthy();
+    const PE = (globalThis as any).window.PointerEvent;
+    await act(async () => {
+      handle.dispatchEvent(new PE("pointerdown", { bubbles: true, pointerId: 1, clientX: 220 }));
+      handle.dispatchEvent(new PE("pointermove", { bubbles: true, pointerId: 1, clientX: 380 }));
+      handle.dispatchEvent(new PE("pointerup", { bubbles: true, pointerId: 1, clientX: 380 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(shelf.style.width).toBe("380px");
+    // Wider than the default → tiles wrap into a grid (headers stay full-width).
+    expect(host.querySelectorAll(".prod-graph-shelf-list.grid .prod-graph-shelf-tiles").length).toBeGreaterThan(0);
+    expect(window.localStorage.getItem("cascade.prod.p1.graph.shelfWidth")).toBe("380");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+    window.localStorage.clear();
+  });
+
+  it("restores a persisted width and renders the grid on open", async () => {
+    window.localStorage.setItem("cascade.prod.p1.graph.shelfWidth", "420");
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
+
+    expect((host.querySelector(".prod-graph-shelf") as HTMLElement).style.width).toBe("420px");
+    expect(host.querySelector(".prod-graph-shelf-list.grid")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+    window.localStorage.clear();
+  });
+});
+
+describe("node-graph reference attach", () => {
+  it("wires a freshly placed reference into the prompt on the first connect", async () => {
+    lastEmittedPrompt = null;
+    lastGraph = null;
+    const had = "elementFromPoint" in document;
+    const orig = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: () => null }).elementFromPoint = () => null;
+    try {
+      const { root, host } = renderModal();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      await openShelf(host);
+      // Place Villain on the canvas (untagged, no wire yet).
+      await act(async () => { dropOnCanvas(host, "application/x-cascade-ref", "r2"); await new Promise((r) => setTimeout(r, 0)); });
+
+      await connectRefToSocket(host, "Villain", "in-ref-open");
+
+      // The tag landed, the wire targets the new numbered socket (Hero already
+      // holds slot 0), and the composer now renders that socket.
+      expect(lastEmittedPrompt).toContain("@[Villain]");
+      expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref:r2-composer-1");
+      const handles = [...host.querySelectorAll(".prod-graph-composer .react-flow__handle")].map((h) => (h as HTMLElement).getAttribute("data-handleid"));
+      expect(handles).toContain("in-ref-1");
+
+      await act(async () => { root.unmount(); });
+      document.body.removeChild(host);
+    } finally {
+      if (had) (document as unknown as { elementFromPoint?: unknown }).elementFromPoint = orig;
+      else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    }
+  });
+});
+
+describe("node-graph shelf full-res zoom", () => {
+  it("shows compressed thumbnails and opens the full-res image from the magnifier", async () => {
+    const refs = [{ id: "r9", name: "Photo", artwork: "cascade-media://p1/references/photo.png" }] as never;
+    const { root, host } = renderModal({ refs });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await openShelf(host);
+
+    // The tile itself loads the compressed `?thumb=1` variant.
+    const thumb = host.querySelector(".prod-graph-shelf-thumb img") as HTMLImageElement;
+    expect(thumb?.getAttribute("src")).toBe("cascade-media://p1/references/photo.png?thumb=1");
+
+    // The magnifier opens the lightbox with the FULL-res source (no thumb query).
+    const zoom = host.querySelector(".prod-graph-shelf-zoom") as HTMLButtonElement;
+    expect(zoom).toBeTruthy();
+    await act(async () => { zoom.click(); await new Promise((r) => setTimeout(r, 0)); });
+    const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
+    expect(lightboxImg?.getAttribute("src")).toBe("cascade-media://p1/references/photo.png");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph save-as-reference reveal", () => {
+  it("opens the shelf and highlights the created reference after a take is saved", async () => {
+    window.localStorage.clear();
+    savedLayouts = [];
+    const { root, host } = renderModal({
+      shotPatch: { graphImageGens: [{ path: "boards/0001/gen.jpg", prompt: "p", model: "m", at: "2026-01-01T00:00:00.000Z" }] },
+      saveRef: () => ({ id: "saved1", name: "Saved Ref_00", artwork: "cascade-media://p1/references/saved.png" }),
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // The shelf starts collapsed.
+    expect(host.querySelector(".prod-graph-shelf.collapsed")).toBeTruthy();
+
+    // Right-click the image node's take → Save as reference.
+    const preview = host.querySelector(".prod-graph-gen-preview-wrap") as HTMLElement;
+    expect(preview).toBeTruthy();
+    await act(async () => {
+      preview.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 140 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const saveItem = [...document.querySelectorAll<HTMLButtonElement>(".session-context-menu .ctx-item")].find((b) => b.textContent?.includes("Save as reference"));
+    expect(saveItem).toBeTruthy();
+    await act(async () => { saveItem!.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    // The shelf opened itself and the new reference tile is highlighted.
+    expect(host.querySelector(".prod-graph-shelf.collapsed")).toBeNull();
+    const highlighted = host.querySelector(".prod-graph-shelf-item.highlight .prod-graph-shelf-name") as HTMLElement;
+    expect(highlighted?.textContent).toBe("@[Saved Ref_00]");
+
+    // The highlight persists (no timer) until the user hovers the tile.
+    const highlightedItem = host.querySelector(".prod-graph-shelf-item.highlight") as HTMLElement;
+    expect(highlightedItem).toBeTruthy();
+    await act(async () => { highlightedItem.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-graph-shelf-item.highlight")).toBeNull();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+    window.localStorage.clear();
+  });
+
+  it("reveals a saved reference that would otherwise sit behind Show more in a long, auto-collapsed group", async () => {
+    window.localStorage.clear();
+    savedLayouts = [];
+    const many = Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, name: `Ref ${i}`, artwork: "data:image/png;base64,AAAA" }));
+    const { root, host } = renderModal({
+      refs: many as never,
+      shotPatch: { graphImageGens: [{ path: "boards/0001/gen.jpg", prompt: "p", model: "m", at: "2026-01-01T00:00:00.000Z" }] },
+      saveRef: () => ({ id: "saved-long", name: "Saved Ref_00", artwork: "cascade-media://p1/references/saved.png" }),
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // The shelf starts collapsed; the 30-ref group auto-collapses past SHELF_PAGE.
+    expect(host.querySelector(".prod-graph-shelf.collapsed")).toBeTruthy();
+
+    const preview = host.querySelector(".prod-graph-gen-preview-wrap") as HTMLElement;
+    await act(async () => {
+      preview.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 140 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const saveItem = [...document.querySelectorAll<HTMLButtonElement>(".session-context-menu .ctx-item")].find((b) => b.textContent?.includes("Save as reference"));
+    await act(async () => { saveItem!.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    // The saved ref is the last tile — past the default page window — yet it is
+    // rendered and highlighted (the group was force-opened for it).
+    const highlighted = host.querySelector(".prod-graph-shelf-item.highlight .prod-graph-shelf-name") as HTMLElement;
+    expect(highlighted?.textContent).toBe("@[Saved Ref_00]");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+    window.localStorage.clear();
+  });
+});
+
+describe("camera-grid node (Spec 04)", () => {
+  it("renders the sheet thumbnail and opens the panel editor", async () => {
+    savedLayouts = [];
+    const { root, host } = renderModal({ shotPatch: { graphCameraGrid: { cols: 4, rows: 4, sheetPath: "references/grids/g.png" } } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelector(".prod-graph-node.prod-graph-camera")).toBeTruthy();
+    // The node itself shows a clickable thumbnail (no marquee/export controls).
+    const thumb = host.querySelector<HTMLButtonElement>(".prod-graph-camera-thumb");
+    expect(thumb).toBeTruthy();
+    expect(host.querySelector(".prod-camera-editor")).toBeFalsy();
+
+    // Clicking it opens the full-res editor with the 16 panel overlays.
+    await act(async () => { thumb!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-camera-editor")).toBeTruthy();
+    expect(host.querySelectorAll(".prod-camera-editor .prod-graph-camera-panel").length).toBe(16);
+    // Nothing selected yet, so Export is disabled; the inset slider is present.
+    const exportBtn = [...host.querySelectorAll<HTMLButtonElement>(".prod-camera-editor .prod-btn")].find((b) => b.textContent?.startsWith("Export"));
+    expect(exportBtn?.disabled).toBe(true);
+    expect(host.querySelector(".prod-camera-editor-inset input[type=range]")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("adds the tool by drag when unused (empty state)", async () => {
+    savedLayouts = [];
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-graph-node.prod-graph-camera")).toBeFalsy();
+
+    dropOnCanvas(host, "application/x-cascade-tool", "cameraGrid");
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelector(".prod-graph-node.prod-graph-camera")).toBeTruthy();
+    expect(host.querySelector(".prod-graph-camera-empty")).toBeTruthy();
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

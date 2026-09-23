@@ -269,6 +269,115 @@ export function openArtSchemaFromProps(
   });
 }
 
+/** A creation status that means the job is still running (not terminal). */
+export const OPENART_JOB_FAILED_RX = /fail|cancel|error/i;
+export const OPENART_JOB_DONE_RX = /complet|success|succeed|done|finish|ready/i;
+
+/** Read `{status, failed}` out of an OpenArt creation reply — the MCP
+ *  `creation_get`/`wait` text or the CLI `creation get/wait --json` stdout —
+ *  tolerating nested envelopes (`{data:{status}}`, `{creation:{state}}`, …). */
+export function openArtCreationStatus(text: string): { status: string; failed: boolean } {
+  const probe = (o: Record<string, unknown>): string => {
+    const direct = ["status", "state"].map((k) => o[k]).find((v) => typeof v === "string" && (v as string).trim());
+    if (typeof direct === "string") return direct;
+    for (const key of ["creation", "data", "result", "job"]) {
+      const v = o[key];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const nested = probe(v as Record<string, unknown>);
+        if (nested) return nested;
+      }
+    }
+    return "";
+  };
+  const obj = parseJsonLooseObject(text);
+  if (obj) {
+    const s = probe(obj as Record<string, unknown>);
+    if (s) return { status: s, failed: OPENART_JOB_FAILED_RX.test(s) };
+  }
+  const arr = parseJsonLooseArray(text);
+  if (arr) {
+    for (const e of arr) {
+      if (e && typeof e === "object") {
+        const s = probe(e as Record<string, unknown>);
+        if (s) return { status: s, failed: OPENART_JOB_FAILED_RX.test(s) };
+      }
+    }
+  }
+  return { status: "", failed: false };
+}
+
+/** Keys whose values are generation INPUTS (prompts, uploaded references, start
+ *  frames) — never result media. A creation reply echoes these, so a blind URL
+ *  scan once downloaded a reference image as the output (the camera-grid node
+ *  got its own source back). */
+const OPENART_INPUT_KEY_RX =
+  /^(params?|prompt|inputs?|references?|visual_?references?|reference_?images?|start_?frame|end_?frame|start_?image|end_?image|first_?frame|last_?frame|source_?image|init_?image|mask|control_?image|element_?images?|request|form_?data?|image2image)$/i;
+
+/** Result-bearing keys, tried before the broader scan so the generated output
+ *  always precedes a stray URL. */
+const OPENART_RESULT_KEYS = [
+  "url", "urls", "result_url", "result_urls", "image_url", "video_url",
+  "download_url", "file_url", "result", "results", "output", "outputs",
+  "images", "image", "videos", "video", "media", "files",
+];
+
+/** Result keys whose value is unambiguously the job's OUTPUT. A URL under one
+ *  of these is accepted even without a media extension (OpenArt's CDN links
+ *  often carry none), so an extension-less result URL still beats an echoed
+ *  input image. The ambiguous keys (`url`, `images`, `image`, `media`, `files`,
+ *  …) keep the extension requirement — they routinely echo uploaded inputs. */
+const OPENART_AUTHORITATIVE_RESULT_KEYS = new Set([
+  "result_url", "result_urls", "image_url", "video_url",
+  "download_url", "file_url", "result", "results", "output", "outputs",
+]);
+
+/** Collect result media URLs out of an OpenArt creation reply (MCP text or CLI
+ *  `--json` stdout). Result-bearing fields win; the recursive scan then skips
+ *  the echoed input/reference fields, so a reference URL can never be mistaken
+ *  for the generated output. A URL under an unambiguous result key is accepted
+ *  even without a media extension (see `OPENART_AUTHORITATIVE_RESULT_KEYS`);
+ *  everywhere else the URL must carry a media extension. Non-JSON replies fall
+ *  back to a plain URL scan. */
+export function openArtCreationResultUrls(text: string, video: boolean): string[] {
+  const extRx = video ? /\.(mp4|webm|mov|m4v)(\?|$)/i : /\.(png|jpe?g|webp|gif)(\?|$)/i;
+  const urlRx = /https?:\/\/[^\s"'\\]+/g;
+  const out: string[] = [];
+  const push = (u: string) => {
+    const clean = u.replace(/[),.\]}>]+$/, "");
+    if (clean && !out.includes(clean)) out.push(clean);
+  };
+  const collect = (v: unknown, authoritative: boolean): void => {
+    if (typeof v === "string") {
+      for (const m of v.match(urlRx) ?? []) if (authoritative || extRx.test(m)) push(m);
+    } else if (Array.isArray(v)) {
+      for (const e of v) collect(e, authoritative);
+    } else if (v && typeof v === "object") {
+      walk(v as Record<string, unknown>, authoritative);
+    }
+  };
+  const walk = (o: Record<string, unknown>, fromResult = false): void => {
+    for (const key of OPENART_RESULT_KEYS) {
+      if (o[key] !== undefined) collect(o[key], fromResult || OPENART_AUTHORITATIVE_RESULT_KEYS.has(key));
+    }
+    for (const [k, v] of Object.entries(o)) {
+      if (OPENART_RESULT_KEYS.includes(k) || OPENART_INPUT_KEY_RX.test(k)) continue;
+      collect(v, fromResult);
+    }
+  };
+  const obj = parseJsonLooseObject(text);
+  if (obj) {
+    walk(obj as Record<string, unknown>);
+    return out; // JSON reply: never blind-scan the whole blob (would catch inputs)
+  }
+  const arr = parseJsonLooseArray(text);
+  if (arr) {
+    for (const e of arr) if (e && typeof e === "object") walk(e as Record<string, unknown>);
+    return out;
+  }
+  for (const m of text.match(urlRx) ?? []) if (extRx.test(m)) push(m);
+  return out;
+}
+
 /** Human-readable summary of accepted clip lengths ("4–15s" for a
  *  contiguous range, "5, 10s" for discrete picks) for validation errors. */
 export function describeOpenArtDurations(durations: number[]): string {

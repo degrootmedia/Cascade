@@ -8,7 +8,7 @@
 import { afterAll, describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Production, ProductionShot } from "../src/shared/ipc.js";
+import type { CameraGridData, Graph, Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceImagePaths } from "../src/main/productions.js";
+import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
@@ -91,6 +91,117 @@ describe("applyRendererState", () => {
       openArt: { model: "auto", resolution: "1k" },
     }));
     expect(bare.openArt).toEqual({ model: "auto", resolution: "1k" });
+  });
+
+  it("merges the camera-grid node: fresh owns the sheet, renderer owns the wiring", () => {
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1, title: "S1",
+        shots: [{
+          id: "s1", number: "0100", audio: "", visual: "",
+          graphCameraGrid: {
+            cols: 4, rows: 4,
+            sheetPath: "references/grids/new.png",
+            panels: [{ x: 0, y: 0, w: 1, h: 1 }],
+            generation: { provider: "openart", model: "m", prompt: "old prompt" },
+          },
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1, title: "S1",
+        shots: [{
+          id: "s1", number: "0100", audio: "", visual: "",
+          graphCameraGrid: {
+            cols: 4, rows: 4,
+            sheetPath: "references/grids/stale.png",
+            source: { kind: "ref", refId: "r1" },
+            refIds: ["r1", "r2"],
+            model: "higgsfield-cli:x",
+            resolution: "2k",
+          },
+        }],
+      }],
+    });
+    const grid = applyRendererState(fresh, incoming).scenes[0].shots[0].graphCameraGrid!;
+    // Main-owned sheet + provenance win over the stale snapshot.
+    expect(grid.sheetPath).toBe("references/grids/new.png");
+    expect(grid.generation?.prompt).toBe("old prompt");
+    // Renderer-owned wiring + picks ride through.
+    expect(grid.source).toEqual({ kind: "ref", refId: "r1" });
+    expect(grid.refIds).toEqual(["r1", "r2"]);
+    expect(grid.model).toBe("higgsfield-cli:x");
+    expect(grid.resolution).toBe("2k");
+  });
+
+  it("keeps a plugged grid image's sheet across a save (newer sheetAt wins)", () => {
+    const gridShot = (grid: CameraGridData, graph?: Graph) => ({
+      id: "s1", number: "0100", audio: "", visual: "",
+      graphCameraGrid: grid,
+      ...(graph ? { graph } : {}),
+    });
+    const fresh = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [gridShot({
+        cols: 4, rows: 4,
+        sheetPath: "references/grids/generated.png",
+        sheetAt: "2026-01-01T00:00:00.000Z",
+        generation: { provider: "openart", model: "m", prompt: "p" },
+      })] }],
+    });
+    const incoming = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [gridShot(
+        {
+          cols: 4, rows: 4,
+          sheetPath: "references/grids/imported.png",
+          sheetAt: "2026-01-01T00:00:01.000Z",
+          gridSource: { kind: "ref", refId: "r1" },
+        },
+        {
+          version: 1,
+          nodes: [
+            { id: "cameraGrid", kind: "cameraGrid", pos: { x: 0, y: 0 } },
+            { id: "ref:r1", kind: "ref", pos: { x: 0, y: 0 } },
+          ],
+          edges: [{ id: "e-ref-camgrid-grid", from: { node: "ref:r1", port: "out" }, to: { node: "cameraGrid", port: "in-grid" } }],
+        },
+      )] }],
+    });
+    const shot = applyRendererState(fresh, incoming).scenes[0].shots[0] as ProductionShot & { graph?: Graph };
+    expect(shot.graphCameraGrid?.gridSource).toEqual({ kind: "ref", refId: "r1" });
+    expect(shot.graphCameraGrid?.sheetPath).toBe("references/grids/imported.png");
+    expect((shot.graph?.edges ?? []).some((e) => e.to.port === "in-grid")).toBe(true);
+  });
+
+  it("a fresh generation still beats a stale renderer save (older sheetAt loses)", () => {
+    const mk = (grid: CameraGridData) => baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "", graphCameraGrid: grid }] }],
+    });
+    const fresh = mk({
+      cols: 4, rows: 4,
+      sheetPath: "references/grids/regenerated.png",
+      sheetAt: "2026-01-01T00:00:10.000Z",
+      generation: { provider: "openart", model: "m", prompt: "new" },
+    });
+    const incoming = mk({
+      cols: 4, rows: 4,
+      sheetPath: "references/grids/old.png",
+      sheetAt: "2026-01-01T00:00:00.000Z",
+      gridSource: { kind: "ref", refId: "r1" },
+    });
+    const grid = applyRendererState(fresh, incoming).scenes[0].shots[0].graphCameraGrid!;
+    expect(grid.sheetPath).toBe("references/grids/regenerated.png");
+    expect(grid.generation?.prompt).toBe("new");
+  });
+
+  it("adopts a camera-grid node the fresh document lacks", () => {
+    const fresh = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "" }] }],
+    });
+    const incoming = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "", graphCameraGrid: { cols: 4, rows: 4, refIds: ["r1"] } }] }],
+    });
+    expect(applyRendererState(fresh, incoming).scenes[0].shots[0].graphCameraGrid).toEqual({ cols: 4, rows: 4, refIds: ["r1"] });
   });
 
   it("never clobbers scene structure the renderer doesn't own", () => {
@@ -781,8 +892,8 @@ describe("unclaimedReferenceFiles", () => {
   });
 });
 
-describe("referenceImagePaths", () => {
-  it("collects absolute asset paths for every artwork-bearing reference", () => {
+describe("referenceThumbnailPaths", () => {
+  it("collects absolute asset paths for every artwork-bearing reference, images and video clips", () => {
     const p = baseProduction({
       characters: [{ id: "c1", name: "Mara", key: "", imagePath: "references/mara.png" }],
       products: [{ id: "pr1", name: "Compass", imagePath: "references/compass.jpg" }],
@@ -792,10 +903,11 @@ describe("referenceImagePaths", () => {
         { id: "r3", name: "Blank" },
       ],
     });
-    expect(referenceImagePaths(p)).toEqual([
+    expect(referenceThumbnailPaths(p)).toEqual([
       path.join("C:/workspace/prod", "references/mara.png"),
       path.join("C:/workspace/prod", "references/compass.jpg"),
       path.join("C:/workspace/prod", "references/silk.webp"),
+      path.join("C:/workspace/prod", "references/clip.mp4"),
     ]);
   });
 });

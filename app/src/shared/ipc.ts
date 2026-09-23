@@ -10,12 +10,16 @@ import { ledgerChannels } from "./ipc-channels/ledger.js";
 import { modelCustomizerChannels } from "./ipc-channels/model-customizer.js";
 import { todoChannels } from "./ipc-channels/todos.js";
 import { goalChannels } from "./ipc-channels/goals.js";
+import { suiteChannels } from "./ipc-channels/suite.js";
+import { windowChannels } from "./ipc-channels/window.js";
+import { cameraGridChannels } from "./ipc-channels/camera-grid.js";
 import type {
   GenParams,
   GraphLayout,
   Graph,
   GraphEditNode,
   GraphGenItem,
+  GraphSource,
   TweenBlock,
   PendingImageGen,
 } from "./ipc/graph.js";
@@ -23,6 +27,20 @@ import type { SessionTasks } from "./ipc/todos.js";
 import type { SessionGoal, SessionGoalPatch } from "./ipc/goal.js";
 import type { SessionSearchHit } from "./ipc/search.js";
 import type { LedgerView, ExpensePriceRule } from "./ipc/ledger.js";
+import type {
+  SuiteSession,
+  SuiteGenerateRequest,
+  SuiteEntry,
+  SuiteExportTarget,
+  SuiteExportResult,
+} from "./ipc/suite.js";
+import type { CanvasBusySnapshot, DetachedCanvasContext, DetachedCanvasState } from "./ipc/window.js";
+import type {
+  CameraGridCutoutRequest,
+  CameraGridCutoutResult,
+  CameraGridGenOptions,
+  CameraGridImportResult,
+} from "./ipc/camera-grid.js";
 import type {
   ProductionMeta,
   ProductionScene,
@@ -78,7 +96,10 @@ export * from "./ipc/ledger.js";
 export * from "./ipc/media.js";
 export * from "./ipc/production.js";
 export * from "./ipc/search.js";
+export * from "./ipc/suite.js";
 export * from "./ipc/todos.js";
+export * from "./ipc/window.js";
+export * from "./ipc/camera-grid.js";
 
 
 export interface ApprovalRequestIpc {
@@ -283,6 +304,10 @@ export interface CascadeApi {
   /** The user's saved media model arrangement (dropdowns follow it). */
   getMediaModelOrder(): Promise<string[]>;
   setMediaModelOrder(ids: string[]): Promise<void>;
+  /** User overrides for the creative prompt templates (Settings → Prompts),
+   *  keyed by template id. Absent id = the built-in wording. */
+  getPromptTemplates(): Promise<Record<string, string>>;
+  setPromptTemplates(overrides: Record<string, string>): Promise<void>;
   /** Dev Model Customizer: per-parameter placement (`modelId::flag` →
    *  core/advanced/hidden). */
   getModelOptionExposure(): Promise<Record<string, ModelParamExposure>>;
@@ -714,6 +739,12 @@ export interface CascadeApi {
    */
   generateEditNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; params?: GenParams }): Promise<Production>;
   /**
+   * Step 3 node graph: upscale the upscale node's source image (its source
+   * pipe, falling back to the shot's current frame) and store the result on
+   * the shot's upscale node. Returns the updated production.
+   */
+  generateUpscaleNode(productionId: string, shotId: string, opts: { model: string; resolution: string; params?: GenParams }): Promise<Production>;
+  /**
    * Step 3 node graph: make a generation node's selected output the shot's
    * primary output (artwork for frames, videoPath for clips). Returns the
    * updated production.
@@ -750,6 +781,10 @@ export interface CascadeApi {
   /** Ids (namespaced) of the video models that accept a video input (the
    *  edit-video node's capability probe). Empty when none is proven. */
   videoEditModels(): Promise<string[]>;
+  /** Ids (namespaced) of the image models that upscale an existing image
+   *  (the upscale node + Image Suite Upscale mode capability probe), unioned
+   *  with the models the user assigned to the `image:upscale` surface. */
+  imageUpscaleModels(): Promise<string[]>;
   /** Step 3/4: live per-config credit quote for one generation (Higgsfield
    *  CLI `generate cost` preflight — no job submitted). Null for providers
    *  without a cost surface and whenever the quote can't be read — callers
@@ -841,6 +876,55 @@ export interface CascadeApi {
    *  ones. Counts: newly encoded / reused from cache / could not encode. */
   regenerateThumbnails(): Promise<{ generated: number; fromDisk: number; failed: number; projects: number }>;
   onProductionEvent(cb: (e: ProductionEvent) => void): () => void;
+
+  /* Image Generation & Editing Suite (Spec 01) */
+  /** Load the persisted suite session for one production (empty when none). */
+  loadSuiteSession(productionId: string): Promise<SuiteSession>;
+  /** Persist one production's suite session (draft + timeline). */
+  saveSuiteSession(productionId: string, session: SuiteSession): Promise<void>;
+  /** Delete one suite entry (and its output file). Returns the session. */
+  deleteSuiteEntry(productionId: string, entryId: string): Promise<SuiteSession>;
+  /** Copy one entry's output into the production as a reference or board file. */
+  exportSuiteEntry(productionId: string, entryId: string, target: SuiteExportTarget): Promise<SuiteExportResult>;
+  /** Run one suite generation/edit through the active `MediaProvider`, writing
+   *  the output into the production's suite folder. Vendor-blind. */
+  generateSuiteImage(productionId: string, req: SuiteGenerateRequest): Promise<SuiteEntry>;
+
+  /* Detached canvas window (Spec 03) */
+  /** Open (or retarget) the single detached canvas window. Resolves to its state. */
+  openDetachedCanvas(ctx: DetachedCanvasContext): Promise<DetachedCanvasState>;
+  /** Close the detached canvas window. Resolves to its (cleared) state. */
+  closeDetachedCanvas(): Promise<DetachedCanvasState>;
+  /** Whether a detached canvas window is open and what it currently shows. */
+  getDetachedCanvasState(): Promise<DetachedCanvasState>;
+  /** The main window's selected storyboard frame changed (hot path — a send). */
+  canvasSelectionChanged(frameId: string | null): void;
+  /** Publish this window's in-flight canvas jobs; main relays to the sibling
+   *  window so "Generating…" shows wherever the graph lives. */
+  canvasBusyChanged(snapshot: CanvasBusySnapshot): void;
+  /** Fired in the detached window with its context (also on retarget/reload). */
+  onCanvasContext(cb: (ctx: DetachedCanvasContext) => void): () => void;
+  /** Fired in the detached window when the main window's frame selection moves. */
+  onCanvasSelectionChanged(cb: (e: { frameId: string | null }) => void): () => void;
+  /** Fired with the other window's in-flight canvas jobs (main ↔ detached). */
+  onCanvasBusy(cb: (snapshot: CanvasBusySnapshot) => void): () => void;
+  /** Fired in the main window when the detached canvas window closes. */
+  onDetachedClosed(cb: () => void): () => void;
+
+  /* 16-panel camera grid (Spec 04) */
+  /** Generate (or regenerate) a shot's camera-grid sheet in place through the
+   *  active `MediaProvider`. Writes the sheet into referencesDir and returns
+   *  the saved production. Vendor-blind. */
+  generateCameraGrid(productionId: string, shotId: string, opts: CameraGridGenOptions): Promise<Production>;
+  /** Use a wired image (e.g. a grid downloaded from OpenArt by hand) as the
+   *  camera-grid sheet to cut panels out of — the manual fallback when the auto
+   *  download fails. Main copies it into referencesDir and returns the copy's
+   *  path; the renderer then binds it as the sheet. */
+  importCameraGridImage(productionId: string, shotId: string, source: GraphSource): Promise<CameraGridImportResult>;
+  /** Crop marqueed panels out of a camera-grid sheet into standalone
+   *  references (one per rect), saving the production. Returns the created
+   *  references + the saved production. */
+  cutoutCameraGrid(req: CameraGridCutoutRequest): Promise<CameraGridCutoutResult>;
 }
 
 /* ---------- IPC channel contract ----------
@@ -872,6 +956,9 @@ export const ipcContract = {
   ...modelCustomizerChannels,
   ...todoChannels,
   ...goalChannels,
+  ...suiteChannels,
+  ...windowChannels,
+  ...cameraGridChannels,
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */
@@ -886,7 +973,11 @@ type SubscriptionMethod =
   | "onGoalChanged"
   | "onAgentSwitched"
   | "onBoardExternalUpdate"
-  | "onProductionEvent";
+  | "onProductionEvent"
+  | "onCanvasContext"
+  | "onCanvasSelectionChanged"
+  | "onCanvasBusy"
+  | "onDetachedClosed";
 
 /** Every non-subscription method on CascadeApi must be wired in ipcContract,
  *  and every contract method must exist on CascadeApi — a type-level drift

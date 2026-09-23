@@ -133,6 +133,12 @@ export interface MediaProvider {
    *  models omit it and the caller offers nothing. */
   videoEditModels?(): Promise<string[]>;
 
+  /** Ids (namespaced) of models that upscale an existing image (the upscale
+   *  node + Image Suite Upscale mode capability probe). Optional — providers
+   *  without an upscale path omit it and the caller unions nothing, falling
+   *  back to the user's `image:upscale` surface assignments alone. */
+  imageUpscaleModels?(): Promise<string[]>;
+
   /** Edit one video: the source video is mandatory; image/video references
    *  ride along. Optional — callers surface a clear error when the active
    *  provider doesn't implement it. */

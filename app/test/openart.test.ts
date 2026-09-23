@@ -13,6 +13,7 @@ import * as path from "node:path";
 import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
 import { OpenArtClient, videoRefsAssign } from "../src/main/providers/openart.js";
+import { openArtCreationResultUrls, openArtCreationStatus } from "../src/main/providers/openart-core.js";
 import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
@@ -673,6 +674,115 @@ describe("OpenArtClient.imageGenFn", () => {
     await expect(client.imageModelOptions("kling-v2")).resolves.toBeNull();
     await expect(client.imageModelOptions("higgsfield:seedance_2_5")).resolves.toBeNull();
   });
+
+  it("never downloads an echoed reference URL while the job is still rendering", async () => {
+    // The creation reply carries the uploaded reference in its params. A slow
+    // job (the camera grid) used to have that reference URL downloaded as the
+    // finished sheet on the first RUNNING poll.
+    let polls = 0;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: { visualReferences: { type: "array" } } } }),
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-1", url: "https://example.invalid/source.png" } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-cg","pollAfterSeconds":0}',
+      openart_creation_wait: () => {
+        polls++;
+        return polls === 1
+          ? { text: '{"status":"STILL_RUNNING","pollAfterSeconds":0,"params":{"visualReferences":[{"url":"https://example.invalid/source.png"}]}}', images: [], uris: [] }
+          : { text: '{"status":"SUCCEEDED","urls":["https://example.invalid/out.png"]}', images: [], uris: [] };
+      },
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string) => ({
+      ok: true,
+      arrayBuffer: async () => Buffer.from(String(url).includes("out.png") ? "OUTPUT" : "SOURCE"),
+    })) as unknown as typeof fetch;
+    try {
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+      const out = await gen("16 angles of the same scene", [
+        { name: "Source", dataUrl: "data:image/png;base64,U09VUkNF" },
+      ]);
+      expect(out.toString()).toBe("OUTPUT");
+      expect(polls).toBeGreaterThanOrEqual(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("prefers the result URL over an echoed reference URL on completion", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: { visualReferences: { type: "array" } } } }),
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-1", url: "https://example.invalid/source.png" } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-done","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({
+        text: '{"status":"SUCCEEDED","params":{"visualReferences":[{"url":"https://example.invalid/source.png"}]},"results":[{"url":"https://example.invalid/out.png"}]}',
+        images: [],
+        uris: [],
+      }),
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string) => ({
+      ok: true,
+      arrayBuffer: async () => Buffer.from(String(url).includes("out.png") ? "OUTPUT" : "SOURCE"),
+    })) as unknown as typeof fetch;
+    try {
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+      const out = await gen("16 angles of the same scene", [
+        { name: "Source", dataUrl: "data:image/png;base64,U09VUkNF" },
+      ]);
+      expect(out.toString()).toBe("OUTPUT");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("excludes an echoed input image attachment and returns the generated image", async () => {
+    const source = Buffer.from("SOURCE-INPUT-BYTES");
+    const output = Buffer.from("GENERATED-OUTPUT");
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "nano-banana-2", displayName: "Nano Banana 2", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: { visualReferences: { type: "array" } } } }),
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-1", url: "https://example.invalid/source.png" } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-echo","pollAfterSeconds":0}',
+      // The completion reply echoes the uploaded input FIRST, then the result.
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [source, output], uris: [] }),
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+    const out = await gen("edit it", [{ name: "Source", dataUrl: `data:image/png;base64,${source.toString("base64")}` }]);
+    expect(out.toString()).toBe("GENERATED-OUTPUT");
+  });
+
+  it("reads an extension-less result URL before an echoed input image", async () => {
+    const source = Buffer.from("SOURCE-INPUT-BYTES");
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "nano-banana-2", displayName: "Nano Banana 2", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: { visualReferences: { type: "array" } } } }),
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-1", url: "https://example.invalid/source.png" } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-noext","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({
+        text: '{"status":"SUCCEEDED","results":[{"url":"https://cdn.example.invalid/job/abc123"}]}',
+        images: [source],
+        uris: [],
+      }),
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string) => ({
+      ok: true,
+      arrayBuffer: async () => Buffer.from(String(url).includes("cdn.example.invalid") ? "GENERATED-OUTPUT" : "SOURCE-INPUT-BYTES"),
+    })) as unknown as typeof fetch;
+    try {
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+      const out = await gen("edit it", [{ name: "Source", dataUrl: `data:image/png;base64,${source.toString("base64")}` }]);
+      expect(out.toString()).toBe("GENERATED-OUTPUT");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 });
 
 describe("OpenArtClient pending-image contingency", () => {
@@ -1151,5 +1261,48 @@ describe("OpenArtClient.videoEndFrameModels", () => {
   it("returns [] when the model list itself fails", async () => {
     const mcp = fakeMcp({ openart_model_list: () => { throw new Error("down"); } });
     expect(await new OpenArtClient(mcp).videoEndFrameModels()).toEqual([]);
+  });
+});
+
+describe("openart-core creation grammar", () => {
+  it("reads a nested creation status", () => {
+    expect(openArtCreationStatus('{"data":{"status":"SUCCEEDED"}}')).toEqual({ status: "SUCCEEDED", failed: false });
+    expect(openArtCreationStatus('{"status":"FAILED"}').failed).toBe(true);
+    expect(openArtCreationStatus("no json here")).toEqual({ status: "", failed: false });
+  });
+
+  it("collects result URLs and never the echoed input/reference URLs", () => {
+    const reply = JSON.stringify({
+      status: "SUCCEEDED",
+      params: { visualReferences: [{ url: "https://example.invalid/source.png" }] },
+      results: [{ url: "https://example.invalid/out.png" }],
+    });
+    expect(openArtCreationResultUrls(reply, false)).toEqual(["https://example.invalid/out.png"]);
+  });
+
+  it("skips start/end frame inputs and falls back to a bare URL for non-JSON", () => {
+    const reply = JSON.stringify({
+      status: "SUCCEEDED",
+      startFrame: { url: "https://example.invalid/start.png" },
+      output: "https://example.invalid/done.png",
+    });
+    expect(openArtCreationResultUrls(reply, false)).toEqual(["https://example.invalid/done.png"]);
+    expect(openArtCreationResultUrls("done: https://example.invalid/x.png", false)).toEqual(["https://example.invalid/x.png"]);
+  });
+
+  it("accepts an extension-less URL under an authoritative result key", () => {
+    const reply = JSON.stringify({
+      status: "SUCCEEDED",
+      results: [{ url: "https://cdn.example.invalid/job/abc123" }],
+    });
+    expect(openArtCreationResultUrls(reply, false)).toEqual(["https://cdn.example.invalid/job/abc123"]);
+  });
+
+  it("still requires a media extension under an ambiguous key", () => {
+    const reply = JSON.stringify({
+      status: "SUCCEEDED",
+      image: "https://cdn.example.invalid/job/abc123",
+    });
+    expect(openArtCreationResultUrls(reply, false)).toEqual([]);
   });
 });

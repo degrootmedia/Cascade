@@ -8,6 +8,7 @@ import {
   CSP_PROD,
   cspForEnv,
   serveMediaFile,
+  etagFor,
 } from "../src/main/media-protocol.js";
 
 describe("mediaMimeForPath", () => {
@@ -121,4 +122,51 @@ describe("serveMediaFile streams ranges without buffering", () => {
     const bytes = new Uint8Array(await res.arrayBuffer());
     expect(bytes.length).toBe(2);
   }, 30000);
+});
+
+describe("image caching (revalidate, never no-store)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-cache-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("serves an image with a strong ETag and revalidate caching", async () => {
+    const file = path.join(dir, "hero.png");
+    fs.writeFileSync(file, Buffer.from([1, 2, 3, 4]));
+    const res = await serveMediaFile(file, null);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=0, must-revalidate");
+    expect(res.headers.get("ETag")).toBe(etagFor({ mtimeMs: fs.statSync(file).mtimeMs, size: 4 }));
+    expect(res.headers.get("Last-Modified")).toBeTruthy();
+    // The body is still the full file (caching must not truncate it).
+    expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([1, 2, 3, 4]);
+  });
+
+  it("answers a matching If-None-Match with 304 and no body", async () => {
+    const file = path.join(dir, "hero.png");
+    fs.writeFileSync(file, Buffer.from([1, 2, 3, 4]));
+    const first = await serveMediaFile(file, null);
+    const etag = first.headers.get("ETag")!;
+    const cached = await serveMediaFile(file, null, etag);
+    expect(cached.status).toBe(304);
+    expect(cached.headers.get("ETag")).toBe(etag);
+    expect(cached.headers.get("Cache-Control")).toBe("private, max-age=0, must-revalidate");
+    expect(await cached.text()).toBe("");
+  });
+
+  it("keeps video uncached (no-store, no ETag)", async () => {
+    const file = path.join(dir, "clip.mp4");
+    fs.writeFileSync(file, Buffer.from([1, 2, 3]));
+    const res = await serveMediaFile(file, null);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("ETag")).toBeNull();
+  });
+
+  it("etagFor is stable across sub-millisecond mtime noise", () => {
+    expect(etagFor({ mtimeMs: 1234.1, size: 99 })).toBe(etagFor({ mtimeMs: 1234.4, size: 99 }));
+    expect(etagFor({ mtimeMs: 1234, size: 99 })).not.toBe(etagFor({ mtimeMs: 1234, size: 100 }));
+  });
 });

@@ -221,6 +221,14 @@ describe("applyModelSurfaces", () => {
     // A surface not applicable to the kind is dropped.
     const wrong = applyModelSurfaces([img], { img1: ["video:generate"] });
     expect(wrong[0].surfaces).toEqual([]);
+    // `image:upscale` is opt-in like `video:tween`: never in an unassigned
+    // image model's default set, and the assignment is the capability
+    // declaration (the CLI probe supplies the known upscalers).
+    const imgDefaults = applyModelSurfaces([img, vid], { vid1: ["video:generate"] });
+    expect(imgDefaults[0].surfaces).toEqual(["image:generate", "image:edit"]);
+    expect(imgDefaults[0].surfaces).not.toContain("image:upscale");
+    const upscaled = applyModelSurfaces([img], { img1: ["image:upscale"] });
+    expect(upscaled[0].surfaces).toEqual(["image:upscale"]);
   });
 
   it("migrates legacy surface keys to the collapsed pool keys", async () => {

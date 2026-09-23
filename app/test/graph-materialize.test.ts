@@ -52,6 +52,69 @@ describe("materializeGraph basics", () => {
     expect(edgeIds(g)).toContain("e-brand-vp");
   });
 
+  it("camera-grid wiring materializes its source + reference edges", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphCameraGrid: { cols: 4, rows: 4, source: { kind: "imagegen" }, refIds: ["r1"] } }),
+        REFS,
+      )
+    );
+    expect(nodeIds(g)).toContain("cameraGrid");
+    expect(nodeIds(g)).toContain("ref:r1");
+    expect(edgeIds(g)).toContain("e-img-camgrid");
+    expect(edgeIds(g)).toContain("e-ref:r1-cameraGrid-0");
+  });
+
+  it("camera-grid materializes a reference source and restores its ref node", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphCameraGrid: { cols: 4, rows: 4, source: { kind: "ref", refId: "r2" } } }),
+        REFS,
+      )
+    );
+    expect(nodeIds(g)).toContain("ref:r2");
+    expect(edgeIds(g)).toContain("e-ref-camgrid");
+  });
+
+  it("camera-grid grid-image wiring materializes its own socket edge", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphCameraGrid: { cols: 4, rows: 4, gridSource: { kind: "ref", refId: "r2" } } }),
+        REFS,
+      )
+    );
+    expect(nodeIds(g)).toContain("cameraGrid");
+    expect(nodeIds(g)).toContain("ref:r2");
+    expect(edgeIds(g)).toContain("e-ref-camgrid-grid");
+    // The grid-image socket is distinct from the source socket.
+    expect(edgeIds(g)).not.toContain("e-ref-camgrid");
+  });
+
+  it("upscale node materializes its source + output feed from domain state", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphUpscale: { source: { kind: "imagegen" } }, graphOutputSource: "upscale" }),
+        REFS,
+      )
+    );
+    expect(nodeIds(g)).toContain("upscale");
+    expect(edgeIds(g)).toContain("e-img-upscale");
+    expect(edgeIds(g)).toContain("e-upscale-out");
+  });
+
+  it("upscale node materializes a reference source and restores its ref node", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphUpscale: { source: { kind: "ref", refId: "r1" } } }),
+        REFS,
+      )
+    );
+    expect(nodeIds(g)).toContain("ref:r1");
+    expect(edgeIds(g)).toContain("e-ref-upscale");
+    // Not piped to the output → no output edge.
+    expect(edgeIds(g)).not.toContain("e-upscale-out");
+  });
+
   it("tags become ref nodes + ordered sockets; dangling tags become missing nodes", () => {
     const g = stable(materializeGraph(shot({ prompt: "See @[Gondola] then @[Marco] and @[Ghost]" }), REFS));
     expect(nodeIds(g)).toContain("ref:r1");

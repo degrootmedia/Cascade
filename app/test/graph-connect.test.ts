@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   addGraphNode,
+  applyCameraGridRefs,
   applyConnection,
   applyTweenKeys,
   canonicalNodeId,
@@ -331,5 +332,113 @@ describe("graphEdgesForDetach mirrors onConnectEnd strips", () => {
     expect(graphEdgesForDetach(g, detach("target", "composer", "nope"), ctx)).toBeNull();
     expect(graphEdgesForDetach(g, detach("target", "editvideo", "in-video"), ctx)).toBeNull();
     expect(graphEdgesForDetach(g, { type: "other", nodeId: "x", handleId: "y" }, ctx)).toBeNull();
+  });
+});
+
+describe("camera-grid wiring", () => {
+  const detach = (type: string, nodeId: string, handleId: string) => ({ type, nodeId, handleId });
+  const camCtx = { tweenKeys: [], editIds: new Set<string>(), refNodeIds: new Set(["ref:r1", "ref:r2"]) };
+
+  /** A graph with the camera-grid node, an edit node, and a placed r1. */
+  const withGrid = (): Graph => {
+    let g = materializeGraph(shot({}), REFS);
+    g = addGraphNode(g, { id: "cameraGrid", kind: "cameraGrid", pos: { x: 0, y: 0 } });
+    g = addGraphNode(g, { id: "editgen:edit0", kind: "editgen", pos: { x: 0, y: 0 } });
+    g = addGraphNode(g, { id: "ref:r1", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Gondola" } });
+    return g;
+  };
+
+  it("imagegen / editgen / ref feed the source socket", () => {
+    expect(keysOf(connect(withGrid(), conn("imagegen", "cameraGrid", "in-image")))).toContain("e-img-camgrid");
+    expect(keysOf(connect(withGrid(), conn("editgen:edit0", "cameraGrid", "in-image")))).toContain("e-edit-camgrid");
+    expect(keysOf(connect(withGrid(), conn("ref:r1", "cameraGrid", "in-image")))).toContain("e-ref-camgrid");
+  });
+
+  it("the source socket is a singleton (new feed replaces the old)", () => {
+    const g = connect(withGrid(), conn("ref:r1", "cameraGrid", "in-image"));
+    const next = connect(g, conn("imagegen", "cameraGrid", "in-image"));
+    expect(keysOf(next)).toContain("e-img-camgrid");
+    expect(keysOf(next)).not.toContain("e-ref-camgrid");
+  });
+
+  it("imagegen / editgen / ref feed the grid-image socket, independent of the source", () => {
+    expect(keysOf(connect(withGrid(), conn("imagegen", "cameraGrid", "in-grid")))).toContain("e-img-camgrid-grid");
+    expect(keysOf(connect(withGrid(), conn("editgen:edit0", "cameraGrid", "in-grid")))).toContain("e-edit-camgrid-grid");
+    expect(keysOf(connect(withGrid(), conn("ref:r1", "cameraGrid", "in-grid")))).toContain("e-ref-camgrid-grid");
+    // Both sockets coexist: wiring the grid image leaves the source wire alone.
+    const both = connect(connect(withGrid(), conn("ref:r1", "cameraGrid", "in-image")), conn("imagegen", "cameraGrid", "in-grid"));
+    expect(keysOf(both)).toContain("e-ref-camgrid");
+    expect(keysOf(both)).toContain("e-img-camgrid-grid");
+  });
+
+  it("dragging the grid-image wire off drops only that socket", () => {
+    const g = connect(withGrid(), conn("ref:r1", "cameraGrid", "in-grid"));
+    const next = graphEdgesForDetach(g, { type: "target", nodeId: "cameraGrid", handleId: "in-grid" }, camCtx);
+    expect(next).not.toBeNull();
+    expect(keysOf(next!)).not.toContain("e-ref-camgrid-grid");
+  });
+
+  it("reference sockets route through applyCameraGridRefs, not connectionToEdge", () => {
+    const g = withGrid();
+    expect(connectionToEdge(conn("ref:r1", "cameraGrid", "in-ref-open"), g)).toBeNull();
+    expect(connectionToEdge(conn("ref:r1", "cameraGrid", "in-ref-0"), g)).toBeNull();
+  });
+
+  it("applyCameraGridRefs emits positional edges only for placed refs", () => {
+    const g = withGrid();
+    const next = applyCameraGridRefs(g, ["r1", "r2"]);
+    expect(keysOf(next)).toContain("e-ref:r1-cameraGrid-0");
+    expect(next.edges.some((e) => e.to.node === "cameraGrid" && e.to.port === "in-ref-1")).toBe(false);
+    const withR2 = addGraphNode(next, { id: "ref:r2", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Marco" } });
+    const rebuilt = applyCameraGridRefs(withR2, ["r1", "r2"]);
+    expect(rebuilt.edges.find((e) => e.id === "e-ref:r2-cameraGrid-1")?.to.port).toBe("in-ref-1");
+    expect(rebuilt.edges.find((e) => e.id === "e-ref:r1-cameraGrid-0")?.to.node).toBe("cameraGrid");
+    expect(normalizeGraph(rebuilt).issues).toEqual([]);
+  });
+
+  it("source detach drops the feed; ref sockets are rebuilt by the caller", () => {
+    const g = connect(withGrid(), conn("imagegen", "cameraGrid", "in-image"));
+    expect(graphEdgesForDetach(g, detach("target", "cameraGrid", "in-image"), camCtx)?.edges.map((e) => e.id)).not.toContain("e-img-camgrid");
+    expect(graphEdgesForDetach(g, detach("target", "cameraGrid", "in-ref-0"), camCtx)).toBeNull();
+    // A source drag-off removes every camera-grid edge from that node.
+    const dropped = graphEdgesForDetach(g, detach("source", "imagegen", ""), camCtx)!;
+    expect(dropped.edges.some((e) => e.to.node === "cameraGrid")).toBe(false);
+  });
+});
+
+describe("upscale node wiring", () => {
+  const detach = (type: string, nodeId: string, handleId: string) => ({ type, nodeId, handleId });
+  const ctx = { tweenKeys: [], editIds: new Set<string>(), refNodeIds: new Set(["ref:r1"]) };
+
+  /** A graph with the upscale node, an edit node, and a placed r1. */
+  const withUpscale = (): Graph => {
+    let g = materializeGraph(shot({}), REFS);
+    g = addGraphNode(g, { id: "upscale", kind: "upscale", pos: { x: 0, y: 0 } });
+    g = addGraphNode(g, { id: "editgen:edit0", kind: "editgen", pos: { x: 0, y: 0 } });
+    g = addGraphNode(g, { id: "ref:r1", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Gondola" } });
+    return g;
+  };
+
+  it("imagegen / editgen / ref feed the source socket; the output feeds the output node", () => {
+    expect(keysOf(connect(withUpscale(), conn("imagegen", "upscale", "in-image")))).toContain("e-img-upscale");
+    expect(keysOf(connect(withUpscale(), conn("editgen:edit0", "upscale", "in-image")))).toContain("e-edit-upscale");
+    expect(keysOf(connect(withUpscale(), conn("ref:r1", "upscale", "in-image")))).toContain("e-ref-upscale");
+    const out = connect(withUpscale(), conn("upscale", "output", "in-out"));
+    expect(keysOf(out)).toContain("e-upscale-out");
+  });
+
+  it("the source socket is a singleton (new feed replaces the old)", () => {
+    const g = connect(withUpscale(), conn("ref:r1", "upscale", "in-image"));
+    const next = connect(g, conn("imagegen", "upscale", "in-image"));
+    expect(keysOf(next)).toContain("e-img-upscale");
+    expect(keysOf(next)).not.toContain("e-ref-upscale");
+  });
+
+  it("detach drops the source feed and the output feed", () => {
+    const g = connect(withUpscale(), conn("imagegen", "upscale", "in-image"));
+    expect(graphEdgesForDetach(g, detach("target", "upscale", "in-image"), ctx)?.edges.map((e) => e.id)).not.toContain("e-img-upscale");
+    const withOut = connect(g, conn("upscale", "output", "in-out"));
+    const dropped = graphEdgesForDetach(withOut, detach("source", "upscale", ""), ctx)!;
+    expect(dropped.edges.some((e) => e.to.node === "output")).toBe(false);
   });
 });

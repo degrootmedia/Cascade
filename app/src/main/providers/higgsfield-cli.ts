@@ -42,6 +42,7 @@ import {
 } from "./cli-run.js";
 import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
 import {
+  dataUrlToBytes,
   IMAGE_URL_RX,
   parseJsonLooseArray,
   parseJsonLooseObject,
@@ -68,6 +69,7 @@ import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 import { resizeVideoRef } from "../video-ref.js";
 import { buildModelSchema, OWNED_FLAGS, type RawModelParam } from "./model-schema.js";
+import { imagePixelSize } from "./image-size.js";
 
 /** Prefix marking model ids that belong to this provider (see types.ts).
  *  The raw id is the CLI job_type (`seedance_2_5`); the legacy MCP prefix
@@ -115,10 +117,22 @@ const COST_TTL_MS = 5 * 60_000;
 const COST_CACHE_CAP = 64;
 /** Placeholder prompt for cost preflights. Verified live (2026-09-16):
  *  prompt text never moves the price, but the flag is required — the real
- *  prompt never travels, and no media flags are sent (zero uploads; refs
- *  don't move the price either — seedance_2_5 5s/720p quotes 32.5 with and
- *  without a start frame). */
+ *  prompt never travels, and the first probe sends no media flags (zero
+ *  uploads in the common case; refs don't move the price either —
+ *  seedance_2_5 5s/720p quotes 32.5 with and without a start frame). A
+ *  media-requiring `mode` falls back to a placeholder start frame (see
+ *  `costProbe`). */
 const COST_PROBE_PROMPT = "cost probe";
+/** 1×1 transparent PNG used only as a fallback cost-probe start frame: a
+ *  media-requiring `mode` (`omni_reference`, `image-to-video`, …) can't be
+ *  priced without a media item, but the real submit always carries the source
+ *  frame. References don't move the price, so the retry prices the same
+ *  config instead of hiding the quote. */
+const COST_PROBE_IMAGE_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+/** A cost-probe rejection caused by missing media (a media-requiring `mode`
+ *  or a required start frame) — the one case the placeholder retry can fix. */
+const COST_MEDIA_REJECT_RX = /media|reference|start[_-]?image|end[_-]?image/i;
 const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
@@ -608,9 +622,11 @@ function extractCliJobId(stdout: string): string | null {
 const JOB_FAILED_RX = /fail|cancel|error/i;
 const JOB_DONE_RX = /complet|success|done|finish|ready/i;
 
-/** Read `{status, failed}` out of a `generate wait/get --json` reply. */
-function cliJobStatus(stdout: string): { status: string; failed: boolean } {
-  const probe = (o: Record<string, unknown>): string => {
+/** Read `{status, failed, reason}` out of a `generate wait/get --json` reply.
+ *  The reason fields are best-effort — the CLI's terminal "failed" status
+ *  usually carries the vendor's error text alongside it. */
+function cliJobStatus(stdout: string): { status: string; failed: boolean; reason: string } {
+  const statusOf = (o: Record<string, unknown>): string => {
     const s = strField(o as CliListItem, "status", "state");
     if (s) return s;
     for (const key of ["job", "data", "result"]) {
@@ -622,17 +638,48 @@ function cliJobStatus(stdout: string): { status: string; failed: boolean } {
     }
     return "";
   };
+  const reasonOf = (o: Record<string, unknown>): string => {
+    const direct = strField(
+      o as CliListItem,
+      "error", "error_message", "errorMessage", "error_code", "message",
+      "fail_reason", "failure_reason", "failureReason", "failure", "failed_reason",
+      "reason", "detail", "status_message", "statusMessage",
+    );
+    if (direct) return direct;
+    for (const key of ["job", "data", "result", "error", "failure"]) {
+      const v = o[key];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const nested = strField(
+          v as CliListItem,
+          "error", "error_message", "error_code", "message", "fail_reason", "failure_reason", "failure", "reason", "detail",
+        );
+        if (nested) return nested;
+      } else if (typeof v === "string" && v.trim()) {
+        return v.trim();
+      }
+    }
+    return "";
+  };
+  const read = (o: Record<string, unknown>): { status: string; failed: boolean; reason: string } | null => {
+    const status = statusOf(o);
+    if (!status && !reasonOf(o)) return null;
+    return { status, failed: JOB_FAILED_RX.test(status), reason: reasonOf(o) };
+  };
   const arr = parseJsonLooseArray(stdout);
-  const status = arr && arr.length && arr[0] && typeof arr[0] === "object"
-    ? probe(arr[0] as Record<string, unknown>)
-    : "";
-  if (status) return { status, failed: JOB_FAILED_RX.test(status) };
+  const first = arr && arr.length && arr[0] && typeof arr[0] === "object" ? (arr[0] as Record<string, unknown>) : null;
+  const fromArr = first ? read(first) : null;
+  if (fromArr) return fromArr;
   const obj = parseJsonLooseObject(stdout);
-  if (obj) {
-    const s = probe(obj as Record<string, unknown>);
-    if (s) return { status: s, failed: JOB_FAILED_RX.test(s) };
-  }
-  return { status: "", failed: false };
+  const fromObj = obj ? read(obj as Record<string, unknown>) : null;
+  if (fromObj) return fromObj;
+  return { status: "", failed: false, reason: "" };
+}
+
+/** Human-readable terminal job failure, including the vendor's reason when the
+ *  CLI surfaces one. */
+function jobFailureMessage(jobId: string, status: string, reason: string): string {
+  const head = `Higgsfield generation ${(status || "failed").toLowerCase()} (job ${jobId.slice(0, 8)}…).`;
+  return reason ? `${head} ${reason.slice(0, 800)}` : head;
 }
 
 /** Collect http(s) media URLs out of a job reply, preferred-field first,
@@ -835,6 +882,37 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return this.cli([...args, "--json", "--no-color"], timeoutMs);
   }
 
+  /** Run the CLI without throwing, returning the raw result (used for
+   *  best-effort diagnostics on a job that already failed). Null when the
+   *  binary is missing or the process can't be spawned. */
+  private async tryRun(args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string } | null> {
+    const binary = this.opts.binary();
+    if (!binary) return null;
+    const run = this.opts.run ?? defaultCliRun(binary);
+    try {
+      return await run([...args, "--json", "--no-color"], { timeoutMs });
+    } catch {
+      return null;
+    }
+  }
+
+  /** Enrich a non-zero `generate wait` failure with the job's terminal status +
+   *  vendor reason (a single `generate get`). Falls back to the original error
+   *  when the job can't be re-read. */
+  private async describeJobFailure(jobId: string, cause: unknown): Promise<string> {
+    const res = await this.tryRun(["generate", "get", jobId], 60_000);
+    if (res) {
+      const combined = `${res.stdout}\n${res.stderr}`;
+      const { status, reason } = cliJobStatus(combined);
+      if (reason) return jobFailureMessage(jobId, status, reason);
+      // No recognizable reason field — surface the raw job reply so the cause
+      // is visible instead of a bare "failed".
+      const raw = (res.stdout.trim() || res.stderr.trim()).slice(0, 800);
+      if (raw) return jobFailureMessage(jobId, status || "failed", raw);
+    }
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+
   // ---- catalog --------------------------------------------------------------------
 
   private async listRaw(kind: "image" | "video"): Promise<CliListItem[]> {
@@ -926,10 +1004,44 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (detail && req.params) {
         emitExtraParams(normalizeCliModelDetail(detail, null, raw, null), req.params, args);
       }
-      const stdout = await this.json(["generate", "cost", ...args], 30_000);
+      const stdout = await this.costProbe(args, detail, req.kind);
       return remember(parseCostCredits(stdout));
     } catch {
       return remember(null);
+    }
+  }
+
+  /** Run one `generate cost` preflight, retrying once with a placeholder in
+   *  the model's start-image slot when the first attempt is rejected for a
+   *  media-requiring `mode` (`omni_reference`, `image-to-video`, …). The real
+   *  submit always carries a source frame, and references don't move the
+   *  price, so the retry prices the same config instead of hiding the quote.
+   *  The retry only fires on failure, so the common media-free config still
+   *  probes with zero uploads. */
+  private async costProbe(
+    args: string[],
+    detail: CliModelDetail | null,
+    kind: "image" | "video"
+  ): Promise<string> {
+    try {
+      return await this.json(["generate", "cost", ...args], 30_000);
+    } catch (e) {
+      // Only a media/reference rejection is worth the placeholder retry — an
+      // invalid flag combo or an unknown model would just fail again.
+      if (kind !== "video" || !COST_MEDIA_REJECT_RX.test(String(e))) throw e;
+      const roles = detail ? HiggsfieldCliProvider.roles(detail) : [];
+      const flag = !roles.length || roles.includes("startimage")
+        ? "--start-image"
+        : roles.includes("image") ? "--image" : null;
+      if (!flag) throw e;
+      const { paths, cleanup } = writeCliTempRefs([{ name: "cost-probe", dataUrl: COST_PROBE_IMAGE_DATA_URL }]);
+      try {
+        const path = paths[0];
+        if (!path) throw e;
+        return await this.json(["generate", "cost", ...args, flag, path], 30_000);
+      } finally {
+        cleanup();
+      }
     }
   }
 
@@ -993,12 +1105,32 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (
         key === "startimage" || key === "endimage" ||
         key === "image" || key === "video" || key === "audio" ||
+        // Some models (nano_banana_pro) name the base slot `input_image` and
+        // the reference array `input_images` instead of `image`/`image_references`.
+        key === "inputimage" || key === "inputimages" ||
         /references?$/.test(key)
       ) {
         if (!out.includes(key)) out.push(key);
       }
     }
     return out;
+  }
+
+  /** The single-image flag a model's base image rides, or null when it has no
+   *  single slot. `--image` is the CLI's legacy single-image flag for image
+   *  models (it fills `input_image`/`image`). */
+  private static singleImageFlag(roles: string[]): string | null {
+    const has = (names: string[]) => roles.some((r) => names.includes(r));
+    if (has(["inputimage", "startimage", "image"])) return "--image";
+    // Unknown schema (detail unreadable): best-effort legacy single image.
+    return roles.length === 0 ? "--image" : null;
+  }
+
+  /** The array-reference flag a model's extra references ride, or null. */
+  private static arrayImageFlag(roles: string[]): string | null {
+    const has = (names: string[]) => roles.some((r) => names.includes(r));
+    if (has(["imagereferences", "inputimages"]) || roles.some((r) => /reference/.test(r))) return "--image-references";
+    return null;
   }
 
   /** Resolve a stored/selected id to the raw job_type to submit: foreign or
@@ -1217,6 +1349,26 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return out.sort();
   }
 
+  /** Ids (namespaced) of the image models the catalog classifies as
+   *  upscalers — they enhance an existing image rather than generate from a
+   *  prompt (Topaz, Bytedance Image Upscale). The upscale node and the Image
+   *  Suite's Upscale mode union this with the user's `image:upscale` surface
+   *  assignments. Empty when the catalog can't be read. */
+  async imageUpscaleModels(): Promise<string[]> {
+    let items: CliListItem[] = [];
+    try {
+      items = await this.listRaw("image");
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const m of items) {
+      const id = strField(m, "job_type", "jobType", "job_set_type", "id", "model", "name");
+      if (id && classifyFamily(id)?.kind === "upscale") out.push(`${HIGGSFIELD_CLI_ID_PREFIX}${id}`);
+    }
+    return out.sort();
+  }
+
   /** No project concept on Higgsfield — generations always land in the
    *  account/workspace default, so there is nothing to resolve. */
   async resolveProject(_p: Production, _onNotice?: (msg: string) => void): Promise<string | null> {
@@ -1271,12 +1423,19 @@ export class HiggsfieldCliProvider implements MediaProvider {
         `The Higgsfield CLI returned no job id (${createOut.slice(0, 200) || "empty reply"}) — the submission may not have gone through and no credits should have been spent.`
       );
     }
-    const waitOut = await this.cli(
-      ["generate", "wait", jobId, "--timeout", `${Math.round(timeoutMs / 60000)}m`, "--interval", `${WAIT_INTERVAL_S}s`],
-      timeoutMs + 60_000
-    );
-    const { status, failed } = cliJobStatus(waitOut);
-    if (failed) throw new Error(`Higgsfield generation ${status.toLowerCase() || "failed"} (${jobId.slice(0, 8)}…).`);
+    let waitOut: string;
+    try {
+      waitOut = await this.cli(
+        ["generate", "wait", jobId, "--timeout", `${Math.round(timeoutMs / 60000)}m`, "--interval", `${WAIT_INTERVAL_S}s`],
+        timeoutMs + 60_000
+      );
+    } catch (e) {
+      // `generate wait` exits non-zero on a terminal failure — ask the job for
+      // its status + vendor reason so the caller sees why, not just "failed".
+      throw new Error(await this.describeJobFailure(jobId, e));
+    }
+    const { status, failed, reason } = cliJobStatus(waitOut);
+    if (failed) throw new Error(jobFailureMessage(jobId, status, reason));
     const urls = cliResultUrls(waitOut, video);
     // A wait that times out server-side can still print progress without a
     // terminal status — fall back to `generate get` once before giving up.
@@ -1285,7 +1444,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       try {
         const getOut = await this.cli(["generate", "get", jobId], 60_000);
         const gs = cliJobStatus(getOut);
-        if (gs.failed) throw new Error(`Higgsfield generation ${gs.status.toLowerCase() || "failed"} (${jobId.slice(0, 8)}…).`);
+        if (gs.failed) throw new Error(jobFailureMessage(jobId, gs.status, gs.reason));
         urls.push(...cliResultUrls(getOut, video));
       } catch (e) {
         if (e instanceof Error && /failed|cancel/i.test(e.message)) throw e;
@@ -1319,7 +1478,6 @@ export class HiggsfieldCliProvider implements MediaProvider {
     aspectRatio: ImageGenAspectRatio = "16:9"
   ): ImageGenFn | null {
     if (!this.isAvailable()) return null;
-    void onNotice;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>): Promise<Buffer> => {
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
@@ -1336,19 +1494,33 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const detail = await this.modelDetail(modelId).catch(() => null);
       const roles = detail ? HiggsfieldCliProvider.roles(detail) : [];
 
-      // Reference art rides repeatable `--image` (failures fall back to
-      // text-only, as on the MCP transports).
+      // Reference art rides the flags the model declares: the base/source image
+      // fills the model's single slot (`input_image`/`image` via `--image`),
+      // extra references the repeatable array (`input_images`/`image_references`
+      // via `--image-references`). A model with only the array gets everything
+      // there; a model with only the single slot takes just the first. Sending
+      // the source into the array left `input_image` null and failed the job.
+      const singleFlag = HiggsfieldCliProvider.singleImageFlag(roles);
+      const arrayFlag = HiggsfieldCliProvider.arrayImageFlag(roles);
       const { paths, cleanup } = writeCliTempRefs(refs);
-      const uploaded: (string | null)[] = [...paths];
+      /** The flag a reference at `i` rides, or null when it has nowhere to go. */
+      const refFlag = (i: number): string | null => {
+        if (i === 0 && singleFlag) return singleFlag;
+        return arrayFlag;
+      };
+      const uploaded: (string | null)[] = paths.map((p, i) => (p && refFlag(i) ? p : null));
       const fullPrompt = citePrompt(prompt, refs, uploaded, styleRefNames(p));
+      // Models whose schema declares no `prompt` param (upscalers, background
+      // removers) reject `--prompt` outright. Emit it only when the model
+      // accepts one; an unreadable schema keeps the legacy prompt so plain
+      // text-to-image generation is unchanged.
+      const acceptsPrompt = !detail || !!HiggsfieldCliProvider.param(detail, "prompt");
       try {
-        const args = [modelId, "--prompt", fullPrompt];
-        const imagePaths = paths.filter((f): f is string => !!f);
-        if (imagePaths.length) {
-          if (!roles.length || roles.some((r) => r === "image" || r === "imagereferences")) {
-            for (const f of imagePaths) args.push("--image", f);
-          }
-        }
+        const args = acceptsPrompt ? [modelId, "--prompt", fullPrompt] : [modelId];
+        paths.forEach((p, i) => {
+          const flag = refFlag(i);
+          if (p && flag) args.push(flag, p);
+        });
         // Aspect ratio: an explicit schema-driven pick (params.aspect_ratio)
         // wins over the request default, but only when the model lists it.
         const extraParams = genParams ?? p.openArt?.params;
@@ -1373,6 +1545,38 @@ export class HiggsfieldCliProvider implements MediaProvider {
           const qMatch = qualities.find((v) => v.toLowerCase() === quality.toLowerCase());
           if (qMatch) args.push("--quality", qMatch);
         }
+        // Some models (Higgsfield's Topaz upscalers) declare required
+        // `output_width`/`output_height` with no default. When the caller
+        // hasn't supplied them, derive a 2× target from the source image's own
+        // pixels so an upscale submits without manual sizing. A user-supplied
+        // side always wins; a single supplied side scales the other by the
+        // source aspect. Unreadable source pixels leave the field untouched
+        // (the user can set it in the node's Advanced options).
+        if (detail) {
+          const reqW = HiggsfieldCliProvider.param(detail, "output_width")?.required === true;
+          const reqH = HiggsfieldCliProvider.param(detail, "output_height")?.required === true;
+          if (reqW || reqH) {
+            const providedNum = (key: string): number | undefined => {
+              const v = extraParams?.[key];
+              const n = typeof v === "number" ? v : Number(String(v ?? "").trim());
+              return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+            };
+            const userW = providedNum("output_width");
+            const userH = providedNum("output_height");
+            const size = refs[0] ? imagePixelSize(dataUrlToBytes(refs[0].dataUrl)) : null;
+            const even = (n: number): number => Math.max(2, Math.round(n / 2) * 2);
+            let w = userW;
+            let h = userH;
+            if (size && (!w || !h)) {
+              const scale = 2;
+              if (!w && !h) { w = even(size.width * scale); h = even(size.height * scale); }
+              else if (!h) h = even((w! * size.height) / size.width);
+              else w = even((h! * size.width) / size.height);
+            }
+            if (w && !userW) args.push("--output_width", String(w));
+            if (h && !userH) args.push("--output_height", String(h));
+          }
+        }
         // Schema-driven extras (variant, background, seed, mode, …) from
         // the persisted params map (or the caller-supplied override, e.g. a
         // reference-generation modal). Owned flags and media roles are
@@ -1380,6 +1584,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (detail && extraParams) {
           emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), extraParams, args);
         }
+        // Diagnostics: name the resolved model and the shape of the submission
+        // so a failed job can be traced from the production log.
+        const refCount = uploaded.filter(Boolean).length;
+        onNotice?.(
+          `Submitting image job via ${modelId} (resolution=${resMatch ?? resolution}, aspect_ratio=${wantAspect}, ` +
+          `refs=${refCount}${refCount ? "" : " (text-only)"}, prompt=${fullPrompt.length} chars)`
+        );
         const genMeta: LedgerGenMeta = {
           kind: "image",
           model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,

@@ -512,7 +512,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                   className={"prod-tween-block" + (focus?.id === b.id ? " focus" : "")}
                   style={{ left: `${left}%`, width: `${width}%` }}
                   onClick={() => setFocusId(b.id)}
-                  onContextMenu={(e) => { if (sel) genMenu.open(e, sel.path); }}
+                  onContextMenu={(e) => { if (sel) genMenu.open(e, sel.path, { src: tweenMediaUrl(prodId, sel.path), media: "video" }); }}
                   title={`${start?.name ?? ""} → ${keyframes.find((k) => k.id === b.endRefId)?.name ?? ""} · ${b.durationSec}s`}
                 >
                   <div className="prod-tween-block-label">{b.startSec.toFixed(0)}s → {(b.startSec + b.durationSec).toFixed(0)}s</div>
@@ -566,7 +566,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                         onBlocksChange(display.map((x) => (x.id === b.id ? { ...x, genIndex: v === "key" ? undefined : Number(v) } : x)));
                       }}
                       onContextMenu={(e) => {
-                        if (sel) genMenu.open(e, sel.path);
+                        if (sel) genMenu.open(e, sel.path, { src: tweenMediaUrl(prodId, sel.path), media: "video" });
                       }}
                       title="View a previous generation, or the original keyframes (right-click for the selected take's options)"
                     >

@@ -63,8 +63,11 @@ import {
   type CliRun,
 } from "./cli-run.js";
 import {
+  OPENART_JOB_DONE_RX,
   describeOpenArtDurations,
   extractOpenArtVideoOptions,
+  openArtCreationResultUrls,
+  openArtCreationStatus,
   openArtSchemaFromProps,
   parseOpenArtFormProperties,
   shapeOpenArtModelChoices,
@@ -128,82 +131,8 @@ function extractHistoryId(stdout: string): string | null {
   return text.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/)?.[0] ?? null;
 }
 
-const JOB_FAILED_RX = /fail|cancel|error/i;
-const JOB_DONE_RX = /complet|success|succeed|done|finish|ready/i;
-
-/** Read `{status, failed}` out of a `creation wait/get --json` reply. */
-function creationStatus(stdout: string): { status: string; failed: boolean } {
-  const probe = (o: Record<string, unknown>): string => {
-    const direct = ["status", "state"].map((k) => o[k]).find((v) => typeof v === "string" && (v as string).trim());
-    if (typeof direct === "string") return direct;
-    for (const key of ["creation", "data", "result", "job"]) {
-      const v = o[key];
-      if (v && typeof v === "object" && !Array.isArray(v)) {
-        const nested = probe(v as Record<string, unknown>);
-        if (nested) return nested;
-      }
-    }
-    return "";
-  };
-  const arr = parseJsonLooseArray(stdout);
-  if (arr) {
-    for (const e of arr) {
-      if (e && typeof e === "object") {
-        const s = probe(e as Record<string, unknown>);
-        if (s) return { status: s, failed: JOB_FAILED_RX.test(s) };
-      }
-    }
-  }
-  const obj = parseJsonLooseObject(stdout);
-  if (obj) {
-    const s = probe(obj as Record<string, unknown>);
-    if (s) return { status: s, failed: JOB_FAILED_RX.test(s) };
-  }
-  return { status: "", failed: false };
-}
-
-/** Collect result media URLs out of a creation reply, preferred-field first,
- *  then any URL with a matching extension anywhere in the payload. */
-function creationUrls(stdout: string, video: boolean): string[] {
-  const extRx = video ? /\.(mp4|webm|mov|m4v)(\?|$)/i : /\.(png|jpe?g|webp|gif)(\?|$)/i;
-  const urlRx = /https?:\/\/[^\s"'\\]+/g;
-  const out: string[] = [];
-  const push = (u: string) => {
-    const clean = u.replace(/[),.\]}>]+$/, "");
-    if (clean && !out.includes(clean)) out.push(clean);
-  };
-  const fromValue = (v: unknown): void => {
-    if (typeof v === "string") {
-      for (const m of v.match(urlRx) ?? []) if (extRx.test(m)) push(m);
-    } else if (Array.isArray(v)) {
-      for (const e of v) fromValue(e);
-    } else if (v && typeof v === "object") {
-      for (const e of Object.values(v as Record<string, unknown>)) fromValue(e);
-    }
-  };
-  const preferred = (o: Record<string, unknown>): void => {
-    for (const key of ["url", "urls", "result_url", "result_urls", "image_url", "video_url",
-      "download_url", "file_url", "result", "results", "output", "outputs", "files", "media"]) {
-      if (o[key] !== undefined) fromValue(o[key]);
-    }
-  };
-  const arr = parseJsonLooseArray(stdout);
-  if (arr) {
-    for (const e of arr) if (e && typeof e === "object") preferred(e as Record<string, unknown>);
-    if (out.length) return out;
-    for (const e of arr) fromValue(e);
-    if (out.length) return out;
-  }
-  const obj = parseJsonLooseObject(stdout);
-  if (obj) {
-    preferred(obj as Record<string, unknown>);
-    if (out.length) return out;
-    fromValue(obj);
-    if (out.length) return out;
-  }
-  for (const m of stdout.match(urlRx) ?? []) if (extRx.test(m)) push(m);
-  return out;
-}
+// Creation status + result-URL extraction live in openart-core: the MCP
+// transport reads the same creation replies, so the grammar has one home.
 
 /** Thrown when a CLI wait cap passes with the job still rendering. The job
  *  is NOT dead — it keeps rendering server-side — so image callers record
@@ -542,15 +471,15 @@ export class OpenArtCliProvider implements MediaProvider {
       ["creation", "wait", historyId, "--timeout", `${Math.max(30, Math.round(timeoutMs / 1000))}s`],
       timeoutMs + 60_000
     );
-    const { status, failed } = creationStatus(waitOut);
+    const { status, failed } = openArtCreationStatus(waitOut);
     if (failed) throw new Error(`OpenArt generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
-    if (status && !JOB_DONE_RX.test(status)) {
+    if (status && !OPENART_JOB_DONE_RX.test(status)) {
       // No terminal status yet — one `creation get` before calling it pending.
       try {
         const getOut = await this.cli(["creation", "get", historyId], 60_000);
-        const gs = creationStatus(getOut);
+        const gs = openArtCreationStatus(getOut);
         if (gs.failed) throw new Error(`OpenArt generation ${gs.status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
-        const urls = creationUrls(getOut, video);
+        const urls = openArtCreationResultUrls(getOut, video);
         if (urls.length) {
           const buf = await this.fetchBytes(urls[0]);
           if (buf) return { buf, ext: OpenArtCliProvider.extOf(urls[0], video), historyId };
@@ -561,7 +490,7 @@ export class OpenArtCliProvider implements MediaProvider {
       throw new OpenArtCliPendingError(historyId);
     }
     if (status && onStatus) onStatus(status);
-    const urls = creationUrls(waitOut, video);
+    const urls = openArtCreationResultUrls(waitOut, video);
     // A completed creation without a fetchable URL can still surface it in
     // plain text (non-JSON progress lines).
     if (!urls.length) {
@@ -687,9 +616,9 @@ export class OpenArtCliProvider implements MediaProvider {
       } catch {
         return null;
       }
-      const { failed, status } = creationStatus(out);
+      const { failed, status } = openArtCreationStatus(out);
       if (failed) throw new Error(`OpenArt generation ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
-      const urls = creationUrls(out, false);
+      const urls = openArtCreationResultUrls(out, false);
       if (!urls.length) {
         const direct = out.match(IMAGE_URL_RX)?.[0];
         if (!direct) return null;

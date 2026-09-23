@@ -4,16 +4,16 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
-import { NodeGraphModal, VIDEO_PROMPT_DEFAULT, type GraphRef } from "./NodeGraphModal.js";
+import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
-import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, StepFooter, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
-import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefs, uniqueRefName } from "./production/references.js";
+import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
+import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
@@ -23,11 +23,15 @@ import { BrandSwatchRow } from "./production/brand.js";
 import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
+import { ImageSuite } from "../features/suite/ImageSuite.js";
+import { SUITE_OPEN_EVENT, openImageSuite, takePendingSuiteSeed } from "../features/suite/suite-handoff.js";
+import { MoodboardCanvas } from "../features/moodboard/MoodboardCanvas.js";
 import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
 import { StyleParamsForm } from "./production/style-params.js";
 import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
+import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
@@ -60,8 +64,30 @@ function DesignSection({ title, prodId, children }: {
   );
 }
 
+/** The step-level error line: the last failed action's message with a dismiss
+ *  button so a stale error doesn't linger at the top of a step. */
+function ErrorNotice({ message, onClear }: { message: string; onClear: () => void }) {
+  return (
+    <div className="prod-error" role="alert">
+      <span className="error-text">{message}</span>
+      <button className="prod-error-clear" onClick={onClear} title="Dismiss error" aria-label="Dismiss error">
+        <XIcon size={12} />
+      </button>
+    </div>
+  );
+}
 
-export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () => void }) {
+
+export function ProductionWorkspace({ onOpenSettings, detached = null, onDetachedTitle }: {
+  onOpenSettings?: () => void;
+  /** When set, this workspace is rendered inside the detached canvas window
+   *  (Spec 03): it loads the production directly, opens the requested canvas,
+   *  follows the main window's frame selection, and hides its chrome. */
+  detached?: DetachedCanvasContext | null;
+  /** Detached only: report a human-readable `Production · Frame` title so the
+   *  detached window's slim bar can show what it hosts. */
+  onDetachedTitle?: (title: string) => void;
+}) {
   const [list, setList] = useState<ProductionMeta[]>([]);
   const [prod, setProd] = useState<Production | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
@@ -69,6 +95,27 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [err, setErr] = useState<string | null>(null);
   // expenses page (far-right tab) replaces the step content while open
   const [showExpenses, setShowExpenses] = useState(false);
+  // Image Suite panel — also replaces the step content, like Expenses. `suiteSeed`
+  // carries an "Open in Suite" handoff from a popup; the suite drains it.
+  const [showSuite, setShowSuite] = useState(false);
+  const [suiteSeed, setSuiteSeed] = useState<import("../features/suite/suite-types.js").SuiteSeed | null>(null);
+  // Reference Moodboard panel — also replaces the step content, like the Suite.
+  const [showMoodboard, setShowMoodboard] = useState(false);
+  /** Detached canvas window state (Spec 03) — the main window guards its own
+   *  graph as read-only while the detached window hosts it. */
+  const [detachedWindow, setDetachedWindow] = useState<import("../../../shared/ipc/window.js").DetachedCanvasState | null>(null);
+  // A popup's "Open in Suite": open the panel and hand over its setup.
+  useEffect(() => {
+    const onOpen = () => {
+      const pending = takePendingSuiteSeed();
+      if (pending) setSuiteSeed(pending.seed);
+      setShowSuite(true);
+      setShowExpenses(false);
+      setShowMoodboard(false);
+    };
+    window.addEventListener(SUITE_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(SUITE_OPEN_EVENT, onOpen);
+  }, []);
   // creation form
   const [newName, setNewName] = useState("");
   const [newFolder, setNewFolder] = useState<string | null>(null);
@@ -139,7 +186,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [mediaProviderName, setMediaProviderName] = useState<string>("OpenArt");
   /** Active media provider id — tracked so model lists refetch when the
    *  provider is switched in Settings while the workspace is open. */
-  const [mediaProviderId, setMediaProviderId] = useState<string>("openart");
+  const [mediaProviderId, setMediaProviderId] = useState<MediaProviderId>("openart");
   const [voUrl, setVoUrl] = useState<string | null>(null);
   const [voDuration, setVoDuration] = useState<number | null>(null);
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
@@ -168,6 +215,9 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   const [tweenBusyByShot, setTweenBusyByShot] = useState<Record<string, string>>({});
   /** Shot ids with a stitch/unstitch in flight. */
   const [tweenStitchingIds, setTweenStitchingIds] = useState<Set<string>>(new Set());
+  /** The sibling window's in-flight canvas jobs (Spec 03), mirrored via main so
+   *  "Generating…" shows whichever window hosts the graph. `null` = none. */
+  const [remoteCanvasBusy, setRemoteCanvasBusy] = useState<CanvasBusySnapshot | null>(null);
   // Step 3 storyboard-PDF export dialog (layout + version + logo options).
   const [pdfOpen, setPdfOpen] = useState(false);
   // Step 2 reference-image generation/edit modal. `refId` preselects edit mode
@@ -328,14 +378,25 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     };
   }, [prod?.meta.id, refreshList, bustOne, bustAll]);
 
-  // Keep the rename draft in sync when switching productions.
-  useEffect(() => { setNameDraft(prod?.meta.name ?? ""); setSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
+  /** Seed the Step 1 source controls from the persisted `scriptSource`: a
+   *  Google Docs URL refills the URL input (one-click re-ingest), a local file
+   *  path refills the picked-file state. */
+  function applyScriptSource(src: string | null) {
+    const url = src && /^https?:\/\//i.test(src) ? src : null;
+    setGdocUrl(url ?? "");
+    setSource(url ? null : src);
+  }
 
-  // Warm the dropdowns' remembered last choices once (media-defaults.ts) and
-  // the per-surface parameter defaults (model-param-defaults.ts).
+  // Keep the rename draft and Step 1 source in sync when switching productions.
+  useEffect(() => { setNameDraft(prod?.meta.name ?? ""); applyScriptSource(prod?.scriptSource ?? null); }, [prod?.meta.id]);
+
+  // Warm the dropdowns' remembered last choices once (media-defaults.ts),
+  // the per-surface parameter defaults (model-param-defaults.ts), and the
+  // prompt-template overrides (prompt-templates.ts).
   useEffect(() => {
     void primeMediaDefaults().then(() => setMediaDefaultsReady(true));
     void primeModelParamDefaults();
+    void primePromptTemplates();
   }, []);
 
   // The Step-3 image dropdown starts at the user's last chosen model: a
@@ -380,9 +441,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   }, []);
 
   useEffect(() => {
-    if (prod?.currentStep !== 2 && prod?.currentStep !== 3) return;
+    // The active provider id is tracked on every step (not just generation
+    // steps) so provider-dependent UI — e.g. the OpenArt-MCP upscale gate —
+    // stays correct wherever it's shown. Models and availability stay gated.
+    const onGenStep = prod?.currentStep === 2 || prod?.currentStep === 3;
+    const step = prod?.currentStep;
     let live = true;
-    const step = prod.currentStep;
     window.cascade.getMediaProvider()
       .then((id) => {
         if (!live) return;
@@ -396,10 +460,12 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           }
         });
       })
-      .catch(() => { if (live) setMediaOk(null); });
-    window.cascade.listOpenArtModels()
-      .then((m) => { if (live) setMediaModels(m); })
-      .catch(() => { if (live) setMediaModels([]); });
+      .catch(() => { if (live && step === 3) setMediaOk(null); });
+    if (onGenStep) {
+      window.cascade.listOpenArtModels()
+        .then((m) => { if (live) setMediaModels(m); })
+        .catch(() => { if (live) setMediaModels([]); });
+    }
     return () => { live = false; };
   }, [prod?.meta.id, prod?.currentStep, mediaProviderId]);
 
@@ -619,6 +685,121 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }, [prod, promptShotId, graphShotId]);
 
+  // ---- Detached canvas window (Spec 03) ----------------------------------
+  // The detached renderer has no picker: load the requested production directly.
+  useEffect(() => {
+    if (!detached) return;
+    if (prodRef.current?.meta.id === detached.productionId) return;
+    void open(detached.productionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detached?.productionId]);
+
+  // Open the target canvas once the production is present, and follow the main
+  // window's frame selection (the context's `frameId`).
+  useEffect(() => {
+    if (!detached || !prod || prod.meta.id !== detached.productionId) return;
+    if (detached.target === "moodboard") {
+      setShowMoodboard(true);
+      setShowSuite(false);
+      setShowExpenses(false);
+      return;
+    }
+    // The graph renders inside the Step-3 surface; force it there.
+    if (prod.currentStep !== 3) {
+      const next: Production = { ...prod, currentStep: 3 };
+      prodRef.current = next;
+      setProd(next);
+      void window.cascade.saveProduction(next).catch(() => {});
+    }
+    const frameId = detached.frameId ?? null;
+    setGraphShotId(frameId);
+    // Follow the composer prompt too, via the same path `focusPrompt` uses: the
+    // graph's composer node reads `focusedPrompt`, which is otherwise never
+    // loaded in the detached window (only the shot-derived video/edit prompt
+    // nodes update on a selection change). Setting `promptShotId` drives the
+    // board-prompt fetch effect below to load the authoritative text.
+    setPromptShotId(frameId);
+    setFocusedPrompt(frameId ? (promptCacheRef.current[frameId] ?? "") : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detached?.productionId, detached?.target, detached?.frameId, prod?.meta.id]);
+
+  // Keep the detached window's slim title bar in sync.
+  useEffect(() => {
+    if (!detached || !onDetachedTitle) return;
+    if (!prod || prod.meta.id !== detached.productionId) { onDetachedTitle("Canvas"); return; }
+    if (detached.target === "moodboard") { onDetachedTitle(`${prod.meta.name} · Moodboard`); return; }
+    const shot = detached.frameId ? prod.scenes.flatMap((s) => s.shots).find((s) => s.id === detached.frameId) : undefined;
+    onDetachedTitle(shot ? `${prod.meta.name} · Shot ${shot.number}` : prod.meta.name);
+  }, [detached, prod, onDetachedTitle]);
+
+  // Main window only: track the detached window so this window's graph can go
+  // read-only while the detached one hosts it, and refresh after a detached
+  // edit when it closes.
+  useEffect(() => {
+    if (detached) return;
+    // Feature-detect so renderer test harnesses with a partial `window.cascade`
+    // fake (and older preloads) don't break the workspace.
+    if (typeof window.cascade.getDetachedCanvasState !== "function") return;
+    if (typeof window.cascade.onDetachedClosed !== "function") return;
+    let live = true;
+    void window.cascade.getDetachedCanvasState().then((s) => { if (live) setDetachedWindow(s); }).catch(() => {});
+    const off = window.cascade.onDetachedClosed(() => {
+      setDetachedWindow({ open: false, productionId: null, target: null, frameId: null });
+      setRemoteCanvasBusy(null);
+      const id = prodRef.current?.meta.id;
+      if (id) void window.cascade.loadProduction(id).then((p) => { if (p) applySnapshot(p); }).catch(() => {});
+    });
+    return () => { live = false; off(); };
+  }, [detached, applySnapshot]);
+
+  // ---- Cross-window in-flight canvas jobs (Spec 03) ----------------------
+  // Both windows mirror each other's busy sets through main so "Generating…"
+  // shows wherever the graph lives. This window publishes its LOCAL sets (never
+  // the mirrored ones — that would echo), and renders the union for display.
+  const activeProdId = prod?.meta.id ?? "";
+  useEffect(() => {
+    if (typeof window.cascade.onCanvasBusy !== "function") return;
+    return window.cascade.onCanvasBusy((s) => setRemoteCanvasBusy(s));
+  }, []);
+  useEffect(() => {
+    if (!activeProdId || typeof window.cascade.canvasBusyChanged !== "function") return;
+    window.cascade.canvasBusyChanged({
+      productionId: activeProdId,
+      image: [...nodeImageBusyIds],
+      video: [...nodeVideoBusyIds],
+      editVideo: [...nodeEditVideoBusyIds],
+      editNodes: [...nodeEditBusyIds],
+      tween: { ...tweenBusyByShot },
+      stitching: [...tweenStitchingIds],
+    });
+  }, [activeProdId, nodeImageBusyIds, nodeVideoBusyIds, nodeEditVideoBusyIds, nodeEditBusyIds, tweenBusyByShot, tweenStitchingIds]);
+  // The sibling's snapshot is only meaningful for the production on screen.
+  const remoteBusy = remoteCanvasBusy && activeProdId && remoteCanvasBusy.productionId === activeProdId ? remoteCanvasBusy : null;
+  const nodeImageBusyAll = useMemo(
+    () => (remoteBusy ? new Set([...nodeImageBusyIds, ...remoteBusy.image]) : nodeImageBusyIds),
+    [nodeImageBusyIds, remoteBusy],
+  );
+  const nodeVideoBusyAll = useMemo(
+    () => (remoteBusy ? new Set([...nodeVideoBusyIds, ...remoteBusy.video]) : nodeVideoBusyIds),
+    [nodeVideoBusyIds, remoteBusy],
+  );
+  const nodeEditVideoBusyAll = useMemo(
+    () => (remoteBusy ? new Set([...nodeEditVideoBusyIds, ...remoteBusy.editVideo]) : nodeEditVideoBusyIds),
+    [nodeEditVideoBusyIds, remoteBusy],
+  );
+  const nodeEditBusyAll = useMemo(
+    () => (remoteBusy ? new Set([...nodeEditBusyIds, ...remoteBusy.editNodes]) : nodeEditBusyIds),
+    [nodeEditBusyIds, remoteBusy],
+  );
+  const tweenBusyAll = useMemo(
+    () => (remoteBusy ? { ...remoteBusy.tween, ...tweenBusyByShot } : tweenBusyByShot),
+    [tweenBusyByShot, remoteBusy],
+  );
+  const tweenStitchingAll = useMemo(
+    () => (remoteBusy ? new Set([...tweenStitchingIds, ...remoteBusy.stitching]) : tweenStitchingIds),
+    [tweenStitchingIds, remoteBusy],
+  );
+
   /** Apply a mutation promise coming back from main with fresh state. */
   const apply = useCallback((p: Promise<Production>) => {
     setBusy(true); setErr(null);
@@ -629,6 +810,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   function setStep(n: 1 | 2 | 3 | 4 | 5) {
     if (showExpenses) setShowExpenses(false);
+    if (showSuite) setShowSuite(false);
+    if (showMoodboard) setShowMoodboard(false);
     if (!prod || prod.currentStep === n) return;
     const next = { ...prod, currentStep: n };
     setProd(next);
@@ -640,16 +823,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!current) return;
     const next = { ...current, ...patch };
     prodRef.current = next;
-    setProd(next);
-    void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
-  }
-
-  /** Mark the current step done and advance to the next one. */
-  function goNext() {
-    if (!prod) return;
-    const n = prod.currentStep;
-    const next: Production = { ...prod };
-    if (n < 5) next.currentStep = (n + 1) as Production["currentStep"];
     setProd(next);
     void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
   }
@@ -689,6 +862,31 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!current) return;
     const finalName = uniqueRefName((current.references ?? []).map((r) => r.name), trimmed);
     saveField({ references: [...(current.references ?? []), { id: uid("ref"), name: finalName, categoryId, imagePath, shotIds: [] }] });
+  }
+  /** Reference Moodboard: pick one image and add it as a new reference,
+   *  returning the id so the board can place the node where the user is. */
+  async function addMoodboardReference(): Promise<string | undefined> {
+    const dataUrl = await window.cascade.pickReferenceImage();
+    if (!dataUrl) return undefined;
+    const base = "Reference";
+    const imagePath = await persistRefImage(dataUrl, base);
+    if (!imagePath) return undefined;
+    const latest = prodRef.current;
+    if (!latest) return undefined;
+    const finalName = uniqueRefName((latest.references ?? []).map((r) => r.name), base);
+    const id = uid("ref");
+    saveField({ references: [...(latest.references ?? []), { id, name: finalName, imagePath, shotIds: [] }] });
+    return id;
+  }
+  /** Reference Moodboard: dropped files become references (image/video/audio),
+   *  returning their ids for board placement. */
+  async function addMoodboardFiles(files: File[]): Promise<string[]> {
+    const ids: string[] = [];
+    for (const file of files) {
+      const ref = await addFileReference("", file);
+      if (ref?.id) ids.push(ref.id);
+    }
+    return ids;
   }
   /** Delete a custom reference entirely — entry, files, and every node +
    *  connection it had — via one atomic main-side op. The returned snapshot
@@ -801,23 +999,25 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     saveField({ referenceCategories: (prod.referenceCategories ?? []).map((c) => c.id === id ? { ...c, name: name.trim() } : c) });
   }
 
-  function moveReference(id: string, categoryId?: string) {
-    if (!prod) return;
-    saveField({ references: (prod.references ?? []).map((r) => r.id === id ? { ...r, categoryId } : r) });
+  function moveReference(ids: string[], categoryId?: string) {
+    if (!prod || !ids.length) return;
+    const set = new Set(ids);
+    saveField({ references: (prod.references ?? []).map((r) => set.has(r.id) ? { ...r, categoryId } : r) });
   }
 
-  /** Drag one reference tile onto another to reorder it. The saved array order
-   *  is what both the Design grid and the node editor's shelf render from; the
-   *  dragged ref also adopts the target's category, so dropping across
-   *  categories both moves and positions it. */
-  function reorderReference(draggedId: string, targetId: string, after: boolean) {
+  /** Drag one reference tile — or the whole multi-selection — onto another to
+   *  reorder it. The saved array order is what both the Design grid and the
+   *  node editor's shelf render from; the dragged refs also adopt the target's
+   *  category, so dropping across categories both moves and positions them. */
+  function reorderReference(draggedIds: string[], targetId: string, after: boolean) {
     const current = prodRef.current;
-    if (!current) return;
+    if (!current || !draggedIds.length) return;
     const refs = current.references ?? [];
-    const reordered = reorderRefs(refs, draggedId, targetId, after);
+    const reordered = reorderRefGroup(refs, draggedIds, targetId, after);
     if (reordered === refs) return;
     const target = refs.find((r) => r.id === targetId);
-    const next = reordered.map((r) => (r.id === draggedId ? { ...r, categoryId: target?.categoryId } : r));
+    const moved = new Set(draggedIds);
+    const next = reordered.map((r) => (moved.has(r.id) ? { ...r, categoryId: target?.categoryId } : r));
     saveField({ references: next });
   }
 
@@ -1138,7 +1338,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.ingestScript(prod.meta.id, src.trim());
       setProd(next);
-      setSource(next.scriptSource ?? null);
+      applyScriptSource(next.scriptSource ?? null);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -1154,7 +1354,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     try {
       const next = await window.cascade.startBlank(prod.meta.id);
       setProd(next);
-      setSource(next.scriptSource ?? null);
+      applyScriptSource(next.scriptSource ?? null);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -1455,9 +1655,14 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
+    // Selection and connection are independent: the dropdown picks WHICH style
+    // ("None" = suppress the paragraph), the graph edge is the plug. Choosing a
+    // style plugs it in, but choosing None never disconnects the style node.
     const patch: Partial<ProductionShot> = { style: styleId || undefined, styleNone: !styleId };
-    if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", !!styleId);
-    else patch.graphStyleConnected = !!styleId; // pre-graph fallback
+    if (styleId) {
+      if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", true);
+      else patch.graphStyleConnected = true; // pre-graph fallback
+    }
     const next: Production = { ...prod, scenes: prod.scenes.map((sc) => ({
       ...sc,
       shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s),
@@ -1484,9 +1689,13 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     if (!prod) return;
     const target = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!target) return;
+    // Same decoupling as updateShotStyle: the edge is the plug, the dropdown
+    // the payload — selecting "None" leaves the style node connected.
     const patch: Partial<ProductionShot> = { style: styleId || undefined, styleNone: !styleId };
-    if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", !!styleId);
-    else patch.graphStyleConnected = !!styleId;
+    if (styleId) {
+      if (target.graph) patch.graph = setStyleEdge(target.graph, "composer", true);
+      else patch.graphStyleConnected = true;
+    }
     saveField({
       scenes: prod.scenes.map((sc) => ({
         ...sc,
@@ -1681,6 +1890,33 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     // focusing another board while the graph is open moves the graph along so
     // the two editors can never show different shots.
     setGraphShotId((cur) => (cur != null && cur !== shotId ? shotId : cur));
+    // Push the selection to the detached canvas window (Spec 03) so its graph
+    // follows the storyboard. The detached window itself never emits (it has no
+    // frame selector) — that avoids echoing the selection back to itself.
+    if (!detached && typeof window.cascade.canvasSelectionChanged === "function") {
+      window.cascade.canvasSelectionChanged(shotId);
+    }
+  }
+
+  /** Pop the node graph out into the detached canvas window (Spec 03). The
+   *  integrated modal closes so the graph only ever lives in one window. */
+  function detachGraph() {
+    if (!prod || !graphShotId) return;
+    const frameId = graphShotId;
+    void window.cascade
+      .openDetachedCanvas({ productionId: prod.meta.id, target: "graph", frameId })
+      .then((s) => { setDetachedWindow(s); setGraphShotId(null); })
+      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")));
+  }
+
+  /** Pop the reference moodboard out into the detached canvas window. The
+   *  integrated panel closes so the moodboard only ever lives in one window. */
+  function detachMoodboard() {
+    if (!prod) return;
+    void window.cascade
+      .openDetachedCanvas({ productionId: prod.meta.id, target: "moodboard", frameId: null })
+      .then((s) => { setDetachedWindow(s); setShowMoodboard(false); })
+      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")));
   }
 
   /** After a Magic Prompt state change, both the classic side panel and the
@@ -2113,8 +2349,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       const videoParams = params ?? cur?.graphVideoParams;
       // Render the video prompt from the plugged references at submit time.
       const videoPrompt = cur
-        ? renderPromptText(cur.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, promptRefsFor(prod, cur, "videoprompt"))
-        : VIDEO_PROMPT_DEFAULT;
+        ? renderPromptText(cur.graphVideoPrompt ?? getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, "videoprompt"))
+        : getPromptTemplate("videoMotion");
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: cur?.graphVideoRefIds ?? [], ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
       bustOne(shotId);
@@ -2199,9 +2435,89 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     }
   }
 
+  /** Step 3 node graph: generate (or regenerate) a shot's 16-panel camera-grid
+   *  sheet in place through the active provider (vendor-blind). */
+  async function runCameraGridGen(shotId: string, opts: CameraGridGenOptions) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.generateCameraGrid(prod.meta.id, shotId, opts);
+      applySnapshot(next);
+      bustOne(shotId);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      throw e;
+    }
+  }
+
+  /** Step 3 node graph: upscale the upscale node's source image through the
+   *  active provider (vendor-blind). The source/wiring come from the node. */
+  async function runUpscaleGen(shotId: string, model: string, resolution: string, params?: Record<string, string>) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.generateUpscaleNode(prod.meta.id, shotId, { model, resolution, ...(params && Object.keys(params).length ? { params } : {}) });
+      applySnapshot(next);
+      bustOne(shotId);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      throw e;
+    }
+  }
+
+  /** Step 3 node graph: pipe the upscale node's selected output into the output
+   *  — binds it as the feed and applies its currently selected upscale. The
+   *  storyboard mirrors the output node: a leftover clip is cleared, and an
+   *  empty node leaves the frame blank. */
+  function pipeUpscaleToOutput(shotId: string) {
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!shot) return;
+    const node = shot.graphUpscale;
+    const path = node?.gens?.[node.genIndex ?? 0]?.path;
+    saveGraphShotFields(shotId, {
+      graphOutputSource: "upscale",
+      graphOutputRefId: undefined,
+      videoPath: undefined,
+      artwork: path,
+    });
+  }
+
+  /** Step 3 node graph: crop marqueed camera-grid panels into references (main
+   *  decodes/crops), then hand the created refs back so the graph can place
+   *  them as nodes. */
+  async function exportCameraGrid(req: CameraGridCutoutRequest): Promise<GraphRef[]> {
+    const result = await window.cascade.cutoutCameraGrid(req);
+    // Apply through the guarded snapshot so `prodRef` updates synchronously —
+    // the graph's layout save right after this must not persist a stale
+    // production that lacks the freshly exported references.
+    applySnapshot(result.production);
+    const prodId = result.production.meta.id;
+    return result.refs.map((r) => ({
+      id: r.id,
+      name: r.name,
+      artwork: r.imagePath ? cascadeMedia(prodId, r.imagePath) : (r.artwork ?? ""),
+      media: r.media,
+      mediaPath: r.mediaPath,
+    }));
+  }
+
+  /** Step 3 node graph: import a wired image as the camera-grid sheet (the
+   *  manual fallback when the auto download fails). Main writes a copy into the
+   *  references folder and returns its path; the graph then sets `sheetPath` +
+   *  `gridSource` itself, so production state stays renderer-owned. */
+  async function importCameraGridImage(shotId: string, source: GraphSource): Promise<CameraGridImportResult | null> {
+    if (!prod) return null;
+    try {
+      return await window.cascade.importCameraGridImage(prod.meta.id, shotId, source);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      return null;
+    }
+  }
+
   /** Step 3 node graph: update one edit node's prompt text. */
-  function setEditNodePrompt(shotId: string, nodeId: string, text: string) {
-    const current = prodRef.current;
+  function setEditNodePrompt(shotId: string, nodeId: string, text: string) {    const current = prodRef.current;
     if (!current) return;
     const shot = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
@@ -2210,10 +2526,20 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: select a generation node's stored output by index;
    *  the piped node's selection becomes the shot's primary output. */
-  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo", index: number, nodeId?: string) {
+  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo" | "upscale", index: number, nodeId?: string) {
     if (!prod) return;
     const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
+    if (kind === "upscale") {
+      const node = shot.graphUpscale;
+      const items = node?.gens;
+      if (!node || !items || !items[index]) return;
+      saveGraphShotFields(shotId, {
+        graphUpscale: { ...node, genIndex: index },
+        ...(shot.graphOutputSource === "upscale" ? { artwork: items[index].path, videoPath: undefined } : {}),
+      });
+      return;
+    }
     if (kind === "editvideo") {
       const items = shot.graphEditVideoGens;
       if (!items || !items[index]) return;
@@ -2242,10 +2568,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
 
   /** Step 3 node graph: cycle a generation node's stored outputs; the piped
    *  node's selection becomes the shot's primary output. */
-  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo", dir: 1 | -1, nodeId?: string) {
+  function cycleGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo" | "upscale", dir: 1 | -1, nodeId?: string) {
     if (!prod) return;
     const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
+    if (kind === "upscale") {
+      const items = shot.graphUpscale?.gens;
+      if (!items || items.length === 0) return;
+      selectGraphGen(shotId, "upscale", ((shot.graphUpscale?.genIndex ?? 0) + dir + items.length) % items.length, nodeId);
+      return;
+    }
     if (kind === "editvideo") {
       const items = shot.graphEditVideoGens;
       if (!items || items.length === 0) return;
@@ -2336,7 +2668,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       // stored prompt is content-only) — slice 04's single renderer.
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const prompt = cur
-        ? renderPromptText(opts.prompt ?? cur.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT, promptRefsFor(prod, cur, "videoprompt"))
+        ? renderPromptText(opts.prompt ?? cur.graphVideoPrompt ?? getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, "videoprompt"))
         : opts.prompt;
       const next = await window.cascade.generateVideo(prod.meta.id, shotId, { ...opts, prompt });
       setProd(next);
@@ -2617,7 +2949,24 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
     });
   };
 
+  /** The active provider has no upscale path (OpenArt MCP) — the upscale node
+   *  and the Image Suite's Upscale mode are disabled with an explanatory hint. */
+  const upscaleUnavailable = !providerSupportsUpscale(mediaProviderId);
+
   if (!prod) {
+    // Detached canvas: never show the picker — a missing production reads as a
+    // clear "no longer available" state instead of a create form.
+    if (detached) {
+      return (
+        <div className="prod-welcome">
+          <div className="prod-welcome-inner">
+            <h2>Canvas</h2>
+            <p className="prod-sub">Loading the production — or it is no longer available.</p>
+            {err && <p className="error-text">{err}</p>}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="prod-welcome">
         <div className="prod-welcome-inner">
@@ -2683,7 +3032,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
   })();
 
   return (
-    <div className="prod-workspace">
+    <div className={"prod-workspace" + (detached ? " prod-workspace--detached" : "")}>
       <header className="prod-header">
         <input
           className="prod-name"
@@ -2699,10 +3048,17 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       </header>
 
       <nav className="prod-steps">
+        <button
+          className={"prod-step prod-step-moodboard" + (showMoodboard ? " active" : "")}
+          onClick={() => { setShowMoodboard(true); setShowSuite(false); setShowExpenses(false); }}
+          title="Reference moodboard — every reference on a PureRef-style canvas"
+        >
+          <span className="prod-step-title">Moodboard</span>
+        </button>
         {STEPS.map(({ n, title, desc }) => (
           <button
             key={n}
-            className={"prod-step" + (prod.currentStep === n && !showExpenses ? " active" : "")}
+            className={"prod-step" + (prod.currentStep === n && !showExpenses && !showSuite && !showMoodboard ? " active" : "")}
             onClick={() => setStep(n)}
             title={desc}
           >
@@ -2710,8 +3066,16 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           </button>
         ))}
         <button
+          className={"prod-step prod-step-suite" + (showSuite ? " active" : "")}
+          onClick={() => { setShowSuite(true); setShowExpenses(false); setShowMoodboard(false); }}
+          title="Image generation & editing suite — history and A/B compare for this project"
+        >
+          <ImageIcon size={14} className="prod-step-icon" />
+          <span className="prod-step-title">Image Suite</span>
+        </button>
+        <button
           className={"prod-step prod-step-expenses" + (showExpenses ? " active" : "")}
-          onClick={() => setShowExpenses(true)}
+          onClick={() => { setShowExpenses(true); setShowSuite(false); setShowMoodboard(false); }}
           title="Running tally of every AI generation and purchased asset"
         >
           <ExpensesIcon size={14} className="prod-step-icon" />
@@ -2720,7 +3084,39 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
       </nav>
 
       <div className="prod-body">
-        {showExpenses ? (
+        {showMoodboard ? (
+          <>
+            {!detached && (
+              <button
+                className="prod-moodboard-popout"
+                onClick={detachMoodboard}
+                title="Open the moodboard in a separate window you can move to another monitor"
+              >
+                Pop out
+              </button>
+            )}
+            <MoodboardCanvas
+              prod={prod}
+              initialLayout={prod.moodboard}
+              onLayoutChange={(moodboard) => saveField({ moodboard })}
+              onAddReference={addMoodboardReference}
+              onAddFiles={addMoodboardFiles}
+              onRename={(id, name) => void updateRef(id, name)}
+              onAttach={(id) => void attachRefArtwork(id)}
+            />
+          </>
+        ) : showSuite ? (
+          <ImageSuite
+            prod={prod}
+            onProdChange={(next) => { applySnapshot(next); void refreshList(); }}
+            models={mediaModels}
+            providerName={mediaProviderName}
+            providerAvailable={mediaOk !== false}
+            upscaleUnavailable={upscaleUnavailable}
+            seed={suiteSeed}
+            onSeedConsumed={() => setSuiteSeed(null)}
+          />
+        ) : showExpenses ? (
           <ExpensesPanel productionId={prod.meta.id} />
         ) : (
           <>
@@ -2751,12 +3147,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   Start blank
                 </button>
               )}
-              {source && <span className="hint">Source: {source}</span>}
+              {source && <span className="hint">Source: {source.split(/[\\/]/).pop()}</span>}
             </div>
-            {err && <p className="error-text">{err}</p>}
-            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
             <ShotTable prod={prod} onMutation={apply} />
-            <StepFooter prod={prod} onNext={goNext} />
+            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
           </section>
         )}
 
@@ -2764,7 +3159,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
           <section className="prod-panel">
             <h3>2 · Design</h3>
 
-            {err && <p className="error-text">{err}</p>}
+            {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
 
             <DesignSection title="Visual styles" prodId={prod.meta.id}>
               <p className="hint">
@@ -3054,8 +3449,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
             )}
 
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
-
-            <StepFooter prod={prod} onNext={goNext} />
           </section>
         )}
 
@@ -3186,7 +3579,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
               </div>
             </div>
-            {err && <p className="error-text">{err}</p>}
+            {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
             {shotCount > 0 && (
               <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
               <div
@@ -3219,8 +3612,8 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     prod={prod}
                     shot={shot}
                     bust={boardBustFor(shot.id)}
-                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyIds.has(shot.id) || nodeEditBusyIds.has(shot.id)}
-                    videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyIds.has(shot.id) || tweenBusyByShot[shot.id] !== undefined || tweenStitchingIds.has(shot.id)}
+                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
+                    videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyAll.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
                     onRegenerate={boardActions.onRegenerate}
@@ -3296,16 +3689,26 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onChange={(value) => { setFocusedPrompt(value); if (promptShotId) { promptCacheRef.current[promptShotId] = value; void saveShotPrompt(promptShotId, value); } }}
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
-                onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
-                submitting={!!promptShotId && regenIds.has(promptShotId)}
-                submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
-                onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
-                magicActive={!!prod.magicEnabled}
+                  onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
+                  submitting={!!promptShotId && regenIds.has(promptShotId)}
+                  submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
+                  onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
+                  onOpenSuite={() => {
+                    if (!promptShotId) return;
+                    const shot = prod.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId);
+                    openImageSuite(prod.meta.id, { mode: "generate", prompt: focusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}) });
+                  }}
+                  magicActive={!!prod.magicEnabled}
               />
+              {visibleLog.length > 0 && (
+                <div className="prod-storyboard-log">
+                  <ProdLog lines={visibleLog} />
+                </div>
+              )}
               </div>
             )}
             {shotCount > 0 && <label className="prod-frame-zoom">Frame size <input type="range" min={180} max={440} step={10} value={frameZoom} onChange={(e) => setFrameZoom(Number(e.target.value))} /><span>{frameZoom}px</span></label>}
-            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {shotCount === 0 && visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
             {graphShotId && (() => {
               const gs = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === graphShotId);
               return gs ? (
@@ -3332,22 +3735,28 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   imageModels={imageModels}
                   videoModels={videoModels}
                   endFrameModelIds={endFrameModelIds}
+                  upscaleUnavailable={upscaleUnavailable}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution, params) => graphShotId ? runImageGenNode(graphShotId, model, resolution, params) : Promise.resolve()}
                   onRunVideoGen={(model, resolution, durationSec, params) => graphShotId ? runVideoGenNode(graphShotId, model, resolution, durationSec, params) : Promise.resolve()}
                   onRunEditGen={(nodeId, model, resolution, params) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution, params) : Promise.resolve()}
                   onRunEditVideo={(model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, model, editPrompt, params) : Promise.resolve()}
+                  onRunCameraGrid={(opts) => graphShotId ? runCameraGridGen(graphShotId, opts) : Promise.resolve()}
+                  onImportCameraGridImage={(source) => graphShotId ? importCameraGridImage(graphShotId, source) : Promise.resolve(null)}
+                  onExportCameraGrid={(req) => exportCameraGrid(req)}
+                  onRunUpscale={(model, resolution, params) => graphShotId ? runUpscaleGen(graphShotId, model, resolution, params) : Promise.resolve()}
                   onPipeEditVideoToOutput={() => { if (graphShotId) pipeEditVideoToOutput(graphShotId); }}
+                  onPipeUpscaleToOutput={() => { if (graphShotId) pipeUpscaleToOutput(graphShotId); }}
                   onRunTweenBlock={(blockId, durationSec, model, params) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model, params) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
-                  imageGenBusy={graphShotId ? nodeImageBusyIds.has(graphShotId) : false}
-                  videoGenBusy={graphShotId ? nodeVideoBusyIds.has(graphShotId) : false}
-                  editVideoBusy={graphShotId ? nodeEditVideoBusyIds.has(graphShotId) : false}
-                  editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyIds.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
-                  busyTweenBlock={graphShotId ? tweenBusyByShot[graphShotId] ?? null : null}
-                  tweenStitching={graphShotId ? tweenStitchingIds.has(graphShotId) : false}
+                  imageGenBusy={graphShotId ? nodeImageBusyAll.has(graphShotId) : false}
+                  videoGenBusy={graphShotId ? nodeVideoBusyAll.has(graphShotId) : false}
+                  editVideoBusy={graphShotId ? nodeEditVideoBusyAll.has(graphShotId) : false}
+                  editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
+                  busyTweenBlock={graphShotId ? tweenBusyAll[graphShotId] ?? null : null}
+                  tweenStitching={graphShotId ? tweenStitchingAll.has(graphShotId) : false}
                   onSelectGraphGen={(kind, index, nodeId) => { if (graphShotId) selectGraphGen(graphShotId, kind, index, nodeId); }}
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
                   onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
@@ -3371,9 +3780,11 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   onUnpipeTweenGen={() => { if (graphShotId) unpipeTweenGen(graphShotId); }}
                   onUnpipeEditGen={(nodeId) => { if (graphShotId) unpipeEditGen(graphShotId, nodeId); }}
                   onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
-                  onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
-                  onClose={() => setGraphShotId(null)}
-                />
+                   onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
+                   readOnly={!detached && detachedWindow?.open === true && detachedWindow.target === "graph"}
+                   onDetach={detached ? undefined : detachGraph}
+                   onClose={() => { if (detached) { void window.cascade.closeDetachedCanvas(); } else { setGraphShotId(null); } }}
+                 />
               ) : null;
             })()}
             {editShotId && (() => {
@@ -3410,7 +3821,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                   shot={vs}
                   prod={prod}
                   models={videoModalModels}
-                  prompt={vs.graphVideoPrompt ?? VIDEO_PROMPT_DEFAULT}
+                  prompt={vs.graphVideoPrompt ?? getPromptTemplate("videoMotion")}
                   onShotField={(patch) => saveGraphShotFields(vs.id, patch)}
                   onPromptChange={(text) => saveGraphShotFields(vs.id, { graphVideoPrompt: text })}
                   onClose={() => setVideoShotId(null)}
@@ -3429,7 +3840,6 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                 onDone={(next) => setProd(next)}
               />
             )}
-            <StepFooter prod={prod} onNext={goNext} />
           </section>
         )}
 
@@ -3441,8 +3851,7 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
               drag the cut points on the timeline to set the length of each clip. The plan is written to <code>{prod.assets.outDir}/animatic.md</code>.
             </p>
 
-            {err && <p className="error-text">{err}</p>}
-            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
 
             {shotCount > 0 && (
               <>
@@ -3544,9 +3953,10 @@ export function ProductionWorkspace({ onOpenSettings }: { onOpenSettings?: () =>
                     onSaveAsReference={(shotId, rel) => saveAsReference(shotId, rel)}
                   />
                 </section>
+
+                {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
               </>
             )}
-            <StepFooter prod={prod} onNext={goNext} />
           </section>
         )}
 

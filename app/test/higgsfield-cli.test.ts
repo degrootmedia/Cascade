@@ -58,6 +58,7 @@ const fail = (stderr: string): CliRunResult => ({ code: 1, stdout: "", stderr })
 const IMAGE_LIST = JSON.stringify([
   { job_type: "cinematic_studio_2_5", name: "Cinematic Studio 2.5", description: "Stills." },
   { job_type: "nano_banana_2", name: "Nano Banana Pro", description: "Reference work." },
+  { job_type: "nano_banana_pro", name: "Nano Banana Pro", description: "Reference work." },
   { job_type: "gpt_image_2_5", name: "GPT Image 2.5", description: "Newest GPT image model." },
 ]);
 const VIDEO_LIST = JSON.stringify([
@@ -154,8 +155,25 @@ const studioImageGet = () =>
       { name: "resolution", options: ["1k", "2k", "4k"], default: "1k" },
       { name: "quality", options: ["basic", "high"], default: "basic" },
       { name: "aspect_ratio", options: ["1:1", "16:9", "9:16"], default: "1:1" },
+      { name: "prompt", type: "string", required: true },
     ],
     medias: [{ roles: ["image"] }],
+  });
+
+/** Live nano_banana_pro shape (from a failed job's params): a single
+ *  `input_image` base slot AND an `input_images` reference array. */
+const nanoBananaProGet = () =>
+  JSON.stringify({
+    display_name: "Nano Banana Pro",
+    job_type: "nano_banana_pro",
+    type: "image",
+    params: [
+      { name: "input_image", type: "object|null", default: null },
+      { name: "input_images", type: "array", default: null },
+      { name: "aspect_ratio", type: "string", enum: ["1:1", "16:9", "9:16"], default: "16:9" },
+      { name: "resolution", type: "string", enum: ["1k", "2k", "4k"], default: "2k" },
+      { name: "prompt", type: "string", required: true },
+    ],
   });
 
 /** Default fake: lists + per-model details + account. Matches on the
@@ -176,6 +194,7 @@ function baseHandler(extra: Record<string, Handler> = {}): Handler {
       if (args[2] === "veo3") return ok(veoGet());
       if (args[2] === "veo3_1_lite") return ok(veoLiteGet());
       if (args[2] === "cinematic_studio_2_5") return ok(studioImageGet());
+      if (args[2] === "nano_banana_pro") return ok(nanoBananaProGet());
       if (args[2] === "gpt_image_2_5") return ok(gptImageGet());
       return fail(`Unknown model: ${args[2]}`);
     }
@@ -266,6 +285,7 @@ describe("HiggsfieldCliProvider.listModelChoices", () => {
     expect(choices.map((c) => c.id)).toEqual([
       `${HIGGSFIELD_CLI_ID_PREFIX}cinematic_studio_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2`,
+      `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_pro`,
       `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`,
       `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`,
       `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`,
@@ -275,7 +295,7 @@ describe("HiggsfieldCliProvider.listModelChoices", () => {
     ]);
     expect(choices.some((c) => c.id === "auto")).toBe(false);
     expect(choices[0]).toMatchObject({ imageInput: true, videoInput: false });
-    expect(choices[3]).toMatchObject({ imageInput: false, videoInput: true });
+    expect(choices[4]).toMatchObject({ imageInput: false, videoInput: true });
   });
 
   it("tolerates envelope replies and isolates one list's failure", async () => {
@@ -458,6 +478,78 @@ describe("HiggsfieldCliProvider.imageGenFn", () => {
     });
   });
 
+  it("routes reference art to --image-references on an array-reference model", async () => {
+    const seen: string[][] = [];
+    const jobId = "55555555-6666-7777-8888-999999999999";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create gpt_image_2_5": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/out.png" }])),
+      })
+    );
+    const p = provider(run);
+    const gen = p.imageGenFn(
+      makeProduction({ openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}gpt_image_2_5`, resolution: "2k" } }),
+      undefined, undefined, undefined, "16:9"
+    )!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await gen("A castle", [{ name: "Hero", dataUrl: "data:image/png;base64,SGVsbG8=" }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args).toContain("--image-references");
+    expect(args).not.toContain("--image");
+  });
+
+  it("routes the base image to the single slot and extras to the array (nano_banana_pro)", async () => {
+    const seen: string[][] = [];
+    const jobId = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create nano_banana_pro": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/out.png" }])),
+      })
+    );
+    const p = provider(run);
+    const gen = p.imageGenFn(
+      makeProduction({ openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_pro`, resolution: "2k" } }),
+      undefined, undefined, undefined, "16:9"
+    )!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([8]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await gen("A castle", [
+        { name: "Source", dataUrl: "data:image/png;base64,SGVsbG8=" },
+        { name: "Ref", dataUrl: "data:image/png;base64,SGVsbG8=" },
+      ]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    // Base image → --image (input_image); extra → --image-references (input_images).
+    expect(args.filter((a) => a === "--image")).toHaveLength(1);
+    expect(args.filter((a) => a === "--image-references")).toHaveLength(1);
+    expect(args[args.indexOf("--image") + 1]).toMatch(/\.png$/);
+    expect(args[args.indexOf("--image-references") + 1]).toMatch(/\.png$/);
+  });
+
   it("records a pending job when the wait outlives the cap, then a recheck reclaims it", async () => {
     const jobId = "22222222-3333-4444-5555-666666666666";
     let finished = false;
@@ -501,6 +593,169 @@ describe("HiggsfieldCliProvider.imageGenFn", () => {
     const { run } = fakeRun(() => fail("Error: Session expired"));
     const gen = provider(run).imageGenFn(makeProduction())!;
     await expect(gen("x", [])).rejects.toThrow(/higgsfield auth login/);
+  });
+
+  it("surfaces the vendor reason when a job fails", async () => {
+    const jobId = "44444444-5555-6666-7777-888888888888";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create gpt_image_2_5": () => ok(JSON.stringify({ job_id: jobId })),
+        // `generate wait` exits non-zero on a terminal failure.
+        [`generate wait ${jobId}`]: () => fail(`Error: job ${jobId} ended with status "failed"`),
+        // The follow-up get carries the vendor's reason.
+        [`generate get ${jobId}`]: () =>
+          ok(JSON.stringify({ id: jobId, status: "failed", error: "content flagged: reference image rejected" })),
+      })
+    );
+    const gen = provider(run).imageGenFn(makeProduction())!;
+    await expect(gen("x", [])).rejects.toThrow(/content flagged: reference image rejected/);
+  });
+});
+
+describe("HiggsfieldCliProvider upscale", () => {
+  const upscaleList = JSON.stringify([
+    { job_type: "gpt_image_2_5", name: "GPT Image 2.5" },
+    { job_type: "bytedance_image_upscale", name: "Bytedance Image Upscale" },
+    { job_type: "topaz_image", name: "Topaz" },
+  ]);
+  const upscaleDetail = JSON.stringify({
+    display_name: "Bytedance Image Upscale",
+    job_type: "bytedance_image_upscale",
+    type: "image",
+    params: [
+      { name: "image_references", type: "array", required: true },
+      { name: "remove_bg", type: "boolean", default: false },
+      { name: "resolution", type: "string", enum: ["2k", "4k"], default: "4k" },
+    ],
+    rules: [{ cel: "size(params.image_references) == 1" }],
+  });
+
+  function upscaleRun(extra: Record<string, Handler> = {}): Handler {
+    return (args) => {
+      const verb = args.slice(0, 2).join(" ");
+      const key = `${verb} ${args[2] ?? ""}`.trim();
+      if (extra[key]) return extra[key](args);
+      if (verb === "model list") return ok(args.includes("--image") ? upscaleList : "[]");
+      if (verb === "model get") {
+        if (args[2] === "bytedance_image_upscale") return ok(upscaleDetail);
+        return fail(`Unknown model: ${args[2]}`);
+      }
+      throw new Error(`No fake handler for higgs args "${args.join(" ")}"`);
+    };
+  }
+
+  it("lists only the catalog's upscale models, namespaced", async () => {
+    const { run } = fakeRun(upscaleRun());
+    const ids = await provider(run).imageUpscaleModels();
+    expect(ids).toEqual([
+      `${HIGGSFIELD_CLI_ID_PREFIX}bytedance_image_upscale`,
+      `${HIGGSFIELD_CLI_ID_PREFIX}topaz_image`,
+    ]);
+  });
+
+  it("submits an upscale without --prompt (schema declares none)", async () => {
+    const seen: string[][] = [];
+    const jobId = "11111111-2222-3333-4444-555555555555";
+    const { run } = fakeRun(upscaleRun({
+      "generate create bytedance_image_upscale": (args) => {
+        seen.push(args.slice(2));
+        return ok(JSON.stringify({ job_id: jobId }));
+      },
+      [`generate wait ${jobId}`]: () =>
+        ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/up.png" }])),
+    }));
+    const p = provider(run);
+    const gen = p.imageGenFn(
+      makeProduction({ openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}bytedance_image_upscale`, resolution: "4k" } }),
+      undefined, undefined, undefined, "16:9"
+    )!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      const out = await gen("", [{ name: "frame", dataUrl: "data:image/png;base64,SGVsbG8=" }]);
+      expect(out).toEqual(Buffer.from([7]));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toHaveLength(1);
+    const args = seen[0];
+    // No prompt: the upscale model rejects it.
+    expect(args).not.toContain("--prompt");
+    expect(args.slice(0, 1)).toEqual(["bytedance_image_upscale"]);
+    // The source image rides the declared array slot.
+    const refIdx = args.indexOf("--image-references");
+    expect(refIdx).toBeGreaterThan(-1);
+    expect(args[refIdx + 1]).toMatch(/\.png$/);
+    // Resolution is emitted only when the model lists it.
+    expect(args[args.indexOf("--resolution") + 1]).toBe("4k");
+  });
+
+  it("derives required output_width/output_height from the source image", async () => {
+    const seen: string[][] = [];
+    const jobId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const topazDetail = JSON.stringify({
+      display_name: "Topaz",
+      job_type: "topaz_image",
+      type: "image",
+      params: [
+        { name: "image_references", type: "array", required: true },
+        { name: "output_width", type: "integer", required: true },
+        { name: "output_height", type: "integer", required: true },
+      ],
+    });
+    const { run } = fakeRun((args) => {
+      const verb = args.slice(0, 2).join(" ");
+      const key = `${verb} ${args[2] ?? ""}`.trim();
+      if (verb === "model list") return ok(args.includes("--image") ? JSON.stringify([{ job_type: "topaz_image", name: "Topaz" }]) : "[]");
+      if (verb === "model get") return ok(topazDetail);
+      if (key === "generate create topaz_image") {
+        seen.push(args.slice(2));
+        return ok(JSON.stringify({ job_id: jobId }));
+      }
+      if (key === `generate wait ${jobId}`) {
+        return ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/up.png" }]));
+      }
+      throw new Error(`No fake handler for higgs args "${args.join(" ")}"`);
+    });
+    const p = provider(run);
+    const gen = p.imageGenFn(
+      makeProduction({ openArt: { model: `${HIGGSFIELD_CLI_ID_PREFIX}topaz_image`, resolution: "4k" } }),
+      undefined, undefined, undefined, "16:9"
+    )!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([1]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    // A 4×2 PNG source → the derived 2× target is 8×4.
+    const png = new Uint8Array(33);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0x00, 0x00, 0x00, 0x0d], 8);
+    png.set([0x49, 0x48, 0x44, 0x52], 12);
+    const dv = new DataView(png.buffer);
+    dv.setUint32(16, 4);
+    dv.setUint32(20, 2);
+    const source = { name: "frame", dataUrl: `data:image/png;base64,${Buffer.from(png).toString("base64")}` };
+    let auto: string[] = [];
+    let user: string[] = [];
+    try {
+      await gen("", [source]);
+      auto = seen[0];
+      seen.length = 0;
+      // A user-supplied size wins and is never duplicated.
+      await gen("", [source], undefined, { output_width: 100, output_height: 50 });
+      user = seen[0];
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(auto[auto.indexOf("--output_width") + 1]).toBe("8");
+    expect(auto[auto.indexOf("--output_height") + 1]).toBe("4");
+    expect(user.filter((a) => a === "--output_width")).toHaveLength(1);
+    expect(user[user.indexOf("--output_width") + 1]).toBe("100");
+    expect(user[user.indexOf("--output_height") + 1]).toBe("50");
   });
 });
 
@@ -925,6 +1180,39 @@ describe("HiggsfieldCliProvider.getGenerationCost", () => {
     expect(await p.getGenerationCost({ model: `${HIGGSFIELD_CLI_ID_PREFIX}kling3_0`, kind: "video", durationSec: 5 })).toBeNull();
     expect(await p.getGenerationCost({ model: `${HIGGSFIELD_CLI_ID_PREFIX}nope`, kind: "image" })).toBeNull();
     expect(calls.filter((a) => a[0] === "generate" && a[1] === "cost").length).toBe(2);
+  });
+
+  it("retries a media-requiring mode with a placeholder start frame", async () => {
+    // Regression: a per-surface/shot `mode` like `omni_reference` can't be
+    // priced without media, so the quote silently vanished. The submit always
+    // carries a source frame, so the probe retries once with a placeholder
+    // bound to the model's start-image slot; refs don't move the price.
+    const costCalls: string[][] = [];
+    let first = true;
+    const { run } = fakeRun((args) => {
+      if (args[0] === "generate" && args[1] === "cost") {
+        costCalls.push(args);
+        if (first) {
+          first = false;
+          return fail("mode 'omni_reference' requires at least one reference media item");
+        }
+        return ok(JSON.stringify({ credits: 60 }));
+      }
+      return baseHandler()(args);
+    });
+    const p = provider(run);
+    const cost = await p.getGenerationCost({
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, kind: "video",
+      resolution: "1080p", durationSec: 5, aspectRatio: "16:9",
+      params: { mode: "omni_reference", bitrate_mode: "high" },
+    });
+    expect(cost).toBe(60);
+    expect(costCalls.length).toBe(2);
+    expect(costCalls[0]).not.toContain("--start-image");
+    const retry = costCalls[1];
+    expect(retry).toContain("--start-image");
+    // The placeholder temp file is cleaned up after the retry.
+    expect(fs.existsSync(retry[retry.indexOf("--start-image") + 1])).toBe(false);
   });
 });
 

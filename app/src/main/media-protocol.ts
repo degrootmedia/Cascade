@@ -56,6 +56,17 @@ export function mediaMimeForPath(rel: string): string {
 
 export const MEDIA_STREAM_CHUNK = 256 * 1024;
 
+/** Revalidate-every-time caching: the renderer keeps the decoded image in its
+ *  cache, but still asks the protocol handler whether the file changed — a
+ *  cheap stat, never a full file read. Used for images only. */
+export const CACHE_REVALIDATE = "private, max-age=0, must-revalidate";
+
+/** Strong validator for a file from its stat: two reads of an unchanged file
+ *  produce the same ETag, and any edit changes mtime/size. */
+export function etagFor(st: { mtimeMs: number; size: number }): string {
+  return `"${Math.round(st.mtimeMs)}-${st.size}"`;
+}
+
 /** Parse a single-range `Range: bytes=start-end` header. Null = absent. */
 export function parseCascadeMediaRange(
   header: string | null,
@@ -110,18 +121,38 @@ export function cspForEnv(isDev: boolean): string {
  * Stream a file as an HTTP-style Response with single-range support.
  * Never buffers the whole file: reads 256 KiB chunks at the requested offset.
  * `absPath` must already be confined (assetPath) by the caller.
+ *
+ * Images are served with a strong `ETag` and `private, max-age=0,
+ * must-revalidate` so a culled/re-mounted tile reuses its decoded bitmap
+ * without re-reading the file; a matching `If-None-Match` answers 304. Video
+ * and audio keep `no-store` — range responses don't belong in the cache.
  */
-export async function serveMediaFile(absPath: string, rangeHeader: string | null): Promise<Response> {
+export async function serveMediaFile(
+  absPath: string,
+  rangeHeader: string | null,
+  ifNoneMatch: string | null = null,
+): Promise<Response> {
   let size: number;
+  let mtimeMs: number;
   try {
     const st = await fs.promises.stat(absPath);
     if (!st.isFile()) return new Response("Not found", { status: 404 });
     size = st.size;
+    mtimeMs = st.mtimeMs;
   } catch {
     return new Response("Not found", { status: 404 });
   }
 
   const mime = mediaMimeForPath(absPath);
+  const cacheable = mime.startsWith("image/");
+  const etag = cacheable ? etagFor({ mtimeMs, size }) : null;
+  if (cacheable && etag && ifNoneMatch === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: { ETag: etag, "Cache-Control": CACHE_REVALIDATE },
+    });
+  }
+
   const parsed = parseCascadeMediaRange(rangeHeader, size);
   if (parsed === "invalid") {
     return new Response(null, {
@@ -173,8 +204,12 @@ export async function serveMediaFile(absPath: string, rangeHeader: string | null
     "Content-Type": mime,
     "Content-Length": String(length),
     "Accept-Ranges": "bytes",
-    "Cache-Control": "no-store",
+    "Cache-Control": cacheable ? CACHE_REVALIDATE : "no-store",
   };
+  if (cacheable && etag) {
+    headers["ETag"] = etag;
+    headers["Last-Modified"] = new Date(mtimeMs).toUTCString();
+  }
   if (parsed) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
 
   return new Response(body, { status: parsed ? 206 : 200, headers });

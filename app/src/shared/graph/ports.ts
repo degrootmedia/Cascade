@@ -122,6 +122,26 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
     inputs: [{ id: "in-out", label: "Output", media: "image", accepts: ["image", "video"] }],
     outputs: [],
   },
+  cameraGrid: {
+    // A generator node: a source image plus reference sockets feed a 4x4 sheet
+    // generation. It has no output (its panels are marqueed out as references).
+    // The grid-image socket takes an already-made sheet to cut up (manual
+    // fallback), bypassing generation.
+    kind: "cameraGrid",
+    inputs: [
+      { id: "in-image", label: "Source image", media: "image", from: ["imagegen", "editgen", "ref"] },
+      { id: "in-grid", label: "Grid image", media: "image", from: ["imagegen", "editgen", "ref"] },
+      { id: "in-ref-open", label: "Reference (open)", media: "image", accepts: ["image"] },
+    ],
+    outputs: [],
+  },
+  upscale: {
+    // A generator node: one source image in, one upscaled image out (feeds the
+    // output node; the shot's frame becomes the upscaled result).
+    kind: "upscale",
+    inputs: [{ id: "in-image", label: "Source image", media: "image", from: ["imagegen", "editgen", "ref"] }],
+    outputs: [{ id: "out", label: "Image", media: "image" }],
+  },
 };
 
 export function nodeDecl(kind: GraphNodeKind): NodeDecl | undefined {

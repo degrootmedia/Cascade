@@ -14,15 +14,18 @@
  */
 
 import type { Production, ProductionShot, ProductionStyle } from "./ipc.js";
+import {
+  LOOK_CLAUSE,
+  STYLE_FRAME_SETTING,
+  STYLE_FRAME_SUBJECT,
+  STYLE_FRAME_TEMPLATE,
+  renderPromptTemplate,
+} from "./prompt-templates.js";
 
-/** Verbatim LOOK clause prepended to every board prompt when a style frame is active. */
-export const LOOK_CLAUSE =
-  "Look reference (reference image 1): match its medium, palette, lighting, line/texture and rendering treatment. Do not copy its subject matter.";
-
-/** Fixed neutral-subject scaffold for generated style frames (a look plate, not a story beat). */
-export const STYLE_FRAME_SUBJECT = "figure in plain clothing, mid-shot";
-/** Fixed neutral setting for generated style frames. */
-export const STYLE_FRAME_SETTING = "softly lit interior";
+// The built-in look vocabulary lives in shared/prompt-templates.ts (the one
+// home for user-editable wording); re-exported here so existing imports and the
+// out-of-repo CLIs keep working.
+export { LOOK_CLAUSE, STYLE_FRAME_SETTING, STYLE_FRAME_SUBJECT, STYLE_FRAME_TEMPLATE };
 
 /** One style frame as an adapter upload: always reference index 0. */
 export interface StyleFrameRef {
@@ -49,9 +52,10 @@ export interface GenerationRequest {
   resolution: string;
 }
 
-/** The fixed look-reference sentence — identical on every shot. */
-export function buildLookClause(): string {
-  return LOOK_CLAUSE;
+/** The fixed look-reference sentence — identical on every shot. `lookClause`
+ *  lets a caller substitute the user's overridden LOOK wording. */
+export function buildLookClause(lookClause: string = LOOK_CLAUSE): string {
+  return lookClause;
 }
 
 /** The global brand clause (palette + font). Single home for the wording —
@@ -71,16 +75,16 @@ export function brandClauseText(brand?: { colors?: string[]; font?: string }): s
 }
 
 /** True when the prompt already carries the LOOK clause (idempotency guard). */
-export function hasLookClause(prompt: string): boolean {
-  return prompt.includes(LOOK_CLAUSE);
+export function hasLookClause(prompt: string, lookClause: string = LOOK_CLAUSE): boolean {
+  return prompt.includes(lookClause);
 }
 
 /** Prepend the LOOK clause ahead of per-shot content (no-op when already present). */
-export function withLookClause(prompt: string): string {
+export function withLookClause(prompt: string, lookClause: string = LOOK_CLAUSE): string {
   const base = prompt.trim();
-  if (!base) return LOOK_CLAUSE;
-  if (hasLookClause(base)) return base;
-  return `${LOOK_CLAUSE}\n\n${base}`;
+  if (!base) return lookClause;
+  if (hasLookClause(base, lookClause)) return base;
+  return `${lookClause}\n\n${base}`;
 }
 
 /**
@@ -93,9 +97,11 @@ export function assembleImagePrompt(parts: {
   brand?: string;
   styleText?: string;
   look?: boolean;
+  /** Override for the LOOK sentence (settings-backed). */
+  lookClause?: string;
 }): string {
   const paras: string[] = [];
-  if (parts.look) paras.push(LOOK_CLAUSE);
+  if (parts.look) paras.push(parts.lookClause?.trim() || LOOK_CLAUSE);
   if (parts.styleText?.trim()) paras.push(`Style: ${parts.styleText.trim()}`);
   if (parts.brand?.trim()) paras.push(`Brand identity: ${parts.brand.trim()}`);
   const content = parts.content.trim() || "Establishing frame for this moment.";
@@ -147,16 +153,14 @@ export function ensureLookSeed(p: Production): number {
  * from: fixed subject scaffold + setting, only the style tokens and brand
  * vary. Keeps frames comparable across styles and reusable as anchors.
  */
-export function styleFramePrompt(stylePromptText: string, brandClause = ""): string {
+export function styleFramePrompt(
+  stylePromptText: string,
+  brandClause = "",
+  template: string = STYLE_FRAME_TEMPLATE
+): string {
   const style = stylePromptText.trim() || "a clean cinematic look";
   const brand = brandClause.trim() ? ` Production palette/typeface: ${brandClause.trim()}` : "";
-  return (
-    `A neutral, story-agnostic look reference for an animated production. ` +
-    `Show a single generic ${STYLE_FRAME_SUBJECT} in a generic ${STYLE_FRAME_SETTING}. ` +
-    `Render in the following style: ${style}.${brand} ` +
-    `Emphasise palette, lighting, materials and surface treatment, and overall finish. ` +
-    `No text, no logos, no named characters, no scene-specific action.`
-  ).slice(0, 2000);
+  return renderPromptTemplate(template, { style, brand }).slice(0, 2000);
 }
 
 /**
@@ -168,11 +172,12 @@ export function buildGenerationRequest(
   p: Production,
   shot: ProductionShot,
   prompt: string,
-  contentRefs: string[]
+  contentRefs: string[],
+  lookClause: string = LOOK_CLAUSE
 ): GenerationRequest {
   const frame = styleFrameForShot(p, shot);
   return {
-    prompt: frame ? withLookClause(prompt) : prompt,
+    prompt: frame ? withLookClause(prompt, lookClause) : prompt,
     ...(frame ? { styleFramePath: frame.imagePath!.trim() } : {}),
     references: contentRefs,
     seed: ensureLookSeed(p),

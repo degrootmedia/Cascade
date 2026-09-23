@@ -19,12 +19,32 @@ const to = (kind: GraphNodeKind, port: string) => ({ kind, port });
 
 describe("port table", () => {
   it("declares every node kind with typed ports", () => {
-    const kinds: GraphNodeKind[] = ["composer", "style", "brand", "imagegen", "videogen", "editgen", "editvideo", "tween", "ref", "output", "videoprompt", "editprompt", "editvideoprompt"];
+    const kinds: GraphNodeKind[] = ["composer", "style", "brand", "imagegen", "videogen", "editgen", "editvideo", "tween", "ref", "output", "videoprompt", "editprompt", "editvideoprompt", "cameraGrid", "upscale"];
     for (const k of kinds) {
       const d = nodeDecl(k);
       expect(d, k).toBeDefined();
       expect(d!.inputs.length + d!.outputs.length).toBeGreaterThan(0);
     }
+  });
+
+  it("declares the cameraGrid generator with a source + grid image + reference inputs, no output", () => {
+    const d = nodeDecl("cameraGrid")!;
+    expect(d.inputs.map((p) => p.id)).toEqual(["in-image", "in-grid", "in-ref-open"]);
+    expect(d.outputs).toEqual([]);
+    expect(portDecl("cameraGrid", "in", "in-ref-2")?.id).toBe("in-ref-open");
+    // The grid-image socket takes the same image sources as the source socket.
+    expect(canConnect(ep("imagegen", "out", "image"), to("cameraGrid", "in-grid"))).toBe(true);
+    expect(canConnect(ep("ref", "out", "image"), to("cameraGrid", "in-grid"))).toBe(true);
+  });
+
+  it("declares the upscale generator with a source input and an image output", () => {
+    const d = nodeDecl("upscale")!;
+    expect(d.inputs.map((p) => p.id)).toEqual(["in-image"]);
+    expect(d.outputs.map((p) => p.id)).toEqual(["out"]);
+    // An upscale output feeds the output node, not a video/tween/ref sink.
+    expect(canConnect(ep("upscale", "out", "image"), to("output", "in-out"))).toBe(true);
+    expect(canConnect(ep("upscale", "out", "image"), to("videogen", "in-image"))).toBe(false);
+    expect(canConnect(ep("imagegen", "out", "image"), to("upscale", "in-image"))).toBe(true);
   });
 
   it("expands positional sockets (in-ref-N, in-tween-N)", () => {
@@ -70,6 +90,10 @@ describe("canConnect", () => {
     expect(canConnect(ep("editgen", "out", "image"), to("output", "in-out"))).toBe(true);
     expect(canConnect(ep("imagegen", "out", "image"), to("tween", "in-tween-2"))).toBe(true);
     expect(canConnect(ep("ref", "out", "image"), to("tween", "in-tween-0"))).toBe(true);
+    expect(canConnect(ep("imagegen", "out", "image"), to("cameraGrid", "in-image"))).toBe(true);
+    expect(canConnect(ep("editgen", "out", "image"), to("cameraGrid", "in-image"))).toBe(true);
+    expect(canConnect(ep("ref", "out", "image"), to("cameraGrid", "in-ref-0"))).toBe(true);
+    expect(canConnect(ep("ref", "out", "image"), to("cameraGrid", "in-ref-open"))).toBe(true);
   });
 
   it("video→video yes (output, edit-video source)", () => {
@@ -86,6 +110,8 @@ describe("canConnect", () => {
     expect(canConnect(ep("videogen", "out", "video"), to("tween", "in-tween-0"))).toBe(false);
     expect(canConnect(ep("imagegen", "out", "image"), to("editvideo", "in-video"))).toBe(false);
     expect(canConnect(ep("ref", "out", "image"), to("editvideo", "in-video"))).toBe(false);
+    expect(canConnect(ep("videogen", "out", "video"), to("cameraGrid", "in-image"))).toBe(false);
+    expect(canConnect(ep("ref", "out", "audio"), to("cameraGrid", "in-ref-open"))).toBe(false);
   });
 
   it("audio is excluded from outputs and image sinks, allowed on prompt refs", () => {

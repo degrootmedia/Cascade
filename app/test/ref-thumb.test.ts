@@ -119,7 +119,7 @@ describe("node-graph reference thumbnails", () => {
     // The shelf lists every reference; disk refs thumb, legacy data URLs pass.
     // (No IntersectionObserver in this environment, so every tile counts as
     // visible and disk thumbs arm on mount.)
-    const shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+    const shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
     expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
     expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
     expect(shelfImgs).toContain("data:image/png;base64,LEGACY");
@@ -166,12 +166,12 @@ describe("node-graph reference thumbnails", () => {
       // Reveal the group: tiles mount, but disk thumbs stay placeholders while
       // the in-memory data URL renders immediately.
       await flushIO();
-      let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toEqual(["data:image/png;base64,LEGACY"]);
 
       // Scroll the tiles into view: disk thumbs arm (slots are free).
       await flushIO();
-      shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
       expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
       expect(shelfImgs).toContain("data:image/png;base64,LEGACY");

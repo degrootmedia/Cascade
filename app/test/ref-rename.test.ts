@@ -13,7 +13,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { renameReference } from "../src/main/pipeline.js";
+import { renameReference, uniqueReferenceName } from "../src/main/pipeline.js";
 
 function makeShot(number: string, overrides: Partial<ProductionShot> = {}): ProductionShot {
   return { id: `shot-${number}`, number, audio: "", visual: `Visual ${number}`, ...overrides };
@@ -89,6 +89,28 @@ describe("renameReference", () => {
     renameReference(p, "r1", "Champion", noop);
 
     expect(shot.prompt).toBe("@[Champion] and @[Sidekick] together");
+  });
+
+  it("appends _dup when another reference already owns the name", () => {
+    const shot = makeShot("0100", { prompt: "@[Hero]" });
+    const p = makeProduction([shot]);
+
+    renameReference(p, "r1", "Sidekick", noop);
+
+    expect(p.references?.map((r) => r.name)).toEqual(["Sidekick_dup", "Sidekick"]);
+    expect(shot.prompt).toBe("@[Sidekick_dup]");
+  });
+
+  it("keeps appending _dup until the name is free (case-insensitive)", () => {
+    const p = makeProduction([]);
+    p.references = [
+      { id: "r1", name: "Hero", imagePath: "references/hero.png", shotIds: [] },
+      { id: "r2", name: "Champion", imagePath: "references/a.png", shotIds: [] },
+      { id: "r3", name: "champion_dup", imagePath: "references/b.png", shotIds: [] },
+    ];
+
+    expect(uniqueReferenceName(p, "r1", "Champion")).toBe("Champion_dup_dup");
+    expect(uniqueReferenceName(p, "r1", "Champion_dup_dup")).toBe("Champion_dup_dup");
   });
 
   it("is a no-op when the name is unchanged and rejects unknown/empty names", () => {

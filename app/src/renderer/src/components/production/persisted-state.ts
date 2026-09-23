@@ -25,3 +25,24 @@ export function usePersistedCollapsed(key: string, initial = false): [boolean, (
   }, [key, collapsed]);
   return [collapsed, setCollapsed];
 }
+
+/** A persisted panel dimension (px). Clamped to `[min, max]` on read and
+ *  write so a corrupt/hand-edited value can never break the layout. */
+export function usePersistedNumber(key: string, initial: number, bounds: { min: number; max: number }): [number, (v: number) => void] {
+  const clamp = (v: number) => Math.max(bounds.min, Math.min(bounds.max, v));
+  const [value, setValue] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(key);
+      const n = raw === null ? NaN : Number(raw);
+      return Number.isFinite(n) ? clamp(n) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, String(value));
+    } catch { /* ignore */ }
+  }, [key, value]);
+  return [value, (v: number) => setValue(clamp(v))];
+}

@@ -15,7 +15,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
 import { setStyleEdge } from "../src/shared/graph/connect.js";
-import { renderShotPrompt, stripSharedSections } from "../src/shared/graph/render.js";
+import { materializeGraph } from "../src/shared/graph/materialize.js";
+import { renderShotPrompt, stripSharedSections, styleEdgePresent } from "../src/shared/graph/render.js";
+import { shotStyleSelectValue } from "../src/renderer/src/components/production/references.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as any).ResizeObserver = ROStub;
@@ -64,13 +66,16 @@ function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
   const cacheRef = useRef<Record<string, string>>({ [SHOT]: initialPrompt });
   const [prompt, setPrompt] = useState(initialPrompt);
 
-  // Mirror of ProductionWorkspace.setGraphStyle (step 04): selection + edge,
-  // no pasted paragraph; the rendered prompt is re-derived for the composer.
+  // Mirror of ProductionWorkspace.setGraphStyle (step 04): the dropdown picks
+  // WHICH style ("None" suppresses the paragraph); it never disconnects the
+  // style node. Choosing a style plugs it in; choosing None leaves the plug.
   const setGraphStyle = (styleId: string) => {
     const cur = prod.scenes[0].shots[0];
     const patch: Record<string, unknown> = { style: styleId || undefined, styleNone: !styleId };
-    if (cur.graph) patch.graph = setStyleEdge(cur.graph, "composer", !!styleId);
-    else patch.graphStyleConnected = !!styleId;
+    if (styleId) {
+      if (cur.graph) patch.graph = setStyleEdge(cur.graph, "composer", true);
+      else patch.graphStyleConnected = true;
+    }
     const next = { ...prod, scenes: prod.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, ...patch } : s) })) };
     setProd(next);
     const rendered = renderShotPrompt(next, next.scenes[0].shots[0], "composer");
@@ -148,7 +153,7 @@ function render(initial: Partial<Parameters<typeof Harness>[0]> = {}): { root: R
 function flush() { return act(async () => { await new Promise((r) => setTimeout(r, 0)); }); }
 
 describe("node-graph style dropdown (step 04: shared reference)", () => {
-  it("removes the Style section when attached, then re-adds it on re-pick", async () => {
+  it("suppresses the Style section on None, then restores it on re-pick", async () => {
     const { root, host } = render();
     await flush();
     expect(composerPrompt(host)).toContain(`Style: ${STYLE_TEXT}`);
@@ -213,5 +218,24 @@ describe("node-graph style node → edit nodes (step 04)", () => {
     expect(editStyleBox(host)?.value).toBe("Node's own look");
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
+  });
+});
+
+describe("style selection is independent of the style node connection", () => {
+  it("a detached style node keeps its selected style and renders no Style section", () => {
+    const base = makeProd(CONTENT, { graphStyleConnected: false, style: STYLE_ID });
+    const detached = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
+    expect(styleEdgePresent(detached.graph, "composer")).toBe(false);
+    // Disconnecting must not flip the dropdown to None.
+    expect(shotStyleSelectValue(detached, base)).toBe(STYLE_ID);
+    expect(renderShotPrompt(base, detached, "composer")).toBe(CONTENT);
+  });
+
+  it("a connected style node set to None omits the Style section but stays wired", () => {
+    const base = makeProd(CONTENT, { graphStyleConnected: true, style: STYLE_ID, styleNone: true });
+    const connected = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
+    expect(styleEdgePresent(connected.graph, "composer")).toBe(true);
+    expect(shotStyleSelectValue(connected, base)).toBe("");
+    expect(renderShotPrompt(base, connected, "composer")).toBe(CONTENT);
   });
 });

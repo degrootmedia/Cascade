@@ -901,10 +901,10 @@ export function AnimaticTimeline({
         className="prod-animatic-preview"
         ref={previewRef}
         style={{ height: `${previewHeight}px` }}
-        title={activeShot?.videoPath || activeShot?.artwork ? "Right-click to save the previewed media as a reference" : undefined}
+        title={activeShot?.videoPath || activeShot?.artwork ? "Right-click for save, copy, edit, reference, or delete options" : undefined}
         onContextMenu={(e) => {
           const rel = activeShot?.videoPath ?? activeShot?.artwork;
-          if (activeShot && rel && onSaveAsReference) genMenu.open(e, rel);
+          if (activeShot && rel) genMenu.open(e, rel, { src: cascadeMedia(prodId, rel), media: activeShot.videoPath ? "video" : "image" });
         }}
       >
         {/* One mounted <video> per recently-active shot (LRU-capped); only the
@@ -1111,22 +1111,6 @@ export function AnimaticTimeline({
     </div>
   );
 }
-
-/** "Next" bar shown at the bottom of every step panel — completes the step
- *  and moves to the next one. */
-
-export function StepFooter({ prod, onNext }: { prod: Production; onNext: () => void }) {
-  if (prod.currentStep >= 5) return null;
-  const nextTitle = STEPS[prod.currentStep].title; // STEPS is 0-indexed, steps are 1-indexed
-  return (
-    <div className="prod-next">
-      <button className="prod-next-btn" onClick={onNext}>
-        Next: {nextTitle} →
-      </button>
-    </div>
-  );
-}
-
 
 export function ProdLog({ lines }: { lines: LogLine[] }) {  const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [lines.length]);

@@ -6,6 +6,7 @@ import { TodoPanel } from "./components/TodoPanel.js";
 import { GoalPanel } from "./components/GoalPanel.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { OPEN_SETTINGS_EVENT } from "./components/settings/open-settings.js";
 import { ModelCustomizer } from "./components/ModelCustomizer.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
@@ -288,6 +289,14 @@ export function App() {
 
   // File → Settings… from the native menu opens the settings panel.
   useEffect(() => window.cascade.onOpenSettings(() => setShowSettings(true)), []);
+
+  // Renderer features can open Settings on a specific section via
+  // `openSettings("providers")` (Spec 05) — the panel consumes the section.
+  useEffect(() => {
+    const onOpen = () => setShowSettings(true);
+    window.addEventListener(OPEN_SETTINGS_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpen);
+  }, []);
 
   useEffect(() => {
     const offSwitched = window.cascade.onAgentSwitched(({ sessionId, frame }) => {

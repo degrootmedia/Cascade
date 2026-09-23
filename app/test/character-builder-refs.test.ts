@@ -12,7 +12,7 @@ import type { Production } from "../src/shared/ipc.js";
 import { allPromptRefs, referenceNamesById } from "../src/renderer/src/components/production/references.js";
 
 function makeProduction(overrides: Partial<Production> = {}): Production {
-  return {
+  const base: Production = {
     meta: { id: "prod-1", name: "Test Production", folder: "C:/workspace/test-production", createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
     currentStep: 2,
     visualStyle: "",
@@ -21,8 +21,12 @@ function makeProduction(overrides: Partial<Production> = {}): Production {
     characters: [],
     products: [],
     references: [],
-    ...overrides,
+    status: {},
+    assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
   };
+  // Object.assign keeps the required fields non-optional even when a caller
+  // passes a Partial (a plain spread would widen `status` to `| undefined`).
+  return Object.assign(base, overrides);
 }
 
 describe("referenceNamesById", () => {

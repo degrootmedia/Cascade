@@ -26,6 +26,8 @@ export const settingsChannels = {
   "settings:setMediaDefault": { method: "setMediaDefault", kind: "invoke" },
   "settings:getMediaModelOrder": { method: "getMediaModelOrder", kind: "invoke" },
   "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
+  "settings:getPromptTemplates": { method: "getPromptTemplates", kind: "invoke" },
+  "settings:setPromptTemplates": { method: "setPromptTemplates", kind: "invoke" },
   "settings:getDevMode": { method: "getDevMode", kind: "invoke" },
   "settings:setDevMode": { method: "setDevMode", kind: "invoke" },
   "settings:getSubmissionDryRun": { method: "getSubmissionDryRun", kind: "invoke" },

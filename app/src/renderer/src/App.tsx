@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionMeta, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
 import { Transcript } from "./components/Transcript.js";
+import { TodoPanel } from "./components/TodoPanel.js";
+import { GoalPanel } from "./components/GoalPanel.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { OPEN_SETTINGS_EVENT } from "./components/settings/open-settings.js";
 import { ModelCustomizer } from "./components/ModelCustomizer.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
@@ -57,6 +60,10 @@ export function App() {
   const [showAgents, setShowAgents] = useState(false);
   /** Plan mode for the current chat (research + plan first, mutations gated). */
   const [planMode, setPlanMode] = useState(false);
+  /** Durable per-chat task lists, keyed by session (file is the truth in main). */
+  const [todos, setTodos] = useState<Record<string, SessionTasks>>({});
+  /** Durable per-chat goals, keyed by session (the objective; todos are steps). */
+  const [goals, setGoals] = useState<Record<string, SessionGoal>>({});
   /** Top-level view: chat home vs. Production Assistant (persisted). */
   const [view, setView] = useState<AppView>(() => {
     try {
@@ -168,7 +175,13 @@ export function App() {
       window.cascade.getCurrentSessionId().then((id) => { sid = id; setCurrentId(id); }),
       window.cascade.getWorkspaceInstructions().then(setInstructions),
     ]);
-    if (sid) void refreshActiveAgent(sid);
+    if (sid) {
+      void refreshActiveAgent(sid);
+      // Restore the durable task list for the reopened chat (restart path).
+      const id: string = sid;
+      void window.cascade.getSessionTodos(id).then((t) => setTodos((p) => ({ ...p, [id]: t }))).catch(() => {});
+      void window.cascade.getSessionGoal(id).then((g) => setGoals((p) => ({ ...p, [id]: g }))).catch(() => {});
+    }
     if (s.hasApiKey) void window.cascade.listModels().then((r) => { if (r.ok) setModels(r.models); }).catch(() => {});
   }, [refreshActiveAgent]);
 
@@ -277,6 +290,14 @@ export function App() {
   // File → Settings… from the native menu opens the settings panel.
   useEffect(() => window.cascade.onOpenSettings(() => setShowSettings(true)), []);
 
+  // Renderer features can open Settings on a specific section via
+  // `openSettings("providers")` (Spec 05) — the panel consumes the section.
+  useEffect(() => {
+    const onOpen = () => setShowSettings(true);
+    window.addEventListener(OPEN_SETTINGS_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpen);
+  }, []);
+
   useEffect(() => {
     const offSwitched = window.cascade.onAgentSwitched(({ sessionId, frame }) => {
       updateTranscript(sessionId, (prev) => [...prev, frame]);
@@ -300,12 +321,20 @@ export function App() {
     const offMention = window.cascade.onMentionAdded(({ sessionId, dataUrl, filename }) => {
       updateTranscript(sessionId, (prev) => [...prev, { kind: "mention", filename, image: dataUrl }]);
     });
+    const offTodos = window.cascade.onTodosChanged(({ sessionId, tasks }) => {
+      setTodos((p) => ({ ...p, [sessionId]: tasks }));
+    });
+    const offGoal = window.cascade.onGoalChanged(({ sessionId, goal }) => {
+      setGoals((p) => ({ ...p, [sessionId]: goal }));
+    });
     return () => {
       offSwitched();
       offEvent();
       offApproval();
       offRenamed();
       offMention();
+      offTodos();
+      offGoal();
     };
   }, [currentId, refreshActiveAgent]);
 
@@ -412,6 +441,8 @@ export function App() {
     void window.cascade.getCurrentWorkspace().then(setWorkspace);
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
     void window.cascade.getPlanMode(id).then(setPlanMode);
+    void window.cascade.getSessionTodos(id).then((t) => setTodos((p) => ({ ...p, [id]: t }))).catch(() => {});
+    void window.cascade.getSessionGoal(id).then((g) => setGoals((p) => ({ ...p, [id]: g }))).catch(() => {});
     void refreshActiveAgent(id);
   }
 
@@ -557,6 +588,19 @@ export function App() {
           />
         </div>
         <Transcript items={items} pureChat={pureChat} />
+        {currentId && goals[currentId]?.goal ? (
+          <GoalPanel
+            goal={goals[currentId]}
+            onPatch={(patch) => {
+              const id = currentId;
+              if (!id) return;
+              void window.cascade.setSessionGoal(id, patch).then((g) => setGoals((p) => ({ ...p, [id]: g })));
+            }}
+          />
+        ) : null}
+        {currentId && todos[currentId]?.items.length ? (
+          <TodoPanel tasks={todos[currentId]} />
+        ) : null}
         {attachments.length > 0 && (
           <div className="attachments">
             {attachments.map((a, i) => (

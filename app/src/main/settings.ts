@@ -98,6 +98,9 @@ interface SettingsFile {
    * always wins). Absent = no default (the vendor's own default applies).
    */
   modelParamDefaults: Record<string, ModelParamDefaultValue>;
+  /** User overrides for the creative prompt templates (shared/prompt-templates.ts),
+   *  keyed by template id. Absent id = the built-in wording. */
+  promptTemplates: Record<string, string>;
   /** Dev Mode: when true, every generation submission is logged. */
   devMode: boolean;
   /** Credit-free dry run: build + log the real request, throw before vendor call. */
@@ -146,6 +149,7 @@ const DEFAULTS: SettingsFile = {
   modelOptionExposure: {},
   modelSurfaces: {},
   modelParamDefaults: {},
+  promptTemplates: {},
   devMode: false,
   submissionDryRun: false,
   windowState: null,
@@ -623,6 +627,30 @@ export function setModelParamDefault(key: string, value: ModelParamDefaultValue 
 /** Clear every parameter default (dev customizer "Reset"). */
 export function resetModelParamDefaults(): void {
   load().modelParamDefaults = {};
+  save();
+}
+
+/** The user's prompt-template overrides (settings → Prompts). Absent = built-in. */
+export function getPromptTemplates(): Record<string, string> {
+  const v = load().promptTemplates;
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
+/** Replace the prompt-template overrides. Each value is trimmed; a blank value
+ *  (or one equal to the built-in) is dropped so the built-in shows through. */
+export function setPromptTemplates(overrides: Record<string, string>): void {
+  const clean: Record<string, string> = {};
+  if (overrides && typeof overrides === "object" && !Array.isArray(overrides)) {
+    for (const [key, value] of Object.entries(overrides)) {
+      const k = typeof key === "string" ? key.trim() : "";
+      if (!k || k.length > 64 || k.includes("\0")) continue;
+      if (typeof value !== "string") continue;
+      const v = value.trim();
+      if (!v || v.length > 20000) continue;
+      clean[k] = v;
+    }
+  }
+  load().promptTemplates = clean;
   save();
 }
 

@@ -72,8 +72,10 @@ export function Sidebar({
   // Right-click context menu state (opened over a specific session).
   const [menu, setMenu] = useState<{ x: number; y: number; session: SessionMeta } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  // Live search filter.
+  // Live search filter (title/preview) plus full-transcript hits from main.
   const [query, setQuery] = useState("");
+  /** sessionId → matching snippet, for content that isn't in the title/preview. */
+  const [contentHits, setContentHits] = useState<Record<string, string>>({});
   // Collapsed groups (key -> hidden).
   const [collapsed, setCollapsed] = useState<Partial<Record<BucketKey, boolean>>>({});
 
@@ -95,6 +97,31 @@ export function Sidebar({
 
   const now = useMemo(() => new Date(), []);
 
+  // Full-transcript search (step 09 T1): debounced, main-side, read-only.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setContentHits({});
+      return;
+    }
+    let live = true;
+    const t = window.setTimeout(() => {
+      void window.cascade
+        .searchSessions(q, 50)
+        .then((results) => {
+          if (!live) return;
+          setContentHits(Object.fromEntries(results.map((r) => [r.sessionId, r.snippet])));
+        })
+        .catch(() => {
+          if (live) setContentHits({});
+        });
+    }, 200);
+    return () => {
+      live = false;
+      window.clearTimeout(t);
+    };
+  }, [query]);
+
   // Hide placeholder "New chat" sessions that have no messages yet — the
   // "+ New chat" button is the entry point for creating chats.
   const visible = useMemo(
@@ -106,7 +133,11 @@ export function Sidebar({
     const q = query.trim().toLowerCase();
     const base = q
       ? visible.filter(
-          (s) => s.title.toLowerCase().includes(q) || s.preview.toLowerCase().includes(q),
+          (s) =>
+            s.title.toLowerCase().includes(q) ||
+            s.preview.toLowerCase().includes(q) ||
+            // Transcript hits from main (content not in title/preview).
+            contentHits[s.id] !== undefined,
         )
       : visible;
     const buckets = new Map<BucketKey, SessionMeta[]>();
@@ -116,7 +147,7 @@ export function Sidebar({
     }
     return BUCKET_ORDER.map((key) => ({ key, label: BUCKET_LABEL[key], sessions: buckets.get(key)! }))
       .filter((b) => b.sessions.length > 0);
-  }, [visible, query, now]);
+  }, [visible, query, now, contentHits]);
 
   const total = visible.length;
 
@@ -175,6 +206,12 @@ export function Sidebar({
                       <span className="session-item-date">{formatRowDate(s.updatedAt, now)}</span>
                     </span>
                     {s.preview && <span className="session-item-preview">{s.preview}</span>}
+                    {(() => {
+                      const q = query.trim().toLowerCase();
+                      const inPreview = q.length >= 2 && (s.title.toLowerCase().includes(q) || s.preview.toLowerCase().includes(q));
+                      const snippet = q.length >= 2 && !inPreview ? contentHits[s.id] : undefined;
+                      return snippet ? <span className="session-item-preview">{snippet}</span> : null;
+                    })()}
                   </button>
                 ))}
             </div>

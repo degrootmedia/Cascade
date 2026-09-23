@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { DragEvent } from "react";
+import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
@@ -14,12 +14,45 @@ import type { PromptContentHandle } from "../TriplePrompt.js";
 import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
+import { refThumbUrl } from "./thumb-url.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
+import { ImageGenForm } from "./ImageGenForm.js";
+import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
 
 interface RefItem {
   id: string;
   name: string;
   artwork?: string;
+}
+
+/** HTML5 drag payload types. `REF_DRAG_MIME` carries the primary tile id (the
+ *  legacy single-ref payload the drop targets have always read);
+ *  `REFS_DRAG_MIME` carries the whole multi-selection as a JSON id array. */
+export const REF_DRAG_MIME = "application/x-cascade-reference";
+export const REFS_DRAG_MIME = "application/x-cascade-references";
+
+/** Every reference id a drop is dragging: the multi-selection when present,
+ *  else the legacy single id. Order is the caller's selection order — the
+ *  reorder helper re-sorts by the saved array anyway. */
+export function refDragIds(dt: DataTransfer): string[] {
+  const raw = dt.getData(REFS_DRAG_MIME);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const ids = parsed.filter((x): x is string => typeof x === "string");
+        if (ids.length) return ids;
+      }
+    } catch { /* fall through to the single id */ }
+  }
+  const id = dt.getData(REF_DRAG_MIME);
+  return id ? [id] : [];
+}
+
+/** True when a drag carries reference tile(s) — used to gate dragover
+ *  preventDefault so unrelated file drags pass through to the file handler. */
+export function hasRefDrag(types: readonly string[] | DOMStringList): boolean {
+  return Array.from(types).includes(REF_DRAG_MIME) || Array.from(types).includes(REFS_DRAG_MIME);
 }
 
 /** Resolve a dragged-in reference's name against the existing ones: a base
@@ -43,16 +76,23 @@ export function uniqueRefName(existingNames: Iterable<string>, base: string): st
  *  the helper repositions only — a caller that wants a category change sets
  *  it too.) */
 export function reorderRefs<T extends { id: string }>(refs: T[], draggedId: string, targetId: string, after: boolean): T[] {
-  if (draggedId === targetId) return refs;
-  const from = refs.findIndex((r) => r.id === draggedId);
-  if (from < 0 || !refs.some((r) => r.id === targetId)) return refs;
-  const next = refs.slice();
-  const [moved] = next.splice(from, 1);
-  let insert = next.findIndex((r) => r.id === targetId);
+  return reorderRefGroup(refs, [draggedId], targetId, after);
+}
+
+/** Move a whole selection (`draggedIds`) to sit contiguously before/after
+ *  `targetId`, preserving the group's own relative order and every non-dragged
+ *  entry's. Returns the input array unchanged when the target is missing, is
+ *  itself part of the group, or none of the ids exist. */
+export function reorderRefGroup<T extends { id: string }>(refs: T[], draggedIds: string[], targetId: string, after: boolean): T[] {
+  const group = new Set(draggedIds);
+  if (group.has(targetId)) return refs;
+  const rest = refs.filter((r) => !group.has(r.id));
+  if (rest.length === refs.length) return refs;
+  const moved = refs.filter((r) => group.has(r.id));
+  let insert = rest.findIndex((r) => r.id === targetId);
   if (insert < 0) return refs;
   if (after) insert += 1;
-  next.splice(insert, 0, moved);
-  return next;
+  return [...rest.slice(0, insert), ...moved, ...rest.slice(insert)];
 }
 
 /** Grid of named reference slots: pick a name (populated from the script) and
@@ -192,10 +232,12 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
-  onMove: (id: string, categoryId?: string) => void;
+  /** Move one or more references into a category (multi-select drag). */
+  onMove: (ids: string[], categoryId?: string) => void;
   /** Drop one tile before/after another to reorder (and, if they sit in
-   *  different categories, move it there). */
-  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
+   *  different categories, move them there). `draggedIds` is the whole
+   *  multi-selection when several tiles are selected. */
+  onReorder: (draggedIds: string[], targetId: string, after: boolean) => void;
   /** Open the reference-image generation modal targeting a category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
@@ -206,6 +248,54 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [rescanning, setRescanning] = useState(false);
+  // Which tiles are multi-selected. Selection is UI-only (never persisted) and
+  // scoped to this section: click selects one, Ctrl/Cmd toggles, Shift extends
+  // from the last click. The anchor is the last plainly-clicked tile so a
+  // Shift-click can build a contiguous range within a category's order.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const anchorRef = useRef<string | null>(null);
+  const select = useCallback((id: string, mode: "single" | "toggle" | "range", order: string[]) => {
+    setSelectedIds((prev) => {
+      if (mode === "toggle") {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        anchorRef.current = id;
+        return next;
+      }
+      if (mode === "range" && anchorRef.current) {
+        const from = order.indexOf(anchorRef.current);
+        const to = order.indexOf(id);
+        if (from >= 0 && to >= 0) {
+          const lo = Math.min(from, to);
+          const hi = Math.max(from, to);
+          const next = new Set(prev);
+          for (let i = lo; i <= hi; i++) next.add(order[i]);
+          return next;
+        }
+      }
+      anchorRef.current = id;
+      return new Set([id]);
+    });
+  }, []);
+  const clearSelection = useCallback(() => { anchorRef.current = null; setSelectedIds((prev) => (prev.size ? new Set() : prev)); }, []);
+  // Drop ids whose reference disappeared (deleted, or adopted elsewhere) so a
+  // stale id can never be dragged into a move/reorder.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (!prev.size) return prev;
+      const live = new Set(items.map((r) => r.id));
+      const next = new Set<string>();
+      for (const id of prev) if (live.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
+  // Escape clears the selection from anywhere in the page.
+  useEffect(() => {
+    if (!selectedIds.size) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") clearSelection(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedIds.size, clearSelection]);
   const rescan = useCallback(async () => {
     if (rescanning) return;
     setRescanning(true);
@@ -228,7 +318,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   return (
     <div className="prod-refs">
       <label className="prod-label">Reference images</label>
-      <p className="hint">Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto <em>From image</em> to generate a style.</p>
+      <p className="hint">Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto <em>From image</em> to generate a style. Click to select, Ctrl/Cmd-click to add, Shift-click for a range, then drag the selection to reorder or move it.</p>
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}><PlusIcon size={14} /> Add category</button>
@@ -238,9 +328,15 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} />
         ))}
       </div>
+      {selectedIds.size > 0 && (
+        <div className="prod-ref-selection">
+          <span>{selectedIds.size} selected — drag to reorder or move, Esc to clear.</span>
+          <button className="prod-btn ghost" onClick={clearSelection}>Clear</button>
+        </div>
+      )}
       <div className="prod-ref-new form">
         <input className="prod-ref-new-name" placeholder="Reference name" value={name} onChange={(e) => setName(e.target.value)} />
         <select className="prod-openart-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}><option value="">Uncategorized</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
@@ -257,28 +353,33 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
+  selectedIds: Set<string>;
+  onSelect: (id: string, mode: "single" | "toggle" | "range", order: string[]) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onRenameCategory: (id: string, name: string) => void;
-  onMove: (id: string, categoryId?: string) => void;
-  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
+  onMove: (ids: string[], categoryId?: string) => void;
+  onReorder: (draggedIds: string[], targetId: string, after: boolean) => void;
   /** Open the reference-image generation modal targeting this category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
+  // The panel's item order is the axis a Shift range selects along.
+  const order = useMemo(() => items.map((r) => r.id), [items]);
+  const handleSelect = useCallback((id: string, mode: "single" | "toggle" | "range") => onSelect(id, mode, order), [onSelect, order]);
   return (
     <section className="prod-category" onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); }} onDragLeave={(e) => e.currentTarget.classList.remove("dragover")} onDrop={(e) => {
       e.preventDefault(); e.currentTarget.classList.remove("dragover");
-      const id = e.dataTransfer.getData("application/x-cascade-reference");
-      if (id) { onMove(id, category.id || undefined); return; }
+      const ids = refDragIds(e.dataTransfer);
+      if (ids.length) { onMove(ids, category.id || undefined); return; }
       for (const file of Array.from(e.dataTransfer.files)) {
         if (!file.type.startsWith("image/")) continue;
         const reader = new FileReader();
@@ -297,7 +398,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onA
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -309,11 +410,14 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, onA
 /** Data-only equality for a category panel: function identities are ignored
  *  (the parent recreates them per render); only visible data matters. */
 function areCategoryPanelsEqual(
-  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[] },
-  next: { prodId: string; category: ReferenceCategory; items: CustomRef[] },
+  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
+  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
 ): boolean {
   if (prev.prodId !== next.prodId) return false;
   if (prev.category.id !== next.category.id || prev.category.name !== next.category.name) return false;
+  // Selection is a fresh Set on every change, so identity covers any tile
+  // entering/leaving the selection (the panel must repaint its highlights).
+  if (prev.selectedIds !== next.selectedIds) return false;
   return areRefItemListsEqual(prev.items, next.items);
 }
 
@@ -350,33 +454,66 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove, onRename, onReorder, onEditRef }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, variant = "row" }: {
   prodId: string;
   refItem: CustomRef;
+  /** This tile is part of the section's multi-selection. */
+  selected?: boolean;
+  /** The whole multi-selection — dragging a selected tile drags all of them. */
+  selectedIds?: Set<string>;
+  /** Report a click's selection intent. Row variant only. */
+  onSelect?: (id: string, mode: "single" | "toggle" | "range") => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
-  onReorder: (draggedId: string, targetId: string, after: boolean) => void;
+  onReorder: (draggedIds: string[], targetId: string, after: boolean) => void;
   onEditRef?: (ref: CustomRef) => void;
+  /** "row" (default) is the sidebar tile — byte-identical to before. "node"
+   *  fills its parent (the moodboard canvas) and drops the HTML5 reorder
+   *  drag. The artwork is served at full resolution — the board is a working
+   *  surface, like the node graph canvas. Every `ref-*` class is reused either
+   *  way. */
+  variant?: "row" | "node";
 }) {
+  const isNode = variant === "node";
   const r = refItem;
   const imgUrl = r.imagePath ? cascadeMedia(prodId, r.imagePath) : r.artwork;
   const isVideo = r.media === "video" && !!r.mediaPath;
   const hasImage = !!imgUrl && !isVideo;
-  const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
+  // Perf: the sidebar/grid tile is 140px wide, so the row variant paints the
+  // compressed `?thumb=1` JPEG instead of decoding the full-resolution file
+  // (a large library otherwise holds one full-size bitmap per visible tile).
+  // The node variant is a working canvas and keeps full resolution; zoom and
+  // the context menu also use the full-res `imgUrl` below.
+  const displayUrl = isNode ? imgUrl : refThumbUrl(imgUrl ?? "");
+  const videoUrl = isVideo ? cascadeMedia(prodId, r.mediaPath!) : undefined;
+  const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean } | null>(null);
   // Which edge a dragged tile currently hovers — drives the insert marker.
   const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
   // Perf 2.4: video element mounts only on first hover/expand; before that a
   // static glyph stands in (no metadata fetch storm for large libraries).
   const [videoActive, setVideoActive] = useState(false);
   const activateVideo = useCallback(() => setVideoActive(true), []);
+  // The canvas (node variant) draws a middle-frame poster instead of playing.
+  // The poster is generated on demand main-side (ffmpeg), so a slow or
+  // transient failure must not stick: the film glyph sits behind the image as
+  // a placeholder and the image retries a couple of times before giving up.
+  const [posterAttempt, setPosterAttempt] = useState(0);
+  const [posterGaveUp, setPosterGaveUp] = useState(false);
+  useEffect(() => {
+    setPosterAttempt(0);
+    setPosterGaveUp(false);
+  }, [videoUrl]);
   const menu = useImageContextMenu({
     src: imgUrl ?? undefined,
     productionId: r.imagePath ? prodId : undefined,
     relPath: r.imagePath ?? undefined,
     dataUrl: r.imagePath ? undefined : (r.artwork ?? undefined),
   });
-  const handleZoom = useCallback(() => setZoom({ name: r.name, url: imgUrl! }), [r.name, imgUrl]);
+  const handleZoom = useCallback(() => {
+    const url = isVideo ? videoUrl : imgUrl;
+    if (url) setZoom({ name: r.name, url, video: isVideo });
+  }, [r.name, imgUrl, isVideo, videoUrl]);
   const handleCloseZoom = useCallback(() => setZoom(null), []);
   const handleAttach = useCallback(() => void onAttach(r.id), [onAttach, r.id]);
   const handleRemove = useCallback(() => onRemove(r.id), [onRemove, r.id]);
@@ -392,12 +529,21 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
     else setNameDraft(r.name);
   }, [nameDraft, onRename, r.id, r.name]);
   const handleEditRef = useCallback(() => onEditRef?.(r), [onEditRef, r]);
-  const handleDragStart = useCallback((e: DragEvent) => { e.dataTransfer.setData("application/x-cascade-reference", r.id); e.dataTransfer.effectAllowed = "copyMove"; }, [r.id]);
+  // Dragging a selected tile carries the whole selection; dragging an
+  // unselected one carries just itself and selects it first, so the drop
+  // always sees the intended group.
+  const handleDragStart = useCallback((e: DragEvent) => {
+    const multi = selected && selectedIds && selectedIds.size > 1;
+    if (!selected) onSelect?.(r.id, "single");
+    e.dataTransfer.setData(REF_DRAG_MIME, r.id);
+    if (multi) e.dataTransfer.setData(REFS_DRAG_MIME, JSON.stringify(Array.from(selectedIds!)));
+    e.dataTransfer.effectAllowed = "copyMove";
+  }, [r.id, selected, selectedIds, onSelect]);
   // Tile-level drop: dropping another reference tile on an edge inserts it
-  // before/after this one. stopPropagation keeps the category panel from also
-  // treating the drop as a plain move-to-category.
+  // (or the whole selection) before/after this one. stopPropagation keeps the
+  // category panel from also treating the drop as a plain move-to-category.
   const handleTileDragOver = useCallback((e: DragEvent<HTMLElement>) => {
-    if (!e.dataTransfer.types.includes("application/x-cascade-reference")) return;
+    if (!hasRefDrag(e.dataTransfer.types)) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = "move";
@@ -409,39 +555,69 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
     setDropSide(null);
   }, []);
   const handleTileDrop = useCallback((e: DragEvent<HTMLElement>) => {
-    const id = e.dataTransfer.getData("application/x-cascade-reference");
-    if (!id) return;
+    const ids = refDragIds(e.dataTransfer);
+    if (!ids.length) return;
     e.preventDefault();
     e.stopPropagation();
     setDropSide(null);
-    if (id !== r.id) onReorder(id, r.id, dropSideFor(e) === "after");
+    if (!ids.includes(r.id)) onReorder(ids, r.id, dropSideFor(e) === "after");
   }, [onReorder, r.id]);
+  // Click selects; interactive controls (name field, action buttons) keep their
+  // own behavior. Modifiers choose toggle vs. shift-range.
+  const handleSelectClick = useCallback((e: ReactMouseEvent) => {
+    if (!onSelect) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("input, button, textarea, select, a")) return;
+    onSelect(r.id, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "single");
+  }, [onSelect, r.id]);
   return (
     <figure
-      className={"prod-ref" + (dropSide ? ` drop-${dropSide}` : "")}
-      style={{ contentVisibility: "auto", containIntrinsicSize: "220px 240px" }}
-      onDragOver={handleTileDragOver}
-      onDragLeave={handleTileDragLeave}
-      onDrop={handleTileDrop}
+      className={"prod-ref" + (isNode ? " prod-ref-node" : "") + (selected && !isNode ? " selected" : "") + (dropSide ? ` drop-${dropSide}` : "")}
+      style={isNode ? undefined : { contentVisibility: "auto", containIntrinsicSize: "220px 240px" }}
+      aria-selected={isNode ? undefined : selected}
+      onClick={isNode ? undefined : handleSelectClick}
+      onDragOver={isNode ? undefined : handleTileDragOver}
+      onDragLeave={isNode ? undefined : handleTileDragLeave}
+      onDrop={isNode ? undefined : handleTileDrop}
     >
-      {imgUrl
-        ? <img src={imgUrl} alt={r.name} draggable onDragStart={handleDragStart} onContextMenu={hasImage ? menu.onContextMenu : undefined} />
+      {hasImage
+        ? <img src={displayUrl} alt={r.name} draggable={!isNode} onDragStart={isNode ? undefined : handleDragStart} onContextMenu={menu.onContextMenu} />
         : isVideo
-          ? (videoActive
-            ? <video className="prod-ref-video" src={`cascade-media://${prodId}/${encodeURIComponent(r.mediaPath!)}`} muted loop playsInline preload="none" autoPlay onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={handleDragStart} />
-            : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>)
+          ? (isNode
+            ? <div className="prod-ref-video-thumb" title="Video reference — use the magnifier to play">
+                <span className="prod-ref-video-placeholder"><FilmStripIcon size={14} /></span>
+                {!posterGaveUp && videoUrl && (
+                  <img
+                    key={posterAttempt}
+                    src={refThumbUrl(videoUrl) + (posterAttempt ? `&r=${posterAttempt}` : "")}
+                    alt={r.name}
+                    draggable={false}
+                    onError={() => {
+                      if (posterAttempt < 2) window.setTimeout(() => setPosterAttempt((a) => a + 1), 1500);
+                      else setPosterGaveUp(true);
+                    }}
+                  />
+                )}
+                <FilmStripIcon size={14} className="prod-ref-video-badge" />
+              </div>
+            : (videoActive
+              ? <video className="prod-ref-video" src={videoUrl} muted loop playsInline preload="none" autoPlay onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={handleDragStart} />
+              : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>))
           : <div className="prod-ref-blank">＋</div>}
       <div className="prod-ref-actions">
-        {hasImage && <button className="prod-ref-zoom" title="Enlarge this reference" onClick={handleZoom}><MagnifyIcon size={12} /></button>}
+        {(hasImage || isVideo) && <button className="prod-ref-zoom" title={isVideo ? "Play this reference full size" : "Enlarge this reference"} onClick={handleZoom}><MagnifyIcon size={12} /></button>}
         {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
         {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
-        <button className="prod-ref-del" title="Delete this reference" onClick={handleRemove}><XIcon size={12} /></button>
+        {hasImage && <OpenInSuiteButton productionId={prodId} seed={{ mode: "edit", sourceRefId: r.id }} className="prod-ref-suite" label="◨" title="Open this reference in the Image Suite" />}
+        <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}><XIcon size={12} /></button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
       {zoom && createPortal(
         <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
           <figure className="prod-ref-lightbox-card">
-            <img src={zoom.url} alt={zoom.name} />
+            {zoom.video
+              ? <video className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay loop playsInline />
+              : <img src={zoom.url} alt={zoom.name} />}
             <figcaption>{zoom.name} — click anywhere to close</figcaption>
           </figure>
         </div>, document.body)}
@@ -450,6 +626,10 @@ const RefFigure = memo(function RefFigure({ prodId, refItem, onAttach, onRemove,
 }, (prev, next) =>
   prev.prodId === next.prodId &&
   areRefItemsEqual(prev.refItem, next.refItem) &&
+  prev.variant === next.variant &&
+  prev.selected === next.selected &&
+  prev.selectedIds === next.selectedIds &&
+  prev.onSelect === next.onSelect &&
   (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0));
 
 export interface PromptReference {
@@ -503,28 +683,15 @@ export function promptRefsForShot(prod: Production, _shotId: string): PromptRefe
   return allPromptRefs(prod);
 }
 
-/** The generated brand clause (palette + font) — mirrors brandPrompt() in
- *  pipeline.ts so the renderer can insert it into manual prompts on toggle. */
-
-export function brandClause(prod: Production): string {
-  const colors = (prod.brand?.colors ?? [])
-    .map((c) => String(c).trim().replace(/^#/, ""))
-    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
-    .slice(0, 5)
-    .map((c) => `#${c.toLowerCase()}`);
-  const font = (prod.brand?.font ?? "").trim();
-  const parts: string[] = [];
-  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
-  if (font) parts.push(`Font: ${font}.`);
-  return parts.join(" ");
-}
-
-/** Select value for a shot's style dropdown: "" = None (manual prompt with
- *  no Style section), otherwise the shot's style or the master fallback. */
-
+/** Select value for a shot's style dropdown: "" = None (no style text),
+ *  otherwise the shot's style or the master fallback. Selection is independent
+ *  of the style node's connection — a disconnected prompt keeps showing its
+ *  selected style (the edge only controls whether the section renders). The
+ *  graph-less heuristic still reports None for a manual prompt with no Style
+ *  section. */
 export function shotStyleSelectValue(shot: ProductionShot, prod: Production): string {
   if (shot.styleNone) return "";
-  if (!shot.style && shot.promptManual && shot.prompt && !/^Style:/m.test(shot.prompt)) return "";
+  if (!shot.graph && !shot.style && shot.promptManual && shot.prompt && !/^Style:/m.test(shot.prompt)) return "";
   return shot.style ?? prod.styles?.[0]?.id ?? "";
 }
 
@@ -901,6 +1068,19 @@ export function RefGenModal({ prodId, models, editModels, categories, references
       <div className="prod-edit-panel prod-refgen-panel" onClick={(e) => e.stopPropagation()}>
         <div className="prod-edit-head">
           <span className="prod-edit-title">Reference image — generate or edit with AI</span>
+          <OpenInSuiteButton
+            productionId={prodId}
+            seed={{
+              mode,
+              prompt,
+              model,
+              resolution,
+              aspectRatio,
+              ...(mode === "edit" ? { sourceRefId } : {}),
+              ...(Object.keys(params).length ? { params } : {}),
+            }}
+            onOpened={onClose}
+          />
           <button className="prod-btn" onClick={onClose}>Cancel</button>
         </div>
         <div className="prod-refgen-tabs">
@@ -908,91 +1088,58 @@ export function RefGenModal({ prodId, models, editModels, categories, references
           <button className={"prod-refgen-tab" + (mode === "edit" ? " active" : "")} disabled={!editable.length} title={editable.length ? "Edit an existing reference image" : "No references with images to edit yet"} onClick={() => switchMode("edit")}>Edit image</button>
         </div>
 
-        <label className="prod-label">Model</label>
-        <select
-          className="prod-openart-select"
-          value={activeModels.some((m) => m.id === model) ? model : (activeModels[0]?.id ?? "")}
-          onChange={(e) => { setModel(e.target.value); rememberMediaDefault(activeCtx, { model: e.target.value }); }}
-          title={mode === "edit" ? "Image-edit model (same pool as the edit popup and edit node)" : "Image model"}
-          disabled={activeModels.length === 0}
-        >
-          {activeModels.map((m) => (
-            <option key={m.id} value={m.id} title={m.description}>{m.displayName}</option>
-          ))}
-        </select>
-        {activeModels.length === 0 && (
-          <p className="hint">No image models reported — connect the media MCP server.</p>
-        )}
-
-        <div className="prod-video-row">
-          <label className="prod-label">Resolution
-            <select className="prod-openart-select" value={resolution} onChange={(e) => { setResolution(e.target.value); rememberMediaDefault(activeCtx, { resolution: e.target.value }); }}>
-              <option value="1k">1k</option>
-              <option value="2k">2k</option>
-              <option value="4k">4k</option>
-            </select>
-          </label>
-          <label className="prod-label">Aspect ratio
-            <select className="prod-openart-select" value={aspectRatio} onChange={(e) => { setAspectRatio(e.target.value as ImageGenAspectRatio); rememberMediaDefault(activeCtx, { aspectRatio: e.target.value }); }}>
-              <option value="1:1">1:1</option>
-              <option value="4:3">4:3</option>
-              <option value="16:9">16:9</option>
-            </select>
-          </label>
-        </div>
-
-        <ModelOptionsForm
+        <ImageGenForm
+          models={activeModels}
+          model={model}
+          onModelChange={setModel}
+          modelTitle={mode === "edit" ? "Image-edit model (same pool as the edit popup and edit node)" : "Image model"}
+          resolution={resolution}
+          onResolutionChange={setResolution}
+          aspectRatio={aspectRatio}
+          onAspectRatioChange={setAspectRatio}
           schema={schema}
-          value={params as ModelOptionValues}
-          onChange={(next) => setParams(next as GenParams)}
-          exclude={["resolution", "aspect_ratio"]}
-          compact
+          params={params}
+          onParamsChange={setParams}
           persistKey="cascade.modelOptions.advanced.reference"
-        />
-
-        {mode === "generate" ? (
-          <>
-            <label className="prod-label">Name
-              <input className="prod-refgen-name" placeholder="e.g. Gondola Interior" value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="prod-label">Category
-              <select className="prod-openart-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-                <option value="">Uncategorized</option>
-                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </label>
-          </>
-        ) : (
-          <>
-            <label className="prod-label">Reference to edit
-              <select className="prod-openart-select" value={sourceRefId} onChange={(e) => setSourceRefId(e.target.value)}>
-                {editable.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </select>
-            </label>
-            {sourceUrl && (
-              <div className="prod-refgen-source">
-                <img src={sourceUrl} alt={sourceRef?.name ?? "source"} />
-                <span>The current image is sent as the visual reference.</span>
-              </div>
-            )}
-          </>
-        )}
-
-        <label className="prod-label">{mode === "edit" ? "Edit prompt" : "Generation prompt"}</label>
-        <ReferencePromptEditor
-          className="prod-refgen-prompt"
-          rows={7}
-          resizable
-          value={prompt}
-          includeBrand={false}
-          references={promptRefs}
-          placeholder={mode === "edit" ? 'Describe the edit, e.g. "make it darker, add warm candlelight" — type @ to reuse another reference' : 'Describe the reference image, e.g. "a red velvet gondola interior, cinematic light" — type @ to reuse another reference'}
-          onChange={setPrompt}
-          onKeyDown={(e) => {
+          prompt={prompt}
+          onPromptChange={setPrompt}
+          promptRefs={promptRefs}
+          promptLabel={mode === "edit" ? "Edit prompt" : "Generation prompt"}
+          promptPlaceholder={mode === "edit" ? 'Describe the edit, e.g. "make it darker, add warm candlelight" — type @ to reuse another reference' : 'Describe the reference image, e.g. "a red velvet gondola interior, cinematic light" — type @ to reuse another reference'}
+          onPromptKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && canSubmit) void submit();
             if (e.key === "Escape") onClose();
           }}
-        />
+          onRemember={(patch) => rememberMediaDefault(activeCtx, patch)}
+        >
+          {mode === "generate" ? (
+            <>
+              <label className="prod-label">Name
+                <input className="prod-refgen-name" placeholder="e.g. Gondola Interior" value={name} onChange={(e) => setName(e.target.value)} />
+              </label>
+              <label className="prod-label">Category
+                <select className="prod-openart-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+                  <option value="">Uncategorized</option>
+                  {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="prod-label">Reference to edit
+                <select className="prod-openart-select" value={sourceRefId} onChange={(e) => setSourceRefId(e.target.value)}>
+                  {editable.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </select>
+              </label>
+              {sourceUrl && (
+                <div className="prod-refgen-source">
+                  <img src={sourceUrl} alt={sourceRef?.name ?? "source"} />
+                  <span>The current image is sent as the visual reference.</span>
+                </div>
+              )}
+            </>
+          )}
+        </ImageGenForm>
         <p className="hint">
           {mode === "edit"
             ? "The reference's current image is uploaded as the source and replaced when the edit finishes. @ tags add other references as inputs; drag a tag to move it. Ctrl+Enter to submit."

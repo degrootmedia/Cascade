@@ -1,9 +1,10 @@
 /**
- * Reference-image thumbnails for the node graph — small compressed JPEGs
- * served over the cascade-media protocol (`?thumb=1`) so the graph never
- * decodes full-resolution reference files just to paint 64px node tiles.
- * The full-res file is untouched: zoom/lightbox URLs keep the original, and
- * prompt sends read the original from disk on the main side.
+ * Reference thumbnails for the node graph — small compressed JPEGs served over
+ * the cascade-media protocol (`?thumb=1`) so a list/canvas never decodes
+ * full-resolution reference files just to paint a tile. Images are resized with
+ * nativeImage; videos get a poster still extracted from a middle frame at 720p
+ * via ffmpeg. The full-res file is untouched: zoom/lightbox URLs keep the
+ * original, and prompt sends read the original from disk on the main side.
  *
  * Thumbs persist to a versioned on-disk cache (`<hash>-<mtimeMs>-<size>.jpg`
  * under a userData dir) so a large project's first graph open is fast on every
@@ -13,6 +14,7 @@
  * pre-encodes every reference and prunes entries whose source is gone.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -29,6 +31,31 @@ void import("electron")
 /** Long-edge cap for reference-node tiles (node art is 64×48, shelf 42×32). */
 export const REF_THUMB_MAX_EDGE = 256;
 const REF_THUMB_JPEG_QUALITY = 65;
+/** Video posters are a real frame the canvas can draw at size, so they cap at
+ *  720p (landscape 1280×720) rather than the tiny list-tile edge. */
+export const VIDEO_THUMB_MAX_W = 1280;
+export const VIDEO_THUMB_MAX_H = 720;
+const VIDEO_THUMB_JPEG_QUALITY = 3;
+
+/** Video containers we can pull a poster frame from (ffmpeg decides support). */
+const VIDEO_EXT_RX = /\.(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/i;
+
+export function isVideoPath(absPath: string): boolean {
+  return VIDEO_EXT_RX.test(absPath);
+}
+
+/** Injected ffmpeg seam (main wires the real binary; tests fake it). Video
+ *  posters are the only path that needs it — image thumbs stay nativeImage. */
+export interface VideoPosterDeps {
+  resolveBin: () => Promise<string | null>;
+  run: (bin: string, argv: string[]) => Promise<void>;
+  probe: (bin: string, absPath: string) => Promise<{ durationSec: number | null; hasAudio: boolean }>;
+}
+let videoPosterDeps: VideoPosterDeps | null = null;
+
+export function setVideoPosterDeps(deps: VideoPosterDeps | null): void {
+  videoPosterDeps = deps;
+}
 /** Bounded memory cache: repeat requests skip the decode; the disk cache is
  *  the durable store. */
 const thumbCache = new Map<string, { mtimeMs: number; size: number; jpeg: Buffer }>();
@@ -87,11 +114,64 @@ function remember(absPath: string, st: { mtimeMs: number; size: number }, jpeg: 
   thumbCache.set(absPath, { mtimeMs: st.mtimeMs, size: st.size, jpeg });
 }
 
+/** Extract a middle-frame poster (≤720p JPEG) from a video via ffmpeg. Null
+ *  when no ffmpeg seam is wired, the binary is missing, or the extract fails
+ *  (the caller then falls through to serving the full video). */
+async function encodeVideoPoster(absPath: string): Promise<Buffer | null> {
+  const deps = videoPosterDeps;
+  if (!deps) return null;
+  let bin: string | null = null;
+  try {
+    bin = await deps.resolveBin();
+  } catch {
+    bin = null;
+  }
+  if (!bin) return null;
+  // Middle frame: seek to half the duration. An unknown duration falls back to
+  // the first frame (still better than nothing).
+  let durationSec: number | null = null;
+  try {
+    durationSec = (await deps.probe(bin, absPath)).durationSec;
+  } catch {
+    durationSec = null;
+  }
+  const seek = durationSec && durationSec > 0 ? durationSec / 2 : 0;
+  const outDir = thumbCacheDir ?? os.tmpdir();
+  try {
+    await fs.promises.mkdir(outDir, { recursive: true });
+  } catch {
+    /* fall through to the temp path */
+  }
+  const out = path.join(outDir, `vposter-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`);
+  // Cap at 720p without upscaling smaller sources.
+  const vf = `scale='min(${VIDEO_THUMB_MAX_W},iw)':'min(${VIDEO_THUMB_MAX_H},ih)':force_original_aspect_ratio=decrease`;
+  const argv = [
+    "-hide_banner", "-nostdin", "-y",
+    "-ss", String(seek),
+    "-i", absPath,
+    "-frames:v", "1",
+    "-vf", vf,
+    "-q:v", String(VIDEO_THUMB_JPEG_QUALITY),
+    "-update", "1",
+    out,
+  ];
+  try {
+    await deps.run(bin, argv);
+    const jpeg = await fs.promises.readFile(out);
+    return jpeg.length > 0 ? jpeg : null;
+  } catch {
+    return null;
+  } finally {
+    try { await fs.promises.unlink(out); } catch { /* best-effort */ }
+  }
+}
+
 /** Ensure a thumbnail exists for `absPath` (memory → disk → encode), returning
- *  the JPEG and whether it was already on disk. Null when the file isn't a
- *  decodable image or nativeImage is unavailable (caller falls through). */
+ *  the JPEG and whether it was already on disk. Images go through nativeImage;
+ *  videos through the ffmpeg poster seam. Null when the source isn't decodable
+ *  or the needed encoder is unavailable (the caller falls through to the full
+ *  file). */
 export async function ensureRefThumbnail(absPath: string): Promise<{ jpeg: Buffer; fromDisk: boolean } | null> {
-  if (!nativeImage) return null;
   let st: fs.Stats;
   try {
     st = await fs.promises.stat(absPath);
@@ -111,7 +191,7 @@ export async function ensureRefThumbnail(absPath: string): Promise<{ jpeg: Buffe
       /* cache miss → encode below */
     }
   }
-  const jpeg = encodeThumb(absPath);
+  const jpeg = isVideoPath(absPath) ? await encodeVideoPoster(absPath) : encodeThumb(absPath);
   if (!jpeg) return null;
   if (thumbCacheDir) {
     try {
@@ -125,16 +205,18 @@ export async function ensureRefThumbnail(absPath: string): Promise<{ jpeg: Buffe
   return { jpeg, fromDisk: false };
 }
 
-/** Compressed JPEG thumbnail for an absolute reference-image path, or null —
- *  the protocol handler falls through to the full file on null. */
+/** Compressed JPEG thumbnail for an absolute reference path (image, or a
+ *  video's middle-frame poster), or null — the protocol handler falls through
+ *  to the full file on null. */
 export async function loadRefThumbnail(absPath: string): Promise<Buffer | null> {
   const hit = await ensureRefThumbnail(absPath);
   return hit?.jpeg ?? null;
 }
 
-/** Pre-encode thumbnails for the given reference images (Settings →
- *  Regenerate thumbnail cache) and prune disk entries whose source file no
- *  longer exists among them. Idempotent: existing valid entries are reused.
+/** Pre-encode thumbnails for the given reference media — images and videos
+ *  (Settings → Regenerate thumbnail cache) — and prune disk entries whose
+ *  source file no longer exists among them. Idempotent: existing valid entries
+ *  are reused.
  *  Yields periodically so the main process stays responsive on large projects. */
 export async function regenerateRefThumbnails(absPaths: string[]): Promise<{ generated: number; fromDisk: number; failed: number }> {
   const result = { generated: 0, fromDisk: 0, failed: 0 };

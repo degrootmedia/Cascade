@@ -1,11 +1,12 @@
 /**
- * Node-graph reference thumbnails: the canvas ref nodes, the side shelf, and
- * the tween keyframe tiles display a small compressed JPEG (`?thumb=1` over
- * the cascade-media protocol) instead of the full-resolution file — while the
- * zoom lightbox keeps the full-res `artwork` URL. Legacy inline data-URL
- * artwork (already in-memory) passes through unchanged. Disk-backed shelf
- * tiles load lazily (near the viewport, max 4 in flight), so their `src` is
- * gated until the tile scrolls into view.
+ * Node-graph reference images: canvas reference nodes render the full-res
+ * `artwork` URL (the graph is a working surface, not a list); the side shelf
+ * tiles display a small compressed JPEG (`?thumb=1` over the cascade-media
+ * protocol) instead of the full-resolution file, and the zoom lightbox keeps
+ * the full-res `artwork` URL. Legacy inline data-URL artwork (already
+ * in-memory) passes through unchanged. Disk-backed shelf tiles load lazily
+ * (near the viewport, max 4 in flight), so their `src` is gated until the tile
+ * scrolls into view.
  */
 import { describe, it, expect } from "vitest";
 import { createElement, useState } from "react";
@@ -105,28 +106,28 @@ describe("refThumbUrl", () => {
 });
 
 describe("node-graph reference thumbnails", () => {
-  it("canvas ref nodes and shelf tiles load the compressed thumb, zoom shows full-res", async () => {
+  it("canvas ref nodes load full-res while shelf tiles load the compressed thumb, zoom shows full-res", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     await openShelf(host);
 
-    // Tagged @[Hero] renders a canvas node; its tile uses the thumb URL.
-    const nodeImg = host.querySelector(".prod-graph-node.prod-graph-ref img") as HTMLImageElement;
+    // Tagged @[Hero] renders a canvas node; its tile uses the full-res URL.
+    const nodeImg = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media img") as HTMLImageElement;
     expect(nodeImg).toBeTruthy();
-    expect(nodeImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png?thumb=1");
+    expect(nodeImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png");
 
     // The shelf lists every reference; disk refs thumb, legacy data URLs pass.
     // (No IntersectionObserver in this environment, so every tile counts as
     // visible and disk thumbs arm on mount.)
-    const shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+    const shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
     expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
     expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
     expect(shelfImgs).toContain("data:image/png;base64,LEGACY");
 
-    // Zoom opens the lightbox with the FULL-res URL (no thumb query).
-    const zoom = host.querySelector(".prod-graph-ref-zoom") as HTMLButtonElement;
-    expect(zoom).toBeTruthy();
-    await act(async () => { zoom.click(); await new Promise((r) => setTimeout(r, 0)); });
+    // Double-clicking the media opens the lightbox with the FULL-res URL (no thumb query).
+    const media = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media") as HTMLElement;
+    expect(media).toBeTruthy();
+    await act(async () => { media.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await new Promise((r) => setTimeout(r, 0)); });
     const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
     expect(lightboxImg).toBeTruthy();
     expect(lightboxImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png");
@@ -165,12 +166,12 @@ describe("node-graph reference thumbnails", () => {
       // Reveal the group: tiles mount, but disk thumbs stay placeholders while
       // the in-memory data URL renders immediately.
       await flushIO();
-      let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      let shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toEqual(["data:image/png;base64,LEGACY"]);
 
       // Scroll the tiles into view: disk thumbs arm (slots are free).
       await flushIO();
-      shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-item img")].map((el) => el.getAttribute("src"));
+      shelfImgs = [...host.querySelectorAll(".prod-graph-shelf-thumb img")].map((el) => el.getAttribute("src"));
       expect(shelfImgs).toContain("cascade-media://p1/references/hero.png?thumb=1");
       expect(shelfImgs).toContain("cascade-media://p1/references/villain.png?thumb=1");
       expect(shelfImgs).toContain("data:image/png;base64,LEGACY");
@@ -182,7 +183,7 @@ describe("node-graph reference thumbnails", () => {
     }
   });
 
-  it("a dragged shelf ref gets a thumb-bearing canvas node with full-res zoom", async () => {
+  it("a dragged shelf ref gets a full-res canvas node with full-res zoom", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
@@ -196,13 +197,31 @@ describe("node-graph reference thumbnails", () => {
     } as unknown as DataTransfer;
     await act(async () => { canvas.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
 
-    const placed = host.querySelector('.prod-graph-node.prod-graph-ref img[src="cascade-media://p1/references/villain.png?thumb=1"]') as HTMLImageElement;
+    const placed = host.querySelector('.prod-graph-node.prod-graph-ref img[src="cascade-media://p1/references/villain.png"]') as HTMLImageElement;
     expect(placed).toBeTruthy();
 
-    const zoom = [...host.querySelectorAll(".prod-graph-ref-zoom")].at(-1) as HTMLButtonElement;
-    await act(async () => { zoom.click(); await new Promise((r) => setTimeout(r, 0)); });
+    const media = placed.closest(".prod-graph-ref-media") as HTMLElement;
+    await act(async () => { media.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await new Promise((r) => setTimeout(r, 0)); });
     const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
     expect(lightboxImg.getAttribute("src")).toBe("cascade-media://p1/references/villain.png");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("a collapsed ref node shows the compressed thumb beside the name", async () => {
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const eye = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-eye") as HTMLButtonElement;
+    expect(eye).toBeTruthy();
+    await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    // The big full-res tile is gone; the small collapsed thumb uses ?thumb=1.
+    expect(host.querySelector(".prod-graph-ref-media")).toBeNull();
+    const thumb = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-thumb img") as HTMLImageElement;
+    expect(thumb).toBeTruthy();
+    expect(thumb.getAttribute("src")).toBe("cascade-media://p1/references/hero.png?thumb=1");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

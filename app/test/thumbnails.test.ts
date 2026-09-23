@@ -14,6 +14,8 @@ import {
   clearRefThumbCache,
   setThumbCacheDir,
   getThumbCacheDir,
+  isVideoPath,
+  setVideoPosterDeps,
   thumbDiskPath,
   regenerateRefThumbnails,
 } from "../src/main/thumbnails.js";
@@ -31,6 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setThumbCacheDir(null);
+  setVideoPosterDeps(null);
   clearRefThumbCache();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -101,5 +104,73 @@ describe("loadRefThumbnail fallbacks", () => {
     // the caller serves the original file exactly as before the change.
     expect(await loadRefThumbnail(src)).toBeNull();
     expect(getThumbCacheDir()).toBe(cacheDir);
+  });
+});
+
+describe("video posters (ffmpeg seam)", () => {
+  const VIDEO = Buffer.from("fake-video-bytes");
+
+  it("detects video containers by extension", () => {
+    expect(isVideoPath("a/b/clip.mp4")).toBe(true);
+    expect(isVideoPath("a/b/clip.MOV")).toBe(true);
+    expect(isVideoPath("a/b/hero.png")).toBe(false);
+  });
+
+  it("extracts a middle frame at 720p and caches it", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, VIDEO);
+    const argvs: string[][] = [];
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: 10, hasAudio: false }),
+      run: async (_bin, argv) => {
+        argvs.push(argv);
+        fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster-jpeg"));
+      },
+    });
+
+    const jpeg = await loadRefThumbnail(src);
+    expect(jpeg?.toString()).toBe("poster-jpeg");
+    // Seeks to half the duration and caps at 720p.
+    expect(argvs[0][argvs[0].indexOf("-ss") + 1]).toBe("5");
+    const vf = argvs[0][argvs[0].indexOf("-vf") + 1];
+    expect(vf).toContain("1280");
+    expect(vf).toContain("720");
+    // Durable cache entry now serves without another ffmpeg run.
+    const st = fs.statSync(src);
+    expect(fs.existsSync(thumbDiskPath(cacheDir, src, st))).toBe(true);
+    argvs.length = 0;
+    expect(await loadRefThumbnail(src)).not.toBeNull();
+    expect(argvs).toHaveLength(0);
+  });
+
+  it("falls back to the first frame when the duration is unknown", async () => {
+    const src = path.join(tmp, "clip.webm");
+    fs.writeFileSync(src, VIDEO);
+    let seek = "";
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: null, hasAudio: false }),
+      run: async (_bin, argv) => {
+        seek = argv[argv.indexOf("-ss") + 1];
+        fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster"));
+      },
+    });
+    expect(await loadRefThumbnail(src)).not.toBeNull();
+    expect(seek).toBe("0");
+  });
+
+  it("returns null when no ffmpeg seam, binary, or run succeeds", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, VIDEO);
+    // No seam wired.
+    expect(await loadRefThumbnail(src)).toBeNull();
+    // Seam present but no binary.
+    setVideoPosterDeps({ resolveBin: async () => null, probe: async () => ({ durationSec: 1, hasAudio: false }), run: async () => {} });
+    expect(await loadRefThumbnail(src)).toBeNull();
+    // Binary present but the extract fails.
+    clearRefThumbCache();
+    setVideoPosterDeps({ resolveBin: async () => "ffmpeg", probe: async () => ({ durationSec: 1, hasAudio: false }), run: async () => { throw new Error("boom"); } });
+    expect(await loadRefThumbnail(src)).toBeNull();
   });
 });

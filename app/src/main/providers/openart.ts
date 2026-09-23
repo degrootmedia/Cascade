@@ -14,30 +14,35 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { McpManager } from "./mcp.js";
-import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "./pipeline.js";
-import { citePrompt, resolvePromptRefs, styleRefNames } from "./providers/refs.js";
-import type { MediaProvider, ProviderEmit } from "./providers/types.js";
-import { uploadDataUrlReference } from "./openart-upload.js";
-import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "./video-ref.js";
+import { createHash } from "node:crypto";
+import type { McpManager } from "../mcp.js";
+import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "../pipeline.js";
+import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import type { MediaProvider, ProviderEmit } from "./types.js";
+import { uploadDataUrlReference } from "../openart-upload.js";
+import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 import {
+  OPENART_JOB_DONE_RX,
   describeOpenArtDurations,
   extractOpenArtVideoOptions,
+  openArtCreationResultUrls,
+  openArtCreationStatus,
   openArtDurationNumber as durationNumber,
   openArtLooksLikeResolution,
   openArtSchemaFromProps,
   parseOpenArtFormProperties,
   parseOpenArtModels,
   shapeOpenArtModelChoices,
-} from "./providers/openart-core.js";
+} from "./openart-core.js";
 import {
   IMAGE_URI_EXT_RX,
   IMAGE_URL_RX,
+  dataUrlToBytes,
   parseJsonLooseArray,
   parseJsonLooseObject,
   VIDEO_URI_EXT_RX,
   VIDEO_URL_RX,
-} from "../shared/prompt-grammar.js";
+} from "../../shared/prompt-grammar.js";
 import type {
   CliModelSchema,
   ImageGenAspectRatio,
@@ -50,7 +55,7 @@ import type {
   ProductionShot,
   VideoGenOptions,
   VideoModelOptions,
-} from "../shared/ipc.js";
+} from "../../shared/ipc.js";
 
 const SERVER = "openart";
 
@@ -88,6 +93,15 @@ export class OpenArtImagePendingError extends Error {
     super(`OpenArt image generation timed out (${historyId.slice(0, 8)}…).`);
     this.name = "OpenArtImagePendingError";
   }
+}
+
+/** Identity of the references uploaded with a submission — their URLs and the
+ *  SHA-1 of their bytes. A creation reply echoes these inputs (as URLs or as
+ *  image content), so result extraction must never hand one back as the
+ *  generated output (a slow job once "downloaded" its own source reference). */
+interface InputExclusion {
+  urls: Set<string>;
+  hashes: Set<string>;
 }
 
 /** Minimal shape of an OpenArt project (from list or create). */
@@ -741,6 +755,64 @@ private videoRefsAssign = videoRefsAssign;
     }
   }
 
+  /** The finished media bytes out of one creation poll reply, or null when the
+   *  job hasn't produced output yet. Result-bearing fields are read first and
+   *  the echoed input/reference URLs the creation reply carries are never
+   *  treated as output — a slow job (the camera grid) once downloaded its own
+   *  source reference as the sheet. Uploaded inputs are excluded by identity
+   *  too (`exclude`), so an echoed input image attachment can't win when no
+   *  result URL is present. While the reply reports a non-terminal status,
+   *  nothing is downloaded at all. Returns the source URL (when known) so the
+   *  video path can preserve the file extension. */
+  private async creationResult(
+    res: { text: string; images: Buffer[]; uris: string[] },
+    video: boolean,
+    exclude?: InputExclusion
+  ): Promise<{ buf: Buffer; url?: string } | null> {
+    const { status } = openArtCreationStatus(res.text);
+    if (status && !OPENART_JOB_DONE_RX.test(status) && !/FAILED|CANCELLED/i.test(status)) return null;
+    const urls = openArtCreationResultUrls(res.text, video).filter((u) => !exclude?.urls.has(u));
+    if (urls.length) {
+      const buf = await this.fetchImageBuffer(urls[0]);
+      if (buf && !this.isExcludedInput(buf, exclude)) return { buf, url: urls[0] };
+    }
+    const image = this.pickResultImage(res.images, exclude);
+    if (image) return { buf: image };
+    const direct = (video ? res.text.match(VIDEO_URL_RX)?.[0] : res.text.match(IMAGE_URL_RX)?.[0])
+      ?? res.uris.find((u) => (video ? VIDEO_URI_EXT_RX : IMAGE_URI_EXT_RX).test(u));
+    if (!direct || exclude?.urls.has(direct)) return null;
+    const buf = await this.fetchImageBuffer(direct);
+    return buf && !this.isExcludedInput(buf, exclude) ? { buf, url: direct } : null;
+  }
+
+  /** Build the input identity for one submission: the uploaded reference URLs
+   *  plus a SHA-1 of each reference's bytes. Undefined when there are no refs
+   *  (nothing to exclude). */
+  private inputExclusion(refs: GenerationRef[], uploaded: Record<string, unknown>[]): InputExclusion | undefined {
+    const urls = new Set<string>();
+    for (const u of uploaded) {
+      const url = (u as { url?: unknown }).url;
+      if (typeof url === "string" && url) urls.add(url);
+    }
+    const hashes = new Set<string>();
+    for (const r of refs) {
+      const bytes = dataUrlToBytes(r.dataUrl);
+      if (bytes && bytes.length) hashes.add(createHash("sha1").update(bytes).digest("hex"));
+    }
+    return urls.size || hashes.size ? { urls, hashes } : undefined;
+  }
+
+  /** Whether a candidate buffer is one of the submission's uploaded inputs. */
+  private isExcludedInput(buf: Buffer, exclude?: InputExclusion): boolean {
+    return !!exclude && exclude.hashes.size > 0 && exclude.hashes.has(createHash("sha1").update(buf).digest("hex"));
+  }
+
+  /** The first image attachment that isn't an echoed input, or null. */
+  private pickResultImage(images: Buffer[], exclude?: InputExclusion): Buffer | null {
+    for (const b of images) if (!this.isExcludedInput(b, exclude)) return b;
+    return null;
+  }
+
 /**
    * One poll pass over an async OpenArt image job. Returns the finished bytes
    * (`buf`), or `{ failed }` when the server reports FAILED/CANCELLED. When
@@ -750,20 +822,14 @@ private videoRefsAssign = videoRefsAssign;
    */
   private async pollOpenArtImage(
     historyId: string,
-    deadlineMs: number
+    deadlineMs: number,
+    exclude?: InputExclusion
   ): Promise<{ buf: Buffer | null; failed?: string }> {
     const waitRaw = this.findTool(/^openart_creation_wait$/);
     const getRaw = this.findTool(/^openart_creation_get$/);
     if (!waitRaw && !getRaw) return { buf: null };
 
     const deadline = Date.now() + deadlineMs;
-    const finalize = async (res: { text: string; images: Buffer[]; uris: string[] }): Promise<Buffer | null> => {
-      if (res.images.length) return res.images[0];
-      const imgUrl =
-        res.text.match(IMAGE_URL_RX)?.[0] ??
-        res.uris.find((u) => IMAGE_URI_EXT_RX.test(u));
-      return imgUrl ? this.fetchImageBuffer(imgUrl) : null;
-    };
 
     const pollWith = waitRaw
       ? async () =>
@@ -772,13 +838,11 @@ private videoRefsAssign = videoRefsAssign;
 
     while (Date.now() < deadline) {
       const res = await pollWith();
-      const got = await finalize(res);
-      if (got) return { buf: got };
+      const got = await this.creationResult(res, false, exclude);
+      if (got) return { buf: got.buf };
+      const { status, failed } = openArtCreationStatus(res.text);
+      if (failed) return { buf: null, failed: status };
       const obj = parseJsonLooseObject(res.text);
-      const status = typeof obj?.status === "string" ? obj.status : "";
-      if (status === "FAILED" || status === "CANCELLED") {
-        return { buf: null, failed: status };
-      }
       await sleepMs(Math.max(1, Number(obj?.pollAfterSeconds ?? 4)) * 1000);
     }
     return { buf: null };
@@ -793,9 +857,9 @@ private videoRefsAssign = videoRefsAssign;
    * when the wait cap passes with the job still running; throws a plain Error
    * on FAILED/CANCELLED.
    */
-  private async waitOpenArtImage(historyId: string, deadlineMs = IMAGE_WAIT_DEADLINE_MS): Promise<Buffer | null> {
+  private async waitOpenArtImage(historyId: string, deadlineMs = IMAGE_WAIT_DEADLINE_MS, exclude?: InputExclusion): Promise<Buffer | null> {
     if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
-    const { buf, failed } = await this.pollOpenArtImage(historyId, deadlineMs);
+    const { buf, failed } = await this.pollOpenArtImage(historyId, deadlineMs, exclude);
     if (buf) return buf;
     if (failed) throw new Error(`OpenArt generation ${failed.toLowerCase()} (${historyId.slice(0, 8)}…).`);
     throw new OpenArtImagePendingError(historyId);
@@ -848,20 +912,6 @@ private videoRefsAssign = videoRefsAssign;
     if (!getRaw && !waitRaw) return null;
 
     const deadline = Date.now() + VIDEO_WAIT_DEADLINE_MS;
-    const finalize = async (res: { text: string; images: Buffer[]; uris: string[] }): Promise<{ buf: Buffer; ext: string } | null> => {
-      if (res.images.length) return { buf: res.images[0], ext: "mp4" };
-      const videoUrl =
-        res.text.match(VIDEO_URL_RX)?.[0] ??
-        res.uris.find((u) => VIDEO_URI_EXT_RX.test(u));
-      if (videoUrl) {
-        const buf = await this.fetchImageBuffer(videoUrl);
-        if (buf) {
-          const ext = (path.extname(new URL(videoUrl).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
-          return { buf, ext };
-        }
-      }
-      return null;
-    };
 
     const pollOnce = async (): Promise<{ text: string; images: Buffer[]; uris: string[] } | null> => {
       try {
@@ -880,12 +930,16 @@ private videoRefsAssign = videoRefsAssign;
     while (Date.now() < deadline) {
       const res = await pollOnce();
       if (res) {
-        const got = await finalize(res);
-        if (got) return got;
-        const obj = parseJsonLooseObject(res.text);
-        const status = typeof obj?.status === "string" ? obj.status : "";
-        if (status === "FAILED" || status === "CANCELLED") {
-          throw new Error(`OpenArt video generation ${status.toLowerCase()} (${historyId.slice(0, 8)}…).`);
+        const got = await this.creationResult(res, true);
+        if (got) {
+          const ext = got.url
+            ? (path.extname(new URL(got.url).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4"
+            : "mp4";
+          return { buf: got.buf, ext };
+        }
+        const { status, failed } = openArtCreationStatus(res.text);
+        if (failed) {
+          throw new Error(`OpenArt video generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
         }
         if (status && status !== lastStatus) {
           lastStatus = status;
@@ -1066,15 +1120,18 @@ private videoRefsAssign = videoRefsAssign;
         shotId: shot?.id,
       };
 
+      // OpenArt's generate tool is async — a PENDING submission carries the
+      // historyId but no pixels, and any image content on that reply is an echo
+      // of the input reference, never the result. So when a job id is present,
+      // wait for the creation first; only a synchronous submission (no job id)
+      // is trusted to carry the result image directly — and even then an
+      // uploaded input is excluded by identity.
+      const exclude = this.inputExclusion(refs, uploaded);
       let buffer: Buffer | null = null;
-      if (images.length) buffer = images[0];
-
-// OpenArt's generate tool is async — a PENDING submission carries the
-      // historyId but no pixels. Wait for the finished image before giving up.
       const historyId = this.openArtHistoryId(text);
-      if (!buffer && historyId) {
+      if (historyId) {
         try {
-          const done = await this.waitOpenArtImage(historyId);
+          const done = await this.waitOpenArtImage(historyId, IMAGE_WAIT_DEADLINE_MS, exclude);
           if (done) buffer = done;
           // no image surfaced despite completion — fall through to URL scan
         } catch (e) {
@@ -1087,23 +1144,30 @@ private videoRefsAssign = videoRefsAssign;
           throw e;
         }
       }
+      if (!buffer && images.length) buffer = this.pickResultImage(images, exclude);
 
-      // Many MCP image tools return text containing a URL to the result.
+      // Some MCP image tools return text containing a URL to the result. Read
+      // the result fields only (never the echoed reference URLs).
       if (!buffer) {
         const url =
-text.match(IMAGE_URL_RX)?.[0] ??
+          openArtCreationResultUrls(text, false).find((u) => !exclude?.urls.has(u)) ??
           text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
         if (!url) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
+        let downloaded: Buffer;
         try {
           const res = await fetch(url);
           if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
-          buffer = Buffer.from(await res.arrayBuffer());
+          downloaded = Buffer.from(await res.arrayBuffer());
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
           // recheck can retry the download without regenerating.
           this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
           throw e;
         }
+        if (this.isExcludedInput(downloaded, exclude)) {
+          throw new Error("OpenArt returned the input reference instead of a generated image — retry the job.");
+        }
+        buffer = downloaded;
       }
 
       this.fireGeneration(genMeta);

@@ -46,6 +46,7 @@ const PANEL_KEY = "cascade.modelCustomizer.panelWidth";
 const IMAGE_SURFACES: [ModelSurface, string][] = [
   ["image:generate", "Generation"],
   ["image:edit", "Edit"],
+  ["image:upscale", "Upscale"],
 ];
 const VIDEO_SURFACES: [ModelSurface, string][] = [
   ["video:generate", "Generation"],
@@ -542,9 +543,11 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
     return k === "video" ? VIDEO_SURFACES : k === "image" ? IMAGE_SURFACES : [];
   };
 
-  /** Default on-state for an unassigned model: `video:tween` is opt-in — the
-   *  assignment itself is the end-frame capability declaration. */
-  const surfaceDefaultOn = (surface: ModelSurface): boolean => surface !== "video:tween";
+  /** Default on-state for an unassigned model: `video:tween` and
+   *  `image:upscale` are opt-in — the assignment itself is the capability
+   *  declaration (end-frame support / upscale support). */
+  const surfaceDefaultOn = (surface: ModelSurface): boolean =>
+    surface !== "video:tween" && surface !== "image:upscale";
 
   /** Whether a model is allowed on a surface (default until restricted). */
   const surfaceOn = (id: string, surface: ModelSurface): boolean => {

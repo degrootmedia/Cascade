@@ -16,8 +16,8 @@ void import("electron")
   .catch(() => {});
 import { ChatClient } from "@core";
 import {
+  dataUrlToBytes,
   escapeRegExp,
-  insertBrandParagraph,
   parseJsonLooseArray,
   parseJsonLooseObject,
   parsePromptBoxes,
@@ -30,9 +30,12 @@ import {
 } from "../shared/prompt-grammar.js";
 import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
 import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
-import { styleFrameForShot, withLookClause, ensureLookSeed } from "../shared/look.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef } from "../shared/ipc.js";
+import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
+import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
+import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
+import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
 
@@ -693,7 +696,9 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
   // No auto-appended period — style texts usually end with their own, and
   // adding another produced "render..". Used verbatim, matching the
   // renderer's style paragraph composer.
-  if (style) paras.push(`Style: ${style}`);
+  // A detached style (stored graph, no style edge) suppresses the paragraph —
+  // the edge is the plug now. Graph-less shots keep the legacy always-on.
+  if (style && (!shot.graph || styleEdgePresent(shot.graph, "composer"))) paras.push(`Style: ${style}`);
   // Paragraph 2 — CONSISTENCY: global brand look, character keys for any
   // character named in the shot, and per-shot references (custom refs and
   // explicitly attached character/product refs). Artwork-bearing refs are
@@ -702,7 +707,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
    // which each provider's citePrompt anchors to the submitted position;
    // exports keep the literal token next to a numbered reference list.
   const consistency: string[] = [];
-   const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
+  const brand = isBrandAttached(shot, "composer", "") ? brandPrompt(p) : "";
   if (brand) consistency.push(`Brand identity: ${brand}`);
   const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
   const excludedIds = new Set(shot.refExcluded ?? []);
@@ -718,16 +723,7 @@ export function boardPrompt(p: Production, shot: ProductionShot): string {
 
 /** The global brand clause (palette + font) appended to every board prompt. */
 export function brandPrompt(p: Production): string {
-  const colors = (p.brand?.colors ?? [])
-    .map((c) => String(c).trim().replace(/^#/, ""))
-    .filter((c) => /^[0-9a-fA-F]{3,6}$/.test(c))
-    .slice(0, 5)
-    .map((c) => `#${c.toLowerCase()}`);
-  const font = (p.brand?.font ?? "").trim();
-  const parts: string[] = [];
-  if (colors.length) parts.push(`Color palette: ${colors.join(", ")}.`);
-  if (font) parts.push(`Font: ${font}.`);
-  return parts.join(" ");
+  return brandClauseText(p.brand);
 }
 
 /** The always-on framing for the Step 2 character builder. The user's
@@ -735,17 +731,16 @@ export function brandPrompt(p: Production): string {
  *  a full body shot (front, or front + back) with an inset closeup of the
  *  character's face — always rendered in a neutral pose and expression under
  *  neutral lighting on a plain gray background, with no text overlays. */
-export function characterSheetPrompt(description: string, view: CharacterSheetView = "front"): string {
+export function characterSheetPrompt(
+  description: string,
+  view: CharacterSheetView = "front",
+  template: string = CHARACTER_SHEET_TEMPLATE
+): string {
   const desc = description.trim();
-  const body = view === "front-back"
+  const views = view === "front-back"
     ? "Full body front view and full body back view"
     : "Full body front view";
-  return (
-    `Character reference sheet: ${desc}. ` +
-    `${body}, with an inset closeup of the character's face. ` +
-    `Neutral pose, neutral expression, neutral lighting, plain gray background. ` +
-    `No text, no labels, no watermarks.`
-  );
+  return renderPromptTemplate(template, { description: desc, views });
 }
 
 /** Mirror a generated character sheet into the references panel: ensure a
@@ -788,9 +783,10 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     const content = stripMagicLeakage(p.magicPrompts[shot.id].trim());
     const paras: string[] = [];
     const style = effectiveShotStyle(p, shot);
-    if (style) paras.push(`Style: ${style}`);
+    // A detached style (stored graph, no style edge) suppresses the paragraph.
+    if (style && (!shot.graph || styleEdgePresent(shot.graph, "composer"))) paras.push(`Style: ${style}`);
     const consistency: string[] = [];
-    const brand = shot.includeBrandIdentity === true ? brandPrompt(p) : "";
+    const brand = isBrandAttached(shot, "composer", "") ? brandPrompt(p) : "";
     if (brand) consistency.push(`Brand identity: ${brand}`);
     const haystack = `${shot.audio} ${shot.visual}`.toLowerCase();
     const excludedIds = new Set(shot.refExcluded ?? []);
@@ -800,20 +796,15 @@ export function effectivePrompt(p: Production, shot: ProductionShot): string {
     if (consistency.length) paras.push(consistency.join("\n"));
     paras.push(content || "Establishing frame for this moment.");
     const base = paras.join("\n\n").slice(0, 2000);
-    // Respect includeBrandIdentity flag (magic content is brand-aware)
-    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
+    // Respect the brand plug (explicit false detaches even magic content).
+    if (!isBrandAttached(shot, "composer", "")) return stripBrandParagraph(base);
     return base;
   }
   if (shot.prompt?.trim()) {
-    const base = shot.prompt.trim();
-    if (shot.includeBrandIdentity === false) return stripBrandParagraph(base);
-    // Brand identity is opt-in: only an explicit true appends it to a manual
-    // prompt (an unset flag leaves hand-written text exactly as written).
-    if (shot.includeBrandIdentity === true) {
-      const brand = brandPrompt(p);
-      if (brand) return insertBrandParagraph(base, brand);
-    }
-    return base;
+    // Manual prompts store content only; shared sections and reference tags
+    // render from the stored graph (edges), so this and the preview are the
+    // same projection. Legacy (graph-less) shots keep tag-driven output.
+    return renderShotPrompt(p, shot, "composer");
   }
   return boardPrompt(p, shot);
 }
@@ -830,11 +821,11 @@ export function effectivePromptContent(p: Production, shot: ProductionShot): str
  * are converted to portable tokens here; the provider's citePrompt anchors
  * each token to the submitted reference position before calling MCP.
  */
-export function openArtPrompt(p: Production, shot: ProductionShot): string {
+export function openArtPrompt(p: Production, shot: ProductionShot, lookClause?: string): string {
   const base = resolveReferenceTags(p, shot, stripReferenceClause(effectivePrompt(p, shot)));
   // The look anchor: one verbatim LOOK clause first on every shot whose style
   // owns a frame — cited as a look, never as a subject.
-  return styleFrameForShot(p, shot) ? withLookClause(base) : base;
+  return styleFrameForShot(p, shot) ? withLookClause(base, lookClause) : base;
 }
 
 /** Workspace-relative styles dir for style frames (look plates). */
@@ -1344,6 +1335,12 @@ export function editNodeSelection(shot: ProductionShot, id?: string): GraphGenIt
   return node?.gens?.[node.genIndex ?? 0];
 }
 
+/** The selected still of the shot's upscale node (undefined when none). */
+export function upscaleSelection(shot: ProductionShot): GraphGenItem | undefined {
+  const node = shot.graphUpscale;
+  return node?.gens?.[node.genIndex ?? 0];
+}
+
 /** The source frame an edit node edits, resolved to a workspace-relative path:
  *  the parent edit node's selection or the image node's selection. Undefined
  *  for a reference / shot-frame source (the caller resolves those separately). */
@@ -1401,13 +1398,18 @@ export function chainSourceForEdit(shot: ProductionShot): GraphEditNode["source"
 export function selectBoardFrame(shot: ProductionShot, rel: string): void {
   const editHit = findEditGen(shot, rel);
   const imageIndex = shot.graphImageGens?.findIndex((g) => g.path === rel) ?? -1;
-  if (!rel || (!editHit && imageIndex < 0 && shot.artwork !== rel && !shot.artworkHistory?.includes(rel))) {
-    throw new Error(`Cannot select board frame "${rel}": it is not in this shot's image/edit generations or artwork history.`);
+  const upIndex = shot.graphUpscale?.gens?.findIndex((g) => g.path === rel) ?? -1;
+  if (!rel || (!editHit && imageIndex < 0 && upIndex < 0 && shot.artwork !== rel && !shot.artworkHistory?.includes(rel))) {
+    throw new Error(`Cannot select board frame "${rel}": it is not in this shot's image/edit/upscale generations or artwork history.`);
   }
   if (editHit) {
     editHit.node.genIndex = editHit.index;
     shot.graphOutputSource = "editgen";
     shot.graphOutputEditNodeId = editHit.node.id;
+  } else if (upIndex >= 0 && shot.graphUpscale) {
+    shot.graphUpscale.genIndex = upIndex;
+    shot.graphOutputSource = "upscale";
+    shot.graphOutputEditNodeId = undefined;
   } else {
     shot.graphOutputEditNodeId = undefined;
     if (imageIndex >= 0) {
@@ -1512,7 +1514,7 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
 }
 
 /** A fresh reference id (same shape the other reference-creation paths use). */
-function newRefId(): string {
+export function newRefId(): string {
   return `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
@@ -1899,6 +1901,14 @@ export function recordGraphImageGen(shot: ProductionShot, rel: string, prompt: s
   shot.graphImageGenIndex = 0;
 }
 
+/** Store an upscaled frame on the shot's upscale node (newest first). */
+export function recordGraphUpscaleGen(shot: ProductionShot, rel: string, model: string): void {
+  const node = shot.graphUpscale ??= {};
+  const item: GraphGenItem = { path: rel, prompt: "", model, at: new Date().toISOString() };
+  node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  node.genIndex = 0;
+}
+
 /** Store a generated clip on the shot's video generation node (newest first). */
 export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
@@ -1924,9 +1934,10 @@ export function recordGraphEditGen(shot: ProductionShot, nodeId: string, rel: st
 
 /** The edit-image prompt framing shared by the classic edit dialog and the
  *  node-graph edit node: the source image occupies token 0, so `@[name]` tags
- *  resolve from token 1. One builder so the two entries can't drift. */
-export function buildEditGenPrompt(editText: string): string {
-  return `Edit this reference image (${refToken(0)}). Keep its composition unless asked otherwise.\n\nEdit instructions: ${editText.slice(0, 1200)}`;
+ *  resolve from token 1. One builder so the two entries can't drift. The
+ *  framing text is the `editImage` prompt template (user-editable). */
+export function buildEditGenPrompt(editText: string, template: string = EDIT_IMAGE_TEMPLATE): string {
+  return renderPromptTemplate(template, { source: refToken(0), instructions: editText.slice(0, 1200) });
 }
 
 /** Auto-wire an edit node's source pipe from the shot's current frame. The
@@ -2176,6 +2187,77 @@ export function rebaseGenIndex(
   return at >= 0 ? at : nextIdx;
 }
 
+/** A character/product/custom reference in the shape the output pipe needs. */
+export interface OutputRef {
+  id: string;
+  imagePath?: string;
+  artwork?: string;
+  media?: string;
+  mediaPath?: string;
+}
+
+/** Every character/product/custom reference as an output-pipe ref. */
+function outputRefs(p: Production): OutputRef[] {
+  return [
+    ...p.characters.map((c) => ({ id: c.id, imagePath: c.imagePath, artwork: c.artwork })),
+    ...p.products.map((pr) => ({ id: pr.id, imagePath: pr.imagePath, artwork: pr.artwork })),
+    ...(p.references ?? []).map((r) => ({ id: r.id, imagePath: r.imagePath, artwork: r.artwork, media: r.media, mediaPath: r.mediaPath })),
+  ];
+}
+
+/** Resolve a reference by id for the output pipe, or null when none matches. */
+export function resolveOutputRef(p: Production, refId: string): OutputRef | null {
+  return outputRefs(p).find((r) => r.id === refId) ?? null;
+}
+
+/** Resolve a reference by its on-disk image/media path, or null. Used to map
+ *  an externally edited file back to the reference that owns it. */
+export function resolveOutputRefByPath(p: Production, relPath: string): OutputRef | null {
+  return outputRefs(p).find((r) => r.imagePath === relPath || r.mediaPath === relPath) ?? null;
+}
+
+/** Apply a reference as the shot's output. A video reference becomes
+ *  `videoPath`; an image reference is copied into a fresh board frame (so the
+ *  storyboard and the export have a JPEG) and becomes `artwork`. Returns the new
+ *  board JPEG rel for an image, or null for a video. Throws when the reference
+ *  has no usable media. Does not save — callers own persistence. */
+export function applyRefToOutput(p: Production, shot: ProductionShot, ref: OutputRef): string | null {
+  if (ref.media === "video" && ref.mediaPath) {
+    shot.videoPath = ref.mediaPath;
+    return null;
+  }
+  const bytes: Buffer | null = ref.imagePath
+    ? (() => { try { return fs.readFileSync(assetPath(p, ref.imagePath!)); } catch { return null; } })()
+    : ref.artwork ? (() => { const b = dataUrlToBytes(ref.artwork!); return b ? Buffer.from(b) : null; })() : null;
+  if (!bytes || !bytes.length) throw new Error("This reference has no usable image — only image and video references can feed the output.");
+  const { jpegRel } = writeBoardFrame(p, shot, bytes, "png");
+  recordBoardArtwork(shot, jpegRel);
+  return jpegRel;
+}
+
+/** Re-encode an existing board frame from `srcRel` — the reference image a
+ *  ref-piped shot's output copied. Overwrites the served JPEG and its archived
+ *  original in place, so an external edit to the reference follows through to
+ *  the storyboard without creating a new take or a history entry. Returns true
+ *  when the frame was rewritten. Does not save — callers own persistence. */
+export function refreshRefCopyFromFile(p: Production, shot: ProductionShot, srcRel: string): boolean {
+  const jpegRel = shot.artwork;
+  if (!jpegRel) return false;
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(assetPath(p, srcRel));
+  } catch {
+    return false;
+  }
+  if (!bytes.length) return false;
+  if (!regenerateBoardJpeg(p, srcRel, jpegRel)) return false;
+  const originalRel = originalForJpegRel(p, jpegRel);
+  if (originalRel) {
+    try { fs.writeFileSync(assetPath(p, originalRel), bytes); } catch { /* original is best-effort */ }
+  }
+  return true;
+}
+
 /** The node-graph output pipe is the source of truth for the shot's primary
  *  frame/clip. Re-derive `artwork`/`videoPath` from the piped generation node's
  *  selected output so the storyboard (which reads `shot.artwork`) always
@@ -2189,8 +2271,11 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
   const vidSel = shot.graphVideoGens?.[shot.graphVideoGenIndex ?? 0];
   switch (shot.graphOutputSource) {
     case "imagegen":
-    case "editgen": {
-      const sel = shot.graphOutputSource === "imagegen" ? imgSel : editSel;
+    case "editgen":
+    case "upscale": {
+      const sel = shot.graphOutputSource === "imagegen" ? imgSel
+        : shot.graphOutputSource === "editgen" ? editSel
+        : upscaleSelection(shot);
       if (sel?.path) {
         let changed = false;
         if (shot.artwork !== sel.path) { recordBoardArtwork(shot, sel.path); changed = true; }
@@ -2324,7 +2409,7 @@ export async function generateBoards(
   p: Production,
   generate: ImageGenFn,
   emit: EmitFn,
-  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number; providerName?: string } = {}
+  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number; providerName?: string; lookClause?: string } = {}
 ): Promise<Production> {
   const max = Math.max(1, Math.min(opts.maxShots ?? 50, 200));
   const all = p.scenes.flatMap((s) => s.shots);
@@ -2346,39 +2431,38 @@ export async function generateBoards(
 
   let done = 0;
   let failed = 0;
-  let next = 0;
-  const worker = async () => {
-    while (next < targets.length) {
-      const shot = targets[next++];
-      emit(`Shot ${shot.number}: ${shot.visual.slice(0, 80) || "frame"}…`);
-      try {
-        const refs = shotReferences(p, shot)
-          .filter((r) => r.artwork)
-          .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
-        // The style frame uploads unconditionally at @image1 (a
-        // production-level input, not a tag-driven content ref) so every shot
-        // shares the same visual anchor; content refs shift positionally.
-        const frameStyle = styleFrameForShot(p, shot);
-        const frameDataUrl = frameStyle ? styleFrameDataUrl(p, frameStyle) : undefined;
-        const genRefs = frameDataUrl
-          ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
-          : refs;
-        const genPrompt = openArtPrompt(p, shot);
-        const png = await generate(genPrompt, genRefs, shot);
-        const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-        recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
-        // Classic flow: the storyboard frame comes from the output pipe — if
-        // nothing is piped yet, hook the image node in so the new frame shows
-        // in the storyboard AND the node view (never displaces a pipe).
-        hookImageGenToOutput(shot);
-        done++;
-      } catch (e) {
-        failed++;
-        emit(`Shot ${shot.number} failed: ${String(e).replace(/^Error:\s*/, "").slice(0, 160)}`, "error");
-      }
+  // One shared bounded queue governs the batch (step 07 T4). Jobs are
+  // independent; a per-shot failure is caught inside the job, so it never
+  // cancels siblings.
+  const queue = createGenerationQueue(concurrency);
+  await Promise.all(targets.map((shot) => queue.run(async () => {
+    emit(`Shot ${shot.number}: ${shot.visual.slice(0, 80) || "frame"}…`);
+    try {
+      const refs = shotReferences(p, shot)
+        .filter((r) => r.artwork)
+        .map((r) => ({ name: r.name, dataUrl: r.artwork! }));
+      // The style frame uploads unconditionally at @image1 (a
+      // production-level input, not a tag-driven content ref) so every shot
+      // shares the same visual anchor; content refs shift positionally.
+      const frameStyle = styleFrameForShot(p, shot);
+      const frameDataUrl = frameStyle ? styleFrameDataUrl(p, frameStyle) : undefined;
+      const genRefs = frameDataUrl
+        ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
+        : refs;
+      const genPrompt = openArtPrompt(p, shot, opts.lookClause);
+      const png = await generate(genPrompt, genRefs, shot);
+      const { jpegRel } = writeBoardFrame(p, shot, png, "png");
+      recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
+      // Classic flow: the storyboard frame comes from the output pipe — if
+      // nothing is piped yet, hook the image node in so the new frame shows
+      // in the storyboard AND the node view (never displaces a pipe).
+      hookImageGenToOutput(shot);
+      done++;
+    } catch (e) {
+      failed++;
+      emit(`Shot ${shot.number} failed: ${String(e).replace(/^Error:\s*/, "").slice(0, 160)}`, "error");
     }
-  };
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  })));
   markBoardsStatus(p);
   emit(
     failed
@@ -2403,7 +2487,7 @@ function markBoardsStatus(p: Production): void {
  * tool (OpenArt web UI, Midjourney, …) and drop the results back in.
  * No model call needed; prompts are deterministic.
  */
-export function exportBoardPrompts(p: Production, emit: EmitFn): Production {
+export function exportBoardPrompts(p: Production, emit: EmitFn, lookClause?: string): Production {
   const all = p.scenes.flatMap((s) => s.shots);
   if (!all.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
   const lines: string[] = [
@@ -2416,7 +2500,7 @@ export function exportBoardPrompts(p: Production, emit: EmitFn): Production {
     "",
   ];
   for (const shot of all) {
-    lines.push(`## Shot ${shot.number}`, "", openArtPrompt(p, shot), "");
+    lines.push(`## Shot ${shot.number}`, "", openArtPrompt(p, shot, lookClause), "");
     const refs = shotReferences(p, shot);
     const frameStyle = styleFrameForShot(p, shot);
     const frameListed = frameStyle?.imagePath?.trim()
@@ -2750,6 +2834,22 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
 }
 
 /**
+ * Resolve a rename target against the production's other references: a name
+ * another reference already owns gets `_dup` appended ("Hero" → "Hero_dup",
+ * then "Hero_dup_dup", …) so two references can never share a name. Matching is
+ * case-insensitive and ignores the reference being renamed.
+ */
+export function uniqueReferenceName(p: Production, refId: string, base: string): string {
+  const taken = new Set<string>();
+  for (const r of p.references ?? []) {
+    if (r.id !== refId) taken.add(r.name.trim().toLowerCase());
+  }
+  let candidate = base;
+  while (taken.has(candidate.toLowerCase())) candidate = `${candidate}_dup`;
+  return candidate;
+}
+
+/**
  * Step 2 Design-page rename: change a custom reference's name and rewrite every
  * `@[oldName]` tag across the prompt stores that can cite it (composer, video,
  * edit, edit-video, each edit node, tween action blocks, magic prompts). Tag
@@ -2761,9 +2861,10 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
 export function renameReference(p: Production, refId: string, newName: string, emit: EmitFn): Production {
   const ref = (p.references ?? []).find((r) => r.id === refId);
   if (!ref) throw new Error("Reference not found.");
-  const name = newName.trim();
-  if (!name) throw new Error("Reference name can't be empty.");
+  const trimmed = newName.trim();
+  if (!trimmed) throw new Error("Reference name can't be empty.");
   const oldName = ref.name;
+  const name = uniqueReferenceName(p, refId, trimmed);
   if (oldName === name) return p;
   p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name } : r));
   const rename = (text: string): string => renameRefTag(text, oldName, name);
@@ -2992,7 +3093,9 @@ export async function ingestScript(
   }
   if (restored) emit(`Kept ${restored} manually edited prompt(s) from the previous breakdown.`);
   p.status[1] = "done";
-  p.scriptSource = label;
+  // Persist the source itself (URL or file path), not the display label, so
+  // Step 1 can refill the input and re-ingest with one click.
+  p.scriptSource = source;
   emit(`Step 1 complete — ${shotCount} shots, numbered ${scenes[0].shots[0].number}–${scenes[scenes.length - 1].shots.slice(-1)[0].number}.`, "done");
   return p;
 }

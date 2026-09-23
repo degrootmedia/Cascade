@@ -12,7 +12,7 @@
 import type { GraphGenItem, ProductionShot } from "./ipc.js";
 import { TWEEN_KEY_IMGGEN, editNodeKeyframe } from "./ipc.js";
 
-export type GenerationKind = "image" | "video" | "edit" | "editvideo" | "tween";
+export type GenerationKind = "image" | "video" | "edit" | "editvideo" | "tween" | "upscale";
 
 /** A located generation entry within a shot's stored history. */
 export interface GenerationRef {
@@ -41,6 +41,8 @@ export function findGeneration(shot: ProductionShot, rel: string): GenerationRef
   if (index >= 0) return { kind: "video", rel, index };
   index = indexOfPath(shot.graphEditVideoGens, rel);
   if (index >= 0) return { kind: "editvideo", rel, index };
+  index = indexOfPath(shot.graphUpscale?.gens, rel);
+  if (index >= 0) return { kind: "upscale", rel, index };
   for (const node of shot.graphEditNodes ?? []) {
     index = indexOfPath(node.gens, rel);
     if (index >= 0) return { kind: "edit", rel, index, nodeId: node.id };
@@ -97,6 +99,11 @@ export function generationInUse(shot: ProductionShot, gen: GenerationRef): strin
     if (shot.graphTweenOutput || shot.graphOutputSource === "tween") return "the stitched in-betweener output";
     return null;
   }
+  if (gen.kind === "upscale") {
+    if (selectedPath(shot.graphUpscale?.gens, shot.graphUpscale?.genIndex) !== rel) return null;
+    if (shot.graphOutputSource === "upscale") return "the storyboard's current frame";
+    return null;
+  }
   return null;
 }
 
@@ -151,6 +158,10 @@ export function removeGeneration(shot: ProductionShot, gen: GenerationRef): bool
       block.genIndex = repairIndex(block.genIndex, gen.index, block.gens.length);
       removed = true;
     }
+  } else if (gen.kind === "upscale" && shot.graphUpscale) {
+    shot.graphUpscale.gens = dropAt(shot.graphUpscale.gens, gen.index);
+    shot.graphUpscale.genIndex = repairIndex(shot.graphUpscale.genIndex, gen.index, shot.graphUpscale.gens.length);
+    removed = true;
   }
   // A generation may also sit in the legacy `artworkHistory` mirror (every
   // previous primary was copied there). Purge it so the board's history

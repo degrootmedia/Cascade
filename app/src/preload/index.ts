@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type ProductionEvent } from "../shared/ipc.js";
+import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type ProductionEvent, type SessionTasks, type SessionGoal, type DetachedCanvasContext, type CanvasBusySnapshot } from "../shared/ipc.js";
 
 /**
  * Build `window.cascade` mechanically from the shared channel contract
@@ -32,6 +32,16 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("mention:added", listener);
     return () => ipcRenderer.removeListener("mention:added", listener);
   };
+  api.onTodosChanged = (cb: (e: { sessionId: string; tasks: SessionTasks }) => void) => {
+    const listener = (_e: unknown, e: { sessionId: string; tasks: SessionTasks }) => cb(e);
+    ipcRenderer.on("todos:changed", listener);
+    return () => ipcRenderer.removeListener("todos:changed", listener);
+  };
+  api.onGoalChanged = (cb: (e: { sessionId: string; goal: SessionGoal }) => void) => {
+    const listener = (_e: unknown, e: { sessionId: string; goal: SessionGoal }) => cb(e);
+    ipcRenderer.on("goals:changed", listener);
+    return () => ipcRenderer.removeListener("goals:changed", listener);
+  };
   api.onOpenSettings = (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on("menu:openSettings", listener);
@@ -61,6 +71,30 @@ function buildApi(): CascadeApi {
     const listener = (_e: unknown, ev: { productionId: string; jpegRel: string; originalRel: string }) => cb(ev);
     ipcRenderer.on("board:externalUpdate", listener);
     return () => ipcRenderer.removeListener("board:externalUpdate", listener);
+  };
+
+  // Detached canvas window (Spec 03). The detached renderer receives its
+  // context + the main window's frame selection; the main window hears when it
+  // closes so any "open in window" state resets.
+  api.onCanvasContext = (cb: (ctx: DetachedCanvasContext) => void) => {
+    const listener = (_e: unknown, ctx: DetachedCanvasContext) => cb(ctx);
+    ipcRenderer.on("canvas:context", listener);
+    return () => ipcRenderer.removeListener("canvas:context", listener);
+  };
+  api.onCanvasSelectionChanged = (cb: (e: { frameId: string | null }) => void) => {
+    const listener = (_e: unknown, e: { frameId: string | null }) => cb(e);
+    ipcRenderer.on("canvas:selectionChanged", listener);
+    return () => ipcRenderer.removeListener("canvas:selectionChanged", listener);
+  };
+  api.onCanvasBusy = (cb: (snapshot: CanvasBusySnapshot) => void) => {
+    const listener = (_e: unknown, snapshot: CanvasBusySnapshot) => cb(snapshot);
+    ipcRenderer.on("canvas:busyChanged", listener);
+    return () => ipcRenderer.removeListener("canvas:busyChanged", listener);
+  };
+  api.onDetachedClosed = (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("window:detachedClosed", listener);
+    return () => ipcRenderer.removeListener("window:detachedClosed", listener);
   };
 
   // The contract↔CascadeApi drift guard in shared/ipc.ts guarantees every

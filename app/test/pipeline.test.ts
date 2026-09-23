@@ -9,6 +9,9 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode } from "../src/shared/ipc.js";
+import { materializeGraph } from "../src/shared/graph/materialize.js";
+import { setBrandEdge } from "../src/shared/graph/connect.js";
+import { renderShotPrompt } from "../src/shared/graph/render.js";
 
 // pipeline.ts imports scripting.ts for its text-extraction helpers; the tests
 // never touch them, and scripting's dynamic pdf-parse import doesn't resolve
@@ -290,12 +293,13 @@ describe("effectivePrompt", () => {
     expect(effectivePrompt(p, shot)).toBe("My custom prompt");
   });
 
-  it("does not duplicate a brand the manual prompt already carries (regression)", () => {
+  it("replaces a stale brand copy with the canonical clause, exactly once (step 04)", () => {
     const p = makeProduction({ brand: { colors: ["#112233"] } });
     const shot = makeShot({ prompt: "Manual\n\nBrand identity: Color palette: #aabbcc.", promptManual: true });
     const prompt = effectivePrompt(p, shot);
     expect(prompt.match(/Brand identity:/g)).toHaveLength(1);
-    expect(prompt).toContain("Color palette: #aabbcc."); // manual wording wins
+    expect(prompt).toContain("Color palette: #112233."); // reference wins over the stored copy
+    expect(prompt).toBe("Brand identity: Color palette: #112233.\n\nManual");
   });
 
   it("strips the brand when includeBrandIdentity is false", () => {
@@ -912,5 +916,32 @@ describe("syncBoardOutputToPipe", () => {
     const shot = makeShot({ artwork: "boards/0100/shot-0100-classic.jpg" });
     expect(syncBoardOutputToPipe(shot)).toBe(false);
     expect(shot.artwork).toBe("boards/0100/shot-0100-classic.jpg");
+  });
+});
+
+describe("prompt as projection (step 05)", () => {
+  it("the preview and the submitted string come from the same renderer", () => {
+    const p = makeProduction({ brand: { colors: ["#112233"], font: "Baskerville" } });
+    const base = makeShot({ prompt: "hold the line", promptManual: true, graphStyleConnected: true, includeBrandIdentity: true });
+    // A stored graph (post step-03/04): style edge from the flag, brand edge
+    // explicit — the shared sections render from the references.
+    const graph = setBrandEdge(materializeGraph(base, [{ id: "c-gandalf", name: "Gandalf" }]), "composer", true);
+    const shot = { ...base, graph };
+    const submitted = effectivePrompt(p, shot);
+    const previewed = renderShotPrompt(p, shot, "composer");
+    expect(submitted).toBe(previewed);
+    expect(submitted).toBe(
+      "Style: Heroic 3D render style\n\nBrand identity: Color palette: #112233. Font: Baskerville.\n\nhold the line"
+    );
+  });
+
+  it("editing the style library updates the submitted string with no stored copy", () => {
+    const p = makeProduction();
+    const base = makeShot({ prompt: "hold the line", promptManual: true, graphStyleConnected: true });
+    const shot = { ...base, graph: materializeGraph(base, []) };
+    expect(effectivePrompt(p, shot)).toBe("Style: Heroic 3D render style\n\nhold the line");
+    const edited = makeProduction({ styles: [{ id: "s-master", index: 1, name: "Heroic 3D", prompt: "Stop-motion" }] });
+    expect(effectivePrompt(edited, shot)).toBe("Style: Stop-motion\n\nhold the line");
+    expect(shot.prompt).toBe("hold the line");
   });
 });

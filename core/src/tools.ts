@@ -10,6 +10,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { resolveSafe, WorkspaceError } from "./workspace.js";
+import { spillContent } from "./spill.js";
+import { makeTodoTools, workspaceTodoPersistence } from "./todo.js";
+import { makeGoalTools, workspaceGoalPersistence } from "./goal.js";
 import type { ToolDefinition, ApprovalRequest, AgentTool } from "./types.js";
 
 const MAX_READ_CHARS = 50_000;
@@ -27,8 +30,22 @@ function str(args: Record<string, unknown>, key: string): string {
   return v;
 }
 
-function truncate(s: string, max: number): string {
+/**
+ * Preview-only truncation for approval dialogs and summaries where the exact
+ * bytes are never needed. NEVER use on a tool *result* — results that exceed
+ * their budget must go through spillContent() so no content is destroyed.
+ */
+function truncatePreview(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + `\n[... truncated, ${s.length - max} more chars]` : s;
+}
+
+/** Optional 1-indexed line/page number from tool args. */
+function numArg(args: Record<string, unknown>, key: string): number | undefined {
+  const v = args[key];
+  if (v === undefined || v === null) return undefined;
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  if (!Number.isFinite(n)) throw new WorkspaceError(`missing/invalid argument: ${key}`);
+  return Math.floor(n);
 }
 
 // ---------------------------------------------------------------- read_file
@@ -38,17 +55,49 @@ const readFile: ToolSpec = {
     type: "function",
     function: {
       name: "read_file",
-      description: "Read a text file inside the workspace. Returns up to 50k chars.",
+      description:
+        "Read a text file inside the workspace. Oversized output spills to .cascade/tool-output/ with a preview + path; page it with offset/limit (1-indexed lines).",
       parameters: {
         type: "object",
-        properties: { path: { type: "string", description: "Path relative to workspace root" } },
+        properties: {
+          path: { type: "string", description: "Path relative to workspace root" },
+          offset: { type: "number", description: "First line to return (1-indexed, default 1)" },
+          limit: { type: "number", description: "Max lines to return (default: whole file)" },
+        },
         required: ["path"],
       },
     },
   },
   async run(args, root) {
     const p = resolveSafe(root, str(args, "path"), { mustExist: true });
-    return truncate(fs.readFileSync(p, "utf8"), MAX_READ_CHARS);
+    const full = fs.readFileSync(p, "utf8");
+    const offset = numArg(args, "offset") ?? 1;
+    const limit = numArg(args, "limit");
+    if (offset < 1) throw new WorkspaceError("offset must be >= 1");
+    if (limit !== undefined && limit < 1) throw new WorkspaceError("limit must be >= 1");
+    if (offset === 1 && limit === undefined) {
+      // Unpaged read: return small files directly, spill large ones so no
+      // bytes are destroyed.
+      if (full.length <= MAX_READ_CHARS) return full;
+      return spillContent(root, "read_file", full, {
+        thresholdChars: MAX_READ_CHARS,
+        previewChars: 8000,
+      }).text;
+    }
+    const lines = full.split("\n");
+    const total = lines.length;
+    if (offset > total) return `(no lines: offset ${offset} beyond end of file, ${total} lines total)`;
+    const end = limit === undefined ? total : Math.min(total, offset - 1 + limit);
+    const page = lines.slice(offset - 1, end).join("\n");
+    const header = `[lines ${offset}–${end} of ${total}]`;
+    const body = `${header}\n${page}`;
+    if (body.length <= MAX_READ_CHARS) return body;
+    // Paged slice still oversized: spill the slice (header included) so the
+    // model keeps a path to the exact bytes instead of a truncation marker.
+    return spillContent(root, "read_file", body, {
+      thresholdChars: MAX_READ_CHARS,
+      previewChars: 8000,
+    }).text;
   },
 };
 
@@ -83,9 +132,9 @@ const writeFile: ToolSpec = {
       } catch {
         /* binary or unreadable; fall through to plain preview */
       }
-      detail = old ? lineDiff(old, content) : truncate(content, 2000);
+      detail = old ? lineDiff(old, content) : truncatePreview(content, 2000);
     } else {
-      detail = truncate(content, 2000);
+      detail = truncatePreview(content, 2000);
     }
     return {
       tool: "write_file",
@@ -127,7 +176,7 @@ const editFile: ToolSpec = {
     return {
       tool: "edit_file",
       summary: `Edit ${str(args, "path")}`,
-      detail: `--- remove\n${truncate(str(args, "old_string"), 1000)}\n+++ insert\n${truncate(str(args, "new_string"), 1000)}`,
+      detail: `--- remove\n${truncatePreview(str(args, "old_string"), 1000)}\n+++ insert\n${truncatePreview(str(args, "new_string"), 1000)}`,
     };
   },
   async run(args, root) {
@@ -204,7 +253,8 @@ const grepTool: ToolSpec = {
     type: "function",
     function: {
       name: "grep",
-      description: "Search file contents with a regex. Returns matching lines as path:line: text.",
+      description:
+        "Search file contents with a regex. Returns matching lines as path:line: text. Oversized output spills to .cascade/tool-output/ with a preview + path.",
       parameters: {
         type: "object",
         properties: {
@@ -224,6 +274,7 @@ const grepTool: ToolSpec = {
     }
     const start = resolveSafe(root, typeof args.path === "string" ? args.path : ".", { mustExist: true });
     const results: string[] = [];
+    let capped = false;
     walk(start, root, (rel, abs, isDir) => {
       if (isDir) return true;
       let text: string;
@@ -237,9 +288,18 @@ const grepTool: ToolSpec = {
       for (let i = 0; i < lines.length && results.length < MAX_GREP_RESULTS; i++) {
         if (rx.test(lines[i])) results.push(`${rel}:${i + 1}: ${lines[i].slice(0, 200)}`);
       }
+      if (results.length >= MAX_GREP_RESULTS) capped = true;
       return results.length < MAX_GREP_RESULTS;
     });
-    return results.length ? results.join("\n") : "(no matches)";
+    if (!results.length) return "(no matches)";
+    let out = results.join("\n");
+    if (capped) {
+      // Lead with the cap notice so it survives inside the spill preview head.
+      out = `[... capped at ${MAX_GREP_RESULTS} matches; narrow the pattern or path to see the rest]\n${out}`;
+    }
+    if (out.length <= MAX_OUTPUT_CHARS) return out;
+    // Oversized result: spill the exact bytes instead of truncating them.
+    return spillContent(root, "grep", out, { thresholdChars: MAX_OUTPUT_CHARS }).text;
   },
 };
 
@@ -359,8 +419,8 @@ const runCommand: ToolSpec = {
     type: "function",
     function: {
       name: "run_command",
-      description:
-        "Run a shell command with the workspace as working directory. Returns stdout+stderr (truncated to 10k chars). 60s timeout by default.",
+        description:
+          "Run a shell command with the workspace as working directory. Returns stdout+stderr; oversized output spills to .cascade/tool-output/ with a preview + path. 60s timeout by default.",
       parameters: {
         type: "object",
         properties: {
@@ -381,7 +441,7 @@ const runCommand: ToolSpec = {
     }
     return {
       tool: "run_command",
-      summary: `${danger ? "⚠ DANGEROUS — " : ""}Run: ${truncate(cmd, 120)}`,
+      summary: `${danger ? "⚠ DANGEROUS — " : ""}Run: ${truncatePreview(cmd, 120)}`,
       detail: danger ? `⚠ This command can delete data or change system state.\n\n${cmd}` : cmd,
     };
   },
@@ -443,7 +503,20 @@ const runCommand: ToolSpec = {
         if (errText) combined += (combined ? "\n--- stderr ---\n" : "") + errText;
         if (timedOut) combined += `\n[cascade] killed after ${timeoutMs / 1000}s`;
         if (truncated) combined += "\n[... truncated]";
-        combined = truncate(combined, MAX_OUTPUT_CHARS);
+        // Oversized result spills to .cascade/tool-output/ so no bytes are
+        // destroyed; small output returns inline. (Approval-gate behavior
+        // above is untouched.)
+        if (combined.length > MAX_OUTPUT_CHARS) {
+          try {
+            combined = spillContent(root, "run_command", combined, {
+              thresholdChars: MAX_OUTPUT_CHARS,
+            }).text;
+          } catch {
+            // Spill is best-effort (e.g. unresolvable root): fall back to a
+            // preview so the command result still returns something.
+            combined = truncatePreview(combined, MAX_OUTPUT_CHARS);
+          }
+        }
         if (timedOut || code !== 0) {
           const reason = timedOut ? `timed out after ${timeoutMs / 1000}s` : `exit code ${code ?? "?"}`;
           resolve(`ERROR (${reason})${combined ? "\n" + combined : ""}`);
@@ -535,6 +608,12 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(`^${rx}$`);
 }
 
+// Workspace-backed defaults (`.cascade/tasks.json`). The Electron host
+// overrides these same names per chat via extraTools with a session-scoped
+// store (Agent merges {...TOOLS, ...extraTools}, so the host wins there).
+const workspaceTodos = makeTodoTools((root) => workspaceTodoPersistence(root));
+const workspaceGoal = makeGoalTools((root) => workspaceGoalPersistence(root));
+
 export const TOOLS: Record<string, ToolSpec> = {
   read_file: readFile,
   write_file: writeFile,
@@ -543,6 +622,11 @@ export const TOOLS: Record<string, ToolSpec> = {
   glob: globTool,
   grep: grepTool,
   run_command: runCommand,
+  todo_read: workspaceTodos.todo_read,
+  todo_write: workspaceTodos.todo_write,
+  goal_read: workspaceGoal.goal_read,
+  goal_set: workspaceGoal.goal_set,
+  goal_update_status: workspaceGoal.goal_update_status,
 };
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = Object.values(TOOLS).map((t) => t.definition);

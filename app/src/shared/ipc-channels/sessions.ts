@@ -1,6 +1,7 @@
 /** Sessions + skills IPC channels. Fragment of ipcContract. */
 export const sessionChannels = {
   "sessions:list": { method: "listSessions", kind: "invoke" },
+  "sessions:search": { method: "searchSessions", kind: "invoke" },
   "sessions:load": { method: "loadSession", kind: "invoke" },
   "sessions:activate": { method: "activateSession", kind: "send" },
   "sessions:new": { method: "newSession", kind: "invoke" },

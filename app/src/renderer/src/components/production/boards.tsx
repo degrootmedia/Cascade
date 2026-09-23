@@ -3,6 +3,7 @@ import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, Vi
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
+import { getPromptTemplate } from "./prompt-templates.js";
 import { costAspect, isQuotableCostModel, useGenerationCost } from "./generation-cost.js";
 import { CostValue, GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
@@ -15,6 +16,7 @@ import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
+import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
 function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
   prod: Production;
@@ -156,6 +158,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   // The card can show the shot's video instead of a frame — "Open file folder"
   // reveals whichever file is actually on screen.
   const relForFolder = histIdx === null && shot.videoPath && !videoFailed ? shot.videoPath : relForExternal;
+  /** The card is currently showing the shot's clip rather than a frame — the
+   *  suite (image editing) must not be offered for a video. */
+  const showingVideo = histIdx === null && !!shot.videoPath && !videoFailed;
   // The generation actually on screen — a browsed history frame, the shot's
   // video, or the current frame — is what "Save as reference" copies.
   const saveableRel = relForFolder ?? shot.artwork;
@@ -226,6 +231,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   function saveMenuReference() {
     setMenu(null);
     if (saveableRel && onSaveAsReference) onSaveAsReference(shot.id, saveableRel);
+  }
+  function editMenuInSuite() {
+    setMenu(null);
+    if (saveableRel) openImageSuite(prod.meta.id, { mode: "edit", sourcePath: saveableRel });
   }
 
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
@@ -562,6 +571,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
               Save as reference
             </button>
           )}
+          {saveableRel && !showingVideo && (
+            <button
+              className="ctx-item"
+              onClick={editMenuInSuite}
+            >
+              Edit in Suite
+            </button>
+          )}
           {histPath && onDeleteGeneration && findGeneration(shot, histPath) && (
             <button
               className="ctx-item danger"
@@ -614,7 +631,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
   const [model, setModel] = useState(() => shot.graphVideoModel ?? remembered?.model ?? videoModels[0]?.id ?? "");
   const [resolution, setResolution] = useState(() => shot.graphVideoResolution ?? remembered?.resolution ?? "1080p");
   const [durationSec, setDurationSec] = useState(() => shot.graphVideoDurationSec ?? remembered?.durationSec ?? 5);
-  const fallback = "Animate this reference image with smooth, cinematic motion.";
+  const fallback = getPromptTemplate("videoMotion");
   const external = externalPrompt ?? shot.graphVideoPrompt ?? fallback;
   const [prompt, setPrompt] = useState(external);
   const [focused, setFocused] = useState(false);

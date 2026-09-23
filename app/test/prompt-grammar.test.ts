@@ -16,7 +16,6 @@ import {
   IMAGE_URL_RX,
   insertBrandParagraph,
   isTagOnlyDiff,
-  mirrorStyleParagraph,
   parseJsonLooseArray,
   parseJsonLooseObject,
   parsePromptBoxes,
@@ -131,15 +130,9 @@ describe("Brand / Style paragraph helpers", () => {
     expect(stripStyleParagraph("Style: Heroic 3D\n\nAction here.")).toBe("Action here.");
   });
 
-  it("mirrors a plugged prompt to the style node's live text", () => {
-    // A style is chosen: the paragraph is replaced wherever it sits.
-    expect(mirrorStyleParagraph("Style: Old\n\nAction here.", "New look", true)).toBe("Style: New look\n\nAction here.");
-    // None: the paragraph is stripped.
-    expect(mirrorStyleParagraph("Style: Old\n\nAction here.", "", true)).toBe("Action here.");
-    // Not plugged: the prompt is untouched, None included.
-    expect(mirrorStyleParagraph("Style: Node's own\n\nAction here.", "", false)).toBe("Style: Node's own\n\nAction here.");
-    expect(mirrorStyleParagraph("Style: Node's own\n\nAction here.", "New look", false)).toBe("Style: Node's own\n\nAction here.");
-  });
+  // mirrorStyleParagraph was deleted in step 04 (rendering replaced
+  // mirroring): the shared renderer in shared/graph/render.ts covers the
+  // plugged/unplugged cases — see graph-render.test.ts.
 });
 
 describe("parsePromptBoxes / composePromptBoxes", () => {

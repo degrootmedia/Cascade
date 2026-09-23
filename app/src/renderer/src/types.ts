@@ -1,4 +1,4 @@
-import type { CascadeApi, ChatAttachment, DisplayItem } from "../../shared/ipc.js";
+import type { CascadeApi, ChatAttachment, DisplayItem, SessionGoal, SessionGoalPatch, SessionTasks, TodoItem, TodoStatus } from "../../shared/ipc.js";
 
 declare global {
   interface Window {
@@ -6,4 +6,4 @@ declare global {
   }
 }
 
-export type { ChatAttachment, DisplayItem } from "../../shared/ipc.js";
+export type { ChatAttachment, DisplayItem, SessionGoal, SessionGoalPatch, SessionTasks, TodoItem, TodoStatus } from "../../shared/ipc.js";

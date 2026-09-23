@@ -1,4 +1,41 @@
-﻿## 2026-09-14 — relocating an asset that several fields share
+﻿## 2026-09-22 — identical sibling blocks in NodeGraphModal; PowerShell rewrite (3rd)
+
+- Symptom: adding a second node view, an Edit whose `oldString` was a generic
+  four-line state-declaration block (`const [schema…]` / `const busy = data.busy`
+  / `const genMenu…` / `const effModel…`) matched the WRONG sibling
+  (`EditVideoNodeView`) and silently deleted its `const prompt = data.savedPrompt
+  ?? ""` binding while leaving the new component without its state. Typecheck
+  surfaced it (`prompt` resolved to `window.prompt`; `setBusy` undefined).
+- Rule: in `NodeGraphModal.tsx` (and any file with several near-identical node
+  views) an Edit's `oldString` MUST include a component-unique anchor (the
+  surface-specific class string, the component name, or a neighbouring unique
+  line). After editing a shared-looking block, grep the intended component to
+  confirm the change landed there, not on a sibling.
+- Did the forbidden PowerShell text rewrite AGAIN (`[IO.File]::ReadAllText` /
+  `.Replace` / `WriteAllText`) for a pure-ASCII rename in 4 files. Byte-scanned
+  clean (0 U+FFFD, 0 control chars) but it is still the wrong tool. Strengthen:
+  the Edit tool (or several Edit calls) is the ONLY way to change file text,
+  regardless of how mechanical the rename looks.
+
+## 2026-09-21 — live cost quotes break on media-requiring modes
+
+- Symptom: Higgsfield CLI video generation costs stopped populating on the
+  Generate buttons. The quote pill only shows when `generate cost` returns a
+  number; it silently hides on any failure, so a config the CLI rejects reads
+  as "no cost".
+- Cause: the cost probe deliberately sends no media (zero uploads), but a
+  per-surface / per-shot `mode` such as seedance_2_5's `omni_reference` (or
+  gemini's `image-to-video`) is rejected by the CLI without a media item:
+  "mode 'omni_reference' requires at least one reference media item". The
+  submit works because it always carries the source frame; the quote didn't.
+- Fix: on a media/reference rejection only, retry once with a 1×1 placeholder
+  bound to the model's start-image role (`--start-image`, else `--image`).
+  References don't move the price, so the retry prices the same config.
+- Rule: an advisory preflight that claims to "mirror the submit" must mirror
+  the submit's *required* inputs too, or it silently disagrees. Gate the
+  fallback on the rejection message so unrelated failures don't spawn twice.
+
+## 2026-09-14 — relocating an asset that several fields share
 
 - Moving a generated file into a new folder must UPDATE EVERY field that
   points at it, and the move must be memoized per old path: the first field's

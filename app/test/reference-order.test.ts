@@ -12,7 +12,7 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
-import { uniqueRefName, reorderRefs } from "../src/renderer/src/components/production/references.js";
+import { uniqueRefName, reorderRefs, reorderRefGroup } from "../src/renderer/src/components/production/references.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
@@ -133,6 +133,48 @@ async function dragTileOntoTile(host: HTMLElement, fromIndex: number, toIndex: n
   await act(async () => { tiles[toIndex].dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
 }
 
+/** Click a tile to change selection: `ctrl` toggles, `shift` extends. */
+async function selectTile(host: HTMLElement, index: number, mod: { ctrl?: boolean; shift?: boolean } = {}): Promise<void> {
+  const tiles = host.querySelectorAll(".prod-ref") as NodeListOf<HTMLElement>;
+  const ev = new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: !!mod.ctrl, shiftKey: !!mod.shift });
+  await act(async () => { tiles[index].dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
+}
+
+/** Start a drag on the tile at `index` and return the payload it published. */
+async function startTileDrag(host: HTMLElement, index: number): Promise<{ primary: string; group: string }> {
+  const tiles = host.querySelectorAll(".prod-ref") as NodeListOf<HTMLElement>;
+  const store = new Map<string, string>();
+  const dt = {
+    types: [] as string[],
+    setData: (t: string, v: string) => { store.set(t, v); if (!dt.types.includes(t)) dt.types.push(t); },
+    getData: (t: string) => store.get(t) ?? "",
+    effectAllowed: "",
+  };
+  const ev = new Event("dragstart", { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown };
+  ev.dataTransfer = dt;
+  const source = tiles[index].querySelector("img") ?? tiles[index];
+  await act(async () => { source.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
+  return { primary: store.get("application/x-cascade-reference") ?? "", group: store.get("application/x-cascade-references") ?? "" };
+}
+
+/** Drop a published payload onto the tile at `toIndex`, on the given half. */
+async function dropPayloadOntoTile(host: HTMLElement, payload: { primary: string; group: string }, toIndex: number, after: boolean): Promise<void> {
+  const tiles = host.querySelectorAll(".prod-ref") as NodeListOf<HTMLElement>;
+  const ev = new MouseEvent("drop", { bubbles: true, cancelable: true, clientX: after ? 1000 : -1000 }) as MouseEvent & { dataTransfer: unknown };
+  ev.dataTransfer = {
+    types: ["application/x-cascade-reference", "application/x-cascade-references"],
+    getData: (t: string) => (t === "application/x-cascade-references" ? payload.group : t === "application/x-cascade-reference" ? payload.primary : ""),
+    files: [],
+  };
+  await act(async () => { tiles[toIndex].dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
+}
+
+function selectedNames(host: HTMLElement): string[] {
+  return Array.from(host.querySelectorAll(".prod-ref.selected")).map((f) =>
+    (f.querySelector(".prod-ref-edit-name") as HTMLInputElement)?.value ?? "???"
+  );
+}
+
 /** Drop an image file onto the uncategorized category panel. */
 async function dropFileOnCategory(host: HTMLElement, file: File): Promise<void> {
   const panel = host.querySelector(".prod-category") as HTMLElement;
@@ -169,6 +211,23 @@ describe("reorderRefs", () => {
   });
 });
 
+describe("reorderRefGroup", () => {
+  const refs = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }];
+  it("moves a contiguous group before/after a target, preserving order", () => {
+    expect(reorderRefGroup(refs, ["a", "c"], "e", false).map((r) => r.id)).toEqual(["b", "d", "a", "c", "e"]);
+    expect(reorderRefGroup(refs, ["a", "c"], "e", true).map((r) => r.id)).toEqual(["b", "d", "e", "a", "c"]);
+    expect(reorderRefGroup(refs, ["d", "e"], "a", false).map((r) => r.id)).toEqual(["d", "e", "a", "b", "c"]);
+  });
+  it("keeps the group's own relative order from the array, not the ids array", () => {
+    expect(reorderRefGroup(refs, ["e", "b"], "a", false).map((r) => r.id)).toEqual(["b", "e", "a", "c", "d"]);
+  });
+  it("is a no-op when the target is in the group, missing, or nothing matches", () => {
+    expect(reorderRefGroup(refs, ["a", "b"], "b", false)).toBe(refs);
+    expect(reorderRefGroup(refs, ["a"], "z", false)).toBe(refs);
+    expect(reorderRefGroup(refs, ["z"], "a", false)).toBe(refs);
+  });
+});
+
 describe("design-page reference reorder", () => {
   it("reorders the saved references when a tile is dropped on another", async () => {
     disk = freshProd();
@@ -187,6 +246,38 @@ describe("design-page reference reorder", () => {
     // Drag "Ref One" onto the left half of "Ref Two" → One before Two.
     await dragTileOntoTile(host, 2, 0, false);
     expect(refNames()).toEqual(["Ref One", "Ref Two", "Ref Three"]);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("design-page multi-select reorder", () => {
+  it("drag carries the selected group and reorders them together", async () => {
+    disk = freshProd();
+    savedProds.length = 0;
+    (globalThis as Record<string, unknown>).window = (globalThis as Record<string, unknown>).window ?? {};
+    (globalThis.window as unknown as Record<string, unknown>).cascade = cascadeMock();
+
+    const { host, root } = await renderWorkspace();
+    expect(tileNames(host)).toEqual(["Ref One", "Ref Two", "Ref Three"]);
+
+    // Ctrl-click "Ref One" and "Ref Three" → both selected.
+    await selectTile(host, 0, { ctrl: true });
+    await selectTile(host, 2, { ctrl: true });
+    expect(selectedNames(host)).toEqual(["Ref One", "Ref Three"]);
+
+    // Dragging a selected tile publishes the whole group.
+    const payload = await startTileDrag(host, 0);
+    expect(JSON.parse(payload.group).sort()).toEqual(["r1", "r3"]);
+
+    // Drop the group after "Ref Two" → Two, One, Three.
+    await dropPayloadOntoTile(host, payload, 1, true);
+    expect(refNames()).toEqual(["Ref Two", "Ref One", "Ref Three"]);
+
+    // Clicking without a modifier collapses the selection to that tile.
+    await selectTile(host, 0, {});
+    expect(selectedNames(host)).toEqual(["Ref Two"]);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

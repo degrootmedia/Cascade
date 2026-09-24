@@ -245,6 +245,29 @@ describe("generateBoards with a style frame", () => {
     expect(seen[0].refs.map((r) => r.name)).toEqual(["Gandalf"]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("keeps a shot's pending job when every board fails", async () => {
+    // The batch throws when nothing generated — but each shot's orphaned
+    // vendor job was recorded on the shot as pending. The job runner must
+    // still persist that record (the only handle for a later recheck).
+    const shot = makeShot();
+    const p = makeProduction([makeStyle()], shot);
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-look-"));
+    (p.meta as { folder: string }).folder = dir;
+    fs.mkdirSync(path.join(dir, "boards"), { recursive: true });
+
+    await expect(
+      generateBoards(p, async (_prompt, _refs, s) => {
+        if (s) s.pendingImageGen = { historyId: "h-orphan", prompt: "p", model: "auto", at: new Date(0).toISOString() };
+        throw new Error("timed out");
+      }, vi.fn(), { concurrency: 1 })
+    ).rejects.toThrow(/Every board generation failed/);
+    expect(shot.pendingImageGen).toMatchObject({ historyId: "h-orphan" });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("styleFramePrompt", () => {

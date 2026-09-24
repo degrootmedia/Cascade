@@ -1,9 +1,49 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 import { BoardCard } from "../src/renderer/src/components/production/boards.js";
 import { resetBoardThumbSchedulerForTests } from "../src/renderer/src/components/production/board-thumbs.js";
+
+type BoardCardProps = Parameters<typeof BoardCard>[0];
+
+/** Mirrors ProductionWorkspace: the workspace owns which shot's frame is
+ *  enlarged so the lightbox can move between cards. */
+function ControlledBoard(props: BoardCardProps) {
+  const [zoomId, setZoomId] = useState<string | null>(null);
+  return createElement(BoardCard, {
+    ...props,
+    zoomOpen: zoomId === props.shot.id,
+    onZoomChange: setZoomId,
+    onZoomNavigate: () => {},
+  });
+}
+
+/** A multi-shot storyboard strip with the workspace's ← / → stepping. */
+function BoardStrip({ shots }:{ shots: ProductionShot[] }) {
+  const [zoomId, setZoomId] = useState<string | null>(null);
+  const navigate = (id: string, dir: -1 | 1) => {
+    const i = shots.findIndex((s) => s.id === id);
+    for (let j = i + dir; j >= 0 && j < shots.length; j += dir) {
+      const s = shots[j];
+      if (s.artwork || s.videoPath) { setZoomId(s.id); return; }
+    }
+  };
+  return createElement(
+    "div",
+    null,
+    shots.map((shot) => createElement(BoardCard, {
+      key: shot.id,
+      prod: makeProduction(shot), shot, bust: 0, regenerating: false, videoBusy: false,
+      onRegenerate: vi.fn(), onImport: vi.fn(), onEdit: vi.fn(), onVideo: vi.fn(),
+      onTextChange: vi.fn(), showScript: false, selected: false,
+      onDropFrame: vi.fn(), onPromoteHistory: vi.fn(), onPromptFocus: vi.fn(),
+      zoomOpen: zoomId === shot.id,
+      onZoomChange: setZoomId,
+      onZoomNavigate: navigate,
+    })),
+  );
+}
 
 const PRIMARY = "boards/0100/current.jpg";
 const EDIT = "boards/0100/edits/never primary #2.jpg";
@@ -56,13 +96,17 @@ describe("BoardCard history", () => {
   let prevRaf: unknown;
   let prevObserver: unknown;
   const getBoardPrompt = vi.fn(async () => "A hero walks.");
-  const boardThumbnail = vi.fn(async (_prodId: string, _shotId: string, path?: string): Promise<string | null> => thumbnail(path ?? currentPath));
-  const boardImageFull = vi.fn(async (_prodId: string, _shotId: string, path?: string) => fullImage(path ?? currentPath));
+  // Per-shot artwork so a strip of several cards resolves each shot's own full
+  // frame (the workspace passes the shot id, not a path, to boardImageFull).
+  const shotArtwork: Record<string, string> = {};
+  const boardThumbnail = vi.fn(async (_prodId: string, shotId: string, path?: string): Promise<string | null> => thumbnail(path ?? shotArtwork[shotId] ?? currentPath));
+  const boardImageFull = vi.fn(async (_prodId: string, shotId: string, path?: string) => fullImage(path ?? shotArtwork[shotId] ?? currentPath));
   const onPromoteHistory = vi.fn();
   const onPromptFocus = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
+    for (const k of Object.keys(shotArtwork)) delete shotArtwork[k];
     resetBoardThumbSchedulerForTests();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     // setup-dom stubs rAF as a never-firing no-op — fire callbacks
@@ -108,8 +152,9 @@ describe("BoardCard history", () => {
 
   async function render(shot: ProductionShot) {
     currentPath = shot.artwork ?? "";
+    shotArtwork[shot.id] = shot.artwork ?? "";
     await act(async () => {
-      root.render(createElement(BoardCard, {
+      root.render(createElement(ControlledBoard, {
         prod: makeProduction(shot), shot, bust: 0, regenerating: false, videoBusy: false,
         onRegenerate: vi.fn(), onImport: vi.fn(), onEdit: vi.fn(), onVideo: vi.fn(),
         onTextChange: vi.fn(), showScript: false, selected: false,
@@ -281,5 +326,42 @@ describe("BoardCard history", () => {
     await click(".prod-board-zoom");
     expect(boardImageFull.mock.calls).toEqual([["prod1", "shot1", undefined]]);
     expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(newPrimary));
+  });
+
+  it("steps the enlarged frame between shots with the arrow keys, skipping blanks", async () => {
+    const firstArt = "boards/0100/a.jpg";
+    const secondArt = "boards/0110/b.jpg";
+    const first = makeShot({ id: "shot1", number: "0100", artwork: firstArt, videoPath: undefined });
+    const blank = makeShot({ id: "blank", number: "0105", artwork: undefined, videoPath: undefined, graphImageGens: [], graphEditGens: [], graphOutputSource: undefined });
+    const second = makeShot({ id: "shot2", number: "0110", artwork: secondArt, videoPath: undefined });
+    shotArtwork[first.id] = firstArt;
+    shotArtwork[second.id] = secondArt;
+    await act(async () => {
+      root.render(createElement(BoardStrip, { shots: [first, blank, second] }));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    const zooms = host.querySelectorAll<HTMLButtonElement>(".prod-board-zoom");
+    expect(zooms.length).toBe(3);
+    expect(zooms[1].disabled).toBe(true);
+    expect(zooms[0].disabled).toBe(false);
+    await act(async () => { zooms[0].click(); });
+    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(firstArt));
+
+    // The blank panel in between is skipped — the lightbox lands on shot2.
+    await act(async () => {
+      window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(secondArt));
+    expect(boardImageFull).toHaveBeenLastCalledWith("prod1", "shot2", undefined);
+
+    await act(async () => {
+      window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft" }));
+    });
+    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(firstArt));
+
+    await act(async () => {
+      window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    expect(host.querySelector(".prod-ref-lightbox")).toBeNull();
   });
 });

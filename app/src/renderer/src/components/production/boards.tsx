@@ -18,7 +18,7 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
+function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -71,11 +71,21 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   /** Delete this shot (right-click menu). Confirmation is handled here when
    *  the shot has content; blank shots delete immediately. */
   onDelete?: (shotId: string) => void;
+  /** The workspace owns the enlarged-frame lightbox: true when THIS card's
+   *  frame is the one on screen, so left/right arrows can step the lightbox
+   *  between shots (a card cannot know its neighbours). */
+  zoomOpen?: boolean;
+  /** Open this card's enlarged frame, or close it (`null`). */
+  onZoomChange?: (shotId: string | null) => void;
+  /** Step the enlarged frame to the neighbouring shot (dir -1 = previous). */
+  onZoomNavigate?: (shotId: string, dir: -1 | 1) => void;
 }) {
   const [img, setImg] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
+  // The lightbox is workspace-owned (see the prop docs): this card only renders
+  // it while `zoomOpen`, which lets the arrows hand it to a neighbouring card.
+  const expanded = !!zoomOpen;
   // The prompt lives in the parent (focused-shot) fetch — every card firing
   // its own getBoardPrompt IPC at mount was N wasted round-trips per page
   // open, and the value was never even read (focusPrompt ignores it).
@@ -157,6 +167,37 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   }, [histPath, prod.meta.id, shot.id]);
 
   const shownImg = histPath === null ? img : histCache[histPath] ?? null;
+
+  // Resolve the enlarged media whenever this card's lightbox opens — or the
+  // lightbox's shot changes under it when the arrows move to a neighbour. The
+  // history branch mirrors the card: a browsed history frame zooms as a still,
+  // and only the current frame of a shot with a clip zooms as the video.
+  useEffect(() => {
+    if (!expanded) return;
+    setExpandedImg(null);
+    setExpandedVideo(null);
+    if (histPath === null && shot.videoPath && !videoFailed) {
+      setExpandedVideo(cascadeMedia(prod.meta.id, shot.videoPath));
+      return;
+    }
+    let live = true;
+    void window.cascade.boardImageFull(prod.meta.id, shot.id, histPath ?? undefined)
+      .then((full) => { if (live && full) setExpandedImg(full); });
+    return () => { live = false; };
+  }, [expanded, histPath, prod.meta.id, shot.id, shot.videoPath, videoFailed]);
+
+  // Left/right arrows step the enlarged frame through the storyboard; Escape
+  // (like a click) closes it. Only the card hosting the lightbox listens.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { onZoomChange?.(null); return; }
+      if (e.key === "ArrowLeft") { e.preventDefault(); onZoomNavigate?.(shot.id, -1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); onZoomNavigate?.(shot.id, 1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded, shot.id, onZoomChange, onZoomNavigate]);
 
   // Right-click → native image menu, with the full-res file pinned for "Edit externally".
   const relForExternal = histPath ?? shot.artwork;
@@ -435,17 +476,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
           className="prod-board-zoom"
           title={histPath === null && shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
           disabled={!shownImg && !(histPath === null && shot.videoPath)}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (histPath === null && shot.videoPath) {
-              setExpandedImg(null);
-              setExpandedVideo(`cascade-media://${prod.meta.id}/${encodeURIComponent(shot.videoPath)}`);
-              setExpanded(true);
-            } else {
-              setExpandedVideo(null);
-              void window.cascade.boardImageFull(prod.meta.id, shot.id, histPath ?? undefined).then((full) => { if (full) { setExpandedImg(full); setExpanded(true); } });
-            }
-          }}
+          onClick={(e) => { e.stopPropagation(); onZoomChange?.(shot.id); }}
         ><MagnifyIcon size={12} /></button>
         <div className="prod-board-actions">
           <button
@@ -527,7 +558,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         </div>
       )}
       {expanded && (expandedImg || expandedVideo) && (
-        <div className="prod-ref-lightbox" onClick={() => setExpanded(false)} onContextMenu={openPanelMenu}>
+        <div className="prod-ref-lightbox" onClick={() => onZoomChange?.(null)} onContextMenu={openPanelMenu}>
           <figure className="prod-ref-lightbox-card">
             {expandedVideo ? (
               <video
@@ -540,7 +571,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             ) : expandedImg ? (
               <img src={expandedImg} alt={`Shot ${shot.number}`} />
             ) : null}
-            <figcaption>Shot {shot.number} — click anywhere to close</figcaption>
+            <figcaption>Shot {shot.number} — use ← → to move between shots · click anywhere to close</figcaption>
           </figure>
         </div>
       )}

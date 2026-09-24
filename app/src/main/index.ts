@@ -1995,12 +1995,21 @@ function registerIpc() {
         if (!pq) throw new Error("Production not found.");
         pq.status[step] = "running";
         const before = structuredClone(pq);
-        await fn(pq, (m, l) => productionEmit(id, m, l));
+        let failure: unknown = null;
+        try {
+          await fn(pq, (m, l) => productionEmit(id, m, l));
+        } catch (e) {
+          failure = e;
+          pq.status[step] = "error";
+        }
+        // Persist even on failure: a batch whose last step throws (e.g. every
+        // board failed) still recorded a pending job per shot — the only
+        // handle on a vendor job still rendering — and its error status. A
+        // skipped save here dropped the pending record and stranded the frame.
         productions.saveProduction(rebaseProduction(before, pq));
+        if (failure) throw failure;
       });
     } catch (e) {
-      const pErr = productions.loadProduction(id);
-      if (pErr) { pErr.status[step] = "error"; productions.saveProduction(pErr); }
       productionEmit(id, friendlyApiError(e), "error");
       throw new Error(friendlyApiError(e));
     }
@@ -2023,8 +2032,17 @@ function registerIpc() {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
-        await fn(pq, (m, l) => productionEmit(id, m, l));
+        let failure: unknown = null;
+        try {
+          await fn(pq, (m, l) => productionEmit(id, m, l));
+        } catch (e) {
+          failure = e;
+        }
+        // Persist even on failure: a recheck that finds a dead job deletes its
+        // pending record (which must stick), and a job that records one must
+        // keep it. Dropping the save left the shot stuck showing as pending.
         productions.saveProduction(rebaseProduction(before, pq));
+        if (failure) throw failure;
       });
     } catch (e) {
       productionEmit(id, friendlyApiError(e), "error");

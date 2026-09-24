@@ -245,6 +245,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [refGen, setRefGen] = useState<{ categoryId?: string; refId?: string } | null>(null);
   const [promptShotId, setPromptShotId] = useState<string | null>(null);
   const [focusedPrompt, setFocusedPrompt] = useState("");
+  // The storyboard's enlarged-frame lightbox: which shot's full frame is on
+  // screen (null = closed). Owned here, not per-card, so ← / → can step the
+  // lightbox to a neighbouring shot (a card only knows its own shot).
+  const [boardZoomId, setBoardZoomId] = useState<string | null>(null);
   // Step 3 node graph: opens for the focused shot; overlays the storyboard.
   const [graphShotId, setGraphShotId] = useState<string | null>(null);
   const promptSaveQueue = useRef(Promise.resolve());
@@ -291,6 +295,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     reorderDragEnd: () => void;
     insertAfter: (id: string) => void;
     remove: (id: string) => void;
+    zoomChange: (id: string | null) => void;
+    zoomNavigate: (id: string, dir: -1 | 1) => void;
   }>(null as never);
   boardHandlerRef.current = {
     regenerate: (id) => void regenBoard(id),
@@ -335,6 +341,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       if (i >= 0) insertBlankShot(flat, i);
     },
     remove: (id) => deleteBoardShot(id),
+    zoomChange: (id) => setBoardZoomId(id),
+    zoomNavigate: (id, dir) => {
+      const current = prodRef.current;
+      if (!current) return;
+      const flat = current.scenes.flatMap((sc) => sc.shots);
+      const i = flat.findIndex((s) => s.id === id);
+      if (i < 0) return;
+      // Skip frameless shots: a blank panel has nothing to enlarge (its zoom
+      // button is disabled), so stepping onto one would strand the lightbox.
+      for (let j = i + dir; j >= 0 && j < flat.length; j += dir) {
+        const s = flat[j];
+        if (s.artwork || s.videoPath) { setBoardZoomId(s.id); return; }
+      }
+    },
   };
   const boardActions = useMemo(() => ({
     onRegenerate: (id: string) => boardHandlerRef.current.regenerate(id),
@@ -356,6 +376,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onReorderDragEnd: () => boardHandlerRef.current.reorderDragEnd(),
     onInsertAfter: (id: string) => boardHandlerRef.current.insertAfter(id),
     onDelete: (id: string) => boardHandlerRef.current.remove(id),
+    onZoomChange: (id: string | null) => boardHandlerRef.current.zoomChange(id),
+    onZoomNavigate: (id: string, dir: -1 | 1) => boardHandlerRef.current.zoomNavigate(id, dir),
   }), []);
 
   const refreshList = useCallback(async () => {
@@ -729,10 +751,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       delete latestPromptRef.current[promptShotId];
     }
     if (graphShotId && !ids.has(graphShotId)) setGraphShotId(null);
+    if (boardZoomId && !ids.has(boardZoomId)) setBoardZoomId(null);
     for (const k of Object.keys(promptCacheRef.current)) {
       if (!ids.has(k)) delete promptCacheRef.current[k];
     }
-  }, [prod, promptShotId, graphShotId]);
+  }, [prod, promptShotId, graphShotId, boardZoomId]);
 
   // ---- Detached canvas window (Spec 03) ----------------------------------
   // The detached renderer has no picker: load the requested production directly.
@@ -3748,6 +3771,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onReorderDrop={boardActions.onReorderDrop}
                     onInsertAfter={boardActions.onInsertAfter}
                     onDelete={boardActions.onDelete}
+                    zoomOpen={boardZoomId === shot.id}
+                    onZoomChange={boardActions.onZoomChange}
+                    onZoomNavigate={boardActions.onZoomNavigate}
                   />
                 ))}
                 <button

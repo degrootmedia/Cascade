@@ -25,10 +25,18 @@ chosen: all video flows.
 - [x] UI: video node + edit-video node render a "pending…" state and a Fetch
       button; the storyboard card shows a "video pending" badge + fetch; the
       tween timeline shows Fetch on the pending block.
+- [x] **Follow-up (image bug found by the user)**: `runProductionStep` and
+      `runProductionJob` also skipped their save when the job threw, so a batch
+      where EVERY board failed (`generateBoards` records `pendingImageGen` per
+      shot, then throws "Every board generation failed") dropped the pending
+      record — the image rendered fine on OpenArt but had no recheck handle.
+      Both runners now persist the rebased snapshot on failure (the step one
+      also commits its error status); regression test in `look-cohesion.test.ts`
+      pins that `generateBoards` leaves the pending record on the shot.
 - [x] Tests: OpenArt pending-video (timeout + reclaim, URL-download retry,
       dead-job no-record); higgsfield-cli/openart-cli video recheck; graph
-      Fetch button renders + fires. `npm run typecheck` clean, 1125 pass + 1
-      skip, `npm run build` clean.
+      Fetch button renders + fires; all-fail batch keeps the pending record.
+      `npm run typecheck` clean, 1126 pass + 1 skip, `npm run build` clean.
 
 ## Review
 
@@ -39,7 +47,11 @@ download — even though the vendor job keeps rendering. Recording
 `production:recheckVideo` handler closes it for every flow. Self-caught: the
 `runVideoJob` runner skipped its save on error, so a pending record written by
 the failed job would never have reached disk — restructured it to save the
-rebased snapshot before rethrowing.
+rebased snapshot before rethrowing. That same structural bug was then reported
+for images: an all-boards-failed batch threw before `runProductionStep` saved,
+dropping `pendingImageGen`; `runProductionStep` and `runProductionJob` now save
+on failure too, so a recorded pending job (or a dead-job deletion) always
+reaches disk.
 
 ---
 

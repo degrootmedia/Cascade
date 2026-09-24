@@ -85,6 +85,19 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   dragged or clicked.
 - **Shot** — the smallest Audio/Visual unit; stable `id`, derived 4-digit `number`.
   The persistent canvas for the node graph (`ProductionShot`).
+- **Outdated panel** — a shot preserved when a script is re-ingested rather than
+  overwritten. `ingestScript` (`pipeline.ts`) archives every prior shot through
+  `archiveShotsToOutdated`: its board folder moves to `boards/outdated/<id>/`
+  (so a freshly numbered shot can't collide with it), every stored media path is
+  rewritten via the shared `mapShotMediaPaths`/`shotMediaRefs` field list, and it
+  is marked `outdated`/`outdatedAt` and appended to `Production.outdatedShots`.
+  Outdated shots are not in `scenes`, so numbering, generation, animatic,
+  assembly, and `script.md` ignore them; the Step 3 Storyboard renders them as a
+  trailing read-only section (`components/production/outdated.tsx`) with restore
+  (`restoreOutdatedShot` — fresh number after the global max, files moved back and
+  `shot-<number>-` filenames renamed, appended to the last scene) and delete
+  (`removeOutdatedShot`). Batches accumulate; `applyRendererState` keeps main's
+  bucket authoritative over a stale renderer save.
 - **Scene** — ordinal grouping of shots (display only).
 - **Reference** — a character / product / custom-referenced image. Artwork lives
   on disk (`imagePath` under `referencesDir`); legacy inline data URLs still read.
@@ -303,7 +316,12 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   routed through the async `onSaveGenerationAsReference` resolver so the created
   ref is known) opens the shelf, clears its filter, and pulses/scrolls the new
   tile into view; the fire-and-forget `onSaveAsReference` is the fallback when
-  no resolver is wired.
+  no resolver is wired. **Magic Prompt is tag-authoritative**: its `@[name]`
+  citations live in the effective prompt text (`magicPrompts`), not in the
+  stored graph's edges, so when it is active `NodeGraphModal` reconciles the
+  composer's ref sockets to the tag order via `wireComposerRefs`
+  (`shared/graph/connect.ts` — adds the ref node + positional `ref→composer`
+  edges, idempotent) and the citations show wired.
 - **In-betweener** — a node-graph node that interpolates 2–5 keyframes
   into one continuous shot. A keyframe is a **source id** stored in
   `graphTweenRefIds` (`TweenBlock.startRefId`/`endRefId`): a reference id

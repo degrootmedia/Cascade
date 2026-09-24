@@ -1,4 +1,50 @@
-﻿# Camera grid: click/shift-click selection, touch-select, wiring persistence
+﻿# Re-ingest: preserve previous panels as outdated (restorable)
+
+User: when re-ingesting a script, previous panels must not be overwritten —
+move them to the end of the storyboard, mark them outdated, keep them fully
+accessible (view + restore + delete). Outdated batches accumulate.
+
+## Plan
+
+- [x] Types: `ProductionShot.outdated` / `outdatedAt`, `Production.outdatedShots`.
+- [x] `pipeline.ts`: extract `mapShotMediaPaths` from `relocateBoardsForRenumber`;
+      `moveShotMediaDir` + `archiveShotsToOutdated` (move board folder to
+      `boards/outdated/<id>/`, mark outdated) + `restoreOutdatedShot` (fresh
+      number, move folder back, insert at end) + `removeOutdatedShot` (unlink).
+- [x] `ingestScript`: archive the old shots into `outdatedShots` before
+      replacing `p.scenes`; keep the manual-prompt carry-over.
+- [x] `productions.ts`: normalize `outdatedShots`; `applyRendererState` keeps
+      main's bucket authoritative (and magic-prompt cleanup spares outdated ids).
+- [x] IPC contract + renderer API: `production:removeOutdatedShot` /
+      `production:restoreOutdatedShot`.
+- [x] `index.ts`: handlers via `mutateShots`, serialized by `enqueueProduction`.
+- [x] Renderer: an "Outdated" section at the end of the Step 3 storyboard
+      (thumbnail + number + Audio/Visual + badge + Restore/Delete, frame opens
+      full-res).
+- [x] Tests: ingest archiving/relocation, number reuse, restore
+      renumber+relocation, remove, text-only panels, accumulation; productions
+      merge keeps the bucket. `outdated-shots.test.ts` (6) + one merge test.
+- [x] Verify: `npm run typecheck` clean, 1119 pass + 1 skip, `npm run build` clean.
+
+## Review
+
+Done. Re-ingest now preserves the previous breakdown instead of `p.scenes = scenes`.
+Each old panel's board folder moves to `boards/outdated/<id>/` (number-free, so a
+fresh shot re-using `0100` can't overwrite it) and every stored media path is
+rewritten through the one `mapShotMediaPaths`/`shotMediaRefs` field list — which
+also de-duplicated `relocateBoardsForRenumber`'s inline patch table. Outdated
+panels live on `Production.outdatedShots`, outside `scenes`, so numbering,
+generation, animatic, assembly, and `script.md` never see them. The Storyboard
+renders them at the end with Restore (fresh number after the global max, files
+moved back with `shot-<number>-` renamed) and Delete (unlink), and batches
+accumulate. Self-caught during testing: the folder move renamed the *stored*
+paths but not the *files*, so a restore's frame landed on disk under the old
+`shot-0100-` name — `moveShotMediaDir` now renames inner files when the number
+changes (the archive move keeps the number, so it stays a plain folder move).
+
+---
+
+# Camera grid: click/shift-click selection, touch-select, wiring persistence
 
 User: clicking panels individually didn't work (want shift+click multi-select);
 the drag box should select any panel it touches (not >50% overlap); the drag box
@@ -1502,3 +1548,36 @@ state block instead of `UpscaleNodeView` and silently dropped its `prompt`
 binding (typecheck caught it; repaired with per-view anchors) — see lessons.
 Also violated the PowerShell-rewrite rule for the `UpscaleNodeData`→`UpscaleData`
 rename; byte-scanned clean and redid later edits with the Edit tool.
+
+---
+
+# Magic Prompt: auto-wire its tagged references in the node graph
+
+User: Magic Prompt correctly tags/attaches references in the sidepanel and
+uploads them to OpenArt, but the node graph didn't show them wired.
+
+## Plan
+
+- [x] Root cause: Magic Prompt is tag-authoritative — its `@[name]` citations
+      live in `magicPrompts` (the effective prompt), while the graph's ref
+      edges come from the stored graph (`materializeGraph` reads `shot.prompt`).
+      So tagged ref nodes render but no wires exist.
+- [x] New pure `wireComposerRefs(graph, refIds)` (`shared/graph/connect.ts`):
+      adds a ref node per id + positional `ref→composer` edges in tag order
+      (mirrors `materializeGraph`), idempotent.
+- [x] `NodeGraphModal` effect: when Magic is active and a stored graph exists,
+      reconcile the composer's ref wires from the tag order (gated on a
+      non-empty focused prompt so a not-yet-fetched prompt can't strip wires);
+      saves only on change.
+- [x] Tests: pure `wireComposerRefs` (adds nodes/edges, positional rebuild,
+      idempotent, normalizes clean) + a `frame-drop` journey (drop onto a Magic
+      shot, open the graph, assert a stored ref→composer edge). `CONTEXT.md`
+      updated.
+
+## Review
+
+Done, verified (`npm run typecheck` clean, 1112 pass + 1 skip, `npm run build`
+clean). Magic remains tag-authoritative; the graph now follows its citations by
+rebuilding the composer ref sockets from the tag order, so an AI-written or
+dropped `@[name]` shows wired when the graph opens. Additive to the stored
+graph's other wiring and idempotent (a settled graph saves nothing).

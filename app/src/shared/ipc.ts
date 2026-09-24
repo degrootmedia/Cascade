@@ -561,6 +561,10 @@ export interface CascadeApi {
   setShotNumber(productionId: string, shotId: string, number: string): Promise<Production>;
   /** Move a shot before another shot (or to the end of the production when beforeShotId is null, or to the end of one scene when endSceneNumber is set). Re-numbers and relocates board files. */
   reorderShot(productionId: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number): Promise<Production>;
+  /** Bring an outdated panel (preserved from a previous script re-ingest) back into the active storyboard with a fresh number; its board files relocate with it. */
+  restoreOutdatedShot(productionId: string, shotId: string): Promise<Production>;
+  /** Permanently delete an outdated panel and its preserved board files. */
+  removeOutdatedShot(productionId: string, shotId: string): Promise<Production>;
   /** Start a production without a script: one scene with five blank shots (refuses when scenes already exist). */
   startBlank(productionId: string): Promise<Production>;
   /** Insert an empty scene after the given ordinal (0 = before the first, null = at the end); later scenes renumber. */

@@ -66,6 +66,26 @@ describe("applyRendererState", () => {
     expect(merged.scriptSource).toBe("C:/script.md");
   });
 
+  it("keeps the main-owned outdated panels over a stale renderer snapshot", () => {
+    const live: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "v" };
+    const old: ProductionShot = {
+      id: "old", number: "0100", audio: "a", visual: "v",
+      outdated: true, outdatedAt: "2026-01-01T00:00:00.000Z",
+      artwork: "boards/outdated/old/shot-0100-old.jpg",
+    };
+    const fresh = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [live] }],
+      outdatedShots: [old],
+    });
+    // A renderer snapshot that never saw the outdated bucket (or is stale).
+    const incoming = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [live] }],
+      outdatedShots: [],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.outdatedShots).toEqual([old]);
+  });
+
   it("preserves sanitized openArt params/quality and drops non-scalar shapes", () => {
     // Regression: the whitelist once rebuilt openArt with model/resolution
     // (+quality) only, silently reverting every storyboard params pick —

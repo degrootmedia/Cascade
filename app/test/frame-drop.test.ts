@@ -230,4 +230,46 @@ describe("frame-over-frame drop", () => {
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
+
+  it("wires the dropped Magic-Prompt reference into the node graph", async () => {
+    disk = freshProd();
+    (disk as Record<string, unknown>).magicEnabled = true;
+    (disk as Record<string, unknown>).magicPrompts = { s2: "The villain looms over the ridge." };
+    savedProds.length = 0;
+    (globalThis as Record<string, unknown>).window = (globalThis as Record<string, unknown>).window ?? {};
+    (globalThis.window as unknown as Record<string, unknown>).cascade = cascadeMock();
+
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(createElement(ProductionWorkspace, {}));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
+    await act(async () => { openBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    // Focus the target shot, drop frame s1 onto it while Magic Prompt is ON.
+    const frames = host.querySelectorAll(".prod-board-frame") as NodeListOf<HTMLElement>;
+    await act(async () => {
+      frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => { dropOnTarget(); await new Promise((r) => setTimeout(r, 50)); });
+
+    // Open the node graph — the citation must become a stored ref→composer wire.
+    const nodesBtn = host.querySelector(".prod-graph-open") as HTMLButtonElement;
+    expect(nodesBtn).toBeTruthy();
+    await act(async () => { nodesBtn.click(); await new Promise((r) => setTimeout(r, 80)); });
+
+    const wired = savedProds.some((p) => {
+      const s2 = (p.scenes as Array<{ shots: Array<Record<string, unknown>> }>)?.flatMap((sc) => sc.shots)?.find((s) => s.id === "s2");
+      const graph = s2?.graph as { edges?: Array<{ from: { node: string }; to: { node: string; port: string } }> } | undefined;
+      return (graph?.edges ?? []).some((e) => e.from.node.startsWith("ref:") && e.to.node === "composer" && e.to.port.startsWith("in-ref-"));
+    });
+    expect(wired).toBe(true);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
 });

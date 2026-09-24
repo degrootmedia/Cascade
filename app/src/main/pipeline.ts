@@ -1541,6 +1541,33 @@ function shotMediaRefs(shot: ProductionShot): string[] {
 }
 
 /**
+ * Rewrite every workspace-relative media path a shot can hold through `remap`,
+ * in place. Pairs with `shotMediaRefs` (same field list) so a new path-bearing
+ * field follows its shot on every relocation — renumber, and the re-ingest
+ * outdated archive/restore moves.
+ */
+function mapShotMediaPaths(shot: ProductionShot, remap: (rel: string) => string): void {
+  const one = (rel: string | undefined): string | undefined =>
+    typeof rel === "string" && rel ? remap(rel) : rel;
+  shot.artwork = one(shot.artwork);
+  if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => one(r)!);
+  if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: one(g.path)! }));
+  if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: one(g.path)! }));
+  if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: one(g.path)! }));
+  for (const node of shot.graphEditNodes ?? []) {
+    if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: one(g.path)! }));
+  }
+  shot.videoPath = one(shot.videoPath);
+  if (shot.graphEditVideoGens?.length) shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: one(g.path)! }));
+  shot.graphTweenOutput = one(shot.graphTweenOutput);
+  if (shot.graphTweenBlocks?.length) {
+    shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) =>
+      b.gens?.length ? { ...b, gens: b.gens.map((g) => ({ ...g, path: one(g.path)! })) } : b
+    );
+  }
+}
+
+/**
  * Relocate storyboard board folders/files when shots are renumbered (e.g.
  * drag-reorder). For every shot whose number changed (old→new), move its
  * per-shot directory boards/<old> → boards/<new> (via temp, so permuted
@@ -1732,31 +1759,15 @@ export function relocateBoardsForRenumber(
   // refreshBoardLinks) rather than pointing at a new non-existent location.
   const patched: string[] = [];
   const patchShotPaths = (shot: ProductionShot, oldNum: string, newNum: string) => {
-    const patchOne = (rel: string | undefined): string | undefined => {
-      if (!rel) return rel;
+    const patchOne = (rel: string): string => {
       const next = relocatedRel(rel, oldNum, newNum);
       if (next === rel) return rel;
       if (newLanded.has(next) || existsRel(next)) { patched.push(next); return next; }
       return rel;
     };
-    if (shot.artwork) shot.artwork = patchOne(shot.artwork)!;
-    if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => patchOne(r)!);
-    if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
-    if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
-    if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
-    for (const node of shot.graphEditNodes ?? []) {
-      if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: patchOne(g.path)! }));
-    }
-    // Video clips live under boards/<number>/video/, so they move with the
-    // shot too — patch the clip paths alongside the frame paths.
-    if (shot.videoPath) shot.videoPath = patchOne(shot.videoPath)!;
-    if (shot.graphEditVideoGens?.length) shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: patchOne(g.path)! }));
-    if (shot.graphTweenOutput) shot.graphTweenOutput = patchOne(shot.graphTweenOutput)!;
-    if (shot.graphTweenBlocks?.length) {
-      shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) =>
-        b.gens?.length ? { ...b, gens: b.gens.map((g) => ({ ...g, path: patchOne(g.path)! })) } : b
-      );
-    }
+    // The same field list renumber's moves touch — frames, histories, node
+    // generations, clips, tween outputs (see `shotMediaRefs`).
+    mapShotMediaPaths(shot, patchOne);
   };
   for (const { shot, oldNum, newNum } of moves) patchShotPaths(shot, oldNum, newNum);
 
@@ -1781,6 +1792,132 @@ export function relocateBoardsForRenumber(
       if (typeof val === "string" && val.trim()) nextOverrides[newKey] = val;
     }
     p.promptOverrides = nextOverrides;
+  }
+}
+
+/** Move one shot's per-shot media folder from `fromDirRel` to `toDirRel` and
+ *  rewrite every stored path (see `mapShotMediaPaths`). When the number changed
+ *  (`fromNumber` → `toNumber`) the inner `shot-<number>-` filenames are renamed
+ *  too, mirroring `relocateBoardsForRenumber`. A missing source folder (a
+ *  text-only panel that never generated) is not an error: there is nothing to
+ *  move and no paths to rewrite. Refuses to clobber an existing target folder.
+ *  Returns true when files were moved. */
+function moveShotMediaDir(
+  p: Production,
+  shot: ProductionShot,
+  fromDirRel: string,
+  toDirRel: string,
+  fromNumber: string,
+  toNumber: string
+): boolean {
+  const fromAbs = assetPath(p, fromDirRel);
+  if (!fs.existsSync(fromAbs)) return false;
+  const toAbs = assetPath(p, toDirRel);
+  if (fs.existsSync(toAbs)) {
+    throw new Error(`Boards folder ${toDirRel} already exists — refusing to overwrite it.`);
+  }
+  fs.mkdirSync(path.dirname(toAbs), { recursive: true });
+  fs.renameSync(fromAbs, toAbs);
+  // A number change must also rename the inner `shot-<number>-` files so
+  // `refreshBoardLinks`/`writeBoardFrame` (which key on that prefix) still find
+  // them. The archive move keeps the number, so this is a no-op there.
+  if (fromNumber !== toNumber) {
+    const renameIn = (absDir: string) => {
+      for (const entry of fs.readdirSync(absDir)) {
+        const full = path.join(absDir, entry);
+        if (fs.statSync(full).isDirectory()) { renameIn(full); continue; }
+        if (entry.includes(`shot-${fromNumber}-`)) {
+          fs.renameSync(full, path.join(absDir, entry.split(`shot-${fromNumber}-`).join(`shot-${toNumber}-`)));
+        }
+      }
+    };
+    renameIn(toAbs);
+  }
+  mapShotMediaPaths(shot, (rel) => {
+    if (!rel.startsWith(`${fromDirRel}/`)) return rel;
+    const rest = rel.slice(fromDirRel.length + 1);
+    return `${toDirRel}/` + (fromNumber !== toNumber ? rest.split(`shot-${fromNumber}-`).join(`shot-${toNumber}-`) : rest);
+  });
+  return true;
+}
+
+/**
+ * Move every shot of the about-to-be-replaced breakdown into the trailing
+ * outdated bucket: its board folder becomes `boards/outdated/<id>/` (so a fresh
+ * shot re-using the shot number can't overwrite it), the shot is marked
+ * `outdated`, and it is appended to `p.outdatedShots` for the Storyboard's
+ * outdated section. Batches accumulate across repeated re-ingests.
+ */
+export function archiveShotsToOutdated(p: Production, shots: ProductionShot[]): number {
+  if (!shots.length) return 0;
+  const at = new Date().toISOString();
+  for (const shot of shots) {
+    moveShotMediaDir(
+      p,
+      shot,
+      `${p.assets.boardsDir}/${shot.number}`,
+      `${p.assets.boardsDir}/outdated/${shot.id}`,
+      shot.number,
+      shot.number
+    );
+    shot.outdated = true;
+    shot.outdatedAt = at;
+  }
+  p.outdatedShots = [...(p.outdatedShots ?? []), ...shots];
+  return shots.length;
+}
+
+/**
+ * Restore one outdated panel into the active storyboard: assign it a fresh
+ * number after the current global maximum, move its board folder back from
+ * `boards/outdated/<id>/` to `boards/<number>/` (renaming the inner
+ * `shot-<number>-` filenames), clear the outdated mark, and append it to the
+ * last scene (creating one when no scenes remain). Returns the restored shot.
+ */
+export function restoreOutdatedShot(p: Production, shotId: string): ProductionShot {
+  const list = p.outdatedShots ?? [];
+  const idx = list.findIndex((s) => s.id === shotId);
+  if (idx === -1) throw new Error("Outdated panel not found.");
+  const shot = list[idx];
+  const active = p.scenes.flatMap((sc) => sc.shots.map((s) => s.number)).filter(shotter.isValidNumber);
+  const number = active.length
+    ? shotter.nextNumber(String(Math.max(...active.map((n) => parseInt(n, 10)))).padStart(4, "0"))
+    : shotter.FIRST_NUMBER;
+  moveShotMediaDir(
+    p,
+    shot,
+    `${p.assets.boardsDir}/outdated/${shot.id}`,
+    `${p.assets.boardsDir}/${number}`,
+    shot.number,
+    number
+  );
+  shot.number = number;
+  delete shot.outdated;
+  delete shot.outdatedAt;
+  list.splice(idx, 1);
+  p.outdatedShots = list;
+  if (!p.scenes.length) p.scenes.push({ number: 1, title: "Scene 1", shots: [shot] });
+  else p.scenes[p.scenes.length - 1].shots.push(shot);
+  return shot;
+}
+
+/**
+ * Permanently drop one outdated panel: remove it from the bucket and delete its
+ * relocated media folder (plus any stray referenced files outside it).
+ */
+export function removeOutdatedShot(p: Production, shotId: string): void {
+  const list = p.outdatedShots ?? [];
+  const idx = list.findIndex((s) => s.id === shotId);
+  if (idx === -1) throw new Error("Outdated panel not found.");
+  const [shot] = list.splice(idx, 1);
+  p.outdatedShots = list;
+  const dirRel = `${p.assets.boardsDir}/outdated/${shot.id}`;
+  try {
+    fs.rmSync(assetPath(p, dirRel), { recursive: true, force: true });
+  } catch { /* folder already gone */ }
+  for (const rel of shotMediaRefs(shot)) {
+    if (rel.startsWith(`${dirRel}/`)) continue; // removed with the folder
+    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* already gone / external */ }
   }
 }
 
@@ -3083,6 +3220,14 @@ export async function ingestScript(
   fs.writeFileSync(mdPath, md, "utf8");
   emit(`Wrote ${p.assets.scriptMd} to the production folder.`);
 
+  // Preserve the previous breakdown instead of overwriting it: every old panel
+  // moves to the trailing outdated section with its board folder relocated to
+  // boards/outdated/<id>/ (so the freshly numbered shots can't collide with it).
+  const previousShots = p.scenes.flatMap((sc) => sc.shots);
+  if (previousShots.length) {
+    const archived = archiveShotsToOutdated(p, previousShots);
+    emit(`Kept ${archived} previous panel(s) as outdated.`);
+  }
   p.scenes = scenes;
   // Restore manual prompts onto shots whose number matches a stashed override.
   let restored = 0;

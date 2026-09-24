@@ -21,6 +21,7 @@ import {
   tweenKeyForSource,
   tweenKeyToNode,
   tweenKeysAfterConnect,
+  wireComposerRefs,
   type FlowConnection,
 } from "../src/shared/graph/connect.js";
 import { materializeGraph } from "../src/shared/graph/materialize.js";
@@ -403,6 +404,26 @@ describe("camera-grid wiring", () => {
     // A source drag-off removes every camera-grid edge from that node.
     const dropped = graphEdgesForDetach(g, detach("source", "imagegen", ""), camCtx)!;
     expect(dropped.edges.some((e) => e.to.node === "cameraGrid")).toBe(false);
+  });
+});
+
+describe("wireComposerRefs reconciles Magic-Prompt tag citations", () => {
+  it("adds ref nodes + positional composer edges in tag order", () => {
+    const g = materializeGraph(shot({}), REFS); // graph-less → no composer tags
+    const next = wireComposerRefs(g, ["r1", "r2"]);
+    expect(keysOf(next)).toContain("e-ref:r1-composer-0");
+    expect(keysOf(next)).toContain("e-ref:r2-composer-1");
+    expect(next.nodes.some((n) => n.id === "ref:r2")).toBe(true);
+    expect(normalizeGraph(next).issues).toEqual([]);
+  });
+
+  it("rebuilds positionally (a removed tag unwires) and is idempotent", () => {
+    const g = wireComposerRefs(materializeGraph(shot({ prompt: "@[Gondola]" }), REFS), ["r1", "r2"]);
+    const reordered = wireComposerRefs(g, ["r2"]);
+    expect(keysOf(reordered)).not.toContain("e-ref:r1-composer-0");
+    expect(reordered.edges.find((e) => e.id === "e-ref:r2-composer-0")?.to).toEqual({ node: "composer", port: "in-ref-0" });
+    expect(wireComposerRefs(reordered, ["r2"])).toEqual(reordered);
+    expect(normalizeGraph(reordered).issues).toEqual([]);
   });
 });
 

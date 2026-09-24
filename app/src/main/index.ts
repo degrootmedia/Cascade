@@ -14,7 +14,7 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween } from "./pipeline.js";
 import { styleFramePrompt } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -1850,6 +1850,27 @@ function registerIpc() {
       const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId, endSceneNumber);
       relocateBoardsForRenumber(p, oldNumbers);
     })
+  );
+
+  // Outdated panels (preserved from a previous script re-ingest). Restore pulls
+  // one back into the active storyboard with a fresh number and relocates its
+  // board files; remove permanently drops it and its files. Both are serialized
+  // per production so they can't race an in-flight generation job.
+  handle("production:restoreOutdatedShot", (_e, id: string, shotId: string) =>
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        const shot = restoreOutdatedShot(p, shotId);
+        productionEmit(id, `Restored outdated panel as shot ${shot.number}.`, "done");
+      })
+    )
+  );
+
+  handle("production:removeOutdatedShot", (_e, id: string, shotId: string) =>
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        removeOutdatedShot(p, shotId);
+      })
+    )
   );
 
   handle("production:startBlank", (_e, id: string) =>

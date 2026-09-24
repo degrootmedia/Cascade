@@ -473,6 +473,33 @@ export function applyCameraGridRefs(graph: Graph, refIds: string[]): Graph {
   return { ...graph, edges: [...kept, ...fresh] };
 }
 
+/**
+ * Magic Prompt is tag-authoritative: its `@[name]` citations live in the
+ * effective prompt text (`magicPrompts`), not in the stored graph's ref edges,
+ * so the canvas shows the tagged ref nodes but no wires. Rebuild the
+ * composer's reference-socket edges from the ordered tagged reference ids —
+ * adding a ref node for each id — so the graph follows the tags. Positional
+ * (socket index = tag order), mirroring `materializeGraph`; a removed tag
+ * unwires. Only ref→composer edges are touched.
+ */
+export function wireComposerRefs(graph: Graph, refIds: string[]): Graph {
+  const nodes = [...graph.nodes];
+  const have = new Set(nodes.map((n) => n.id));
+  for (const id of refIds) {
+    const nodeId = `ref:${id}`;
+    if (!have.has(nodeId)) { have.add(nodeId); nodes.push({ id: nodeId, kind: "ref", pos: { x: 0, y: 0 } }); }
+  }
+  const kept = graph.edges.filter(
+    (e) => !(e.to.node === "composer" && e.from.node.startsWith("ref:") && /^in-ref-\d+$/.test(e.to.port))
+  );
+  const fresh: GraphEdge[] = [];
+  refIds.forEach((id, i) => {
+    const nodeId = `ref:${id}`;
+    if (have.has(nodeId)) fresh.push(mkEdge(`e-${nodeId}-composer-${i}`, nodeId, "out", "composer", `in-ref-${i}`));
+  });
+  return { ...graph, nodes, edges: [...kept, ...fresh] };
+}
+
 /** Add a node (no-op when the id already exists). */
 export function addGraphNode(graph: Graph, node: GraphNode): Graph {
   if (graph.nodes.some((n) => n.id === node.id)) return graph;

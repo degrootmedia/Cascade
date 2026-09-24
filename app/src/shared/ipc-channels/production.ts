@@ -32,6 +32,8 @@ export const productionChannels = {
   "production:updateShot": { method: "updateShot", kind: "invoke" },
   "production:setShotNumber": { method: "setShotNumber", kind: "invoke" },
   "production:reorderShot": { method: "reorderShot", kind: "invoke" },
+  "production:restoreOutdatedShot": { method: "restoreOutdatedShot", kind: "invoke" },
+  "production:removeOutdatedShot": { method: "removeOutdatedShot", kind: "invoke" },
   "production:startBlank": { method: "startBlank", kind: "invoke" },
   "production:addScene": { method: "addScene", kind: "invoke" },
   "production:generateBoards": { method: "generateBoards", kind: "invoke" },

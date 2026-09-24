@@ -26,6 +26,7 @@ export interface ProductionFile extends Production {}
 function normalize(p: ProductionFile): ProductionFile {
   if (!p.meta || !p.meta.id || !p.meta.folder) throw new Error("corrupt production file");
   p.scenes ??= [];
+  p.outdatedShots ??= [];
   p.characters ??= [];
   p.products ??= [];
   p.references ??= [];
@@ -55,7 +56,12 @@ function normalize(p: ProductionFile): ProductionFile {
   if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
   // Clean stale magic entries for deleted shots and non-string values
   if (p.magicPrompts && typeof p.magicPrompts === "object") {
-    const ids = new Set(p.scenes.flatMap((sc) => sc.shots.map((s) => s.id)));
+    // Outdated panels are preserved verbatim, so their magic prompts count as
+    // live keys too — only truly-gone shots get pruned.
+    const ids = new Set([
+      ...p.scenes.flatMap((sc) => sc.shots.map((s) => s.id)),
+      ...(p.outdatedShots ?? []).map((s) => s.id),
+    ]);
     for (const k of Object.keys(p.magicPrompts)) {
       if (!ids.has(k) || typeof p.magicPrompts[k] !== "string") delete p.magicPrompts[k];
       else p.magicPrompts[k] = p.magicPrompts[k].trim().slice(0, 2000);
@@ -438,6 +444,9 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // that predates a shot reorder can neither revert the order nor cross-wire
   // frames between shots. Shots the renderer deleted stay deleted.
   mergeRendererScenes(fresh, p);
+  // outdatedShots is main-owned (ingest archives panels; the restore/remove
+  // handlers mutate it) — the fresh on-disk bucket always wins over a stale
+  // renderer snapshot, which never edits it.
   // promptOverrides is keyed by displayed shot number and written main-side
   // (ingest stashes manual prompts, reorder remaps them) — the renderer never
   // edits it through a save, so the fresh map always wins. Replacing it with

@@ -926,6 +926,27 @@ body {
 .prod-frame-zoom { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border); background: rgba(25,29,33,.96); color: var(--text-dim); font-size: .78rem; }
 .prod-frame-zoom input { width: 180px; accent-color: var(--accent); }
 .prod-frame-zoom span { width: 42px; text-align: right; }
+/* Outdated panels: the trailing, read-only section of the Step 3 storyboard. */
+.prod-outdated { margin: 26px 0 8px; padding-top: 18px; border-top: 1px dashed var(--border); }
+.prod-outdated-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.prod-outdated-head h3 { margin: 0; font-size: .95rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+.prod-outdated-head .hint { color: var(--text-dim); font-size: .78rem; }
+.prod-outdated-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.prod-outdated-card { margin: 0; display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); opacity: .92; }
+.prod-outdated-frame { position: relative; display: block; width: 100%; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); cursor: zoom-in; }
+.prod-outdated-frame:disabled { cursor: default; }
+.prod-outdated-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.prod-outdated-noframe { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--text-dim); font-size: .75rem; }
+.prod-outdated-badge { position: absolute; top: 6px; left: 6px; padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--danger) 82%, black); color: white; font-size: .62rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.prod-outdated-meta { display: flex; flex-direction: column; gap: 3px; }
+.prod-outdated-number { font-family: ui-monospace, Consolas, monospace; font-size: .72rem; color: var(--text-dim); }
+.prod-outdated-text { margin: 0; font-size: .78rem; line-height: 1.35; color: var(--text); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.prod-outdated-text b { color: var(--text-dim); margin-right: 4px; }
+.prod-outdated-actions { display: flex; gap: 8px; }
+.prod-outdated-actions .prod-btn { flex: 1; padding: 5px 8px; font-size: .76rem; }
+.prod-btn.danger { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); color: var(--danger); }
+.prod-btn.danger:hover:not(:disabled) { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+@media (max-width: 900px) { .prod-outdated-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } }
 .prod-prompt-sidepanel { position: sticky; top: 12px; height: min(680px, calc(100vh - 190px)); min-height: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); display: flex; flex-direction: column; overflow: auto; }
 .prod-prompt-sidepanel .prod-ref-prompt-editor { display: flex; flex-direction: column; height: 300px; flex: none; margin-top: 10px; }
 .prod-prompt-sidepanel .prod-ref-prompt-editor { height: auto; flex: 1; min-height: 0; }

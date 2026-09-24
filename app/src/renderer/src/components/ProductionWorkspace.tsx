@@ -16,6 +16,7 @@ import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider,
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
+import { OutdatedSection } from "./production/outdated.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
@@ -3916,6 +3917,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onDone={(next) => setProd(next)}
               />
             )}
+            <OutdatedSection prod={prod} onMutate={apply} />
           </section>
         )}
 

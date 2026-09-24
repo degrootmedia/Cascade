@@ -46,7 +46,7 @@ import { useImageContextMenu } from "./image-context-menu.js";
 import { graphEdgesToFlow, promptSockets } from "./graphFlow.js";
 import { materializeGraph } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
-import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, tweenKeyForSource, tweenKeyToNode } from "../../../shared/graph/connect.js";
+import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
 import { canConnect, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections } from "../../../shared/graph/render.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
@@ -3971,6 +3971,25 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prod.meta.id, shot.id]);
+
+  // Magic Prompt citations live in the effective prompt text (`magicPrompts`),
+  // not in the stored graph's edges — so the canvas showed tagged ref nodes
+  // with no wires. Rebuild the composer's ref-socket wires (and add the ref
+  // nodes) from the tag order whenever Magic is active; `wireComposerRefs` is
+  // idempotent so a settled graph saves nothing. Gated on a non-empty prompt
+  // so a not-yet-fetched focused prompt can't strip the existing wires.
+  const magicRefIds = useMemo(
+    () => tagged.flatMap((t) => (t.ref?.id ? [t.ref.id] : [])),
+    [tagged]
+  );
+  useEffect(() => {
+    if (!magicActive || !prompt.trim()) return;
+    const g = cb.current.graph;
+    if (!g) return;
+    const next = wireComposerRefs(g, magicRefIds);
+    if (JSON.stringify(next) !== JSON.stringify(g)) cb.current.onGraphField({ graph: next });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [magicActive, prompt, shot.graph, magicRefIds]);
 
   const onNodesChange = useCallback<OnNodesChange<GraphNode>>((changes) => {
     // Canonical controlled flow: apply every change (position, select,

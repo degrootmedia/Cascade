@@ -219,6 +219,13 @@ graphImageGenIndex?: number;
    *  server-side, so the frame can be reclaimed later instead of re-paid.
    *  Cleared when a fresh generation supersedes it or the recheck recovers it. */
   pendingImageGen?: PendingImageGen;
+  /** True once a re-ingest moved this shot out of the active storyboard into
+   *  `Production.outdatedShots`. Its media was relocated to
+   *  `boards/outdated/<id>/` so a fresh shot re-using its number can't
+   *  overwrite it. Outdated shots keep every field and can be restored. */
+  outdated?: boolean;
+  /** ISO timestamp of when the shot was moved to the outdated bucket. */
+  outdatedAt?: string;
 }
 
 export interface ProductionScene {
@@ -596,6 +603,15 @@ export interface Production {
    *  when empty, `visualStyle` back-fills the master for older productions. */
   styles: ProductionStyle[];
   scenes: ProductionScene[];
+  /**
+   * Panels preserved from previous script ingestions: moved to the end of the
+   * storyboard, marked `outdated`, and kept fully intact (frames, node graphs,
+   * clips, history). They are NOT part of `scenes`, so numbering, generation,
+   * animatic, assembly, and `script.md` all ignore them; the Storyboard renders
+   * them as a trailing read-only section with restore/delete. Batches
+   * accumulate across repeated re-ingests until removed.
+   */
+  outdatedShots?: ProductionShot[];
   /**
    * Manual board prompts carried across re-ingestion, keyed by shot number.
    * When a re-ingested shot lands on a number that has an entry here (and the

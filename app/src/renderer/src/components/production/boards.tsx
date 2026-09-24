@@ -18,7 +18,7 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, onRegenerate, onRecheck, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
+function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -28,9 +28,15 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   pending?: boolean;
   /** A recheck is currently polling the pending job. */
   rechecking?: boolean;
+  /** A video job outlived its wait — show a pending badge + fetch. */
+  videoPending?: boolean;
+  /** A fetch is currently polling the pending video job. */
+  videoRechecking?: boolean;
   onRegenerate: (shotId: string) => void;
   /** Recheck the shot's pending generation job and download the frame when ready. */
   onRecheck?: (shotId: string) => void;
+  /** Fetch the shot's pending video job and download the clip when ready. */
+  onRecheckVideo?: (shotId: string) => void;
   onImport: (shotId: string) => void;
   /** Open the AI edit dialog for this frame. */
   onEdit: (shotId: string) => void;
@@ -417,6 +423,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             pending
           </span>
         )}
+        {videoPending && (
+          <span
+            className="prod-board-pending prod-board-pending-video"
+            title="This shot's video is still rendering (or its download failed) — fetch to download the clip when ready"
+          >
+            video pending
+          </span>
+        )}
         <button
           className="prod-board-zoom"
           title={histPath === null && shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
@@ -468,6 +482,16 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             onClick={(e) => { e.stopPropagation(); onRecheck?.(shot.id); }}
           >
             {rechecking ? "…" : "◷"}
+          </button>
+        )}
+        {videoPending && (
+          <button
+            className="prod-board-recheck prod-board-recheck-video"
+            title="Fetch the pending video job and download the clip when ready"
+            disabled={videoRechecking}
+            onClick={(e) => { e.stopPropagation(); onRecheckVideo?.(shot.id); }}
+          >
+            {videoRechecking ? "…" : "⤓"}
           </button>
         )}
       </div>

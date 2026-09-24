@@ -329,7 +329,7 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     "id", "number",
     "artworkHistory",
     "graphImageGens", "graphVideoGens", "graphEditGens", "graphEditVideoGens",
-    "graphTweenOutput", "pendingImageGen", "graphMigrated",
+    "graphTweenOutput", "pendingImageGen", "pendingVideoGen", "graphMigrated",
     "graphImageGenIndex", "graphVideoGenIndex", "graphEditVideoGenIndex",
   ]);
   const merged: ProductionShot = { ...freshShot };

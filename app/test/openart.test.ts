@@ -953,6 +953,112 @@ describe("OpenArtClient pending-image contingency", () => {
   });
 });
 
+describe("OpenArtClient pending-video contingency", () => {
+  const folder = path.join(dataDir, "prod-video");
+  const prod = () =>
+    makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+  const shot = (): ProductionShot => ({ id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" });
+
+  beforeEach(() => {
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+  });
+
+  it("records a pending video when the wait times out, then a recheck downloads it", async () => {
+    let completed = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-slow","pollAfterSeconds":0}',
+      openart_creation_get: () =>
+        completed
+          ? { text: '{"status":"SUCCEEDED"}', images: [Buffer.from("late-mp4")], uris: [] }
+          : { text: '{"status":"STILL_RUNNING","pollAfterSeconds":0}', images: [], uris: [] },
+    });
+    const client = new OpenArtClient(mcp);
+    const p = prod();
+    const s = shot();
+
+    vi.useFakeTimers();
+    try {
+      const first = client.generateVideoClip(p, s, { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate" }, () => {});
+      const assertion = expect(first).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(20 * 60_000 + 10_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The job wasn't lost — it's recorded on the shot (with submit metadata).
+    expect(s.pendingVideoGen).toMatchObject({ historyId: "h-slow", prompt: "animate", model: "veo-3", durationSec: 5 });
+
+    // A recheck probe while it's still rendering reports pending (null).
+    vi.useFakeTimers();
+    try {
+      const probe = client.recheckPendingVideo(s.pendingVideoGen!);
+      const probeAssertion = expect(probe).resolves.toBeNull();
+      await vi.advanceTimersByTimeAsync(61_000);
+      await probeAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Once the job finishes server-side, a recheck downloads the clip.
+    completed = true;
+    await expect(client.recheckPendingVideo(s.pendingVideoGen!)).resolves.toEqual({ buf: Buffer.from("late-mp4"), ext: "mp4" });
+  });
+
+  it("records the result URL when the finished clip can't be downloaded, then a recheck retries it", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_video: () => "Done! Your clip is at https://example.invalid/out.mp4",
+    });
+    const client = new OpenArtClient(mcp);
+    const s = shot();
+    const realFetch = globalThis.fetch;
+
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 }) as unknown as typeof fetch;
+    try {
+      await expect(
+        client.generateVideoClip(prod(), s, { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate" }, () => {})
+      ).rejects.toThrow(/Couldn't download/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(s.pendingVideoGen).toMatchObject({ url: "https://example.invalid/out.mp4", prompt: "animate", model: "veo-3" });
+
+    const bytes = Uint8Array.from([9, 8, 7, 6]);
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => bytes.buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await expect(client.recheckPendingVideo(s.pendingVideoGen!)).resolves.toEqual({ buf: Buffer.from(bytes), ext: "mp4" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("does not record a dead (FAILED) video job as pending", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-fail","pollAfterSeconds":0}',
+      openart_creation_get: () => ({ text: '{"status":"FAILED"}', images: [], uris: [] }),
+    });
+    const client = new OpenArtClient(mcp);
+    const s = shot();
+    await expect(
+      client.generateVideoClip(prod(), s, { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate" }, () => {})
+    ).rejects.toThrow(/failed/i);
+    expect(s.pendingVideoGen).toBeUndefined();
+  });
+});
+
 describe("OpenArtClient generation recorder", () => {
   it("records a successful image generation with its resolved metadata", async () => {
     const onGeneration = vi.fn();

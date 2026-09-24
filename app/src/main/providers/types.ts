@@ -26,6 +26,7 @@ import type {
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
+  PendingVideoGen,
   Production,
   ProductionEvent,
   ProductionShot,
@@ -93,6 +94,14 @@ export interface MediaProvider {
    * the job is dead (FAILED/CANCELLED — nothing left to reclaim).
    */
   recheckPendingImage(rec: PendingImageGen): Promise<Buffer | null>;
+
+  /**
+   * Recheck a pending video job and return the finished bytes + file
+   * extension, or null when it's still rendering (or the result still can't be
+   * fetched). Throws when the job is dead (FAILED/CANCELLED — nothing left to
+   * reclaim).
+   */
+  recheckPendingVideo(rec: PendingVideoGen): Promise<{ buf: Buffer; ext: string } | null>;
 
   /**
    * Resolve the vendor-side project/collection a production's frames should
@@ -177,6 +186,7 @@ export type {
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
+  PendingVideoGen,
   Production,
   ProductionShot,
   VideoGenOptions,

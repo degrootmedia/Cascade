@@ -586,6 +586,13 @@ export interface CascadeApi {
    * downloaded). Rechecks the pending job and downloads the image when ready.
    */
   recheckBoard(productionId: string, shotId: string): Promise<Production>;
+  /**
+   * Step 3/4: reclaim a shot's video clip from a job that outlived the
+   * generating call (the wait timed out or the finished clip couldn't be
+   * downloaded). Rechecks the pending job and downloads the clip when ready,
+   * applying it to whichever node/field submitted it (`pendingVideoGen.target`).
+   */
+  recheckVideo(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: write every shot's generation prompt to <folder>/boards/prompts.md. */
   exportBoardPrompts(productionId: string): Promise<Production>;
   /** Step 3: return one shot's full generation prompt (used by the per-frame copy button). */

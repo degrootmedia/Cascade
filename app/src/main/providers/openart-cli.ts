@@ -49,6 +49,7 @@ import type {
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
+  PendingVideoGen,
   Production,
   ProductionShot,
   VideoGenOptions,
@@ -95,6 +96,7 @@ const FORM_TTL_MS = 10 * 60_000;
 const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
+const VIDEO_RECHECK_TIMEOUT_MS = 60_000;
 
 const IMAGE_MODES = ["image2image", "text2image"];
 const VIDEO_IMAGE_MODES = ["image2video", "image_to_video", "img2video", "element2video"];
@@ -134,11 +136,13 @@ function extractHistoryId(stdout: string): string | null {
 // Creation status + result-URL extraction live in openart-core: the MCP
 // transport reads the same creation replies, so the grammar has one home.
 
-/** Thrown when a CLI wait cap passes with the job still rendering. The job
- *  is NOT dead — it keeps rendering server-side — so image callers record
- *  the historyId as pending and reclaim it with `creation get` later. */
+/** Thrown when a CLI wait cap passes with the job still rendering, or a
+ *  finished job's result URL couldn't be downloaded. The work is NOT dead — it
+ *  keeps rendering (or stays published) server-side — so callers record the
+ *  historyId (and URL) as pending and reclaim it with `creation get`/a
+ *  re-fetch later. */
 export class OpenArtCliPendingError extends Error {
-  constructor(readonly historyId: string) {
+  constructor(readonly historyId: string, readonly url?: string) {
     super(`OpenArt generation timed out (${historyId.slice(0, 8)}…).`);
     this.name = "OpenArtCliPendingError";
   }
@@ -500,7 +504,9 @@ export class OpenArtCliProvider implements MediaProvider {
     const url = urls[0];
     if (!url) throw new OpenArtCliPendingError(historyId);
     const buf = await this.fetchBytes(url);
-    if (!buf) throw new Error(`Couldn't download the generated ${video ? "video" : "image"}.`);
+    // The job finished but its result couldn't be downloaded — keep the id +
+    // URL so a recheck can retry the fetch.
+    if (!buf) throw new OpenArtCliPendingError(historyId, url);
     return { buf, ext: OpenArtCliProvider.extOf(url, video), historyId };
   }
 
@@ -633,6 +639,36 @@ export class OpenArtCliProvider implements MediaProvider {
   }
 
   /**
+   * Recheck a pending video job and return the finished clip bytes + extension,
+   * or null when it's still rendering (or the result still can't be fetched).
+   * With a `historyId` it re-asks `creation get`; with just a `url` it
+   * re-fetches that. Throws when the job reports FAILED/CANCELLED.
+   */
+  async recheckPendingVideo(rec: PendingVideoGen): Promise<{ buf: Buffer; ext: string } | null> {
+    if (rec.historyId) {
+      if (!this.isAvailable()) return null;
+      let out = "";
+      try {
+        out = await this.cli(["creation", "get", rec.historyId], VIDEO_RECHECK_TIMEOUT_MS);
+      } catch {
+        return null;
+      }
+      const { failed, status } = openArtCreationStatus(out);
+      if (failed) throw new Error(`OpenArt generation ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
+      const urls = openArtCreationResultUrls(out, true);
+      const url = urls[0] ?? out.match(VIDEO_URL_RX)?.[0];
+      if (!url) return null;
+      const buf = await this.fetchBytes(url);
+      return buf ? { buf, ext: OpenArtCliProvider.extOf(url, true) } : null;
+    }
+    if (rec.url) {
+      const buf = await this.fetchBytes(rec.url);
+      return buf ? { buf, ext: OpenArtCliProvider.extOf(rec.url, true) } : null;
+    }
+    return null;
+  }
+
+  /**
    * Generate one video clip for a shot: text2video, or single-start-frame
    * image2video via `--image`. The CLI exposes no end-frame slot and no
    * reference arrays, so tween end frames, extra image references, and video
@@ -715,10 +751,32 @@ export class OpenArtCliProvider implements MediaProvider {
       args.push("--aspect-ratio", "16:9");
       if (projectId) args.push("--project", projectId);
 
+      // A fresh submission supersedes any earlier pending job.
+      if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (OpenArt CLI)…`);
-      const done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
-        emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
-      );
+      let done: { buf: Buffer; ext: string; historyId: string };
+      try {
+        done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
+          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
+        );
+      } catch (e) {
+        // The job keeps rendering (or finished but couldn't be downloaded) —
+        // record it as pending so the clip can be fetched instead of re-paid.
+        if (e instanceof OpenArtCliPendingError) {
+          shot.pendingVideoGen = {
+            historyId: e.historyId,
+            ...(e.url ? { url: e.url } : {}),
+            prompt: opts.prompt,
+            model: `${OPENART_CLI_ID_PREFIX}${modelId}`,
+            resolution: opts.resolution || "",
+            durationSec: Math.round(opts.durationSec) || 5,
+            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+            ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
+            at: new Date().toISOString(),
+          };
+        }
+        throw e;
+      }
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);

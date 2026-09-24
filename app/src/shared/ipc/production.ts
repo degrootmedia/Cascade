@@ -13,6 +13,7 @@ import type {
   GraphGenItem,
   TweenBlock,
   PendingImageGen,
+  PendingVideoGen,
   UpscaleData,
 } from "./graph.js";
 
@@ -219,6 +220,12 @@ graphImageGenIndex?: number;
    *  server-side, so the frame can be reclaimed later instead of re-paid.
    *  Cleared when a fresh generation supersedes it or the recheck recovers it. */
   pendingImageGen?: PendingImageGen;
+  /** A video job that outlived the generating call (timed out or the finished
+   *  clip couldn't be downloaded). The job keeps rendering server-side, so the
+   *  clip can be fetched later instead of re-paid. `target` says which node /
+   *  field a reclaimed clip belongs to. Cleared when a fresh generation
+   *  supersedes it or the fetch recovers it. */
+  pendingVideoGen?: PendingVideoGen;
   /** True once a re-ingest moved this shot out of the active storyboard into
    *  `Production.outdatedShots`. Its media was relocated to
    *  `boards/outdated/<id>/` so a fresh shot re-using its number can't
@@ -381,7 +388,7 @@ export function shotHasContent(s: ProductionShot): boolean {
   if (s.audio?.trim() || s.visual?.trim()) return true;
   if (s.prompt?.trim() || s.graphVideoPrompt?.trim() || s.graphEditPrompt?.trim()) return true;
   if (s.artwork || (s.artworkHistory?.length ?? 0) > 0) return true;
-  if (s.videoPath || s.graphTweenOutput || s.pendingImageGen) return true;
+  if (s.videoPath || s.graphTweenOutput || s.pendingImageGen || s.pendingVideoGen) return true;
   if ((s.graphImageGens?.length ?? 0) > 0) return true;
   if ((s.graphVideoGens?.length ?? 0) > 0) return true;
   if ((s.graphEditGens?.length ?? 0) > 0) return true;

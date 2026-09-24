@@ -3635,6 +3635,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-board-recheck:hover:not(:disabled) { border-color: var(--accent); color: white; }
 .prod-board-recheck:disabled { opacity: 0.5; cursor: default; }
 
+/* A video job outlived its wait — its badge/recheck sit below the frame one. */
+.prod-board-pending-video { top: 28px; }
+.prod-board-recheck-video { right: 74px; }
+
 /* ---------- EditBoardModal (AI frame edit) ---------- */
 .prod-edit-overlay {
   position: fixed;
@@ -4511,6 +4515,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-gen-cycle { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); font-size: 0.72rem; }
 .prod-graph-gen-hint { font-size: 0.68rem; color: var(--text-dim); }
 .prod-graph-gen-go { padding: 7px 10px; font-size: 0.78rem; }
+/* Fetch button for a video node whose vendor job outlived its wait. */
+.prod-graph-gen-fetch { padding: 5px 10px; font-size: 0.72rem; margin-bottom: 6px; }
 /* Generation history strip: every stored generation, click to select. */
 .prod-graph-gen-strip { display: flex; flex-wrap: wrap; gap: 4px; max-height: 84px; overflow-y: auto; }
 .prod-graph-gen-strip button {

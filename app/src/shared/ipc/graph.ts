@@ -256,6 +256,45 @@ export interface TweenBlock {
   genIndex?: number;
 }
 
+/** Where a reclaimed video clip belongs once its pending job finally
+ *  downloads. The provider records the vendor job without knowing which node
+ *  asked, so the call site tags the record (`production:recheckVideo` reads it
+ *  to apply the clip to the right field/history). */
+export type PendingVideoTarget =
+  | { kind: "videoPath" }
+  | { kind: "videoNode"; sourcePath?: string }
+  | { kind: "editVideoNode"; sourcePath?: string }
+  | { kind: "tween"; blockId: string };
+
+/** An async vendor video job that outlived the generating call — the wait
+ *  timed out or the finished clip couldn't be downloaded, but the job keeps
+ *  rendering server-side. Kept on the shot so the clip can be reclaimed
+ *  (recheck + download) instead of paying for a second generation. */
+export interface PendingVideoGen {
+  /** The async job id to re-poll (OpenArt `creation_get` / CLI `generate get`). */
+  historyId?: string;
+  /** Direct result URL to re-download when the submission returned one
+   *  (no historyId) and the first download failed. */
+  url?: string;
+  /** The prompt this job was submitted with. */
+  prompt: string;
+  /** The model id used ("auto" when Cascade picked). */
+  model: string;
+  /** The resolution the job was submitted at (bills like the original). */
+  resolution?: string;
+  /** The requested clip length in seconds (bills like the original). */
+  durationSec?: number;
+  /** Schema-driven options the job was submitted with (bills like the original). */
+  params?: Record<string, string | number | boolean | string[]>;
+  /** The frame the clip was animated from (provenance for the node output). */
+  sourcePath?: string;
+  /** Where a reclaimed clip belongs. Tagged by the call site (the provider
+   *  only knows it generated a clip, not which node asked). */
+  target?: PendingVideoTarget;
+  /** ISO timestamp of when the job was orphaned. */
+  at: string;
+}
+
 /** An OpenArt async image job that outlived the generating call — the wait
  *  timed out or the finished image couldn't be downloaded, but the job keeps
  *  rendering server-side. Kept on the shot so the finished frame can be

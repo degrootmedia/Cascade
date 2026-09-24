@@ -374,6 +374,42 @@ describe("OpenArtCliProvider.generateVideoClip", () => {
     });
   });
 
+  it("records a pending video when the wait outlives the cap, then a recheck reclaims it", async () => {
+    let finished = false;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate video": () => ok(JSON.stringify({ historyId: "h-vid-slow" })),
+        "creation wait": () => ok(JSON.stringify({ historyId: "h-vid-slow", status: "RUNNING" })),
+        "creation get": () =>
+          finished
+            ? ok(JSON.stringify({ historyId: "h-vid-slow", status: "SUCCEEDED", video_url: "https://example.invalid/late.mp4" }))
+            : ok(JSON.stringify({ historyId: "h-vid-slow", status: "RUNNING" })),
+      })
+    );
+    const p = provider(run);
+    const s = shot();
+    await expect(
+      p.generateVideoClip(prodDir("prod-vid-pending"), s, {
+        model: `${OPENART_CLI_ID_PREFIX}kling-3-omni`, resolution: "1080p", durationSec: 5, prompt: "animate",
+      }, () => {})
+    ).rejects.toThrow(/timed out/i);
+    expect(s.pendingVideoGen).toMatchObject({ historyId: "h-vid-slow", prompt: "animate", durationSec: 5 });
+
+    await expect(p.recheckPendingVideo(s.pendingVideoGen!)).resolves.toBeNull();
+
+    finished = true;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([3, 3]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await expect(p.recheckPendingVideo(s.pendingVideoGen!)).resolves.toEqual({ buf: Buffer.from([3, 3]), ext: "mp4" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("fails loudly on unsupported lengths instead of coercing", async () => {
     let submitted = false;
     const { run } = fakeRun(

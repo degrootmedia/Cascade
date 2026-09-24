@@ -1,4 +1,49 @@
-﻿# Re-ingest: preserve previous panels as outdated (restorable)
+﻿# Video jobs: pending contingency + Fetch (all flows)
+
+User report: a node-graph video generated fine on OpenArt but never downloaded
+(the wait/download failed after submission), and the job was lost. Request: make
+it bulletproof with a "Fetch" button when the automatic download fails. Scope
+chosen: all video flows.
+
+## Plan
+
+- [x] Types: `PendingVideoGen` + `PendingVideoTarget` (`shared/ipc/graph.ts`),
+      `ProductionShot.pendingVideoGen`, `shotHasContent`, `mergeRendererShot`
+      DENIED (main-owned).
+- [x] Provider seam: `MediaProvider.recheckPendingVideo(rec)`; OpenArt records
+      on any non-`OpenArtVideoFailedError` post-submission failure (new
+      `OpenArtVideoPendingError`/`OpenArtVideoFailedError`; `waitOpenArtVideo`
+      takes a deadline), higgsfield-cli/openart-cli on their `*PendingError`
+      (now carrying the result URL on a failed download).
+- [x] IPC: `production:recheckVideo`; handler re-polls, writes via
+      `writeShotVideo`, applies by `target` (videoPath / videoNode /
+      editVideoNode / tween), bills the ledger once. `runVideoJob` now persists
+      the snapshot even when the job throws (otherwise the pending record —
+      the only handle on the still-running vendor job — was dropped).
+- [x] Call sites tag `target` before rethrowing (classic, video node, edit-video
+      node, tween block).
+- [x] UI: video node + edit-video node render a "pending…" state and a Fetch
+      button; the storyboard card shows a "video pending" badge + fetch; the
+      tween timeline shows Fetch on the pending block.
+- [x] Tests: OpenArt pending-video (timeout + reclaim, URL-download retry,
+      dead-job no-record); higgsfield-cli/openart-cli video recheck; graph
+      Fetch button renders + fires. `npm run typecheck` clean, 1125 pass + 1
+      skip, `npm run build` clean.
+
+## Review
+
+Done. The gap was that the image path had a pending/recheck contingency but the
+video path threw away the `historyId`/result URL on a wait cap or failed
+download — even though the vendor job keeps rendering. Recording
+`shot.pendingVideoGen` (with a call-site-tagged `target`) and a single
+`production:recheckVideo` handler closes it for every flow. Self-caught: the
+`runVideoJob` runner skipped its save on error, so a pending record written by
+the failed job would never have reached disk — restructured it to save the
+rebased snapshot before rethrowing.
+
+---
+
+# Re-ingest: preserve previous panels as outdated (restorable)
 
 User: when re-ingesting a script, previous panels must not be overwritten —
 move them to the end of the storyboard, mark them outdated, keep them fully

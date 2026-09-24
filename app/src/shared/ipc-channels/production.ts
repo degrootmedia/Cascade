@@ -71,6 +71,7 @@ export const productionChannels = {
   "production:musicUrl": { method: "musicUrl", kind: "invoke" },
   "production:removeMusic": { method: "removeMusic", kind: "invoke" },
   "production:generateVideo": { method: "generateVideo", kind: "invoke" },
+  "production:recheckVideo": { method: "recheckVideo", kind: "invoke" },
   "production:generateFrameNode": { method: "generateFrameNode", kind: "invoke" },
   "production:generateVideoNode": { method: "generateVideoNode", kind: "invoke" },
   "production:generateEditVideoNode": { method: "generateEditVideoNode", kind: "invoke" },

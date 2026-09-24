@@ -33,7 +33,7 @@ let lastEmittedPrompt: string | null = null;
 let lastGraph: { edges: Array<{ id: string }> } | null = null;
 let renames: Array<[string, string]> = [];
 
-function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean }) {
+function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable, fetchVideo }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; fetchVideo?: () => void }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
   // References are stateful here so a "Save as reference" action can append the
   // created ref and the shelf re-render, like the real workspace's `apply()`.
@@ -77,6 +77,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
     onRunImageGen: async () => {},
     onRunVideoGen: async () => {},
     onRunEditGen: async () => {},
+    onFetchVideo: async () => { fetchVideo?.(); },
     onSelectGraphGen: () => {},
     onCycleGraphGen: () => {},
     onGraphField: (patch: Record<string, unknown>) => { if (patch.graph) lastGraph = patch.graph as { edges: Array<{ id: string }> }; setShotState((prev) => ({ ...prev, ...patch })); },
@@ -101,7 +102,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; fetchVideo?: () => void } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -498,6 +499,32 @@ describe("node-graph tool panel", () => {
     // Only the video tile reports "on canvas" — edit nodes count as a list, the
     // tile always adds another.
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(1);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("shows a Fetch button on the video node for an orphaned job", async () => {
+    let fetched = 0;
+    const { root, host } = renderModal({
+      fetchVideo: () => { fetched++; },
+      shotPatch: {
+        graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
+        pendingVideoGen: {
+          historyId: "h-pending",
+          prompt: "motion",
+          model: "auto",
+          at: "2026-01-01T00:00:00.000Z",
+          target: { kind: "videoNode" },
+        },
+      },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const fetchBtn = host.querySelector(".prod-graph-gen-fetch") as HTMLButtonElement | null;
+    expect(fetchBtn).toBeTruthy();
+    await act(async () => { fetchBtn!.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(fetched).toBe(1);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

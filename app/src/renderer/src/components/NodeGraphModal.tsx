@@ -331,6 +331,10 @@ interface VideoGenData extends Record<string, unknown> {
   hasImageSource: boolean;
   /** Lifted in-flight flag (see ImageGenData.busy). */
   busy: boolean;
+  /** A video job outlived its wait — show a pending badge + Fetch. */
+  pending: boolean;
+  /** Re-poll the orphaned video job and download the clip when ready. */
+  onFetch: () => Promise<void>;
   onGenerate: (model: string, resolution: string, durationSec: number, params?: GenParams) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -380,6 +384,9 @@ interface EditVideoData extends Record<string, unknown> {
   selected: number;
   busy: boolean;
   piped: boolean;
+  /** A video-edit job outlived its wait — show a pending badge + Fetch. */
+  pending: boolean;
+  onFetch: () => Promise<void>;
   onGenerate: (model: string, prompt: string, params: GenParams) => Promise<void>;
   onSelect: (index: number) => void;
   onCycle: (dir: 1 | -1) => void;
@@ -1065,6 +1072,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   const [durationSec, setDurationSec] = useState(data.savedDurationSec ?? remembered?.durationSec ?? 5);
   const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
   const busy = data.busy === true;
+  const [fetching, setFetching] = useState(false);
   const genMenu = useGenerationMenu();
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
   const [schema, setSchema] = useState<CliModelSchema | null>(null);
@@ -1102,6 +1110,11 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   };
   const run = async () => {
     await data.onGenerate(effModel, resolution, durationSec, params);
+  };
+  const fetchPending = async () => {
+    if (fetching) return;
+    setFetching(true);
+    try { await data.onFetch(); } finally { setFetching(false); }
   };
   // Live per-config quote (Higgsfield CLI only) for the node's Generate button.
   const videoCostReq = isQuotableCostModel(effModel) ? {
@@ -1161,7 +1174,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
               <MagnifyIcon size={9} />
             </button>
           </div>
-        : <div className="prod-graph-gen-preview blank">No generations yet</div>}
+        : <div className="prod-graph-gen-preview blank">{data.pending ? "pending…" : "No generations yet"}</div>}
       {data.items.length > 0 && (
         <div className="prod-graph-gen-strip nodrag">
           {[...data.items].map((it, i) => ({ it, i })).reverse().map(({ it, i }) => (
@@ -1183,6 +1196,16 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
           <span>{data.selected + 1} / {data.items.length}</span>
           <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(-1)} title="Newer clip">›</button>
         </div>
+      )}
+      {data.pending && (
+        <button
+          className="prod-btn prod-graph-gen-fetch nodrag"
+          disabled={fetching || busy}
+          onClick={() => { void fetchPending(); }}
+          title="The video job outlived its wait (or its download failed) — recheck and download the clip when ready"
+        >
+          {fetching ? "Fetching…" : "⤓ Fetch"}
+        </button>
       )}
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
         {busy ? "Generating…" : <>Generate<GenerationCostSuffix req={videoCostReq} /></>}
@@ -1240,6 +1263,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
   const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
   const [schema, setSchema] = useState<CliModelSchema | null>(null);
   const busy = data.busy === true;
+  const [fetching, setFetching] = useState(false);
   const prompt = data.savedPrompt ?? "";
   const genMenu = useGenerationMenu();
   const effModel = data.models.some((m) => m.id === model) ? model : (data.models[0]?.id ?? "");
@@ -1259,6 +1283,11 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
   const run = async () => {
     if (!prompt.trim()) return;
     await data.onGenerate(effModel, prompt.trim(), params);
+  };
+  const fetchPending = async () => {
+    if (fetching) return;
+    setFetching(true);
+    try { await data.onFetch(); } finally { setFetching(false); }
   };
   // Live per-config quote (Higgsfield CLI only). No resolution/duration
   // controls here — the submit keeps the source's timing — so the quote is
@@ -1315,13 +1344,23 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
               <MagnifyIcon size={9} />
             </button>
           </div>
-        : <div className="prod-graph-gen-preview blank">No edits yet</div>}
+        : <div className="prod-graph-gen-preview blank">{data.pending ? "pending…" : "No edits yet"}</div>}
       {data.items.length > 1 && (
         <div className="prod-graph-gen-cycle">
           <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(1)} title="Older edit">‹</button>
           <span>{data.selected + 1} / {data.items.length}</span>
           <button className="prod-graph-ref-btn nodrag" disabled={busy} onClick={() => data.onCycle(-1)} title="Newer edit">›</button>
         </div>
+      )}
+      {data.pending && (
+        <button
+          className="prod-btn prod-graph-gen-fetch nodrag"
+          disabled={fetching || busy}
+          onClick={() => { void fetchPending(); }}
+          title="The video-edit job outlived its wait (or its download failed) — recheck and download the clip when ready"
+        >
+          {fetching ? "Fetching…" : "⤓ Fetch"}
+        </button>
       )}
       <div className="prod-graph-gen-controls">
         <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy || !prompt.trim()} onClick={() => { void run(); }}>
@@ -2535,7 +2574,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, imageGenBusy = false, videoGenBusy = false, editVideoBusy = false, editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {}, onSaveGenerationAsReference = async () => null, onEditNodePrompt = () => {}, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditVideoToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagic, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, videoGenBusy = false, editVideoBusy = false, editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {}, onSaveGenerationAsReference = async () => null, onEditNodePrompt = () => {}, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeEditVideoToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -2607,6 +2646,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onStitchTween?: () => Promise<void>;
   /** Undo a stitch — back to the individual block clips (toggle on Stitch). */
   onUnstitchTween?: () => Promise<void>;
+  /** Recheck a shot's pending video job (any flow) and download/apply the clip. */
+  onFetchVideo?: () => Promise<void>;
   /** Lifted in-flight flags so "Generating…" survives the modal unmounting
    *  (the workspace owns them per shot). */
   imageGenBusy?: boolean;
@@ -2999,8 +3040,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // Node callbacks change identity every parent render; routing them through
   // a ref keeps node data (and node object identities) stable across renders,
   // which keeps React Flow's selection bookkeeping from fighting re-renders.
-  const cb = useRef({ graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale });
-  cb.current = { graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale };
+  const cb = useRef({ graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onFetchVideo, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale });
+  cb.current = { graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onFetchVideo, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeEditVideoToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, graphEditVideoSourceRefId: shot.graphEditVideoSourceRefId, graphVideoToEditVideo: shot.graphVideoToEditVideo, graphEditVideoPrompt: shot.graphEditVideoPrompt, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale };
   // Live-draft handles registered by the three prompt nodes (see
   // PromptDraftApplier). Prompt mutations below prefer them over cb.current's
   // prop values, which lag the node's local draft while it is focused.
@@ -3058,6 +3099,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onRunVideoGen: (model: string, resolution: string, durationSec: number, params?: GenParams) => cb.current.onRunVideoGen(model, resolution, durationSec, params),
     onRunEditGen: (nodeId: string, model: string, resolution: string, params?: GenParams) => cb.current.onRunEditGen(nodeId, model, resolution, params),
     onRunEditVideo: (model: string, prompt: string, params?: GenParams) => cb.current.onRunEditVideo?.(model, prompt, params) ?? Promise.resolve(),
+    onFetchVideo: () => cb.current.onFetchVideo?.() ?? Promise.resolve(),
     onRunCameraGrid: (opts: CameraGridGenOptions) => cb.current.onRunCameraGrid?.(opts) ?? Promise.resolve(),
     /** Import a wired image as the camera-grid sheet, then bind it to the node
      *  (sheetPath + gridSource) so the editor can cut it up. */
@@ -3389,6 +3431,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         selected: shot.graphEditVideoGenIndex ?? 0,
         busy: editVideoBusy === true,
         piped: shot.graphOutputSource === "editvideo",
+        pending: shot.pendingVideoGen?.target?.kind === "editVideoNode",
+        onFetch: stable.onFetchVideo,
         onGenerate: stable.onRunEditVideo,
         onSelect: stable.onSelectEditVideoGen,
         onCycle: stable.onCycleEditVideoGen,
@@ -3402,7 +3446,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       },
       deletable: true,
     };
-  }, [videoModels, videoEditModelIds, shot.graphEditVideoSourceRefId, shot.graphVideoToEditVideo, shot.graphEditVideoModel, shot.graphEditVideoParams, shot.graphEditVideoPrompt, shot.graphEditVideoGens, shot.graphEditVideoGenIndex, shot.graphOutputSource, references, prod.meta.id, editVideoBusy, stable]);
+  }, [videoModels, videoEditModelIds, shot.graphEditVideoSourceRefId, shot.graphVideoToEditVideo, shot.graphEditVideoModel, shot.graphEditVideoParams, shot.graphEditVideoPrompt, shot.graphEditVideoGens, shot.graphEditVideoGenIndex, shot.graphOutputSource, shot.pendingVideoGen, references, prod.meta.id, editVideoBusy, stable]);
 
   /** The edit-video tool: the gen node + its prompt node (mirrors the video
    *  node pair). Shared by buildDerived and addTool. */
@@ -3445,6 +3489,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           selected: shot.graphVideoGenIndex ?? 0,
           hasImageSource: shot.graphImageToVideo === true || shot.graphEditToVideo === true || !!shot.graphVideoSourceRefId,
           busy: videoGenBusy === true,
+          pending: shot.pendingVideoGen?.target?.kind === "videoNode",
+          onFetch: stable.onFetchVideo,
           onGenerate: stable.onRunVideoGen,
           onSelect: stable.onSelectVideoGen,
           onCycle: stable.onCycleVideoGen,
@@ -3466,7 +3512,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         deletable: true,
       },
     ];
-  }, [videoModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphVideoModel, shot.graphVideoResolution, shot.graphVideoDurationSec, shot.graphVideoParams, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceRefId, videoPromptValue, taggedVideo, stable, prod.meta.id, videoGenBusy]);
+  }, [videoModels, shot.graphVideoGens, shot.graphVideoGenIndex, shot.graphVideoModel, shot.graphVideoResolution, shot.graphVideoDurationSec, shot.graphVideoParams, shot.graphImageToVideo, shot.graphEditToVideo, shot.graphVideoSourceRefId, shot.pendingVideoGen, videoPromptValue, taggedVideo, stable, prod.meta.id, videoGenBusy]);
 
   /** Build one edit node's gen+prompt pair. `editNode` supplies its prompt and
    *  generation history; node ids carry its stable id (`editgen:edit0`). */
@@ -5339,6 +5385,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           onSaveAsRef={stable.onSaveAsRef}
           onRunBlock={(blockId: string, durationSec: number, model: string, params?: GenParams) => onRunTweenBlock(blockId, durationSec, model, params)}
           busyBlock={busyBlock}
+          pendingBlockId={shot.pendingVideoGen?.target?.kind === "tween" ? shot.pendingVideoGen.target.blockId : null}
+          onFetchBlock={() => onFetchVideo()}
           onStitch={() => onStitchTween()}
           onUnstitch={() => onUnstitchTween()}
           stitching={stitching}

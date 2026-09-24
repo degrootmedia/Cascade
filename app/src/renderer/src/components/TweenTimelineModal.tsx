@@ -235,6 +235,10 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
    *  can be newer than the last save after a keyframe drag). */
   onRunBlock: (blockId: string, durationSec: number, model: string, params?: GenParams) => Promise<void>;
   busyBlock: string | null;
+  /** The action block whose video job outlived its wait (pending fetch). */
+  pendingBlockId?: string | null;
+  /** Recheck the pending job for a block and download its clip when ready. */
+  onFetchBlock?: (blockId: string) => Promise<void>;
   /** Stitch every block's selected clip into the continuous shot. */
   onStitch: () => Promise<void>;
   /** Undo the stitch — back to the individual block clips. */
@@ -255,7 +259,7 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
     prodId, shotNumber, refIds, blocks, keyframes, model, resolution, videoModels,
     onModelOptions, onModelSchema, onModelChange, onResolutionChange,
     params, onParamsChange, onBlocksChange, onDeleteGen, onSaveAsRef,
-    onRunBlock, busyBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
+    onRunBlock, busyBlock, pendingBlockId, onFetchBlock, onStitch, onUnstitch, stitching, stitched, reencoded,
     stitchUrl, onPipeToOutput, piped, onClose,
   } = props;
 
@@ -264,8 +268,15 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
   const [focusId, setFocusId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [drag, setDrag] = useState<{ index: number; t: number } | null>(null);
+  const [fetchingBlock, setFetchingBlock] = useState<string | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const genMenu = useGenerationMenu();
+
+  const fetchBlock = async (blockId: string) => {
+    if (fetchingBlock) return;
+    setFetchingBlock(blockId);
+    try { await onFetchBlock?.(blockId); } finally { setFetchingBlock(null); }
+  };
 
   // Escape closes the timeline (the graph owns Escape otherwise — it yields
   // when this overlay is present).
@@ -547,6 +558,16 @@ export const TweenTimelineModal = memo(function TweenTimelineModal(props: {
                     rows={2}
                   />
                   <div className="prod-tween-block-row" onClick={(e) => e.stopPropagation()}>
+                    {pendingBlockId === b.id && (
+                      <button
+                        className="prod-btn prod-tween-fetch"
+                        disabled={fetchingBlock !== null || busyBlock !== null}
+                        onClick={() => { void fetchBlock(b.id); }}
+                        title="This block's video job outlived its wait (or its download failed) — fetch the clip when ready"
+                      >
+                        {fetchingBlock === b.id ? "Fetching…" : "⤓ Fetch"}
+                      </button>
+                    )}
                     <button
                       className="prod-btn primary prod-tween-go"
                       disabled={busyBlock !== null || !(drafts[b.id] ?? b.prompt).trim() || blocked}

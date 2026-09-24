@@ -825,6 +825,44 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     });
   });
 
+  it("records a pending video when the wait outlives the cap, then a recheck reclaims it", async () => {
+    const jobId = "66666666-7777-8888-9999-000000000000";
+    let finished = false;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": () => ok(JSON.stringify({ job_id: jobId })),
+        [`generate wait ${jobId}`]: () => ok(JSON.stringify([{ id: jobId, status: "running" }])),
+        [`generate get ${jobId}`]: () =>
+          finished
+            ? ok(JSON.stringify({ id: jobId, status: "completed", video_url: "https://example.invalid/late.mp4" }))
+            : ok(JSON.stringify({ id: jobId, status: "running" })),
+      })
+    );
+    const p = provider(run);
+    const prod = prodDir("prod-vid-pending");
+    const s = shot();
+    await expect(
+      p.generateVideoClip(prod, s, { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 5, prompt: "animate" }, () => {})
+    ).rejects.toThrow(/timed out/i);
+    expect(s.pendingVideoGen).toMatchObject({ historyId: jobId, prompt: "animate", durationSec: 5 });
+
+    // Still rendering → recheck reports pending (null).
+    await expect(p.recheckPendingVideo(s.pendingVideoGen!)).resolves.toBeNull();
+
+    // Once finished server-side, a recheck downloads the clip.
+    finished = true;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([5, 5]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await expect(p.recheckPendingVideo(s.pendingVideoGen!)).resolves.toEqual({ buf: Buffer.from([5, 5]), ext: "mp4" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("selects omni_reference on seedance_2_5 whenever media is attached", async () => {
     const seen: string[][] = [];
     const jobId = "55555555-6666-7777-8888-999999999999";

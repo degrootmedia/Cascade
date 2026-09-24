@@ -51,6 +51,7 @@ import type {
   OpenArtBoardConfig,
   OpenArtModelChoice,
   PendingImageGen,
+  PendingVideoGen,
   Production,
   ProductionShot,
   VideoGenOptions,
@@ -83,6 +84,10 @@ const IMAGE_WAIT_DEADLINE_MS = 150_000;
  *  isn't ready yet the user can recheck again later. */
 const IMAGE_RECHECK_DEADLINE_MS = 60_000;
 
+/** How long one video recheck probes a pending job before reporting it as
+ *  still rendering (the Fetch button polls, it never blocks for minutes). */
+const VIDEO_RECHECK_DEADLINE_MS = 60_000;
+
 /** How long to wait between non-blocking image poll passes when the server
  *  doesn't tell us (`pollAfterSeconds`). */
 const IMAGE_POLL_INTERVAL_MS = 4_000;
@@ -104,6 +109,27 @@ export class OpenArtImageFailedError extends Error {
   constructor(readonly historyId: string, status: string) {
     super(`OpenArt generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
     this.name = "OpenArtImageFailedError";
+  }
+}
+
+/** Thrown when an async OpenArt video job outlives the wait cap. The job is
+ *  NOT dead — it keeps rendering server-side (or finished but its result
+ *  couldn't be downloaded) — so callers can record it as pending and fetch the
+ *  finished clip later. */
+export class OpenArtVideoPendingError extends Error {
+  constructor(readonly historyId: string) {
+    super(`OpenArt video generation timed out (${historyId.slice(0, 8)}…).`);
+    this.name = "OpenArtVideoPendingError";
+  }
+}
+
+/** Thrown when OpenArt reports a video job FAILED/CANCELLED — the job is dead
+ *  and nothing can be reclaimed. Distinct from OpenArtVideoPendingError so
+ *  callers avoid recording a dead job as pending. */
+export class OpenArtVideoFailedError extends Error {
+  constructor(readonly historyId: string, status: string) {
+    super(`OpenArt video generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
+    this.name = "OpenArtVideoFailedError";
   }
 }
 
@@ -901,6 +927,15 @@ private videoRefsAssign = videoRefsAssign;
     shot.pendingImageGen = { ...rec, at: new Date().toISOString() };
   }
 
+  /** Record an OpenArt video job that outlived the generating call on the
+   *  shot, so the finished clip can be fetched later instead of re-paid. A
+   *  fresh submission or a successful fetch clears it. The call site tags
+   *  `target` (the provider doesn't know which node asked). */
+  private recordPendingVideo(shot: ProductionShot | undefined, rec: Omit<PendingVideoGen, "at" | "target">): void {
+    if (!shot) return;
+    shot.pendingVideoGen = { ...rec, at: new Date().toISOString() };
+  }
+
   /**
    * Recheck a pending image job and return the finished bytes, or null when
    * it's still rendering (or the result URL still can't be fetched). With a
@@ -920,6 +955,41 @@ private videoRefsAssign = videoRefsAssign;
     return null;
   }
 
+  /** The file extension to store a fetched clip under, from its source URL
+   *  (falls back to mp4). */
+  private videoExtFromUrl(url?: string): string {
+    if (!url) return "mp4";
+    try {
+      return (path.extname(new URL(url).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
+    } catch {
+      return "mp4";
+    }
+  }
+
+  /**
+   * Recheck a pending video job and return the finished clip bytes + extension,
+   * or null when it's still rendering (or the result still can't be fetched).
+   * With a `historyId` this re-polls `openart_creation_get`/`wait` (a bounded
+   * probe, unlike the submit-time 20-min wait); with just a `url` it re-fetches
+   * that. Throws when the server reports the job FAILED/CANCELLED.
+   */
+  async recheckPendingVideo(rec: PendingVideoGen): Promise<{ buf: Buffer; ext: string } | null> {
+    if (rec.historyId) {
+      try {
+        return await this.waitOpenArtVideo(rec.historyId, undefined, VIDEO_RECHECK_DEADLINE_MS);
+      } catch (e) {
+        // Still rendering past the short probe — the user can fetch again.
+        if (e instanceof OpenArtVideoPendingError) return null;
+        throw e;
+      }
+    }
+    if (rec.url) {
+      const buf = await this.fetchImageBuffer(rec.url);
+      return buf ? { buf, ext: this.videoExtFromUrl(rec.url) } : null;
+    }
+    return null;
+  }
+
   /**
    * Wait for an async OpenArt video generation, returning the bytes + the
    * file extension to store under. Polls with the non-blocking
@@ -930,13 +1000,14 @@ private videoRefsAssign = videoRefsAssign;
    */
   private async waitOpenArtVideo(
     historyId: string,
-    onStatus?: (status: string) => void
+    onStatus?: (status: string) => void,
+    deadlineMs = VIDEO_WAIT_DEADLINE_MS
   ): Promise<{ buf: Buffer; ext: string } | null> {
     const waitRaw = this.findTool(/^openart_creation_wait$/);
     const getRaw = this.findTool(/^openart_creation_get$/);
     if (!getRaw && !waitRaw) return null;
 
-    const deadline = Date.now() + VIDEO_WAIT_DEADLINE_MS;
+    const deadline = Date.now() + deadlineMs;
 
     const pollOnce = async (): Promise<{ text: string; images: Buffer[]; uris: string[] } | null> => {
       try {
@@ -964,7 +1035,7 @@ private videoRefsAssign = videoRefsAssign;
         }
         const { status, failed } = openArtCreationStatus(res.text);
         if (failed) {
-          throw new Error(`OpenArt video generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
+          throw new OpenArtVideoFailedError(historyId, status);
         }
         if (status && status !== lastStatus) {
           lastStatus = status;
@@ -973,7 +1044,7 @@ private videoRefsAssign = videoRefsAssign;
       }
       await sleepMs(5000);
     }
-    throw new Error(`OpenArt video generation timed out after ${VIDEO_WAIT_DEADLINE_MS / 60_000} minutes (${historyId.slice(0, 8)}…).`);
+    throw new OpenArtVideoPendingError(historyId);
   }
 
   // ---- projects -------------------------------------------------------------
@@ -1457,23 +1528,52 @@ private videoRefsAssign = videoRefsAssign;
         ? `params ${durationKeys.map((k) => `${k}=${JSON.stringify(paramsObj[k])}`).join(", ")}`
         : `⚠ no duration/length param was set (OpenArt may default to 5s). Model form fields: [${formKeys.join(", ")}]${formDurationish.length ? ` — duration-ish: [${formDurationish.join(", ")}]` : ""}${schemaDump ? ` — ${schemaDump}` : ""}${formReplyInfo}`)
     );
+    // A fresh submission supersedes any earlier pending job — the new job is
+    // the one a future Fetch must poll.
+    if (shot.pendingVideoGen) delete shot.pendingVideoGen;
+
     const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
 
+    const historyId = this.openArtHistoryId(text);
+    // The submission reply may advertise a direct result URL (no job id); keep
+    // it so a failed download can be retried by a recheck.
+    const directUrl = text.match(VIDEO_URL_RX)?.[0];
+
     const done = await (async (): Promise<{ buf: Buffer; ext: string }> => {
-      if (images.length) return { buf: images[0], ext: "mp4" };
-      const historyId = this.openArtHistoryId(text);
-      if (historyId) {
-        const v = await this.waitOpenArtVideo(historyId, (status) =>
-          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
-        );
-        if (v) return v;
+      try {
+        if (images.length) return { buf: images[0], ext: "mp4" };
+        if (historyId) {
+          const v = await this.waitOpenArtVideo(historyId, (status) =>
+            emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
+          );
+          if (v) return v;
+        }
+        if (!directUrl) throw new Error(`OpenArt returned no video (${text.slice(0, 120) || "empty reply"})`);
+        const res = await fetch(directUrl);
+        if (!res.ok) throw new Error(`Couldn't download the generated video (HTTP ${res.status})`);
+        const ext = this.videoExtFromUrl(directUrl);
+        return { buf: Buffer.from(await res.arrayBuffer()), ext };
+      } catch (e) {
+        // Any failure past submission that isn't a dead job — the wait cap
+        // passing, a transient transport error, or a finished clip whose
+        // download failed — leaves the job reclaimable server-side. Record it
+        // so the clip can be fetched later instead of re-paid. A FAILED/
+        // CANCELLED job has nothing to reclaim, and a job with neither an id
+        // nor a URL can't be re-polled, so neither is recorded.
+        if (!(e instanceof OpenArtVideoFailedError) && (historyId || directUrl)) {
+          this.recordPendingVideo(shot, {
+            ...(historyId ? { historyId } : {}),
+            ...(directUrl ? { url: directUrl } : {}),
+            prompt: opts.prompt,
+            model: modelId ?? "auto",
+            resolution: opts.resolution || "",
+            durationSec: opts.durationSec,
+            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+            ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
+          });
+        }
+        throw e;
       }
-      const url = text.match(VIDEO_URL_RX)?.[0];
-      if (!url) throw new Error(`OpenArt returned no video (${text.slice(0, 120) || "empty reply"})`);
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Couldn't download the generated video (HTTP ${res.status})`);
-      const ext = (path.extname(new URL(url).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
-      return { buf: Buffer.from(await res.arrayBuffer()), ext };
     })();
 
     const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";

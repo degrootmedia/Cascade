@@ -60,6 +60,7 @@ import {
   type OpenArtBoardConfig,
   type OpenArtModelChoice,
   type PendingImageGen,
+  type PendingVideoGen,
   type Production,
   type ProductionShot,
   type VideoGenOptions,
@@ -136,6 +137,7 @@ const COST_MEDIA_REJECT_RX = /media|reference|start[_-]?image|end[_-]?image/i;
 const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
+const VIDEO_RECHECK_TIMEOUT_MS = 60_000;
 const WAIT_INTERVAL_S = 5;
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1453,11 +1455,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const url = urls[0];
     if (!url) {
       // No result URL and no terminal status = still rendering past the wait
-      // cap. Signal it distinctly so image callers can record the job id.
+      // cap. Signal it distinctly so callers can record the job id.
       throw new HiggsfieldCliPendingError(jobId);
     }
     const buf = await this.fetchBytes(url);
-    if (!buf) throw new Error(`Couldn't download the generated ${video ? "video" : "image"}.`);
+    // The job finished but its result couldn't be downloaded — keep the job id
+    // + URL on the pending error so a recheck can retry the fetch.
+    if (!buf) throw new HiggsfieldCliPendingError(jobId, url);
     const ext = (path.extname(new URL(url).pathname) || (video ? ".mp4" : ".png")).replace(/^\./, "").toLowerCase() || (video ? "mp4" : "png");
     if (onStatus && status) onStatus(status);
     return { buf, ext, jobId };
@@ -1675,6 +1679,46 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return null;
   }
 
+  /** The file extension to store a fetched clip under, from its source URL. */
+  private videoExtFromUrl(url?: string): string {
+    if (!url) return "mp4";
+    try {
+      return (path.extname(new URL(url).pathname) || ".mp4").replace(/^\./, "").toLowerCase() || "mp4";
+    } catch {
+      return "mp4";
+    }
+  }
+
+  /**
+   * Recheck a pending video job and return the finished clip bytes + extension,
+   * or null when it's still rendering (or the result still can't be fetched).
+   * With a `historyId` it re-asks `generate get`; with just a `url` it
+   * re-fetches that. Throws when the job reports FAILED/CANCELLED.
+   */
+  async recheckPendingVideo(rec: PendingVideoGen): Promise<{ buf: Buffer; ext: string } | null> {
+    if (rec.historyId) {
+      if (!this.isAvailable()) return null;
+      let out = "";
+      try {
+        out = await this.cli(["generate", "get", rec.historyId], VIDEO_RECHECK_TIMEOUT_MS);
+      } catch {
+        return null;
+      }
+      const { failed, status } = cliJobStatus(out);
+      if (failed) throw new Error(`Higgsfield generation ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
+      const urls = cliResultUrls(out, true);
+      const url = urls[0] ?? out.match(VIDEO_URL_RX)?.[0];
+      if (!url) return null;
+      const buf = await this.fetchBytes(url);
+      return buf ? { buf, ext: this.videoExtFromUrl(url) } : null;
+    }
+    if (rec.url) {
+      const buf = await this.fetchBytes(rec.url);
+      return buf ? { buf, ext: this.videoExtFromUrl(rec.url) } : null;
+    }
+    return null;
+  }
+
   /**
    * Generate one video clip for a shot. Mirrors the MCP generateVideoClip
    * contract (same args, same { rel } result): the source frame fills
@@ -1831,10 +1875,32 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : undefined);
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
+      // A fresh submission supersedes any earlier pending job.
+      if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (Higgsfield CLI)…`);
-      const done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
-        emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
-      );
+      let done: { buf: Buffer; ext: string; jobId: string };
+      try {
+        done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
+          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
+        );
+      } catch (e) {
+        // The job keeps rendering (or finished but couldn't be downloaded) —
+        // record it as pending so the clip can be fetched instead of re-paid.
+        if (e instanceof HiggsfieldCliPendingError) {
+          shot.pendingVideoGen = {
+            historyId: e.jobId,
+            ...(e.url ? { url: e.url } : {}),
+            prompt: opts.prompt,
+            model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
+            resolution: opts.resolution || "",
+            durationSec,
+            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+            ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
+            at: new Date().toISOString(),
+          };
+        }
+        throw e;
+      }
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);
@@ -1966,10 +2032,31 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : undefined);
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
+      // A fresh submission supersedes any earlier pending job.
+      if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video-edit job via ${modelId} (Higgsfield CLI)…`);
-      const done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
-        emit(`Shot ${shot.number}: video edit ${status.toLowerCase()}… still rendering.`, "info")
-      );
+      let done: { buf: Buffer; ext: string; jobId: string };
+      try {
+        done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
+          emit(`Shot ${shot.number}: video edit ${status.toLowerCase()}… still rendering.`, "info")
+        );
+      } catch (e) {
+        // Same contingency as the generate path — keep the job for a fetch.
+        if (e instanceof HiggsfieldCliPendingError) {
+          shot.pendingVideoGen = {
+            historyId: e.jobId,
+            ...(e.url ? { url: e.url } : {}),
+            prompt: opts.prompt,
+            model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
+            resolution: opts.resolution || "",
+            ...(durationSec > 0 ? { durationSec } : {}),
+            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+            sourcePath: sourceRel,
+            at: new Date().toISOString(),
+          };
+        }
+        throw e;
+      }
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt, "edit");
@@ -2001,11 +2088,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
   }
 }
 
-/** Thrown when a CLI wait cap passes with the job still rendering. The job
- *  is NOT dead — it keeps rendering server-side — so image callers record
- *  the jobId as pending and reclaim it with `generate get` later. */
+/** Thrown when a CLI wait cap passes with the job still rendering, or when a
+ *  finished job's result URL couldn't be downloaded. The work is NOT dead — it
+ *  keeps rendering (or stays published) server-side — so callers record the
+ *  jobId (and URL) as pending and reclaim it with `generate get`/a re-fetch
+ *  later. */
 export class HiggsfieldCliPendingError extends Error {
-  constructor(readonly jobId: string) {
+  constructor(readonly jobId: string, readonly url?: string) {
     super(`Higgsfield generation timed out (${jobId.slice(0, 8)}…).`);
     this.name = "HiggsfieldCliPendingError";
   }

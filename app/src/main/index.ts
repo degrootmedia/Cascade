@@ -18,7 +18,7 @@ import { ingestScript, refineStylePrompt, refineCharacterDescription, generateSt
 import { styleFramePrompt } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, resolveOutputRef, resolveOutputRefByPath, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, resolveOutputRefByPath, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
@@ -2047,15 +2047,20 @@ function registerIpc() {
     if (!snap) throw new Error("Production not found.");
     productionEmit(id, `${label}…`);
     const before = structuredClone(snap);
+    let failure: unknown = null;
     try {
       await fn(snap, (m, l) => productionEmit(id, m, l));
     } catch (e) {
       productionEmit(id, friendlyApiError(e), "error");
-      throw new Error(friendlyApiError(e));
+      failure = e;
     }
+    // Persist even on failure: a job that outlives its wait records a pending
+    // record on the shot that a later Fetch must see — dropping the save would
+    // lose the only handle on the still-rendering vendor job.
     await enqueueProduction(id, async () => {
       productions.saveProduction(rebaseProduction(before, snap));
     });
+    if (failure) throw new Error(friendlyApiError(failure));
     return productions.loadProduction(id) ?? snap;
   }
 
@@ -2166,6 +2171,83 @@ function registerIpc() {
       }, settings.getHiggsfieldCreditUsd());
       delete shot.pendingImageGen;
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
+    })
+  );
+
+  // Step 3/4: reclaim a video clip whose vendor job outlived the generating
+  // call — the wait timed out or the finished clip couldn't be downloaded. The
+  // active provider re-polls the job via recheckPendingVideo and the clip is
+  // applied to whichever node/field submitted it (`pendingVideoGen.target`):
+  // the shot's video (classic), the video node, the edit-video node, or a
+  // tween action block.
+  handle("production:recheckVideo", (_e, id: string, shotId: string) =>
+    runVideoJob(id, "fetching a pending video", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const pending = shot.pendingVideoGen;
+      if (!pending) {
+        emit(`Shot ${shot.number}: nothing pending to fetch.`, "info");
+        return;
+      }
+      emit(`Shot ${shot.number}: checking the pending video job…`, "info");
+      let got: { buf: Buffer; ext: string } | null;
+      try {
+        got = await mediaFor(pending.model).recheckPendingVideo(pending);
+      } catch (e) {
+        // The job is dead (FAILED/CANCELLED) — drop the stale record so the
+        // shot stops showing as pending; the user regenerates instead.
+        delete shot.pendingVideoGen;
+        throw e;
+      }
+      if (!got) {
+        emit(`Shot ${shot.number}: the video is still rendering — fetch again in a minute.`, "info");
+        return;
+      }
+      const rel = writeShotVideo(p, shot, got.buf, got.ext);
+      const target = pending.target;
+      if (target?.kind === "videoPath") {
+        if (shot.videoPath && shot.videoPath !== rel) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old clip already gone */ } }
+        shot.videoPath = rel;
+        recordGraphVideoGen(shot, rel, pending.prompt, pending.model);
+        hookVideoGenToOutput(shot);
+      } else if (target?.kind === "editVideoNode") {
+        recordGraphEditVideoGen(shot, rel, pending.prompt, pending.model);
+        if (shot.graphOutputSource === "editvideo") applyVideoOutput(shot, rel, target.sourcePath);
+      } else if (target?.kind === "tween") {
+        syncTweenBlocks(p, shot);
+        const block = (shot.graphTweenBlocks ?? []).find((b) => b.id === target.blockId);
+        if (block) recordTweenBlockGen(block, rel, pending.prompt, pending.model);
+      } else {
+        // Default to the video generation node (the node-graph video flow).
+        recordGraphVideoGen(shot, rel, pending.prompt, pending.model);
+        if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined);
+      }
+      // The original submit never reached its generation recorder (the wait
+      // timed out or the download failed), so the cost was unbilled. Bill it
+      // now, once, using the submit-time config kept on the pending record.
+      let reclaimCredits: number | undefined;
+      try {
+        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+          model: pending.model, kind: "video",
+          ...(pending.resolution ? { resolution: pending.resolution } : {}),
+          ...(pending.durationSec ? { durationSec: pending.durationSec } : {}),
+          ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
+        }) ?? undefined;
+      } catch {
+        reclaimCredits = undefined;
+      }
+      ledger.recordGeneration({
+        kind: "video",
+        model: pending.model,
+        resolution: pending.resolution ?? "",
+        durationSec: pending.durationSec,
+        credits: reclaimCredits,
+        at: Date.now(),
+        productionId: p.meta.id,
+        shotId: shot.id,
+      }, settings.getHiggsfieldCreditUsd());
+      delete shot.pendingVideoGen;
+      emit(`Shot ${shot.number}: video recovered from the pending generation job.`, "done");
     })
   );
 
@@ -2947,7 +3029,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit);
+      let rel: string;
+      try {
+        rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit)).rel;
+      } catch (e) {
+        // Tag the orphaned job so a later Fetch applies the clip as the
+        // shot's video (the classic flow).
+        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoPath" };
+        throw e;
+      }
       if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
       shot.videoPath = rel;
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
@@ -3025,7 +3115,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
-      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
+      let rel: string;
+      try {
+        rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs)).rel;
+      } catch (e) {
+        // Tag the orphaned job so a later Fetch stores the clip on the video
+        // generation node (and the output when it feeds it).
+        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}) };
+        throw e;
+      }
       recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
       if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath);
       emit(`Shot ${shot.number}: node video ready.`, "done");
@@ -3062,7 +3160,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // References ride the prompt node's @[name] tags and are resolved inside
       // the provider (like the video node) — no separate refIds arg.
       emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await provider.generateVideoEdit(p, shot, clean, emit, sourcePath);
+      let rel: string;
+      try {
+        rel = (await provider.generateVideoEdit(p, shot, clean, emit, sourcePath)).rel;
+      } catch (e) {
+        // Tag the orphaned job so a later Fetch stores the edit clip on the
+        // edit-video node (and the output when it feeds it).
+        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "editVideoNode", ...(sourcePath ? { sourcePath } : {}) };
+        throw e;
+      }
       recordGraphEditVideoGen(shot, rel, clean.prompt, clean.model);
       if (shot.graphOutputSource === "editvideo") applyVideoOutput(shot, rel, sourcePath);
       emit(`Shot ${shot.number}: edited video ready.`, "done");
@@ -3213,7 +3319,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const { rel } = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, undefined, [], { start, end });
+      let rel: string;
+      try {
+        rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, undefined, [], { start, end })).rel;
+      } catch (e) {
+        // Tag the orphaned job so a later Fetch stores the clip back on its
+        // action block.
+        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "tween", blockId };
+        throw e;
+      }
       recordTweenBlockGen(block, rel, prompt, clean.model);
       emit(`Shot ${shot.number}: in-between ready — pick it in the block's dropdown to preview.`, "done");
     })

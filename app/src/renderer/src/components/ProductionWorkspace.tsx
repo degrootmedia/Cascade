@@ -161,6 +161,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
   /** Shot ids whose pending generation job is being rechecked. */
   const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
+  /** Shot ids whose pending video job is being fetched. */
+  const [videoRecheckIds, setVideoRecheckIds] = useState<Set<string>>(new Set());
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
   // each load/save the whole production and clobber each other, so batches run
@@ -272,6 +274,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const boardHandlerRef = useRef<{
     regenerate: (id: string) => void;
     recheck: (id: string) => void;
+    recheckVideo: (id: string) => void;
     importFrame: (id: string) => void;
     edit: (id: string) => void;
     video: (id: string) => void;
@@ -292,6 +295,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   boardHandlerRef.current = {
     regenerate: (id) => void regenBoard(id),
     recheck: (id) => void recheckBoard(id),
+    recheckVideo: (id) => void recheckVideo(id),
     importFrame: (id) => void importFrames(id),
     edit: (id) => setEditShotId(id),
     video: (id) => setVideoShotId(id),
@@ -335,6 +339,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const boardActions = useMemo(() => ({
     onRegenerate: (id: string) => boardHandlerRef.current.regenerate(id),
     onRecheck: (id: string) => boardHandlerRef.current.recheck(id),
+    onRecheckVideo: (id: string) => boardHandlerRef.current.recheckVideo(id),
     onImport: (id: string) => boardHandlerRef.current.importFrame(id),
     onEdit: (id: string) => boardHandlerRef.current.edit(id),
     onVideo: (id: string) => boardHandlerRef.current.video(id),
@@ -1509,6 +1514,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setRecheckIds((prev) => {
+        const n = new Set(prev);
+        n.delete(shotId);
+        return n;
+      });
+    }
+  }
+
+  /** Fetch a shot's clip from a video job that outlived the generating call
+   *  (the wait timed out or the download failed). The job keeps rendering
+   *  server-side, so fetching polls it again and downloads the clip when ready;
+   *  main applies it to whichever node/field submitted it. */
+  async function recheckVideo(shotId: string) {
+    if (!prod || videoRecheckIds.has(shotId)) return;
+    setErr(null);
+    setVideoRecheckIds((prev) => new Set(prev).add(shotId));
+    try {
+      const next = await window.cascade.recheckVideo(prod.meta.id, shotId);
+      setProd(next);
+      bustOne(shotId);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setVideoRecheckIds((prev) => {
         const n = new Set(prev);
         n.delete(shotId);
         return n;
@@ -3693,8 +3722,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyAll.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
+                    videoPending={shot.pendingVideoGen?.target?.kind === "videoPath"}
+                    videoRechecking={videoRecheckIds.has(shot.id)}
                     onRegenerate={boardActions.onRegenerate}
                     onRecheck={boardActions.onRecheck}
+                    onRecheckVideo={boardActions.onRecheckVideo}
                     onImport={boardActions.onImport}
                     onEdit={boardActions.onEdit}
                     onVideo={boardActions.onVideo}
@@ -3828,6 +3860,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onRunTweenBlock={(blockId, durationSec, model, params) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model, params) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
+                  onFetchVideo={() => graphShotId ? recheckVideo(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyAll.has(graphShotId) : false}
                   videoGenBusy={graphShotId ? nodeVideoBusyAll.has(graphShotId) : false}
                   editVideoBusy={graphShotId ? nodeEditVideoBusyAll.has(graphShotId) : false}

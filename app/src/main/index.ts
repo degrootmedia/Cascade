@@ -1702,11 +1702,28 @@ function registerIpc() {
       if (!gen) throw new Error(`${refMedia.displayName} isn't connected, so style frames can't be generated in-app.`);
       const prompt = styleFramePrompt(style.prompt || style.name, brandPrompt(p), settings.getPromptTemplates().styleFrame);
       emit(`Generating a style frame for "${style.name || `Style ${style.index}`}” (16:9)…`);
-      const buf = await gen(prompt, [], undefined, sanitizeGenParams(params));
+      // A fresh submission supersedes any earlier pending style-frame job.
+      delete style.pendingImageGen;
+      let buf: Buffer;
+      try {
+        buf = await gen(prompt, [], undefined, sanitizeGenParams(params), (rec) => {
+          // The job outlived the wait / hit a transient error but keeps
+          // rendering server-side — persist it on the style so it can be
+          // reclaimed via production:recheckStyleFrame.
+          style.pendingImageGen = rec;
+        });
+      } catch (e) {
+        if (style.pendingImageGen) {
+          emit(`Style "${style.name || `Style ${style.index}`}" frame is still rendering — recheck to download it when ready.`, "info");
+          return;
+        }
+        throw e;
+      }
       const ext = buf[0] === 0xff && buf[1] === 0xd8 ? "jpg" : "png";
       const rel = writeStyleFrame(p, style.id, `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${buf.toString("base64")}`);
       style.imagePath = rel;
       style.frameSource = "generated";
+      delete style.pendingImageGen;
     })
   );
 
@@ -1877,8 +1894,9 @@ function registerIpc() {
     // `characters`/`references`/`referenceCategories` are included so the
     // runProductionJob-based generators (reference-image gen, character
     // builder) persist their new/updated entries — without them those changes
-    // were silently dropped on save.
-    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly", "characters", "references", "referenceCategories"] as const) {
+    // were silently dropped on save. `styles` is included so the style-frame
+    // generator's written frame + pending-job record persist the same way.
+    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
@@ -2127,6 +2145,69 @@ function registerIpc() {
       }, settings.getHiggsfieldCreditUsd());
       delete shot.pendingImageGen;
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
+    })
+  );
+
+  // Step 2: reclaim a style frame whose async vendor job outlived the
+  // generating call. Same contingency as production:recheckBoard, but the
+  // target is a style (its own pending record), not a shot.
+  handle("production:recheckStyleFrame", (_e, id: string, styleId: string) =>
+    runProductionJob(id, "rechecking a pending style frame", async (p, emit) => {
+      const style = (p.styles ?? []).find((s) => s.id === styleId);
+      if (!style) throw new Error("Style not found.");
+      const pending = style.pendingImageGen;
+      if (!pending) {
+        emit(`Style "${style.name || `Style ${style.index}`}": nothing pending to recheck.`, "info");
+        return;
+      }
+      emit(`Style "${style.name || `Style ${style.index}`}": rechecking the pending generation job…`, "info");
+      let buf: Buffer;
+      try {
+        const got = await mediaFor(pending.model).recheckPendingImage(pending);
+        if (!got) {
+          emit(`Style "${style.name || `Style ${style.index}`}": the frame is still rendering — check again in a minute.`, "info");
+          return;
+        }
+        buf = got;
+      } catch (e) {
+        // The job is dead (FAILED/CANCELLED) — drop the stale pending record so
+        // the style stops showing as pending; the user regenerates instead.
+        delete style.pendingImageGen;
+        throw e;
+      }
+      const ext = buf[0] === 0xff && buf[1] === 0xd8 ? "jpg" : "png";
+      const rel = writeStyleFrame(p, style.id, `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${buf.toString("base64")}`);
+      if (style.imagePath && style.imagePath !== rel) {
+        try { fs.unlinkSync(assetPath(p, style.imagePath)); } catch { /* old frame already gone */ }
+      }
+      style.imagePath = rel;
+      style.frameSource = "generated";
+      // The original submit never reached its generation recorder (the wait
+      // timed out), so the cost was unbilled. Bill it now, once, using the
+      // submit-time resolution/aspect kept on the pending record.
+      let reclaimCredits: number | undefined;
+      try {
+        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+          model: pending.model, kind: "image",
+          ...(pending.resolution ? { resolution: pending.resolution } : {}),
+          ...(pending.aspectRatio ? { aspectRatio: pending.aspectRatio } : {}),
+          ...(pending.quality ? { quality: pending.quality } : {}),
+          ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
+        }) ?? undefined;
+      } catch {
+        reclaimCredits = undefined;
+      }
+      ledger.recordGeneration({
+        kind: "image",
+        model: pending.model,
+        resolution: pending.resolution ?? "",
+        aspectRatio: pending.aspectRatio,
+        credits: reclaimCredits,
+        at: Date.now(),
+        productionId: p.meta.id,
+      }, settings.getHiggsfieldCreditUsd());
+      delete style.pendingImageGen;
+      emit(`Style "${style.name || `Style ${style.index}`}": frame recovered from the pending generation job.`, "done");
     })
   );
 

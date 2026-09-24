@@ -43,6 +43,20 @@ const MAX_STYLES = 5;
 const DELETE_GENERATION_WARNING =
   "Are you sure you want to delete this generation? This permanently removes it from your disk, but you can always access it again on your Higgsfield/OpenArt account.";
 
+/** localStorage key remembering the production that was open, so switching to
+ *  Chat and back resumes it instead of dropping the user on the picker. */
+const LAST_PROD_KEY = "cascade.lastProduction";
+
+function readLastProductionId(): string | null {
+  try { return localStorage.getItem(LAST_PROD_KEY); } catch { return null; }
+}
+function rememberProduction(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(LAST_PROD_KEY, id);
+    else localStorage.removeItem(LAST_PROD_KEY);
+  } catch { /* ignore */ }
+}
+
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
  * identity / References) so each reads as its own block. Collapse state is
  * persisted per production so it survives step switches and app restarts. */
@@ -131,6 +145,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [styleImgBusy, setStyleImgBusy] = useState(false);
   // step 2: which style card is generating/uploading its frame (look anchor)
   const [styleFrameBusy, setStyleFrameBusy] = useState<string | null>(null);
+  /** Style ids whose pending style-frame job is being rechecked. */
+  const [styleRecheckIds, setStyleRecheckIds] = useState<Set<string>>(new Set());
   // step 2: enlarged style-frame image (lightbox), or null when closed
   const [styleZoom, setStyleZoom] = useState<string | null>(null);
   // step 2: set when the active chat model can't see images (shows a popup)
@@ -602,6 +618,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const p = await window.cascade.createProduction(newName, newFolder);
       prodRevRef.current = revOf(p);
       setProd(p);
+      rememberProduction(p.meta.id);
       setNewName(""); setNewFolder(null);
       await refreshList();
     } catch (e) {
@@ -619,6 +636,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const p = await window.cascade.importProduction(dir);
       prodRevRef.current = revOf(p);
       setProd(p);
+      rememberProduction(p.meta.id);
       setNewName(""); setNewFolder(null);
       await refreshList();
     } catch (e) {
@@ -632,7 +650,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setErr(null);
     try {
       const p = await window.cascade.loadProduction(id);
-      if (p) { prodRevRef.current = revOf(p); setProd(p); setLog([]); await refreshList(); }
+      if (p) {
+        prodRevRef.current = revOf(p);
+        setProd(p);
+        setLog([]);
+        if (!detached) rememberProduction(p.meta.id);
+        await refreshList();
+      } else if (readLastProductionId() === id) {
+        // The remembered production is gone — forget it so the picker shows.
+        rememberProduction(null);
+      }
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -641,14 +668,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function remove(id: string) {
     try { await window.cascade.removeProduction(id, "delete"); } catch { return; }
     if (prod?.meta.id === id) { prodRevRef.current = 0; setProd(null); }
+    if (readLastProductionId() === id) rememberProduction(null);
     await refreshList();
   }
 
   function close() {
     prodRevRef.current = 0;
     setProd(null);
+    // An explicit close opts out of the resume — reopening is a deliberate pick.
+    rememberProduction(null);
     void refreshList();
   }
+
+  // Resume the production that was open when the user last left this view, so
+  // switching to Chat and back lands them where they were. The detached window
+  // loads its own target and never touches the main window's remembered id.
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (detached || resumedRef.current) return;
+    resumedRef.current = true;
+    if (prodRef.current) return;
+    const id = readLastProductionId();
+    if (id) void open(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** Guarded whole-snapshot apply: rejects stale IPC snapshots (Fix A) and
    *  drops dangling focus + dead prompt cache entries (Fix C). Returns true
@@ -1121,6 +1164,29 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setStyleFrameBusy(styleId);
     setErr(null);
     apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution, params).finally(() => setStyleFrameBusy(null)));
+  }
+
+  /** Step 2: reclaim a style frame from a vendor job that outlived the
+   *  generating call (the wait timed out or a transient error hit). The job
+   *  keeps rendering server-side, so rechecking polls it again and downloads
+   *  the finished frame when ready. */
+  async function recheckStyleFrame(styleId: string) {
+    if (!prod || styleRecheckIds.has(styleId)) return;
+    setErr(null);
+    setStyleRecheckIds((prev) => new Set(prev).add(styleId));
+    try {
+      const next = await window.cascade.recheckStyleFrame(prod.meta.id, styleId);
+      applySnapshot(next);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setStyleRecheckIds((prev) => {
+        const n = new Set(prev);
+        n.delete(styleId);
+        return n;
+      });
+    }
   }
 
   /** Step 2: attach a picked file as one style's frame. */
@@ -3189,7 +3255,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                           </button>
                         </span>
                       ) : (
-                        <span className="prod-style-frame-empty" title="No style frame — boards generate from text only">no frame</span>
+                        <span className="prod-style-frame-empty" title={s.pendingImageGen ? "This style frame is still rendering — recheck to download it when ready" : "No style frame — boards generate from text only"}>{s.pendingImageGen ? "pending…" : "no frame"}</span>
                       )}
                       {styleZoom === s.id && s.imagePath && (
                         <div className="prod-ref-lightbox" onClick={() => setStyleZoom(null)}>
@@ -3241,6 +3307,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                               } : null;
                             })()} /></>}
                           </button>
+                          {s.pendingImageGen && (
+                            <button
+                              className="prod-btn"
+                              disabled={styleFrameBusy !== null || styleRecheckIds.has(s.id)}
+                              onClick={() => void recheckStyleFrame(s.id)}
+                              title="This style frame is still rendering — recheck to download it when ready"
+                            >
+                              {styleRecheckIds.has(s.id) ? "…" : "◷ Recheck"}
+                            </button>
+                          )}
                           <button
                             className="prod-btn"
                             disabled={styleFrameBusy !== null}

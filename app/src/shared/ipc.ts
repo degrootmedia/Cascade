@@ -545,6 +545,12 @@ export interface CascadeApi {
   /** Step 3: lock the look — copy an approved shot frame to styles/ and point
    *  the shot's style (or the master) at it (frameSource "anchor"). */
   useShotAsStyleFrame(productionId: string, shotId: string, styleId?: string): Promise<Production>;
+  /**
+   * Step 2: reclaim a style frame from a vendor job that outlived the
+   * generating call (the wait timed out or a transient error hit). Rechecks
+   * the pending job and downloads/attaches the frame when it's ready.
+   */
+  recheckStyleFrame(productionId: string, styleId: string): Promise<Production>;
   /** Insert a shot (mid-numbered) before the given position; returns updated production. */
   insertShot(productionId: string, sceneNumber: number, index: number): Promise<Production>;
   /** Remove a shot by its stable id. */

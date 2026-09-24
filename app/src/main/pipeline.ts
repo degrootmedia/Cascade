@@ -33,7 +33,7 @@ import { findGeneration, generationInUse, generationInUseMessage, removeGenerati
 import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
 import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
@@ -2391,12 +2391,15 @@ export function migrateEditNodes(shot: ProductionShot): boolean {
  *  `refs` carries the shot's reference artwork (if any) for image-input models.
  *  `shot` (when given) lets the generator record a pending async job on the
  *  shot if the generation outlives its wait — the frame can then be reclaimed
- *  later instead of being lost. */
+ *  later instead of being lost. `onPending` (when given) receives the same
+ *  record for callers whose generation target isn't a shot (a style frame, a
+ *  reference) so they can persist it for a later recheck too. */
 export type ImageGenFn = (
   prompt: string,
   refs: GenerationRef[],
   shot?: ProductionShot,
-  params?: Record<string, string | number | boolean | string[]>
+  params?: Record<string, string | number | boolean | string[]>,
+  onPending?: (rec: PendingImageGen) => void
 ) => Promise<Buffer>;
 
 /**

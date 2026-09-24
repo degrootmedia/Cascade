@@ -540,7 +540,7 @@ export class OpenArtCliProvider implements MediaProvider {
 
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot): Promise<Buffer> => {
+    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen) => void): Promise<Buffer> => {
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let models: OpenArtModelChoice[] = [];
@@ -589,8 +589,10 @@ export class OpenArtCliProvider implements MediaProvider {
         try {
           done = await this.createAndWait(args, false, IMAGE_WAIT_TIMEOUT_MS);
         } catch (e) {
-          if (shot && e instanceof OpenArtCliPendingError) {
-            shot.pendingImageGen = { historyId: e.historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, resolution: cfgUsed.resolution, aspectRatio, at: new Date().toISOString() };
+          if (e instanceof OpenArtCliPendingError) {
+            const rec: PendingImageGen = { historyId: e.historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, resolution: cfgUsed.resolution, aspectRatio, at: new Date().toISOString() };
+            if (shot) shot.pendingImageGen = rec;
+            onPending?.(rec);
           }
           throw e;
         }

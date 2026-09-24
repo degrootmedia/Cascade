@@ -16,7 +16,7 @@ import { OpenArtClient, videoRefsAssign } from "../src/main/providers/openart.js
 import { openArtCreationResultUrls, openArtCreationStatus } from "../src/main/providers/openart-core.js";
 import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
-import type { Production, ProductionShot } from "../src/shared/ipc.js";
+import type { PendingImageGen, Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -884,6 +884,72 @@ describe("OpenArtClient pending-image contingency", () => {
 
     // Rechecking a dead job throws too.
     await expect(client.recheckPendingImage({ historyId: "h-fail2", prompt: "any", model: "m", at: "" })).rejects.toThrow(/failed/i);
+  });
+
+  it("tolerates a transient poll error and still downloads the finished frame", async () => {
+    // The batch scenario: several frames poll at once, the MCP client's
+    // per-call timeout fires on one, and the previously-thrown error discarded
+    // a frame whose job had actually completed server-side.
+    let calls = 0;
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-flaky","pollAfterSeconds":0}',
+      openart_creation_get: () => {
+        calls++;
+        if (calls === 1) throw new Error("timeout: openart.openart_creation_get (120s)");
+        return { text: '{"status":"SUCCEEDED"}', images: [Buffer.from("late-jpeg")], uris: [] };
+      },
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+
+    vi.useFakeTimers();
+    try {
+      const pending = gen("Draw a castle", []);
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(pending).resolves.toEqual(Buffer.from("late-jpeg"));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports an orphaned job to the caller's pending sink when there's no shot", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-sink","pollAfterSeconds":0}',
+      openart_creation_get: () => ({ text: '{"status":"STILL_RUNNING","pollAfterSeconds":0}', images: [], uris: [] }),
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+    const seen: PendingImageGen[] = [];
+
+    vi.useFakeTimers();
+    try {
+      const pending = gen("style plate", [], undefined, undefined, (rec) => seen.push(rec));
+      const assertion = expect(pending).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(151_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ historyId: "h-sink", prompt: "style plate" });
+  });
+
+  it("does not report a dead (FAILED) job to the pending sink", async () => {
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-dead","pollAfterSeconds":0}',
+      openart_creation_get: () => ({ text: '{"status":"FAILED"}', images: [], uris: [] }),
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+    const seen: PendingImageGen[] = [];
+
+    await expect(gen("any", [], undefined, undefined, (rec) => seen.push(rec))).rejects.toThrow(/failed/i);
+    expect(seen).toHaveLength(0);
   });
 });
 

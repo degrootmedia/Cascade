@@ -1479,7 +1479,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
   ): ImageGenFn | null {
     if (!this.isAvailable()) return null;
 
-    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>): Promise<Buffer> => {
+    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen) => void): Promise<Buffer> => {
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let items: CliListItem[] = [];
@@ -1618,14 +1618,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
           // The job keeps rendering server-side — record it as pending so
           // the finished frame can be reclaimed instead of re-paid. Quality
           // and params ride along so the reclaim bills like the submit.
-          if (shot && e instanceof HiggsfieldCliPendingError) {
-            shot.pendingImageGen = {
+          if (e instanceof HiggsfieldCliPendingError) {
+            const rec: PendingImageGen = {
               historyId: e.jobId, prompt, model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
               resolution, aspectRatio,
               ...(quality ? { quality } : {}),
               ...(extraParams && Object.keys(extraParams).length ? { params: { ...extraParams } } : {}),
               at: new Date().toISOString(),
             };
+            if (shot) shot.pendingImageGen = rec;
+            onPending?.(rec);
           }
           throw e;
         }

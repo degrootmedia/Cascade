@@ -83,15 +83,27 @@ const IMAGE_WAIT_DEADLINE_MS = 150_000;
  *  isn't ready yet the user can recheck again later. */
 const IMAGE_RECHECK_DEADLINE_MS = 60_000;
 
+/** How long to wait between non-blocking image poll passes when the server
+ *  doesn't tell us (`pollAfterSeconds`). */
+const IMAGE_POLL_INTERVAL_MS = 4_000;
+
 /** Thrown when an async OpenArt image job outlives the wait cap. The job is
  *  NOT dead — it keeps rendering server-side — so callers can record the
- *  historyId as pending and reclaim the finished image later. FAILED/CANCELLED
- *  completions throw a plain Error instead (the job is dead; nothing to
- *  reclaim). */
+ *  historyId as pending and reclaim the finished image later. */
 export class OpenArtImagePendingError extends Error {
   constructor(readonly historyId: string) {
     super(`OpenArt image generation timed out (${historyId.slice(0, 8)}…).`);
     this.name = "OpenArtImagePendingError";
+  }
+}
+
+/** Thrown when OpenArt reports the job FAILED/CANCELLED — the job is dead and
+ *  nothing can be reclaimed. Distinct from OpenArtImagePendingError so callers
+ *  can avoid recording a dead job as pending. */
+export class OpenArtImageFailedError extends Error {
+  constructor(readonly historyId: string, status: string) {
+    super(`OpenArt generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
+    this.name = "OpenArtImageFailedError";
   }
 }
 
@@ -831,13 +843,26 @@ private videoRefsAssign = videoRefsAssign;
 
     const deadline = Date.now() + deadlineMs;
 
-    const pollWith = waitRaw
-      ? async () =>
-          this.mcp.callRawContent(SERVER, waitRaw!, { historyId, timeoutSeconds: 60 })
-      : async () => this.mcp.callRawContent(SERVER, getRaw!, { historyId });
+    // Prefer the NON-blocking `get`. A batch submits and waits off many frames
+    // at once, and a long server-side `wait` per frame piles up behind the MCP
+    // client's per-call timeout (later frames "timed out" while their jobs kept
+    // rendering). Polling `get` is cheap and parallel-safe; the blocking wait is
+    // only a fallback when `get` isn't exposed.
+    const pollWith = getRaw
+      ? () => this.mcp.callRawContent(SERVER, getRaw, { historyId })
+      : () => this.mcp.callRawContent(SERVER, waitRaw!, { historyId, timeoutSeconds: 30 });
 
     while (Date.now() < deadline) {
-      const res = await pollWith();
+      let res: { text: string; images: Buffer[]; uris: string[] };
+      try {
+        res = await pollWith();
+      } catch {
+        // Transient per-call failure (client timeout, dropped connection). The
+        // job keeps rendering server-side, so sleep and poll again instead of
+        // reporting the frame as lost.
+        await sleepMs(IMAGE_POLL_INTERVAL_MS);
+        continue;
+      }
       const got = await this.creationResult(res, false, exclude);
       if (got) return { buf: got.buf };
       const { status, failed } = openArtCreationStatus(res.text);
@@ -861,7 +886,7 @@ private videoRefsAssign = videoRefsAssign;
     if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
     const { buf, failed } = await this.pollOpenArtImage(historyId, deadlineMs, exclude);
     if (buf) return buf;
-    if (failed) throw new Error(`OpenArt generation ${failed.toLowerCase()} (${historyId.slice(0, 8)}…).`);
+    if (failed) throw new OpenArtImageFailedError(historyId, failed);
     throw new OpenArtImagePendingError(historyId);
   }
 
@@ -888,7 +913,7 @@ private videoRefsAssign = videoRefsAssign;
       if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
       const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS);
       if (buf) return buf;
-      if (failed) throw new Error(`OpenArt generation ${failed.toLowerCase()} (${rec.historyId.slice(0, 8)}…).`);
+      if (failed) throw new OpenArtImageFailedError(rec.historyId, failed);
       return null;
     }
     if (rec.url) return this.fetchImageBuffer(rec.url);
@@ -1048,10 +1073,19 @@ private videoRefsAssign = videoRefsAssign;
     // the rest of the run); null when the lookup/create fails.
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot): Promise<Buffer> => {
+    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen) => void): Promise<Buffer> => {
       // A fresh submission supersedes any earlier pending job — the new
       // historyId is the one a future recheck must poll.
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
+
+      /** Persist an orphaned job both on the shot (the storyboard flow) and,
+       *  when the caller supplied a sink, wherever it stores pending jobs (a
+       *  style frame, a reference, …). */
+      const recordPending = (rec: Omit<PendingImageGen, "at">): void => {
+        const full: PendingImageGen = { ...rec, at: new Date().toISOString() };
+        this.recordPendingImage(shot, full);
+        onPending?.(full);
+      };
 
       // Resolve the dropdown choice (incl. "auto") fresh per run, so edits to
       // the model dropdown are honored without an app restart.
@@ -1135,11 +1169,12 @@ private videoRefsAssign = videoRefsAssign;
           if (done) buffer = done;
           // no image surfaced despite completion — fall through to URL scan
         } catch (e) {
-          if (e instanceof OpenArtImagePendingError) {
-            // The wait cap passed but the job keeps rendering server-side —
-            // don't lose it. Record the historyId as pending so the finished
-            // frame can be rechecked and downloaded without paying twice.
-            this.recordPendingImage(shot, { historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+          // Any failure past submission — the wait cap passing OR a transient
+          // transport error — leaves the job rendering server-side. Record it
+          // as pending so the finished frame can be rechecked and downloaded
+          // without paying twice. Only a dead (FAILED/CANCELLED) job is skipped.
+          if (!(e instanceof OpenArtImageFailedError)) {
+            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
           }
           throw e;
         }
@@ -1161,7 +1196,7 @@ private videoRefsAssign = videoRefsAssign;
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
           // recheck can retry the download without regenerating.
-          this.recordPendingImage(shot, { url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
           throw e;
         }
         if (this.isExcludedInput(downloaded, exclude)) {

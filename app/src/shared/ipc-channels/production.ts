@@ -26,6 +26,7 @@ export const productionChannels = {
   "production:generateStyleFrame": { method: "generateStyleFrame", kind: "invoke" },
   "production:setStyleFrame": { method: "setStyleFrame", kind: "invoke" },
   "production:useShotAsStyleFrame": { method: "useShotAsStyleFrame", kind: "invoke" },
+  "production:recheckStyleFrame": { method: "recheckStyleFrame", kind: "invoke" },
   "production:insertShot": { method: "insertShot", kind: "invoke" },
   "production:deleteShot": { method: "deleteShot", kind: "invoke" },
   "production:updateShot": { method: "updateShot", kind: "invoke" },

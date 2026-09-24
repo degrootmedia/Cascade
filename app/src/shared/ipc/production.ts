@@ -358,6 +358,11 @@ export interface ProductionStyle {
   /** Per-style schema-driven model options (variant, seed, …) for
    *  style-frame generation. Absent/empty = vendor defaults. */
   params?: Record<string, string | number | boolean | string[]>;
+  /** An async style-frame job that outlived the generating call (the wait timed
+   *  out or a transient transport error hit, but the job keeps rendering
+   *  server-side). Kept so the finished frame can be reclaimed via
+   *  `production:recheckStyleFrame` instead of paying for a second generation. */
+  pendingImageGen?: PendingImageGen;
 }
 
 /** True when a shot carries anything worth confirming before delete: written

@@ -18,7 +18,7 @@ import { AgentsPanel } from "./components/AgentsPanel.js";
 import { ViewTabs, type AppView } from "./components/ViewTabs.js";
 import { ProductionWorkspace } from "./components/ProductionWorkspace.js";
 import { AutoTextarea } from "./components/AutoTextarea.js";
-import { AttachFileIcon, StopButtonIcon, XIcon } from "./components/icons.js";
+import { AttachFileIcon, XIcon } from "./components/icons.js";
 import { expandCommand } from "../../shared/commands.js";
 
 import { applyAccent } from "./theme.js";
@@ -659,7 +659,6 @@ export function App() {
                 setBusyIds((p) => ({ ...p, [currentId as string]: false }));
               }}
             >
-              <StopButtonIcon size={15} />
               Stop
             </button>
           ) : (

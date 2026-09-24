@@ -3322,7 +3322,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   flex-wrap: wrap;
 }
 .attachment { position: relative; }
-.attachment img {
+.attachment > img {
   height: 56px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -3352,8 +3352,12 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   position: absolute;
   top: -6px;
   right: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 18px;
   height: 18px;
+  padding: 0;
   border-radius: 50%;
   border: none;
   background: var(--danger);
@@ -3361,6 +3365,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
+}
+.attachment button .cascade-icon {
+  filter: brightness(0) invert(1);
 }
 .attach-warning { color: var(--danger); font-size: 0.82rem; }
 .composer .attach {

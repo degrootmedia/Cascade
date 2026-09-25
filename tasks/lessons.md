@@ -3,7 +3,7 @@
 - Symptom: with Magic Prompt on, a frame's prompt sometimes went blank in the
   side panel while the node view looked fine, and sometimes showed a *different*
   shot's prompt.
-- Five independent causes, all fixed:
+- Six independent causes, all fixed:
   1. **Composer draft not scoped to its shot.** `NodeGraphModal` wasn't keyed by
      shot, so switching frames (detached-window selection) reused the same
      composer instance; its local draft (the old shot's) could be emitted under
@@ -28,6 +28,12 @@
      (echo suppressed by `emitted`) and the save is coalesced by the prompt
      queue's latest-value guard. The side panel already updated per keystroke
      when *it* was edited, so this makes the two views symmetric.
+  6. **The live prompt wasn't shot-scoped.** `focusedPrompt` was a bare string,
+     so a stale/async write for one shot could be rendered under another (the
+     "side panel shows the other frame's prompt" report). Fix: pair it with
+     `focusedPromptShot` and only render when it matches the focused shot; key
+     the side panel by `promptShotId` too. A cross-shot display is now
+     impossible regardless of which async path last wrote the text.
 - Rules:
   1. Per-key maps that long jobs mutate (magicPrompts) must have ONE writer:
      main. Never accept them from a whole-document save; never rebase the whole

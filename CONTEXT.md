@@ -472,8 +472,12 @@ standalone package that must not import from `app/shared`.
   `graphShotId`), so a frame switch flushes the departing draft to its own shot
   instead of copying it onto the next, and it **publishes every edit to the
   shared `focusedPrompt` live** — the composer and the classic side panel are
-  two views of one prompt and must never diverge. Prompt reads never block on
-  the save queue indefinitely (bounded 300ms race), so a save stuck behind a
-  generation can't leave the side panel blank.
+  two views of one prompt and must never diverge. That live prompt is itself
+  **shot-scoped** (`focusedPromptShot`): the editor only renders `focusedPrompt`
+  when it belongs to the focused shot, and the side panel is keyed by
+  `promptShotId`, so no stale/async write can surface one frame's prompt under
+  another. Prompt reads never block on the save queue indefinitely (bounded
+  300ms race), so a save stuck behind a generation can't leave the side panel
+  blank.
 - No ADRs exist yet; if a future review rejects a deepening with a load-bearing
   reason, record it as an ADR here.

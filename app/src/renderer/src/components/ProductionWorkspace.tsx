@@ -257,6 +257,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [refGen, setRefGen] = useState<{ categoryId?: string; refId?: string } | null>(null);
   const [promptShotId, setPromptShotId] = useState<string | null>(null);
   const [focusedPrompt, setFocusedPrompt] = useState("");
+  // Which shot `focusedPrompt` belongs to. The side panel and the node graph
+  // are two views of ONE prompt; rendering it under the wrong shot is the
+  // "shows the other frame's prompt" bug. Deriving the displayed value only
+  // when this matches the focused shot makes a cross-shot display impossible,
+  // regardless of which async path last wrote `focusedPrompt`.
+  const [focusedPromptShot, setFocusedPromptShot] = useState<string | null>(null);
+  /** Set the live prompt together with the shot it belongs to. */
+  function setPromptForShot(shotId: string | null, text: string) {
+    setFocusedPromptShot(shotId);
+    setFocusedPrompt(text);
+  }
 
   // The storyboard's enlarged-frame lightbox: which shot's full frame is on
   // screen (null = closed). Owned here, not per-card, so ← / → can step the
@@ -595,6 +606,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // wouldn't refresh the side panel if the shot was already focused (the
   // focused-bust/promptShotId deps alone miss it).
   const focusedShot = promptShotId ? prod?.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId) : undefined;
+  // The live prompt is shown ONLY when it belongs to the focused shot — a
+  // stale/async write for another shot can never surface in this editor.
+  const liveFocusedPrompt = focusedPromptShot === promptShotId ? focusedPrompt : "";
   const focusedSig = promptShotId ? JSON.stringify([
     promptShotId,
     prod?.magicEnabled,
@@ -644,7 +658,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             const shotChanged = lastLoadedPromptShotRef.current !== shotId;
             if (!shotChanged && isPromptTextarea(document.activeElement)) return;
             lastLoadedPromptShotRef.current = shotId;
-            promptCacheRef.current[shotId] = next; setFocusedPrompt(next);
+            promptCacheRef.current[shotId] = next; setPromptForShot(shotId, next);
           }
           return;
         }
@@ -789,7 +803,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const ids = new Set(prod.scenes.flatMap((s) => s.shots).map((s) => s.id));
     if (promptShotId && !ids.has(promptShotId)) {
       setPromptShotId(null);
-      setFocusedPrompt("");
+      setPromptForShot(null, "");
       delete promptCacheRef.current[promptShotId];
       delete latestPromptRef.current[promptShotId];
     }
@@ -834,7 +848,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     // nodes update on a selection change). Setting `promptShotId` drives the
     // board-prompt fetch effect below to load the authoritative text.
     setPromptShotId(frameId);
-    setFocusedPrompt(frameId ? (promptCacheRef.current[frameId] ?? "") : "");
+    setPromptForShot(frameId, frameId ? (promptCacheRef.current[frameId] ?? "") : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detached?.productionId, detached?.target, detached?.frameId, prod?.meta.id]);
 
@@ -1837,7 +1851,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (promptShotId === shotId) {
       const rerendered = renderShotPrompt(next, next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId)!, "composer");
       promptCacheRef.current[shotId] = rerendered;
-      setFocusedPrompt(rerendered);
+      setPromptForShot(shotId, rerendered);
     }
     void window.cascade.saveProduction(next).then(async () => {
       await refreshList();
@@ -1848,7 +1862,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         const updated = await window.cascade.getBoardPrompt(next.meta.id, shotId);
         if (updated == null) return;
         promptCacheRef.current[shotId] = updated;
-        if (promptShotIdRef.current === shotId) setFocusedPrompt(updated);
+        if (promptShotIdRef.current === shotId) setPromptForShot(shotId, updated);
       } catch { /* keep the last good prompt on IPC failure */ }
     }).catch(() => {});
   }
@@ -1873,7 +1887,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (nextShot) {
       const rerendered = renderShotPrompt(prod, { ...nextShot, ...patch }, "composer");
       promptCacheRef.current[shotId] = rerendered;
-      if (promptShotId === shotId || graphShotId === shotId) setFocusedPrompt(rerendered);
+      if (promptShotId === shotId || graphShotId === shotId) setPromptForShot(shotId, rerendered);
     }
   }
 
@@ -1912,7 +1926,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       // focusPrompt, which reads the cache) shows the tagged prompt — the
       // board-refresh effect (focusedBust) may not have fired yet.
       promptCacheRef.current[shotId] = prompt;
-      if (promptShotIdRef.current === shotId) setFocusedPrompt(prompt);
+      if (promptShotIdRef.current === shotId) setPromptForShot(shotId, prompt);
       const references = upsertReference(name, ref, shotId);
       if (prod.magicEnabled) {
         // Magic prompts keep content-only text in magicPrompts[shotId] — the
@@ -2060,7 +2074,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   function focusPrompt(shotId: string, _prompt: string) {
     setPromptShotId(shotId);
-    setFocusedPrompt(promptCacheRef.current[shotId] ?? "");
+    setPromptForShot(shotId, promptCacheRef.current[shotId] ?? "");
     // The node graph and the classic side panel mirror the same shot's prompt:
     // focusing another board while the graph is open moves the graph along so
     // the two editors can never show different shots.
@@ -2117,7 +2131,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         const p = await window.cascade.getBoardPrompt(next.meta.id, id);
         if (p != null) {
           promptCacheRef.current[id] = p;
-          if (id === (promptShotIdRef.current ?? graphShotIdRef.current)) setFocusedPrompt(p);
+          if (id === (promptShotIdRef.current ?? graphShotIdRef.current)) setPromptForShot(id, p);
         }
       } catch { /* keep the last good prompt on IPC failure */ }
     }
@@ -2176,7 +2190,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const updated = await window.cascade.getBoardPrompt(next.meta.id, shotId);
       if (updated != null) {
         promptCacheRef.current[shotId] = updated;
-        if (promptShotIdRef.current === shotId && !isPromptTextarea(document.activeElement)) setFocusedPrompt(updated);
+        if (promptShotIdRef.current === shotId && !isPromptTextarea(document.activeElement)) setPromptForShot(shotId, updated);
       }
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -2512,7 +2526,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const frameParams = params ?? cur?.graphImageParams;
-      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: focusedPrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
+      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: liveFocusedPrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2843,7 +2857,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       // this shot's cache, but only push live text while it is still focused —
       // otherwise the toggled shot's prompt overwrites the newly selected frame.
       promptCacheRef.current[shotId] = fresh;
-      if (promptShotIdRef.current === shotId) setFocusedPrompt(fresh);
+      if (promptShotIdRef.current === shotId) setPromptForShot(shotId, fresh);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
 
@@ -3918,13 +3932,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 )}
               </div>
               <PromptSidePanel
+                key={promptShotId ?? "none"}
                 shotNumber={focusedShot?.number}
-                value={focusedPrompt}
+                value={liveFocusedPrompt}
                 includeBrand={focusedShot?.includeBrandIdentity === true}
                 styles={prod.styles ?? []}
                 styleValue={focusedShot ? shotStyleSelectValue(focusedShot, prod) : ""}
                 references={promptShotId ? promptRefsForShot(prod, promptShotId) : []}
-                onChange={(value) => { setFocusedPrompt(value); if (promptShotId) { promptCacheRef.current[promptShotId] = value; void saveShotPrompt(promptShotId, value); } }}
+                onChange={(value) => { setPromptForShot(promptShotId, value); if (promptShotId) { promptCacheRef.current[promptShotId] = value; void saveShotPrompt(promptShotId, value); } }}
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                   onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
@@ -3934,7 +3949,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onOpenSuite={() => {
                     if (!promptShotId) return;
                     const shot = prod.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId);
-                    openImageSuite(prod.meta.id, { mode: "generate", prompt: focusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}) });
+                    openImageSuite(prod.meta.id, { mode: "generate", prompt: liveFocusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}) });
                   }}
                   magicActive={!!prod.magicEnabled}
                   onRegenMagic={promptShotId ? () => regenMagicPrompt(promptShotId) : undefined}
@@ -3957,7 +3972,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   prod={prod}
                   shot={gs}
                   bust={boardBustFor(gs.id)}
-                  prompt={focusedPrompt}
+                  prompt={liveFocusedPrompt}
                   references={promptRefsForShot(prod, graphShotId)}
                   styles={prod.styles ?? []}
                   styleValue={shotStyleSelectValue(gs, prod)}
@@ -3968,7 +3983,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onRegenMagic={regenMagic}
                   onRegenMagicShot={graphShotId ? () => regenMagicPrompt(graphShotId) : undefined}
                   initialLayout={gs.graphLayout}
-                  onPromptChange={(value) => { setFocusedPrompt(value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
+                  onPromptChange={(value) => { setPromptForShot(graphShotId, value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}
                   onStyleChange={(style) => setGraphStyle(graphShotId!, style)}
                   onToggleBrand={(include) => { if (graphShotId) void setBrandForShot(graphShotId, include); }}
                   onDropFile={(file) => graphShotId ? addFileReference(graphShotId, file) : Promise.resolve(null)}

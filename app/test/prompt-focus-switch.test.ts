@@ -278,4 +278,60 @@ describe("side-panel prompt follows frame switches after edits (magic on)", () =
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
+
+  it("keeps a side-panel magic edit after switching away and back", async () => {
+    const { host, root } = await mount();
+    await clickFrame(host, 0);
+    expect(panelText(host)).toContain("Magic one.");
+
+    // Edit s1's magic content directly in the side panel.
+    const editor = host.querySelector(".prod-prompt-sidepanel .prompt-content-editor") as HTMLElement;
+    expect(editor).toBeTruthy();
+    await act(async () => {
+      editor.textContent = "EDITED ONE";
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    // Away to s2, then back to s1.
+    await clickFrame(host, 1);
+    expect(panelText(host)).toContain("Magic two.");
+    await clickFrame(host, 0);
+
+    expect(panelText(host)).toContain("EDITED ONE");
+    expect(panelText(host)).not.toContain("Magic two.");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("keeps a side-panel magic edit after a frame round-trip with the graph open", async () => {
+    const { host, root } = await mount();
+    await clickFrame(host, 0);
+
+    const nodesBtn = host.querySelector(".prod-graph-open") as HTMLButtonElement;
+    expect(nodesBtn).toBeTruthy();
+    await act(async () => { nodesBtn.click(); await new Promise((r) => setTimeout(r, 80)); });
+
+    // Edit s1's magic content in the side panel while the graph is open.
+    const editor = host.querySelector(".prod-prompt-sidepanel .prompt-content-editor") as HTMLElement;
+    expect(editor).toBeTruthy();
+    await act(async () => {
+      editor.textContent = "EDITED ONE";
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    // Away to s2, then back to s1.
+    await clickFrame(host, 1);
+    await clickFrame(host, 0);
+
+    const graphText = host.querySelector(".prod-graph-composer")?.textContent ?? "";
+    expect(graphText).toContain("EDITED ONE");
+    expect(panelText(host)).toContain("EDITED ONE");
+    expect(panelText(host)).not.toContain("Magic two.");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
 });

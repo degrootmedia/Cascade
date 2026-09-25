@@ -1917,10 +1917,21 @@ function registerIpc() {
     // builder) persist their new/updated entries — without them those changes
     // were silently dropped on save. `styles` is included so the style-frame
     // generator's written frame + pending-job record persist the same way.
-    for (const k of ["status", "currentStep", "magicEnabled", "magicPrompts", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
+    for (const k of ["status", "currentStep", "magicEnabled", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
+    }
+    // magicPrompts is keyed by shot id and written one entry at a time (bulk
+    // generation, per-shot regeneration, and the prompt drawer's
+    // updateBoardPrompt all mutate single keys). Copy ONLY the keys this job
+    // actually changed — copying the whole map would revert any other shot's
+    // prompt that landed while the job ran, which is how an edit on one frame
+    // surfaced on another.
+    const beforeMagic = before.magicPrompts ?? {};
+    const afterMagic = after.magicPrompts ?? {};
+    if (JSON.stringify(beforeMagic) !== JSON.stringify(afterMagic)) {
+      fresh.magicPrompts = productions.applyMagicPromptDelta(fresh.magicPrompts, beforeMagic, afterMagic);
     }
     const flat = (p: Production) => p.scenes.flatMap((s) => s.shots);
     const prevById = new Map(flat(before).map((s) => [s.id, s]));
@@ -1954,6 +1965,14 @@ function registerIpc() {
       for (const node of shot.graphEditNodes ?? []) {
         const prevNode = prev.graphEditNodes?.find((n) => n.id === node.id);
         const nextNode = next.graphEditNodes?.find((n) => n.id === node.id);
+        if (!prevNode || !nextNode) continue;
+        if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
+        node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
+      }
+      // Video nodes likewise own per-node histories; re-anchor each selection.
+      for (const node of shot.graphVideoNodes ?? []) {
+        const prevNode = prev.graphVideoNodes?.find((n) => n.id === node.id);
+        const nextNode = next.graphVideoNodes?.find((n) => n.id === node.id);
         if (!prevNode || !nextNode) continue;
         if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
         node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
@@ -2226,8 +2245,8 @@ function registerIpc() {
       if (target?.kind === "videoPath") {
         if (shot.videoPath && shot.videoPath !== rel) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old clip already gone */ } }
         shot.videoPath = rel;
-        recordGraphVideoGen(shot, rel, pending.prompt, pending.model);
-        hookVideoGenToOutput(shot);
+        recordGraphVideoGen(shot, "vid0", rel, pending.prompt, pending.model);
+        hookVideoGenToOutput(shot, "vid0");
       } else if (target?.kind === "editVideoNode") {
         recordGraphEditVideoGen(shot, rel, pending.prompt, pending.model);
         if (shot.graphOutputSource === "editvideo") applyVideoOutput(shot, rel, target.sourcePath);
@@ -2237,8 +2256,9 @@ function registerIpc() {
         if (block) recordTweenBlockGen(block, rel, pending.prompt, pending.model);
       } else {
         // Default to the video generation node (the node-graph video flow).
-        recordGraphVideoGen(shot, rel, pending.prompt, pending.model);
-        if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined);
+        const nodeId = target?.kind === "videoNode" ? (target.nodeId ?? "vid0") : "vid0";
+        recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model);
+        if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
       }
       // The original submit never reached its generation recorder (the wait
       // timed out or the download failed), so the cost was unbilled. Bill it
@@ -2536,6 +2556,31 @@ function registerIpc() {
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
         await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl());
+        productions.saveProduction(rebaseProduction(before, pq));
+      });
+    } catch (e) {
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    return productions.loadProduction(id) ?? p;
+  });
+
+  // Step 3: Magic Prompt — regenerate ONE shot's content prompt (the per-frame
+  // escape hatch). Replaces just that entry; every other shot is untouched.
+  handle("production:regenerateMagicPrompt", async (_e, id: string, shotId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error(apiKeyRequired());
+    productionEmit(id, `Magic Prompt: regenerating shot ${shot.number}…`);
+    try {
+      await enqueueProduction(id, async () => {
+        const pq = productions.loadProduction(id);
+        if (!pq) throw new Error("Production not found.");
+        const before = structuredClone(pq);
+        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl(), [shotId]);
         productions.saveProduction(rebaseProduction(before, pq));
       });
     } catch (e) {
@@ -3058,8 +3103,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
       shot.videoPath = rel;
-      recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
-      hookVideoGenToOutput(shot);
+      recordGraphVideoGen(shot, "vid0", rel, clean.prompt, clean.model);
+      hookVideoGenToOutput(shot, "vid0");
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
     })
   );
@@ -3101,10 +3146,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // The animated source frame comes from the node's image pipe when one is
   // connected, otherwise the shot's current frame. The clip is stored on the
   // node; it becomes shot.videoPath only when the node is piped to the output.
-  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "generating a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
+      const nodeId = typeof opts?.nodeId === "string" && opts.nodeId ? opts.nodeId : "vid0";
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
@@ -3139,11 +3185,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       } catch (e) {
         // Tag the orphaned job so a later Fetch stores the clip on the video
         // generation node (and the output when it feeds it).
-        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}) };
+        if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
         throw e;
       }
-      recordGraphVideoGen(shot, rel, clean.prompt, clean.model);
-      if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath);
+      recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
+      if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );

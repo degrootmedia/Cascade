@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
+import { applyRendererState, applyMagicPromptDelta, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
@@ -640,14 +640,34 @@ describe("applyRendererState", () => {
     expect(merged.promptOverrides).toEqual({ "0200": "kept prompt" });
   });
 
-  it("merges magicPrompts per key so stale snapshots can't wipe fresh entries", () => {
-    // The prompt drawer writes magicPrompts[shotId] through saves, so
-    // incoming non-blank entries win — but fresh-only keys (e.g. from a bulk
-    // generation that landed after the snapshot) survive.
+  it("keeps the main-owned magicPrompts map over a whole-document save", () => {
+    // magicPrompts is written main-side (bulk/per-shot generation and the
+    // prompt drawer's updateBoardPrompt). A whole-document save carries a
+    // snapshot that can predate a generation, so accepting its map would
+    // revert fresh prompts on other shots — the fresh on-disk map always wins.
     const fresh = baseProduction({ magicPrompts: { shot1: "fresh generated", shot2: "untouched" } });
-    const incoming = baseProduction({ magicPrompts: { shot1: "typed edit", shot3: "   " } });
+    const incoming = baseProduction({ magicPrompts: { shot1: "stale typed edit", shot3: "   " } });
     const merged = applyRendererState(fresh, incoming);
-    expect(merged.magicPrompts).toEqual({ shot1: "typed edit", shot2: "untouched" });
+    expect(merged.magicPrompts).toEqual({ shot1: "fresh generated", shot2: "untouched" });
+  });
+
+  it("rebases only the magic keys a job changed, preserving concurrent edits", () => {
+    // A generation job holds a snapshot from before it ran. Rebasing must fold
+    // back ONLY the keys it changed (shot1), never its stale copy of keys
+    // written while it ran (shot2's concurrent edit).
+    const fresh = { shot2: "edited during the job", shot3: "untouched" };
+    const before = { shot1: "old one", shot2: "old two" };
+    const after = { shot1: "fresh one", shot2: "old two" };
+    expect(applyMagicPromptDelta(fresh, before, after)).toEqual({
+      shot1: "fresh one",
+      shot2: "edited during the job",
+      shot3: "untouched",
+    });
+  });
+
+  it("deletes a magic key the job cleared but leaves other keys alone", () => {
+    const fresh = { shot1: "stale", shot2: "keep" };
+    expect(applyMagicPromptDelta(fresh, { shot1: "stale" }, {})).toEqual({ shot2: "keep" });
   });
 
   it("clamps volume fields to [0, 1]", () => {
@@ -738,8 +758,8 @@ describe("board frame selection persistence", () => {
       expect(restored.graphImageGenIndex).toBe(selected.graphImageGenIndex);
       expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
       expect(restored.graphImageGens).toEqual(selected.graphImageGens);
-      expect(restored.graphVideoGens).toEqual(selected.graphVideoGens);
-      expect(restored.graphImageToVideo).toBe(true);
+      expect(restored.graphVideoNodes?.[0]?.gens).toEqual(selected.graphVideoGens);
+      expect(restored.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
       expect(boardFrameHistory(restored)).toEqual(history);
       expect(syncBoardOutputToPipe(restored)).toBe(false);
       saveProduction(loaded!);
@@ -784,7 +804,7 @@ describe("board frame selection persistence", () => {
       expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
       expect(restored.graphImageGens).toEqual(images);
       expect(restored.artworkHistory).toEqual(selected.artworkHistory);
-      expect(restored.graphImageToVideo).toBe(true);
+      expect(restored.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
       incoming.scenes = loaded.scenes;
     }
     expect(incoming.scenes[0].shots[0].graphEditNodes).toHaveLength(2);
@@ -878,12 +898,12 @@ describe("video layout migration", () => {
     saveProduction(doc as unknown as ProductionFile);
     const loaded = loadProduction("video-migration")!;
     const restored = loaded.scenes[0].shots[0];
-    expect(restored.graphVideoGens![0].path).toBe("boards/0100/video/shot-0100-clip.mp4");
+    expect(restored.graphVideoNodes![0].gens![0].path).toBe("boards/0100/video/shot-0100-clip.mp4");
     expect(restored.videoPath).toBe("boards/0100/video/shot-0100-clip.mp4");
     expect(fs.existsSync(path.join(folder, "boards", "0100", "video", "shot-0100-clip.mp4"))).toBe(true);
     expect(fs.existsSync(path.join(folder, "videos", "shot-0100-clip.mp4"))).toBe(false);
     expect((loaded.assets as { videosDir?: string }).videosDir).toBeUndefined();
-    expect(loaded.schemaVersion).toBe(2);
+    expect(loaded.schemaVersion).toBe(3);
   });
 });
 
@@ -974,10 +994,10 @@ describe("too-old production guard (step 10 T5)", () => {
   it("v1 and unversioned legacy documents still migrate", () => {
     const v1 = baseProduction({ schemaVersion: 1 });
     saveProduction(v1);
-    expect(loadProduction(v1.meta.id)?.schemaVersion).toBe(2);
+    expect(loadProduction(v1.meta.id)?.schemaVersion).toBe(3);
     const legacy = baseProduction();
     delete (legacy as { schemaVersion?: number }).schemaVersion;
     saveProduction(legacy);
-    expect(loadProduction(legacy.meta.id)?.schemaVersion).toBe(2);
+    expect(loadProduction(legacy.meta.id)?.schemaVersion).toBe(3);
   });
 });

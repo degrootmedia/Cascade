@@ -34,6 +34,16 @@ export function providerSupportsUpscale(id: MediaProviderId): boolean {
 /** Tooltip shown wherever the upscale path is disabled for the active provider. */
 export const UPSCALE_UNAVAILABLE_HINT = "Not available when using OpenArt MCP";
 
+/** Whether the active provider offers a video-edit path. Only the Higgsfield
+ *  CLI implements `generateVideoEdit` / `videoEditModels`; both OpenArt
+ *  transports omit them, so the edit-video node is disabled for them. */
+export function providerSupportsVideoEdit(id: MediaProviderId): boolean {
+  return id === "higgsfield-cli";
+}
+
+/** Tooltip shown wherever the video-edit path is disabled for the active provider. */
+export const VIDEO_EDIT_UNAVAILABLE_HINT = "Video editing isn't available on the active provider (requires the Higgsfield CLI)";
+
 /** Canonicalize a per-style model/resolution override for generation:
  *  absent, blank, or "auto" inherits the production default (sent as
  *  undefined — the provider treats undefined and "auto" alike). */

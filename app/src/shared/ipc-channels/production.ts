@@ -92,6 +92,7 @@ export const productionChannels = {
   "production:videoEndFrameModels": { method: "videoEndFrameModels", kind: "invoke" },
   "production:generationCost": { method: "generationCost", kind: "invoke" },
   "production:generateMagicPrompts": { method: "generateMagicPrompts", kind: "invoke" },
+  "production:regenerateMagicPrompt": { method: "regenerateMagicPrompt", kind: "invoke" },
   "production:setMagicEnabled": { method: "setMagicEnabled", kind: "invoke" },
   "production:generate3dModel": { method: "generate3dModel", kind: "invoke" },
   "production:delete3dModel": { method: "delete3dModel", kind: "invoke" },

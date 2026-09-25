@@ -3,7 +3,7 @@ import { composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../../s
 import type { ProductionStyle } from "../../../../shared/ipc.js";
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
-import { NodesIcon } from "../icons.js";
+import { NodesIcon, RegenerateIcon } from "../icons.js";
 
 export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, styleReadOnly, brandReadOnly, onKeyDown, onFocus, onBlur }: {
   value: string;
@@ -137,11 +137,21 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
  *  (references are stored as files on disk now, so thumbnails + previews load
  *  through the streaming protocol rather than inline data URLs). */
 
-export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, onOpenGraph, onOpenSuite, magicActive, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
+export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
   return (
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber}` : "Frame prompt"}</span>
+        {shotNumber && magicActive && onRegenMagic && (
+          <button
+            className="prod-btn prod-magic-refresh"
+            disabled={magicBusy}
+            onClick={onRegenMagic}
+            title="Regenerate this shot's Magic Prompt with AI (other shots are untouched)"
+          >
+            {magicBusy ? "…" : <RegenerateIcon size={14} />} Regenerate
+          </button>
+        )}
         {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
       </div>
       {shotNumber ? <>

@@ -31,8 +31,9 @@ export interface DetachedCanvasState {
  *  sibling (no shared job state — the window that started the job owns it). */
 export interface CanvasBusySnapshot {
   productionId: string;
-  /** Shot ids with an image / video / edit-video node generating. */
+  /** Shot ids with an image / edit-video node generating. */
   image: string[];
+  /** `${shotId}:${nodeId}` for video-generation nodes. */
   video: string[];
   editVideo: string[];
   /** `${shotId}:${nodeId}` for edit-image nodes. */

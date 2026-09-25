@@ -684,9 +684,8 @@ export function promptRefsForShot(prod: Production, _shotId: string): PromptRefe
 }
 
 /** Select value for a shot's style dropdown: "" = None (no style text),
- *  otherwise the shot's style or the master fallback. Selection is independent
- *  of the style node's connection — a disconnected prompt keeps showing its
- *  selected style (the edge only controls whether the section renders). The
+ *  otherwise the shot's style or the master fallback. Selection mirrors the
+ *  composer's style wire — a style means plugged, None means unplugged. The
  *  graph-less heuristic still reports None for a manual prompt with no Style
  *  section. */
 export function shotStyleSelectValue(shot: ProductionShot, prod: Production): string {

@@ -56,26 +56,24 @@ function makeProd(prompt: string, patch?: Record<string, unknown>): any {
   };
 }
 
-function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
+function Harness({ initialPrompt, initialConnected, initialStyle, initialStyleNone, editNodes }: {
   initialPrompt: string;
   initialConnected?: boolean;
   initialStyle?: string;
+  initialStyleNone?: boolean;
   editNodes?: any[];
 }) {
-  const [prod, setProd] = useState(() => makeProd(initialPrompt, { graphStyleConnected: initialConnected ?? true, style: initialStyle, ...(editNodes ? { graphEditNodes: editNodes } : {}) }));
+  const [prod, setProd] = useState(() => makeProd(initialPrompt, { graphStyleConnected: initialConnected ?? true, style: initialStyle, styleNone: initialStyleNone, ...(editNodes ? { graphEditNodes: editNodes } : {}) }));
   const cacheRef = useRef<Record<string, string>>({ [SHOT]: initialPrompt });
   const [prompt, setPrompt] = useState(initialPrompt);
 
-  // Mirror of ProductionWorkspace.setGraphStyle (step 04): the dropdown picks
-  // WHICH style ("None" suppresses the paragraph); it never disconnects the
-  // style node. Choosing a style plugs it in; choosing None leaves the plug.
+  // Mirror of ProductionWorkspace.setGraphStyle: selection and wire mirror —
+  // a style plugs the edge, None unplugs it.
   const setGraphStyle = (styleId: string) => {
     const cur = prod.scenes[0].shots[0];
     const patch: Record<string, unknown> = { style: styleId || undefined, styleNone: !styleId };
-    if (styleId) {
-      if (cur.graph) patch.graph = setStyleEdge(cur.graph, "composer", true);
-      else patch.graphStyleConnected = true;
-    }
+    if (cur.graph) patch.graph = setStyleEdge(cur.graph, "composer", !!styleId);
+    else patch.graphStyleConnected = !!styleId;
     const next = { ...prod, scenes: prod.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, ...patch } : s) })) };
     setProd(next);
     const rendered = renderShotPrompt(next, next.scenes[0].shots[0], "composer");
@@ -102,7 +100,7 @@ function Harness({ initialPrompt, initialConnected, initialStyle, editNodes }: {
   };
 
   const onStyleDetached = () => {
-    setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, style: undefined } : s) })) }));
+    setProd((p: any) => ({ ...p, scenes: p.scenes.map((sc: any) => ({ ...sc, shots: sc.shots.map((s: any) => s.id === SHOT ? { ...s, style: undefined, styleNone: true } : s) })) }));
   };
 
   const shot = prod.scenes[0].shots[0];
@@ -169,12 +167,21 @@ describe("node-graph style dropdown (step 04: shared reference)", () => {
     document.body.removeChild(host);
   });
 
-  it("unplugged (detached) prompt keeps its own Style prose as an override", async () => {
-    const { root, host } = render({ initialConnected: false, initialPrompt: `Style: My own custom look\n\n${CONTENT}` });
+  it("unplugged (None) prompt keeps its own Style prose as an override", async () => {
+    const { root, host } = render({ initialConnected: false, initialStyleNone: true, initialPrompt: `Style: My own custom look\n\n${CONTENT}` });
     await flush();
-    // Detached: the stored prose is the user's explicit override, not a copy.
+    // None = unwired: the stored prose is the user's explicit override, not a copy.
     expect(composerPrompt(host)).toContain("Style: My own custom look");
     expect(composerPrompt(host)).toContain(CONTENT);
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("an active style selection heals to wired on open", async () => {
+    // Regression: sidepanel showing a style while the composer wire is missing.
+    const { root, host } = render({ initialConnected: false, initialStyle: STYLE_ID, initialPrompt: CONTENT });
+    await flush();
+    expect(composerPrompt(host)).toContain(`Style: ${STYLE_TEXT}`);
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
   });
@@ -221,21 +228,20 @@ describe("node-graph style node → edit nodes (step 04)", () => {
   });
 });
 
-describe("style selection is independent of the style node connection", () => {
-  it("a detached style node keeps its selected style and renders no Style section", () => {
+describe("style selection mirrors the style node connection", () => {
+  it("an explicit style selection always materializes wired", () => {
     const base = makeProd(CONTENT, { graphStyleConnected: false, style: STYLE_ID });
-    const detached = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
-    expect(styleEdgePresent(detached.graph, "composer")).toBe(false);
-    // Disconnecting must not flip the dropdown to None.
-    expect(shotStyleSelectValue(detached, base)).toBe(STYLE_ID);
-    expect(renderShotPrompt(base, detached, "composer")).toBe(CONTENT);
+    const healed = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
+    expect(styleEdgePresent(healed.graph, "composer")).toBe(true);
+    expect(shotStyleSelectValue(healed, base)).toBe(STYLE_ID);
+    expect(renderShotPrompt(base, healed, "composer")).toContain(`Style: ${STYLE_TEXT}`);
   });
 
-  it("a connected style node set to None omits the Style section but stays wired", () => {
+  it("None always materializes unwired", () => {
     const base = makeProd(CONTENT, { graphStyleConnected: true, style: STYLE_ID, styleNone: true });
-    const connected = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
-    expect(styleEdgePresent(connected.graph, "composer")).toBe(true);
-    expect(shotStyleSelectValue(connected, base)).toBe("");
-    expect(renderShotPrompt(base, connected, "composer")).toBe(CONTENT);
+    const unwired = { ...base.scenes[0].shots[0], graph: materializeGraph(base.scenes[0].shots[0], []) };
+    expect(styleEdgePresent(unwired.graph, "composer")).toBe(false);
+    expect(shotStyleSelectValue(unwired, base)).toBe("");
+    expect(renderShotPrompt(base, unwired, "composer")).toBe(CONTENT);
   });
 });

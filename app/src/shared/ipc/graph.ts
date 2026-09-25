@@ -188,6 +188,60 @@ export interface GraphEditNode {
   params?: GenParams;
 }
 
+/** One node-graph video-generation node. A shot may hold several; each owns
+ *  its motion prompt, clip history, source frame, references, and model picks.
+ *  The list is the source of truth; the legacy flat `graphVideo*` fields
+ *  migrate into a single `vid0` entry on load. Mirrors `GraphEditNode`. */
+export interface GraphVideoNode {
+  /** Stable identity within the shot: "vid0", "vid1", …. */
+  id: string;
+  /** The node's own motion prompt (its `videoprompt` node's text). */
+  prompt: string;
+  /** Stored clips (newest first) + the selected index. */
+  gens?: GraphGenItem[];
+  genIndex?: number;
+  /** The node's own model/resolution/length picks (per-node, win over the
+   *  global media-default; unset falls back to it). */
+  model?: string;
+  resolution?: string;
+  durationSec?: number;
+  /** Schema-driven advanced/variant params for this node (keyed by canonical
+   *  flag). Optional/additive. */
+  params?: GenParams;
+  /** What feeds this node's source input (`in-image`). Absent = the shot's
+   *  current frame. */
+  source?: GraphSource;
+  /** Reference ids feeding this node's extra reference sockets, in order. */
+  refIds?: string[];
+  /** Whether the style node is plugged into this node's prompt node. */
+  styleConnected?: boolean;
+}
+
+/** Canvas node-id prefixes for the per-video-node pair. The first node keeps
+ *  the historical bare ids (`videogen` / `videoprompt`) so pre-multi-node
+ *  stored graphs and edges stay valid; additional nodes are suffixed
+ *  (`videogen:vid1`). */
+export const VIDEOGEN_NODE_PREFIX = "videogen:";
+export const VIDEOPROMPT_NODE_PREFIX = "videoprompt:";
+/** Canvas id for a video-generation node's generator (vid0 = bare legacy id). */
+export function videoGenNodeId(nodeId: string): string {
+  return nodeId === "vid0" ? "videogen" : `${VIDEOGEN_NODE_PREFIX}${nodeId}`;
+}
+/** Canvas id for a video-generation node's prompt node (vid0 = bare). */
+export function videoPromptNodeId(nodeId: string): string {
+  return nodeId === "vid0" ? "videoprompt" : `${VIDEOPROMPT_NODE_PREFIX}${nodeId}`;
+}
+/** The node id a canvas videogen node refers to (bare "videogen" = vid0). */
+export function parseVideoGenNode(id: string): string | null {
+  if (id === "videogen") return "vid0";
+  return id.startsWith(VIDEOGEN_NODE_PREFIX) ? id.slice(VIDEOGEN_NODE_PREFIX.length) : null;
+}
+/** The node id a canvas videoprompt node refers to (bare = vid0). */
+export function parseVideoPromptNode(id: string): string | null {
+  if (id === "videoprompt") return "vid0";
+  return id.startsWith(VIDEOPROMPT_NODE_PREFIX) ? id.slice(VIDEOPROMPT_NODE_PREFIX.length) : null;
+}
+
 /** In-betweener keyframe source sentinels that read a generation node's output
  *  instead of a production reference's artwork. They are stored in
  *  `graphTweenRefIds` (and `TweenBlock.startRefId`/`endRefId`) alongside bare
@@ -262,7 +316,7 @@ export interface TweenBlock {
  *  to apply the clip to the right field/history). */
 export type PendingVideoTarget =
   | { kind: "videoPath" }
-  | { kind: "videoNode"; sourcePath?: string }
+  | { kind: "videoNode"; sourcePath?: string; nodeId?: string }
   | { kind: "editVideoNode"; sourcePath?: string }
   | { kind: "tween"; blockId: string };
 

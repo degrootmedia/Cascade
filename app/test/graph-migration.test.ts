@@ -66,7 +66,10 @@ describe("migrateShotGraph (load path)", () => {
     // Old flag fields intact; pasted shared copies strip (step 04 — the new
     // edges cover them, and the render stays byte-identical via the edge).
     expect(s.graphStyleConnected).toBe(true);
-    expect(s.graphImageToVideo).toBe(true);
+    // The video node's flat fields migrate into `graphVideoNodes[0]` (the
+    // multi-node model); the composer style plug stays a flag.
+    expect(s.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
+    expect(s.graphImageToVideo).toBeUndefined();
     expect(s.prompt).toBe("Hold @[Gondola]");
     expect(s.prompt).toContain("@[Gondola]");
   });

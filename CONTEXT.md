@@ -277,7 +277,12 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   other generation nodes it has a dedicated **prompt node**
   (`editvideoprompt`, the shared `PromptNodeView` body, writing
   `graphEditVideoPrompt`) whose Style/Reference/Brand sockets work exactly
-  like the video/edit prompt nodes.
+  like the video/edit prompt nodes. The edit-video node is **disabled when the
+  active provider has no video-edit path** (`providerSupportsVideoEdit` in
+  `shared/ipc/media.ts`; only the Higgsfield CLI implements
+  `generateVideoEdit`/`videoEditModels`, so both OpenArt transports are
+  gated) — the palette tile and `addTool` block it with
+  `VIDEO_EDIT_UNAVAILABLE_HINT`, mirroring the upscale node's OpenArt gate.
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
   whose persisted state lives on `ProductionShot.graph*` fields. **Edit-image
   nodes** are a list (`graphEditNodes: GraphEditNode[]`), not a singleton: each
@@ -285,7 +290,17 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   a reference, or a parent edit node), so any edit can daisy-chain into
   another (cycle-checked in `NodeGraphModal`). The output names its feeding
   edit via `graphOutputEditNodeId`; the video source via
-  `graphVideoSourceEditNodeId`. The classic Edit-frame popup appends a new edit
+  `graphVideoSourceEditNodeId`. **Video-generation nodes** are likewise a list
+  (`graphVideoNodes: GraphVideoNode[]`, mirrors `GraphEditNode`): each owns its
+  motion `prompt`, clip history (`gens`/`genIndex`), `source` frame
+  (`imagegen`/`editgen`/`ref`), `refIds`, model/resolution/length/params, and
+  `styleConnected`. Canvas ids are `videogen:<id>`/`videoprompt:<id>` (the first
+  node `vid0` keeps the historical bare `videogen`/`videoprompt` ids and edge
+  ids for backward compatibility; extra nodes suffix `:vid1`…), the output is
+  named by `graphOutputVideoNodeId`, and the legacy flat `graphVideo*` fields
+  migrate into `vid0` on load (`migrateVideoNodes`, schema v3). Dragging the
+  palette tile appends another node; deleting one node's pair removes that node.
+  The classic Edit-frame popup appends a new edit
   node to whatever chain currently feeds the output (`chainSourceForEdit` +
   `recordBoardEdit` in `pipeline.ts`) and binds it as the output — the wiring
   shows up in the graph automatically. A prompt node's leading `Style:`
@@ -447,5 +462,18 @@ standalone package that must not import from `app/shared`.
 
 - The pipeline is deliberately **not** a free-form agent loop (see `pipeline.ts`
   header) — one-shot bounded LLM calls, distinct from the `core/` agent loop.
+- **`magicPrompts` is main-owned, keyed by shot id.** Every renderer magic edit
+  goes through `production:updateBoardPrompt` (never a whole-document save —
+  `applyRendererState` ignores the incoming map, like `promptOverrides`), and
+  bulk/per-shot generation writes it main-side. A long generation job rebases
+  only the keys it changed (`applyMagicPromptDelta`), so a snapshot captured
+  before the job can't revert or blank another shot's prompt. The node-graph
+  composer's draft is scoped to its shot (`NodeGraphModal` is keyed by
+  `graphShotId`), so a frame switch flushes the departing draft to its own shot
+  instead of copying it onto the next, and it **publishes every edit to the
+  shared `focusedPrompt` live** — the composer and the classic side panel are
+  two views of one prompt and must never diverge. Prompt reads never block on
+  the save queue indefinitely (bounded 300ms race), so a save stuck behind a
+  generation can't leave the side panel blank.
 - No ADRs exist yet; if a future review rejects a deepening with a load-bearing
   reason, record it as an ADR here.

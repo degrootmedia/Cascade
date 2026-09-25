@@ -11,6 +11,7 @@ import type {
   Graph,
   GraphEditNode,
   GraphGenItem,
+  GraphVideoNode,
   TweenBlock,
   PendingImageGen,
   PendingVideoGen,
@@ -95,20 +96,33 @@ graphImageGenIndex?: number;
   /** Schema-driven advanced/variant params for the image gen node (keyed by
    *  canonical flag). Optional/additive. */
   graphImageParams?: GenParams;
-  /** Node graph video generation node: stored clips (newest first) + index. */
+  /** Node graph video generation node: stored clips (newest first) + index.
+   *  @deprecated Migrated into `graphVideoNodes[0]` (id "vid0"). */
   graphVideoGens?: GraphGenItem[];
+  /** @deprecated Migrated into `graphVideoNodes[0]`. */
   graphVideoGenIndex?: number;
-  /** The video-prompt node's text (motion prompt for the video gen node). */
+  /** The video-prompt node's text (motion prompt for the video gen node).
+   *  @deprecated Migrated into `graphVideoNodes[0].prompt`. */
   graphVideoPrompt?: string;
   /** Per-shot video-gen selections (the classic modal and the graph's video
    *  node both read/write them; they win over the global media-default, so a
-   *  change in one shot never propagates to the others). */
+   *  change in one shot never propagates to the others).
+   *  @deprecated Migrated into `graphVideoNodes[0].*`. */
   graphVideoModel?: string;
+  /** @deprecated Migrated into `graphVideoNodes[0].resolution`. */
   graphVideoResolution?: string;
+  /** @deprecated Migrated into `graphVideoNodes[0].durationSec`. */
   graphVideoDurationSec?: number;
   /** Schema-driven advanced/variant params for the video gen node (keyed by
-   *  canonical flag). Optional/additive — absent on old documents. */
+   *  canonical flag). Optional/additive — absent on old documents.
+   *  @deprecated Migrated into `graphVideoNodes[0].params`. */
   graphVideoParams?: GenParams;
+  /** Node graph video-generation nodes (zero or more). The list is the source
+   *  of truth; the legacy flat `graphVideo*` fields above migrate into a single
+   *  `vid0` entry on load. */
+  graphVideoNodes?: GraphVideoNode[];
+  /** Which video node feeds the output when `graphOutputSource === "videogen"`. */
+  graphOutputVideoNodeId?: string;
   /** Node graph edit-image nodes (zero or more, daisy-chainable). The list is
    *  the source of truth; the legacy flat `graphEdit*` fields below migrate
    *  into a single `edit0` entry on load. */
@@ -116,7 +130,8 @@ graphImageGenIndex?: number;
   /** Which edit node feeds the output when `graphOutputSource === "editgen"`. */
   graphOutputEditNodeId?: string;
   /** Which edit node feeds the video node's image input when
-   *  `graphEditToVideo` is set. */
+   *  `graphEditToVideo` is set.
+   *  @deprecated Migrated into `graphVideoNodes[*].source`. */
   graphVideoSourceEditNodeId?: string;
   /** @deprecated Migrated into `graphEditNodes[0].gens`. */
   graphEditGens?: GraphGenItem[];
@@ -131,21 +146,25 @@ graphImageGenIndex?: number;
   /** @deprecated Migrated into `graphEditNodes[0].source`. */
   graphEditSourceRefId?: string;
   /** Reference ids feeding the video gen node's extra reference inputs (beyond
-   *  the main image pipe), in connection order. Only image refs connect. */
+   *  the main image pipe), in connection order. Only image refs connect.
+   *  @deprecated Migrated into `graphVideoNodes[*].refIds`. */
   graphVideoRefIds?: string[];
   /** Whether the image generation node's output also feeds the video node's
    *  image input. Independent of the output feed — the image node can pipe to
-   *  the video node AND the output simultaneously. */
+   *  the video node AND the output simultaneously.
+   *  @deprecated Migrated into `graphVideoNodes[*].source`. */
   graphImageToVideo?: boolean;
   /** Whether an edit-image node's output feeds the video node's image input
    *  (the frame the clip is animated from). Which node is named by
    *  `graphVideoSourceEditNodeId`. Mutually exclusive with `graphImageToVideo`
    *  — the video node's source input accepts any image output, and connecting
-   *  one replaces the other. */
+   *  one replaces the other.
+   *  @deprecated Migrated into `graphVideoNodes[*].source`. */
   graphEditToVideo?: boolean;
   /** A reference feeding the video node's image input (the frame the clip is
    *  animated from). Mutually exclusive with `graphImageToVideo` /
-   *  `graphEditToVideo` — the source input accepts one image at a time. */
+   *  `graphEditToVideo` — the source input accepts one image at a time.
+   *  @deprecated Migrated into `graphVideoNodes[*].source`. */
   graphVideoSourceRefId?: string;
   /** Keyframe source ids wired into the in-betweener node's keyframe sockets,
    *  in timeline order (2–5). Each is a bare reference id OR a generation-node
@@ -203,7 +222,8 @@ graphImageGenIndex?: number;
    *  remembered — switching the style to None removes the paragraph without
    *  disconnecting. */
   graphStyleConnected?: boolean;
-  /** Whether the style node is plugged into the video-prompt node. */
+  /** Whether the style node is plugged into the video-prompt node.
+   *  @deprecated Migrated into `graphVideoNodes[*].styleConnected`. */
   graphVideoStyleConnected?: boolean;
   /** @deprecated Migrated into the edit node's `styleConnected`. */
   graphEditStyleConnected?: boolean;

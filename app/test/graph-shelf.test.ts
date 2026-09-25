@@ -33,7 +33,7 @@ let lastEmittedPrompt: string | null = null;
 let lastGraph: { edges: Array<{ id: string }> } | null = null;
 let renames: Array<[string, string]> = [];
 
-function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable, fetchVideo }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; fetchVideo?: () => void }) {
+function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable, videoEditUnavailable, fetchVideo }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; fetchVideo?: () => void }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
   // References are stateful here so a "Save as reference" action can append the
   // created ref and the shelf re-render, like the real workspace's `apply()`.
@@ -74,6 +74,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
     defaultImageModel: "auto",
     defaultImageResolution: "1k",
     upscaleUnavailable,
+    videoEditUnavailable,
     onRunImageGen: async () => {},
     onRunVideoGen: async () => {},
     onRunEditGen: async () => {},
@@ -102,7 +103,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; fetchVideo?: () => void } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; fetchVideo?: () => void } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -131,11 +132,11 @@ function dropOnCanvas(host: HTMLDivElement, type: string, data: string): void {
 /** Attach a reference node's output to a prompt socket, using React Flow's
  *  click-to-connect path (start on the source handle, finish on the target
  *  handle) — the same `onConnect` the drag fires. */
-async function connectRefToSocket(host: HTMLDivElement, refName: string, targetHandle: string): Promise<void> {
+async function connectRefToSocket(host: HTMLDivElement, refName: string, targetHandle: string, container = ".prod-graph-composer"): Promise<void> {
   const node = [...host.querySelectorAll(".prod-graph-node.prod-graph-ref")]
     .find((n) => (n.querySelector("input.prod-ref-edit-name") as HTMLInputElement | null)?.value === refName);
   const source = node?.querySelector(".react-flow__handle.react-flow__handle-right") as HTMLElement | null;
-  const target = host.querySelector(`.prod-graph-composer .react-flow__handle[data-handleid="${targetHandle}"]`) as HTMLElement | null;
+  const target = host.querySelector(`${container} .react-flow__handle[data-handleid="${targetHandle}"]`) as HTMLElement | null;
   if (!source || !target) throw new Error("handle not found");
   await act(async () => {
     source.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, clientX: 1, clientY: 1 }));
@@ -470,6 +471,28 @@ describe("node-graph tool panel", () => {
     document.body.removeChild(host);
   });
 
+  it("disables the edit-video tile with a hint when the provider has no video-edit path", async () => {
+    const { root, host } = renderModal({ videoEditUnavailable: true });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const tile = Array.from(host.querySelectorAll<HTMLElement>(".prod-graph-tools-item"))
+      .find((el) => el.textContent?.includes("Edit video"))!;
+    expect(tile).toBeTruthy();
+    expect(tile.classList.contains("disabled")).toBe(true);
+    expect(tile.getAttribute("aria-disabled")).toBe("true");
+    expect(tile.getAttribute("draggable")).toBe("false");
+
+    // A drop that slips past the palette still can't add the node.
+    await act(async () => {
+      dropOnCanvas(host, "application/x-cascade-tool", "editvideo");
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelector(".prod-graph-node.prod-graph-editvideo")).toBeFalsy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
   it("leaves the upscale tile enabled when the provider supports upscale", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
@@ -563,6 +586,22 @@ describe("node-graph tool panel", () => {
     });
     expect(host.querySelector(".prod-graph-node.prod-graph-editgen")).toBeTruthy();
     expect(host.querySelector(".prod-graph-node.prod-graph-editprompt")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+  it("adds a second video node on a second drag (multi-instance)", async () => {
+    savedLayouts = [];
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { dropOnCanvas(host, "application/x-cascade-tool", "video"); await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { dropOnCanvas(host, "application/x-cascade-tool", "video"); await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelectorAll(".prod-graph-node.prod-graph-videogen").length).toBe(2);
+    const pos = savedLayouts[savedLayouts.length - 1].positions ?? {};
+    expect(Object.keys(pos)).toContain("videogen");
+    expect(Object.keys(pos)).toContain("videogen:vid1");
+    expect(Object.keys(pos)).toContain("videoprompt:vid1");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
@@ -728,6 +767,35 @@ describe("node-graph reference attach", () => {
       expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref:r2-composer-1");
       const handles = [...host.querySelectorAll(".prod-graph-composer .react-flow__handle")].map((h) => (h as HTMLElement).getAttribute("data-handleid"));
       expect(handles).toContain("in-ref-1");
+
+      await act(async () => { root.unmount(); });
+      document.body.removeChild(host);
+    } finally {
+      if (had) (document as unknown as { elementFromPoint?: unknown }).elementFromPoint = orig;
+      else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    }
+  });
+
+  it("wires a reference into the edit-video prompt node's numbered socket", async () => {
+    lastGraph = null;
+    const had = "elementFromPoint" in document;
+    const orig = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: () => null }).elementFromPoint = () => null;
+    try {
+      const { root, host } = renderModal();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      await openShelf(host);
+      // Add the edit-video node pair and place Villain untagged on the canvas.
+      await act(async () => { dropOnCanvas(host, "application/x-cascade-tool", "editvideo"); await new Promise((r) => setTimeout(r, 0)); });
+      await act(async () => { dropOnCanvas(host, "application/x-cascade-ref", "r2"); await new Promise((r) => setTimeout(r, 0)); });
+
+      await connectRefToSocket(host, "Villain", "in-ref-open", ".prod-graph-editvideoprompt");
+
+      // The stored wire lands on the edit-video prompt's new numbered socket...
+      expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref:r2-editvideoprompt-0");
+      // ...and the node grows that socket so the wire has a handle to attach to.
+      const handles = [...host.querySelectorAll(".prod-graph-editvideoprompt .react-flow__handle")].map((h) => h.getAttribute("data-handleid"));
+      expect(handles).toContain("in-ref-0");
 
       await act(async () => { root.unmount(); });
       document.body.removeChild(host);

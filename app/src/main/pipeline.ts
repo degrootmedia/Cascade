@@ -22,6 +22,7 @@ import {
   parseJsonLooseObject,
   parsePromptBoxes,
   refTagMatches,
+  refTagNames,
   removeRefTag,
   renameRefTag,
   stripBrandParagraph,
@@ -33,7 +34,8 @@ import { findGeneration, generationInUse, generationInUseMessage, removeGenerati
 import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
 import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen } from "../shared/ipc.js";
+import { videoNodesFor } from "../shared/graph/materialize.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
@@ -513,30 +515,48 @@ export function stripMagicLeakage(text: string): string {
 }
 
 /**
- * One bounded LLM call that generates CONTENT-ONLY prompts for every shot.
- * Uses the magic-prompt skill file as the prompt source when available,
- * otherwise falls back to the embedded template.
- * Returns a map of shotId → content prompt and mutates the production to
- * store it with magicEnabled=true.
+ * Canonical key for matching a model-returned shot number to a shot: the
+ * numeric value with leading zeros dropped ("0100", "100", and "Shot 0100"
+ * all key as "100"). Pure string/number munging so regeneration matching is
+ * unit-testable without an LLM call. Returns "" when there are no digits.
  */
-export async function generateMagicPrompts(
+export function magicShotNumberKey(raw: unknown): string {
+  const digits = String(raw ?? "").replace(/\D/g, "");
+  if (!digits) return "";
+  return String(parseInt(digits, 10));
+}
+
+/** The two message bodies sent to the model for Magic Prompt generation. */
+export interface MagicPromptMessages {
+  systemContent: string;
+  userContent: string;
+}
+
+/**
+ * Pure builder for the Magic Prompt model request — no LLM, no IO, so the
+ * grounding is unit-testable.
+ *
+ * Two rules learned the hard way:
+ *  - The pre-existing draft's PROSE is never sent. Sending it let a wrong entry
+ *    be parroted back on every regeneration (shot 0400 kept a neighboring
+ *    shot's "constellation" text forever). Only the draft's reference TAG
+ *    NAMES survive, so the tags stay stable without anchoring the wording.
+ *  - The script audio/visual is the sole ground truth. Adjacent similar shots
+ *    are generated in separate calls (one shot per call in the generator), so
+ *    one shot's beat can't bleed into the next.
+ */
+export function buildMagicPromptMessages(
   p: Production,
-  apiKey: string,
-  model: string,
-  emit: EmitFn,
-  baseUrl?: string
-): Promise<Production> {
-  const shots = p.scenes.flatMap((s) => s.shots);
-  if (!shots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
-  const skillText = loadMagicSkillText();
-  // Build shot list for the model: number | audio | visual | currentContent (stripped)
+  shots: ProductionShot[],
+  skillText: string | null,
+): MagicPromptMessages {
   const shotLines = shots.map((s) => {
     const boxes = parsePromptBoxes(effectivePrompt(p, s));
-    // Current content without style/brand — what magic replaces
-    const curContent = boxes.content.trim() || s.visual.trim() || "(no visual direction)";
+    const curContent = boxes.content.trim() || s.visual.trim() || "";
+    const draftTags = Array.from(new Set(refTagNames(curContent))).map((n) => `@[${n}]`).join(" ");
     const audio = s.audio.trim() ? s.audio.trim().slice(0, 220) : "(no dialogue)";
     const visual = s.visual.trim() ? s.visual.trim().slice(0, 400) : "(no visual direction)";
-    return `${s.number} | audio: ${audio} | visual: ${visual} | current prompt content: ${curContent.slice(0, 500)}`;
+    return `${s.number} | script audio: ${audio} | script visual (AUTHORITATIVE): ${visual} | reference tags previously cited for this shot (keep only those that belong in THIS shot's frame): ${draftTags || "(none)"}`;
   }).join("\n");
 
   const refNames = [
@@ -552,21 +572,109 @@ export async function generateMagicPrompts(
     ? "You are a cinematic storyboard prompt engineer. Reply with JSON only — no prose, no markdown fences. Follow the MAGIC PROMPT skill instructions verbatim. Content prompts only — never style language.\n\nSKILL:\n" + skillPrefix
     : "You are a cinematic storyboard prompt engineer for an animation pipeline. Reply with JSON only — no prose, no markdown fences. You write CONTENT prompts only — never style language.";
 
+  const single = shots.length === 1;
   const userContent =
-    "You are a storyboard image-prompt generator. Analyze the full script and visual direction and produce a CONTENT-ONLY prompt for each shot.\n\n" +
+    "You are a storyboard image-prompt generator. Produce a CONTENT-ONLY prompt for the shot below.\n\n" +
     "Rules:\n" +
     "- CONTENT ONLY: Describe subject, framing, action, camera (wide/medium/closeup), composition, key props and characters, setting, time of day, mood conveyed by content.\n" +
     "- NEVER include style words: no medium, palette, lighting style, line treatment, rendering, brush, painterly, photorealistic, 3D, anime, etc. The style system will handle that.\n" +
-    "- Keep each prompt to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
-    "- Understand flow: track continuity across shots — maintain character presence, location progression, action continuity, and shot-to-shot rhythm. Adjacent shots should read as a visual sequence, not isolated images.\n" +
-    "- Include ALL elements needed in each frame: foreground/background elements, character count and placement, key objects from references when tagged, and any text-implied visuals (e.g. SFX sources).\n" +
-    "- Respect @[Name] reference tags if present — keep them verbatim when that reference should appear in the frame; omit when not needed for this shot's content.\n" +
+    "- Keep it to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
+    "- Ground the prompt STRICTLY in this shot's script audio/visual. Do NOT import beats, subjects, or framing from any other shot in the script.\n" +
+    "- Include ALL elements needed in the frame: foreground/background elements, character count and placement, key objects from references when tagged, and any text-implied visuals (e.g. SFX sources).\n" +
+    "- Carry over any previously cited @[Name] reference tag only when that reference actually appears in THIS shot's frame; otherwise omit it.\n" +
     "- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.\n\n" +
-    "Shots (in order):\n" + shotLines + "\n\n" +
+    (single ? "Shot:\n" : "Shots (in order):\n") + shotLines + "\n\n" +
     "References available (name — will be inserted as @[Name] where needed):\n" + refList + "\n\n" +
-    'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.';
+    (single
+      ? 'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." } ] }'
+      : 'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.');
+  return { systemContent, userContent };
+}
 
-  emit(`Generating Magic Prompts for ${shots.length} shot(s) (model: ${model})…`);
+/**
+ * Bounded LLM calls that generate CONTENT-ONLY prompts for shots. Each shot is
+ * generated in its OWN call so adjacent similar shots can't bleed into each
+ * other (the 0400/0500 "constellation" conflation). Regenerating is a merge:
+ * with `shotIds` only those entries are replaced; otherwise every shot is
+ * replaced. A failed shot keeps its previous text rather than being corrupted.
+ */
+export async function generateMagicPrompts(
+  p: Production,
+  apiKey: string,
+  model: string,
+  emit: EmitFn,
+  baseUrl?: string,
+  shotIds?: string[],
+): Promise<Production> {
+  const allShots = p.scenes.flatMap((s) => s.shots);
+  if (!allShots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
+  const byId = new Map(allShots.map((s) => [s.id, s]));
+  let targets: ProductionShot[];
+  if (shotIds && shotIds.length) {
+    targets = [];
+    for (const id of shotIds) {
+      const shot = byId.get(id);
+      if (!shot) throw new Error("Shot not found.");
+      if (!targets.some((t) => t.id === id)) targets.push(shot);
+    }
+  } else {
+    targets = allShots;
+  }
+
+  const skillText = loadMagicSkillText();
+  const next: Record<string, string> = { ...(p.magicPrompts ?? {}) };
+  let replaced = 0;
+  let failed = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const shot = targets[i];
+    if (targets.length > 1) emit(`Magic Prompt: shot ${shot.number} (${i + 1}/${targets.length})…`);
+    try {
+      const prompt = await generateOneMagicPrompt(p, shot, skillText, apiKey, model, baseUrl);
+      if (prompt) {
+        next[shot.id] = prompt;
+        replaced++;
+      } else {
+        failed++;
+        if (!next[shot.id]?.trim()) next[shot.id] = (shot.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
+        emit(`Magic Prompt: the model returned no usable prompt for shot ${shot.number} — kept the previous text.`, "info");
+      }
+    } catch (e) {
+      failed++;
+      if (!next[shot.id]?.trim()) next[shot.id] = (shot.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
+      emit(`Magic Prompt: shot ${shot.number} failed — ${e instanceof Error ? e.message : String(e)} — kept the previous text.`, "error");
+    }
+  }
+  if (!replaced) throw new Error("Magic Prompt generation produced no replies — check the API key and try again.");
+  p.magicPrompts = next;
+  p.magicEnabled = true;
+  emit(targets.length === 1
+    ? `Magic Prompt: shot ${targets[0].number} updated.`
+    : `Magic Prompt updated ${replaced} of ${targets.length} prompt(s)${failed ? ` (${failed} kept)` : ""} — enabled.`, "done");
+  return p;
+}
+
+/** Extract the prompt array from a Magic Prompt model reply, tolerating the
+ *  usual loose-JSON shapes. Pure so the parse surface is testable. */
+export function parseMagicPromptsReply(text: string): unknown[] | null {
+  const parsed = parseJsonLooseObject(text);
+  const rawPrompts = (parsed?.prompts ?? parsed?.shots ?? parsed?.data) as unknown;
+  if (Array.isArray(rawPrompts)) return rawPrompts;
+  if (Array.isArray(parsed)) return parsed as unknown[];
+  const loose = parseJsonLooseArray(text);
+  return loose ?? null;
+}
+
+/** One bounded call for a single shot. Returns null when the reply carries no
+ *  usable prompt for that shot's number. */
+async function generateOneMagicPrompt(
+  p: Production,
+  shot: ProductionShot,
+  skillText: string | null,
+  apiKey: string,
+  model: string,
+  baseUrl?: string,
+): Promise<string | null> {
+  const { systemContent, userContent } = buildMagicPromptMessages(p, [shot], skillText);
   const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,
@@ -574,50 +682,65 @@ export async function generateMagicPrompts(
       { role: "system", content: systemContent },
       { role: "user", content: userContent },
     ],
-    8000
+    4000
   );
+  const arr = parseMagicPromptsReply(text);
+  if (!arr || !arr.length) return null;
+  const { generated, matched } = applyMagicModelReply([shot], arr);
+  return matched ? generated[shot.id] ?? null : null;
+}
 
-  const parsed = parseJsonLooseObject(text);
-  const rawPrompts = (parsed?.prompts ?? parsed?.shots ?? parsed?.data) as unknown;
-  let arr: unknown[] | null = null;
-  if (Array.isArray(rawPrompts)) arr = rawPrompts;
-  else if (Array.isArray(parsed)) arr = parsed as unknown[];
-  else {
-    // Try loose array extraction
-    const loose = parseJsonLooseArray(text);
-    if (loose) arr = loose;
-  }
-  if (!arr || !arr.length) throw new Error("Magic Prompt generation returned no JSON prompts — try again.");
+/** Result of folding one Magic Prompt model reply into per-shot content. */
+export interface MagicApplyResult {
+  /** Shot id → content prompt, complete for every shot (gaps filled). */
+  generated: Record<string, string>;
+  /** Entries matched to a shot by number (excludes gap fills). */
+  matched: number;
+  /** Shot numbers the model reply had nothing usable for (gap-filled). */
+  skipped: string[];
+}
 
+/**
+ * Pure fold of a Magic Prompt model reply onto shots — no LLM, no IO, so
+ * regeneration matching is unit-testable. Matching is strictly number-keyed
+ * (exact, zero-padded, then numeric value, so "100" or "Shot 0100" still find
+ * shot 0100) and never positional: a partial reply mapped by order would
+ * write prompts into the wrong shots. Gaps fill from the shot's script
+ * direction (`visual`) — never from the stale magic content being replaced,
+ * which previously let a skipped shot keep its old text through every
+ * regeneration.
+ */
+export function applyMagicModelReply(shots: ProductionShot[], arr: unknown[]): MagicApplyResult {
   const byNumber = new Map(shots.map((s) => [s.number, s]));
   const byNumberLoose = new Map(shots.map((s) => [s.number.padStart(4, "0"), s]));
+  const byNumericValue = new Map(shots.map((s) => [magicShotNumberKey(s.number), s]));
   const generated: Record<string, string> = {};
+  const seen = new Set<string>();
   let matched = 0;
   for (const item of arr) {
     const o = (item ?? {}) as Record<string, unknown>;
     const rawNum = String(o.number ?? o.shot ?? o.id ?? "").trim();
     const num = rawNum.padStart(4, "0");
-    const shot = byNumber.get(num) ?? byNumberLoose.get(num) ?? byNumber.get(rawNum);
-    if (!shot) continue;
+    const key = magicShotNumberKey(rawNum);
+    const shot = byNumber.get(num) ?? byNumberLoose.get(num) ?? byNumber.get(rawNum)
+      ?? (key ? byNumericValue.get(key) : undefined);
+    if (!shot || seen.has(shot.id)) continue;
     let prompt = String(o.prompt ?? o.content ?? o.text ?? "").trim();
     if (!prompt) continue;
     prompt = stripMagicLeakage(prompt).slice(0, 600);
     if (!prompt) continue;
     generated[shot.id] = prompt;
+    seen.add(shot.id);
     matched++;
   }
-  if (!matched) throw new Error("Magic Prompt generation produced no matching shot numbers — try again.");
-  // Fill gaps with fallback (keep existing visual or previous content)
+  const skipped: string[] = [];
   for (const s of shots) {
     if (!generated[s.id]) {
-      const fallback = stripMagicLeakage(parsePromptBoxes(effectivePrompt(p, s)).content) || s.visual.trim() || "Establishing frame for this moment.";
-      generated[s.id] = fallback.slice(0, 600);
+      skipped.push(s.number);
+      generated[s.id] = (s.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
     }
   }
-  p.magicPrompts = generated;
-  p.magicEnabled = true;
-  emit(`Magic Prompt generated ${Object.keys(generated).length} prompt(s) — enabled.`, "done");
-  return p;
+  return { generated, matched, skipped };
 }
 
 /**
@@ -1253,6 +1376,9 @@ export function relocateVideoLayout(p: Production, shot: ProductionShot): boolea
   };
   if (shot.videoPath) shot.videoPath = move(shot.videoPath);
   if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
+  for (const node of shot.graphVideoNodes ?? []) {
+    if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: move(g.path)! }));
+  }
   if (shot.graphEditVideoGens?.length) {
     shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
   }
@@ -1339,6 +1465,46 @@ export function editNodeSelection(shot: ProductionShot, id?: string): GraphGenIt
 export function upscaleSelection(shot: ProductionShot): GraphGenItem | undefined {
   const node = shot.graphUpscale;
   return node?.gens?.[node.genIndex ?? 0];
+}
+
+/** The video node with `id`, else the first video node (undefined when none).
+ *  Falls back to the legacy flat fields for a pre-migration shot. */
+export function getVideoNode(shot: ProductionShot, id?: string): GraphVideoNode | undefined {
+  const nodes = shot.graphVideoNodes ?? videoNodesFor(shot);
+  return id ? nodes.find((n) => n.id === id) : nodes[0];
+}
+
+/** The selected clip of a video node. */
+export function videoNodeSelection(shot: ProductionShot, id?: string): GraphGenItem | undefined {
+  const node = getVideoNode(shot, id);
+  return node?.gens?.[node.genIndex ?? 0];
+}
+
+/** Append a fresh video node, returning it. `source` is the pipe feeding it. */
+export function newVideoNode(shot: ProductionShot, prompt: string, source?: GraphSource): GraphVideoNode {
+  const nodes = shot.graphVideoNodes ??= [];
+  let i = 0;
+  while (nodes.some((n) => n.id === `vid${i}`)) i++;
+  const node: GraphVideoNode = { id: `vid${i}`, prompt };
+  if (source) node.source = source;
+  nodes.push(node);
+  return node;
+}
+
+/** Store a generated clip on the named video node (newest first), creating the
+ *  node when the shot has none yet (e.g. a classic generation after every
+ *  video node was removed). */
+export function recordGraphVideoGen(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string): void {
+  const id = nodeId || "vid0";
+  if (!shot.graphVideoNodes) shot.graphVideoNodes = videoNodesFor(shot);
+  let node = shot.graphVideoNodes.find((n) => n.id === id);
+  if (!node) {
+    node = { id, prompt: "" };
+    shot.graphVideoNodes.push(node);
+  }
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
+  node.genIndex = 0;
 }
 
 /** The source frame an edit node edits, resolved to a workspace-relative path:
@@ -1531,6 +1697,7 @@ function shotMediaRefs(shot: ProductionShot): string[] {
   for (const r of shot.artworkHistory ?? []) push(r);
   for (const g of shot.graphImageGens ?? []) push(g.path);
   for (const g of shot.graphVideoGens ?? []) push(g.path);
+  for (const node of shot.graphVideoNodes ?? []) for (const g of node.gens ?? []) push(g.path);
   for (const g of shot.graphEditGens ?? []) push(g.path);
   for (const node of shot.graphEditNodes ?? []) for (const g of node.gens ?? []) push(g.path);
   push(shot.videoPath);
@@ -1553,6 +1720,9 @@ function mapShotMediaPaths(shot: ProductionShot, remap: (rel: string) => string)
   if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map((r) => one(r)!);
   if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: one(g.path)! }));
   if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: one(g.path)! }));
+  for (const node of shot.graphVideoNodes ?? []) {
+    if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: one(g.path)! }));
+  }
   if (shot.graphEditGens?.length) shot.graphEditGens = shot.graphEditGens.map((g) => ({ ...g, path: one(g.path)! }));
   for (const node of shot.graphEditNodes ?? []) {
     if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: one(g.path)! }));
@@ -2046,13 +2216,6 @@ export function recordGraphUpscaleGen(shot: ProductionShot, rel: string, model: 
   node.genIndex = 0;
 }
 
-/** Store a generated clip on the shot's video generation node (newest first). */
-export function recordGraphVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
-  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
-  shot.graphVideoGens = [item, ...(shot.graphVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
-  shot.graphVideoGenIndex = 0;
-}
-
 /** Store an AI-edited video clip on the edit-video node (newest first). */
 export function recordGraphEditVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
@@ -2261,14 +2424,16 @@ export function buildTweenConcatList(absPaths: string[]): string {
  *  node-graph image pipe, not from the shot's own frame), the video's source
  *  frame — the image node's current output, or the piped `sourceFallback` —
  *  becomes the still, so the animatic timeline always has a frame to show. */
-export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string): void {
+export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string, nodeId?: string): void {
   shot.videoPath = rel;
   if (!shot.artwork) {
     // The still comes from the node that fed the video's source input — the
-    // edit-image node when `graphEditToVideo`, otherwise the image node — or
-    // the piped source path itself.
-    const sourceNode = shot.graphEditToVideo
-      ? editNodeSelection(shot, shot.graphVideoSourceEditNodeId)?.path
+    // edit-image node when the video node's source pipe is an edit node,
+    // otherwise the image node — or the piped source path itself.
+    const node = getVideoNode(shot, nodeId ?? shot.graphOutputVideoNodeId);
+    const src = node?.source;
+    const sourceNode = src?.kind === "editgen"
+      ? editNodeSelection(shot, src.nodeId)?.path
       : shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
     const source = sourceNode ?? sourceFallback;
     if (source) shot.artwork = source;
@@ -2296,9 +2461,10 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
  *  an explicit user action — the clip must stay the shot's output (the
  *  storyboard mirrors it and the animatic plays it), so it always takes over
  *  the pipe; the displaced still lives on in its node's history. */
-export function hookVideoGenToOutput(shot: ProductionShot): void {
+export function hookVideoGenToOutput(shot: ProductionShot, nodeId?: string): void {
   shot.graphOutputSource = "videogen";
   shot.graphOutputRefId = undefined;
+  if (nodeId) shot.graphOutputVideoNodeId = nodeId;
 }
 
 /** Re-anchor a generation node's selected index after a finished job's rebase
@@ -2405,7 +2571,8 @@ export function refreshRefCopyFromFile(p: Production, shot: ProductionShot, srcR
 export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
   const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
   const editSel = editNodeSelection(shot, shot.graphOutputEditNodeId);
-  const vidSel = shot.graphVideoGens?.[shot.graphVideoGenIndex ?? 0];
+  const vidNode = getVideoNode(shot, shot.graphOutputVideoNodeId);
+  const vidSel = vidNode?.gens?.[vidNode.genIndex ?? 0];
   switch (shot.graphOutputSource) {
     case "imagegen":
     case "editgen":
@@ -2433,8 +2600,8 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
         let changed = false;
         if (shot.videoPath !== vidSel.path) { shot.videoPath = vidSel.path; changed = true; }
         // The still mirror comes from whichever image node feeds the video
-        // source (edit node when graphEditToVideo, else the image node).
-        const feed = shot.graphEditToVideo ? editNodeSelection(shot, shot.graphVideoSourceEditNodeId) : imgSel;
+        // source (an edit node when the source pipe is one, else the image node).
+        const feed = vidNode?.source?.kind === "editgen" ? editNodeSelection(shot, vidNode.source.nodeId) : imgSel;
         if (!shot.artwork && feed?.path && shot.artwork !== feed.path) { shot.artwork = feed.path; changed = true; }
         return changed;
       }
@@ -2522,6 +2689,68 @@ export function migrateEditNodes(shot: ProductionShot): boolean {
   delete shot.graphEditToVideo;
   delete shot.graphEditStyleConnected;
   return true;
+}
+
+/** One-time migration: fold the legacy single video-generation node's flat
+ *  fields into `graphVideoNodes` (as `vid0`) and canonicalize a pre-list stored
+ *  graph's bare `videogen`/`videoprompt` node ids. Guarded by the presence of
+ *  `graphVideoNodes`. */
+export function migrateVideoNodes(shot: ProductionShot): boolean {
+  let changed = false;
+  if (!shot.graphVideoNodes) {
+    const hasLegacy = !!(
+      shot.graphVideoGens?.length ||
+      shot.graphVideoRefIds?.length ||
+      shot.graphImageToVideo ||
+      shot.graphEditToVideo ||
+      shot.graphVideoSourceRefId ||
+      (shot.graphVideoPrompt ?? "").trim() ||
+      shot.graphVideoModel ||
+      shot.graphVideoResolution ||
+      shot.graphVideoDurationSec !== undefined ||
+      shot.graphVideoParams ||
+      shot.graphOutputSource === "videogen"
+    );
+    shot.graphVideoNodes = [];
+    if (hasLegacy) {
+      const node: GraphVideoNode = { id: "vid0", prompt: shot.graphVideoPrompt ?? "" };
+      if (shot.graphVideoGens?.length) node.gens = shot.graphVideoGens;
+      if (shot.graphVideoGenIndex !== undefined) node.genIndex = shot.graphVideoGenIndex;
+      if (shot.graphVideoModel) node.model = shot.graphVideoModel;
+      if (shot.graphVideoResolution) node.resolution = shot.graphVideoResolution;
+      if (shot.graphVideoDurationSec !== undefined) node.durationSec = shot.graphVideoDurationSec;
+      if (shot.graphVideoParams) node.params = shot.graphVideoParams;
+      if (shot.graphVideoRefIds?.length) node.refIds = shot.graphVideoRefIds;
+      if (shot.graphImageToVideo) node.source = { kind: "imagegen" };
+      else if (shot.graphEditToVideo) node.source = { kind: "editgen", nodeId: shot.graphVideoSourceEditNodeId ?? "edit0" };
+      else if (shot.graphVideoSourceRefId) node.source = { kind: "ref", refId: shot.graphVideoSourceRefId };
+      if (shot.graphVideoStyleConnected) node.styleConnected = true;
+      shot.graphVideoNodes = [node];
+      if (shot.graphOutputSource === "videogen") shot.graphOutputVideoNodeId = "vid0";
+    }
+    changed = true;
+    // A pre-list stored graph carries bare `videogen`/`videoprompt` node ids;
+    // rewrite them to the canonical prefixed form so render-layer matching
+    // stays a plain id compare.
+    if (shot.graph) {
+      const map = (id: string): string =>
+        id === "videogen" ? "videogen:vid0" : id === "videoprompt" ? "videoprompt:vid0" : id;
+      for (const n of shot.graph.nodes) n.id = map(n.id);
+      for (const e of shot.graph.edges) { e.from.node = map(e.from.node); e.to.node = map(e.to.node); }
+    }
+  }
+  // Always strip the legacy flat fields: a stale renderer save (which doesn't
+  // deny them) can re-add them after the list exists.
+  const legacyKeys = [
+    "graphVideoGens", "graphVideoGenIndex", "graphVideoPrompt", "graphVideoModel",
+    "graphVideoResolution", "graphVideoDurationSec", "graphVideoParams", "graphVideoRefIds",
+    "graphImageToVideo", "graphEditToVideo", "graphVideoSourceRefId", "graphVideoSourceEditNodeId",
+    "graphVideoStyleConnected",
+  ] as const;
+  for (const k of legacyKeys) {
+    if (k in shot) { delete (shot as unknown as Record<string, unknown>)[k]; changed = true; }
+  }
+  return changed;
 }
 
 /** Image generator injected by the caller (OpenArt MCP in production).
@@ -2942,6 +3171,14 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
         return prompt !== n.prompt || source !== n.source ? { ...n, prompt, source } : n;
       });
     }
+    if (Array.isArray(shot.graphVideoNodes)) {
+      shot.graphVideoNodes = shot.graphVideoNodes.map((n) => {
+        const prompt = typeof n.prompt === "string" ? strip(n.prompt) : n.prompt;
+        const source = n.source?.kind === "ref" && n.source.refId === refId ? undefined : n.source;
+        const refIds = n.refIds?.includes(refId) ? n.refIds.filter((id) => id !== refId) : n.refIds;
+        return prompt !== n.prompt || source !== n.source || refIds !== n.refIds ? { ...n, prompt, source, refIds } : n;
+      });
+    }
     if (shot.graphEditSourceRefId === refId) shot.graphEditSourceRefId = undefined;
     if (shot.refIds?.includes(refId)) shot.refIds = shot.refIds.filter((id) => id !== refId);
     if (shot.refExcluded?.includes(refId)) shot.refExcluded = shot.refExcluded.filter((id) => id !== refId);
@@ -3011,6 +3248,15 @@ export function renameReference(p: Production, refId: string, newName: string, e
   for (const shot of p.scenes.flatMap((s) => s.shots)) {
     if (Array.isArray(shot.graphEditNodes)) {
       shot.graphEditNodes = shot.graphEditNodes.map((n) => {
+        if (typeof n.prompt === "string" && n.prompt.includes("@[")) {
+          const prompt = rename(n.prompt);
+          if (prompt !== n.prompt) return { ...n, prompt };
+        }
+        return n;
+      });
+    }
+    if (Array.isArray(shot.graphVideoNodes)) {
+      shot.graphVideoNodes = shot.graphVideoNodes.map((n) => {
         if (typeof n.prompt === "string" && n.prompt.includes("@[")) {
           const prompt = rename(n.prompt);
           if (prompt !== n.prompt) return { ...n, prompt };

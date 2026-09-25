@@ -3,7 +3,7 @@
  * wire converts to nodes/edges, and normalize(materialize(x)) is stable.
  */
 import { describe, it, expect } from "vitest";
-import { materializeGraph, videoPairActive, tweenActive, editVideoActive, type GraphRefView } from "../src/shared/graph/materialize.js";
+import { materializeGraph, videoNodesFor, videoPairActive, tweenActive, editVideoActive, type GraphRefView } from "../src/shared/graph/materialize.js";
 import { normalizeGraph } from "../src/shared/graph/normalize.js";
 import { TWEEN_KEY_IMGGEN } from "../src/shared/ipc.js";
 import type { Graph, ProductionShot } from "../src/shared/ipc.js";
@@ -238,6 +238,49 @@ describe("activity predicates mirror the canvas", () => {
     expect(tweenActive(shot({ graphOutputSource: "tween" }))).toBe(true);
     expect(editVideoActive(shot({ graphOutputSource: "editvideo" }))).toBe(true);
     expect(editVideoActive(shot())).toBe(false);
+  });
+
+  it("videoPairActive is true for a graphVideoNodes list", () => {
+    expect(videoPairActive(shot({ graphVideoNodes: [] }))).toBe(false);
+    expect(videoPairActive(shot({ graphVideoNodes: [{ id: "vid0", prompt: "" }] }))).toBe(true);
+  });
+});
+
+describe("video nodes (multi-instance)", () => {
+  it("emits one pair per graphVideoNode with per-node edges", () => {
+    const s = shot({
+      graphVideoNodes: [
+        { id: "vid0", prompt: "first", source: { kind: "imagegen" } },
+        { id: "vid1", prompt: "second @[Gondola]", source: { kind: "ref", refId: "r1" } },
+      ],
+      graphOutputSource: "videogen",
+      graphOutputVideoNodeId: "vid1",
+    });
+    const g = stable(materializeGraph(s, REFS));
+    expect(nodeIds(g)).toContain("videogen");
+    expect(nodeIds(g)).toContain("videoprompt");
+    expect(nodeIds(g)).toContain("videogen:vid1");
+    expect(nodeIds(g)).toContain("videoprompt:vid1");
+    const ids = edgeIds(g);
+    expect(ids).toContain("e-img-vid");                 // vid0 imagegen source (bare)
+    expect(ids).toContain("e-vp-vid");
+    expect(ids).toContain("e-ref:r1-videoprompt:vid1-0"); // vid1 ref tag
+    expect(ids).toContain("e-vp-vid:vid1");             // vid1 prompt pipe
+    expect(ids).toContain("e-ref-vid:vid1");            // vid1 ref source
+    expect(ids).toContain("e-vid-out:vid1");            // output follows vid1
+    expect(ids).not.toContain("e-vid-out");
+  });
+
+  it("videoNodesFor synthesizes a vid0 from legacy flat fields", () => {
+    const fromLegacy = videoNodesFor(shot({
+      graphVideoPrompt: "Drift",
+      graphImageToVideo: true,
+      graphVideoGens: [{ path: "c.mp4", prompt: "", model: "auto", at: "" }],
+    }));
+    expect(fromLegacy).toHaveLength(1);
+    expect(fromLegacy[0].id).toBe("vid0");
+    expect(fromLegacy[0].source).toEqual({ kind: "imagegen" });
+    expect(fromLegacy[0].gens?.[0].path).toBe("c.mp4");
   });
 });
 

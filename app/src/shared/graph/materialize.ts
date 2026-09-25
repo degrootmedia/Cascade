@@ -17,9 +17,10 @@
  * intentionally absent: they never had canvas edges (they bind at submit
  * time), so there is no wire to migrate.
  */
-import type { Graph, GraphEdge, GraphNode, ProductionShot } from "../ipc.js";
+import type { Graph, GraphEdge, GraphNode, GraphVideoNode, ProductionShot } from "../ipc.js";
+import { videoGenNodeId, videoPromptNodeId } from "../ipc.js";
 import { hasBrandParagraph, refTagNames } from "../prompt-grammar.js";
-import { tweenKeyToNode } from "./connect.js";
+import { videoEdgeId, tweenKeyToNode } from "./connect.js";
 
 /** Minimal reference view the materializer needs: identity, name (tag match), media, artwork. */
 export interface GraphRefView {
@@ -47,6 +48,7 @@ function editPromptId(editId: string): string {
 /** Mirror of NodeGraphModal's videoGenActive: when the video pair is on canvas. */
 export function videoPairActive(shot: ProductionShot): boolean {
   return !!(
+    (shot.graphVideoNodes?.length ?? 0) > 0 ||
     (shot.graphVideoGens?.length ?? 0) > 0 ||
     (shot.graphVideoRefIds?.length ?? 0) > 0 ||
     shot.graphImageToVideo ||
@@ -55,6 +57,26 @@ export function videoPairActive(shot: ProductionShot): boolean {
     shot.graphOutputSource === "videogen" ||
     (shot.graphVideoPrompt ?? "").trim()
   );
+}
+
+/** The video nodes to draw: the shot's list when it has one, else a single
+ *  `vid0` synthesized from the legacy flat fields (pre-migration shots).
+ *  Shared with the renderer so its canvas derivation matches the materializer. */
+export function videoNodesFor(shot: ProductionShot): GraphVideoNode[] {
+  if (Array.isArray(shot.graphVideoNodes)) return shot.graphVideoNodes;
+  if (!videoPairActive(shot)) return [];
+  const node: GraphVideoNode = { id: "vid0", prompt: shot.graphVideoPrompt ?? "" };
+  if (shot.graphVideoGens?.length) node.gens = shot.graphVideoGens;
+  if (shot.graphVideoGenIndex !== undefined) node.genIndex = shot.graphVideoGenIndex;
+  if (shot.graphVideoModel) node.model = shot.graphVideoModel;
+  if (shot.graphVideoResolution) node.resolution = shot.graphVideoResolution;
+  if (shot.graphVideoDurationSec !== undefined) node.durationSec = shot.graphVideoDurationSec;
+  if (shot.graphVideoParams) node.params = shot.graphVideoParams;
+  if (shot.graphImageToVideo) node.source = { kind: "imagegen" };
+  else if (shot.graphEditToVideo) node.source = { kind: "editgen", nodeId: shot.graphVideoSourceEditNodeId ?? "edit0" };
+  else if (shot.graphVideoSourceRefId) node.source = { kind: "ref", refId: shot.graphVideoSourceRefId };
+  if (shot.graphVideoStyleConnected) node.styleConnected = true;
+  return [node];
 }
 
 /** Mirror of NodeGraphModal's tweenActive. */
@@ -89,7 +111,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   const byName = new Map(refs.map((r) => [r.name.toLowerCase(), r]));
   const refIds = new Set(refs.map((r) => r.id));
   const prompt = shot.prompt ?? "";
-  const videoPrompt = shot.graphVideoPrompt ?? "";
+  const videoNodes = videoNodesFor(shot);
   const editVideoPrompt = shot.graphEditVideoPrompt ?? "";
   const editNodes = shot.graphEditNodes ?? [];
   const positions = shot.graphLayout?.positions ?? {};
@@ -116,7 +138,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
     }
   };
   addNames(refTagNames(prompt));
-  addNames(refTagNames(videoPrompt));
+  for (const n of videoNodes) addNames(refTagNames(n.prompt ?? ""));
   for (const n of editNodes) addNames(refTagNames(n.prompt ?? ""));
   addNames(refTagNames(editVideoPrompt));
 
@@ -153,10 +175,13 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   if (positions.videogen || positions.videoprompt) { layoutTools.add("videogen"); layoutTools.add("videoprompt"); }
   if (positions.tween) layoutTools.add("tween");
   if (positions.editvideo || positions.editvideoprompt) { layoutTools.add("editvideo"); layoutTools.add("editvideoprompt"); }
-  const hasVideo = videoPairActive(shot) || layoutTools.has("videogen");
+  const hasVideo = videoNodes.length > 0 || layoutTools.has("videogen");
+  const drawVideoNodes: GraphVideoNode[] = videoNodes.length > 0 ? videoNodes : (hasVideo ? [{ id: "vid0", prompt: "" }] : []);
   const hasTween = tweenActive(shot) || layoutTools.has("tween");
   const hasEditVideo = editVideoActive(shot) || layoutTools.has("editvideo");
-  if (hasVideo) { addNode("videoprompt", "videoprompt"); addNode("videogen", "videogen"); }
+  if (hasVideo) {
+    for (const n of drawVideoNodes) { addNode(videoPromptNodeId(n.id), "videoprompt"); addNode(videoGenNodeId(n.id), "videogen"); }
+  }
   for (const n of editNodes) { addNode(editPromptId(n.id), "editprompt"); addNode(editGenId(n.id), "editgen"); }
   if (hasTween) addNode("tween", "tween");
   if (hasEditVideo) { addNode("editvideoprompt", "editvideoprompt"); addNode("editvideo", "editvideo"); }
@@ -232,18 +257,22 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
     });
   };
   refEdges(refTagNames(prompt), "composer");
-  if (hasVideo) refEdges(refTagNames(videoPrompt), "videoprompt");
+  for (const n of drawVideoNodes) refEdges(refTagNames(n.prompt ?? ""), videoPromptNodeId(n.id));
   for (const n of editNodes) refEdges(refTagNames(n.prompt ?? ""), editPromptId(n.id));
   if (hasEditVideo) refEdges(refTagNames(editVideoPrompt), "editvideoprompt");
 
   // Style / brand plugs (flag wins, prompt paragraph is the fallback).
-  if (shot.graphStyleConnected ?? hasStyleLine(prompt)) edge("e-style", "style", "out", "composer", "in-style");
-  if (hasVideo && (shot.graphVideoStyleConnected ?? hasStyleLine(videoPrompt))) {
-    edge("e-style-vp", "style", "out", "videoprompt", "in-style");
+  // Mirroring: an explicit style selection is always wired (None never is),
+  // so a shot whose sidepanel shows a style materializes with the style edge.
+  const composerStyleSelected = !shot.styleNone && !!shot.style;
+  if (shot.styleNone ? false : (composerStyleSelected || (shot.graphStyleConnected ?? hasStyleLine(prompt)))) edge("e-style", "style", "out", "composer", "in-style");
+  for (const n of drawVideoNodes) {
+    const target = videoPromptNodeId(n.id);
+    if (n.styleConnected ?? hasStyleLine(n.prompt ?? "")) edge(videoEdgeId("e-style-vp", n.id), "style", "out", target, "in-style");
+    if (hasBrandParagraph(n.prompt ?? "")) edge(videoEdgeId("e-brand-vp", n.id), "brand", "out", target, "in-brand");
   }
   if (hasEditVideo && hasStyleLine(editVideoPrompt)) edge("e-style-evp", "style", "out", "editvideoprompt", "in-style");
   if (hasBrandParagraph(prompt)) edge("e-brand", "brand", "out", "composer", "in-brand");
-  if (hasVideo && hasBrandParagraph(videoPrompt)) edge("e-brand-vp", "brand", "out", "videoprompt", "in-brand");
   if (hasEditVideo && hasBrandParagraph(editVideoPrompt)) edge("e-brand-evp", "brand", "out", "editvideoprompt", "in-brand");
   for (const n of editNodes) {
     if (n.styleConnected ?? hasStyleLine(n.prompt ?? "")) edge(`e-style-ep:${n.id}`, "style", "out", editPromptId(n.id), "in-style");
@@ -252,19 +281,19 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
 
   // Fixed prompt pipes.
   edge("e-cmp-img", "composer", "out", "imagegen", "in-prompt");
-  if (hasVideo) edge("e-vp-vid", "videoprompt", "out", "videogen", "in-prompt");
+  for (const n of drawVideoNodes) edge(videoEdgeId("e-vp-vid", n.id), videoPromptNodeId(n.id), "out", videoGenNodeId(n.id), "in-prompt");
   if (hasEditVideo) edge("e-evp-ev", "editvideoprompt", "out", "editvideo", "in-prompt");
   for (const n of editNodes) edge(`e-ep-edit:${n.id}`, editPromptId(n.id), "out", editGenId(n.id), "in-prompt");
 
   // Video / edit-video source wires.
-  if (hasVideo && shot.graphImageToVideo) edge("e-img-vid", "imagegen", "out", "videogen", "in-image");
-  if (hasVideo && shot.graphEditToVideo && shot.graphVideoSourceEditNodeId && editNodes.some((n) => n.id === shot.graphVideoSourceEditNodeId)) {
-    edge("e-edit-vid", editGenId(shot.graphVideoSourceEditNodeId), "out", "videogen", "in-image");
+  for (const n of drawVideoNodes) {
+    const gen = videoGenNodeId(n.id);
+    const src = n.source;
+    if (src?.kind === "imagegen") edge(videoEdgeId("e-img-vid", n.id), "imagegen", "out", gen, "in-image");
+    else if (src?.kind === "editgen" && editNodes.some((p) => p.id === src.nodeId)) edge(videoEdgeId("e-edit-vid", n.id), editGenId(src.nodeId), "out", gen, "in-image");
+    else if (src?.kind === "ref" && hasRefNode(src.refId)) edge(videoEdgeId("e-ref-vid", n.id), `ref:${src.refId}`, "out", gen, "in-image");
   }
-  if (hasVideo && shot.graphVideoSourceRefId && hasRefNode(shot.graphVideoSourceRefId)) {
-    edge("e-ref-vid", `ref:${shot.graphVideoSourceRefId}`, "out", "videogen", "in-image");
-  }
-  if (hasEditVideo && shot.graphVideoToEditVideo && hasVideo) edge("e-vid-ev", "videogen", "out", "editvideo", "in-video");
+  if (hasEditVideo && shot.graphVideoToEditVideo && hasVideo && drawVideoNodes[0]) edge("e-vid-ev", videoGenNodeId(drawVideoNodes[0].id), "out", "editvideo", "in-video");
   if (hasEditVideo && shot.graphEditVideoSourceRefId && hasRefNode(shot.graphEditVideoSourceRefId)) {
     edge("e-ref-ev", `ref:${shot.graphEditVideoSourceRefId}`, "out", "editvideo", "in-video");
   }
@@ -292,7 +321,12 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
 
   // Output feed.
   if (shot.graphOutputSource === "imagegen") edge("e-img-out", "imagegen", "out", "output", "in-out");
-  if (shot.graphOutputSource === "videogen" && hasVideo) edge("e-vid-out", "videogen", "out", "output", "in-out");
+  if (shot.graphOutputSource === "videogen" && hasVideo) {
+    const outId = (shot.graphOutputVideoNodeId && drawVideoNodes.some((n) => n.id === shot.graphOutputVideoNodeId))
+      ? shot.graphOutputVideoNodeId
+      : drawVideoNodes[0]?.id;
+    if (outId) edge(videoEdgeId("e-vid-out", outId), videoGenNodeId(outId), "out", "output", "in-out");
+  }
   if (shot.graphOutputSource === "tween" && hasTween) edge("e-tween-out", "tween", "out", "output", "in-out");
   if (shot.graphOutputSource === "upscale" && shot.graphUpscale) edge("e-upscale-out", "upscale", "out", "output", "in-out");
   if (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId && editNodes.some((n) => n.id === shot.graphOutputEditNodeId)) {

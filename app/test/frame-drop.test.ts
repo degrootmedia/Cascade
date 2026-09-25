@@ -97,8 +97,21 @@ function cascadeMock(): Record<string, unknown> {
     reorderShot: stub, promoteBoardHistory: stub, recheckBoard: stub, removeVideo: stub,
     updateBoardPrompt: async (_id: string, shotId: string, prompt: string) => {
       if (!disk) return null;
-      const shot = (disk.scenes as Array<{ shots: Array<Record<string, unknown>> }>).flatMap((s) => s.shots).find((s) => s.id === shotId);
-      if (shot) { shot.prompt = prompt.trim() || undefined; shot.promptManual = !!prompt.trim(); }
+      const text = typeof prompt === "string" ? prompt.trim() : "";
+      if (disk.magicEnabled) {
+        // Mirror main's magic branch: strip Style/Brand, store the content box.
+        const content = prompt
+          .split(/\n\n+/)
+          .filter((p) => !/^Style:[ \t]*/.test(p.trim()) && !/^Brand identity:[ \t]*/.test(p.trim()))
+          .join("\n\n")
+          .trim();
+        const map = (disk.magicPrompts ?? {}) as Record<string, string>;
+        if (content) map[shotId] = content; else delete map[shotId];
+        disk.magicPrompts = map;
+      } else {
+        const shot = (disk.scenes as Array<{ shots: Array<Record<string, unknown>> }>).flatMap((s) => s.shots).find((s) => s.id === shotId);
+        if (shot) { shot.prompt = text || undefined; shot.promptManual = !!text; }
+      }
       return disk;
     },
   };
@@ -218,11 +231,12 @@ describe("frame-over-frame drop", () => {
     await act(async () => { dropOnTarget(); await new Promise((r) => setTimeout(r, 50)); });
 
     // The tag must land in magicPrompts[shotId] (the store effectivePrompt,
-    // shotReferences, and the node graph read), not just shot.prompt.
-    const last = savedProds[savedProds.length - 1];
-    const magicPrompts = (last?.magicPrompts as Record<string, string>) ?? {};
+    // shotReferences, and the node graph read), not just shot.prompt. The
+    // content is persisted through production:updateBoardPrompt (main owns
+    // magicPrompts), so assert against the on-disk map.
+    const magicPrompts = (disk?.magicPrompts as Record<string, string>) ?? {};
     expect(magicPrompts.s2).toContain("@[Frame 0001]");
-    expect((last?.references as Array<Record<string, unknown>>)?.some((r) => r.name === "Frame 0001")).toBe(true);
+    expect(savedProds.some((p) => (p.references as Array<Record<string, unknown>>)?.some((r) => r.name === "Frame 0001"))).toBe(true);
     // And the side panel must display it.
     const panelText = host.querySelector(".prod-prompt-sidepanel")?.textContent ?? "";
     expect(panelText).toContain("@[Frame 0001]");

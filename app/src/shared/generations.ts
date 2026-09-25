@@ -39,6 +39,10 @@ export function findGeneration(shot: ProductionShot, rel: string): GenerationRef
   if (index >= 0) return { kind: "image", rel, index };
   index = indexOfPath(shot.graphVideoGens, rel);
   if (index >= 0) return { kind: "video", rel, index };
+  for (const node of shot.graphVideoNodes ?? []) {
+    index = indexOfPath(node.gens, rel);
+    if (index >= 0) return { kind: "video", rel, index, nodeId: node.id };
+  }
   index = indexOfPath(shot.graphEditVideoGens, rel);
   if (index >= 0) return { kind: "editvideo", rel, index };
   index = indexOfPath(shot.graphUpscale?.gens, rel);
@@ -75,7 +79,12 @@ export function generationInUse(shot: ProductionShot, gen: GenerationRef): strin
     return null;
   }
   if (gen.kind === "video") {
-    if (selectedPath(shot.graphVideoGens, shot.graphVideoGenIndex) !== rel) return null;
+    if (gen.nodeId) {
+      const node = (shot.graphVideoNodes ?? []).find((n) => n.id === gen.nodeId);
+      if (!node || selectedPath(node.gens, node.genIndex) !== rel) return null;
+    } else if (selectedPath(shot.graphVideoGens, shot.graphVideoGenIndex) !== rel) {
+      return null;
+    }
     if (shot.graphVideoToEditVideo) return "the edit-video node's source clip";
     return null;
   }
@@ -136,6 +145,13 @@ export function removeGeneration(shot: ProductionShot, gen: GenerationRef): bool
     shot.graphImageGens = dropAt(shot.graphImageGens, gen.index);
     shot.graphImageGenIndex = repairIndex(shot.graphImageGenIndex, gen.index, shot.graphImageGens.length);
     removed = true;
+  } else if (gen.kind === "video" && gen.nodeId) {
+    const node = (shot.graphVideoNodes ?? []).find((n) => n.id === gen.nodeId);
+    if (node) {
+      node.gens = dropAt(node.gens, gen.index);
+      node.genIndex = repairIndex(node.genIndex, gen.index, node.gens.length);
+      removed = true;
+    }
   } else if (gen.kind === "video") {
     shot.graphVideoGens = dropAt(shot.graphVideoGens, gen.index);
     shot.graphVideoGenIndex = repairIndex(shot.graphVideoGenIndex, gen.index, shot.graphVideoGens.length);

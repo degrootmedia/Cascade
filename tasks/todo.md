@@ -1,4 +1,91 @@
-﻿# Video jobs: pending contingency + Fetch (all flows)
+﻿# Node graph: multi-instance nodes + edit-video availability
+
+User request (3 parts):
+1. Disable the edit-video node when using the OpenArt MCP provider (it has no
+   video-edit path).
+2. Allow dragging in **multiple video-generation nodes**, like edit-image nodes.
+3. ("In fact") every node kind should be addable more than once.
+
+## Findings / scope
+
+- Only `higgsfield-cli` implements `videoEditModels()`/`generateVideoEdit()`;
+  both OpenArt transports omit them (`providers/openart.ts`,
+  `openart-cli.ts`). The edit-video node is currently addable under OpenArt; its
+  model list is empty and submit throws (`index.ts:3174-3177`). The upscale node
+  already has the correct gate (`providerSupportsUpscale` +
+  `UPSCALE_UNAVAILABLE_HINT`, palette `NodeGraphModal.tsx:5343`) — mirror it.
+- Only edit-image nodes are list-backed (`graphEditNodes: GraphEditNode[]`,
+  canvas ids `editgen:<id>` / `editprompt:<id>`, prefix helpers + `nextEditNodeId`,
+  main-side `mergeEditNodes`). Every other generator is a singleton field with a
+  bare canvas id.
+- Full multi-instance is NOT one mechanical change: `imagegen` is structural
+  (`TWEEN_KEY_IMGGEN`, always present, shared composer pipe), `tween` owns all
+  keyframes/blocks/stitch, and `cameraGrid`/`upscale` carry per-node source wiring
+  + history. Each needs its own list type + migration + merge, following the
+  edit-node precedent.
+
+## Plan
+
+### Phase A — edit-video availability gate (small)
+- [x] `shared/ipc/media.ts`: `providerSupportsVideoEdit(id)` (only
+      `higgsfield-cli`) + `VIDEO_EDIT_UNAVAILABLE_HINT`.
+- [x] `ProductionWorkspace`: `videoEditUnavailable` from `mediaProviderId`,
+      passed to `NodeGraphModal`.
+- [x] `NodeGraphModal`: gate the palette item + `addTool("editvideo")` exactly
+      like upscale (disabled class/title/hint). Keep the live
+      `videoEditModels` probe for the model list.
+
+### Phase B — multiple video-generation nodes (like edit nodes)
+- [x] `graph.ts`: `GraphVideoNode` (id, prompt, gens/genIndex,
+      model/resolution/durationSec/params, source?, refIds?, styleConnected?)
+      + `videogen:<id>`/`videoprompt:<id>` id helpers (vid0 keeps bare ids).
+- [x] `production.ts`: `graphVideoNodes?: GraphVideoNode[]`,
+      `graphOutputVideoNodeId?`; legacy `graphVideo*` marked deprecated.
+- [x] `migrateVideoNodes(shot)`: folds the singleton into `[vid0]`; called from
+      `migrateBoardArtwork` and `mergeRendererScenes`; schema bumped 2 → 3.
+- [x] `materialize.ts`: one pair per node, edges parameterized by node id;
+      output edge uses `graphOutputVideoNodeId`; `videoNodesFor` legacy synth.
+- [x] `connect.ts`: `nodeKindForId`/`promptPipeFor`/`connectionToEdge`/
+      `graphEdgesForDetach` handle the prefixed video ids; vid0 unchanged.
+- [x] `productions.ts`: `mergeVideoNodes` by id (mirrors `mergeEditNodes`).
+- [x] `pipeline.ts`: `getVideoNode`/`newVideoNode`/`videoNodeSelection`/
+      `recordGraphVideoGen(nodeId,…)` + media-path/ref-cleanup coverage.
+- [x] `index.ts` + IPC + preload: `production:generateVideoNode` takes `nodeId`;
+      pending target `{kind:"videoNode", nodeId}`; recheck applies to that node.
+- [x] `NodeGraphModal` + `ProductionWorkspace`: `videoNodes` memo, per-node
+      factory/prompt node, `addTool("video")` appends, buildDerived maps all,
+      reconciliation, per-node select/cycle/draft/busy, output pipe by node id.
+- [x] Tests: materialize multi-node + `videoNodesFor`; connect per-node edge ids;
+      shelf second-drag adds `videogen:vid1`; edit-video tile disabled; updated
+      migration/selection/schema tests. `npm run typecheck` clean, 1135 app +
+      147 core pass, `npm run build` clean.
+
+### Phase C (follow-up, if asked) — all remaining kinds multi-instance
+- [ ] `editvideo` list, `cameraGrid` list, `upscale` list.
+- [ ] `imagegen` list (structural: per-node prompt vs shared composer?).
+- [ ] `tween` list (per-node keyframes/blocks/stitch).
+
+## Review
+
+Done (Parts 1+2). Part 1: `providerSupportsVideoEdit` disables the edit-video
+tile/drop for any non-Higgsfield provider, matching the upscale gate. Part 2:
+video-generation nodes are now a list (`graphVideoNodes`), mirroring the
+edit-node precedent end to end — canvas pairs `videogen:<id>`/`videoprompt:<id>`
+(vid0 keeps the historical bare ids + edge ids so every existing stored graph
+and test stays valid), per-node history/source/refs/model picks, per-node
+pending-recheck target and busy mirroring, merge-by-id persistence, and a
+one-time `migrateVideoNodes` fold from the legacy flat fields (schema v3). The
+palette tile now always appends another node (count badge) with a "remove all"
+X; individual nodes delete via the node Delete key, blocked while a node holds
+clips/prompt/source/refs/output. Self-caught: the style-plug edge was missing
+from the legacy synth until `videoNodesFor` carried `styleConnected` (graph-render/
+graph-flow failures); classic generation after clearing all video nodes would
+have recorded nowhere until `recordGraphVideoGen` started creating `vid0`.
+Part 3 (all remaining kinds) is deferred per the chosen scope.
+
+---
+
+# Video jobs: pending contingency + Fetch (all flows)
 
 User report: a node-graph video generated fine on OpenArt but never downloaded
 (the wait/download failed after submission), and the job was lost. Request: make

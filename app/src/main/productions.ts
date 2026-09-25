@@ -7,14 +7,15 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { CameraGridData, Graph, GraphEditNode, Production, ProductionMeta, ProductionShot, TweenBlock, UpscaleData }
+import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
 import { sanitizeGenParams } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateGraphGenerations,
+import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath }
 from "./pipeline.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
 import { normalizeGraph } from "../shared/graph/normalize.js";
+import { setStyleEdge } from "../shared/graph/connect.js";
 import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
@@ -114,7 +115,7 @@ export function listProductions(): ProductionMeta[] {
 
 /** Current production schema version. Bump when adding a one-time migration
  *  to migrateBoardArtwork; loads with >= this value skip the board walk. */
-export const PRODUCTION_SCHEMA_VERSION = 2;
+export const PRODUCTION_SCHEMA_VERSION = 3;
 
 /** Oldest production schema the loader can migrate. Data below this cannot be
  *  brought forward safely, so it fails loudly with the version named instead
@@ -281,6 +282,34 @@ function mergeEditNodes(
   return out;
 }
 
+/** Merge one shot's video-generation nodes by stable node id: the fresh node
+ *  owns its clip history (main-side appends), the incoming snapshot owns the
+ *  node's editable fields (prompt, wiring, model picks). Nodes only the
+ *  incoming snapshot has are creations racing this save — adopt them whole.
+ *  Mirrors `mergeEditNodes`. */
+function mergeVideoNodes(
+  freshNodes: GraphVideoNode[] | undefined,
+  incomingNodes: GraphVideoNode[] | undefined
+): GraphVideoNode[] | undefined {
+  if (!incomingNodes) return freshNodes;
+  const incomingById = new Map<string, GraphVideoNode>();
+  for (const n of incomingNodes) {
+    if (n && typeof n.id === "string" && !incomingById.has(n.id)) incomingById.set(n.id, n);
+  }
+  const out = (freshNodes ?? []).map((fn) => {
+    const inc = incomingById.get(fn.id);
+    if (!inc) return fn;
+    const { gens: _gens, genIndex: _idx, id: _id, ...rest } = inc;
+    const node: GraphVideoNode = { ...fn, ...rest };
+    node.genIndex = takeGenIndex(inc.genIndex, inc.gens, fn.genIndex, fn.gens);
+    return node;
+  });
+  for (const [id, inc] of incomingById) {
+    if (!(freshNodes ?? []).some((n) => n.id === id)) out.push({ ...inc });
+  }
+  return out;
+}
+
 /** Merge in-betweener action blocks by keyframe pair (start/end source ids —
  *  block ids are positional and reshuffle when keyframes reorder). The fresh
  *  block owns its generation history; the incoming snapshot owns the block's
@@ -341,7 +370,7 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   for (const [key, value] of Object.entries(incomingRec)) {
     if (DENIED.has(key)) continue;
     if (key === "artwork" || key === "videoPath") continue; // explicit-null / editvideo rules below
-    if (key === "graphEditNodes" || key === "graphTweenBlocks" || key === "graphUpscale") continue; // merged by id / pair / state below
+    if (key === "graphEditNodes" || key === "graphVideoNodes" || key === "graphTweenBlocks" || key === "graphUpscale") continue; // merged by id / pair / state below
     mergedRec[key] = value;
   }
   merged.graphImageGenIndex = takeGenIndex(
@@ -357,6 +386,7 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     freshShot.graphEditVideoGenIndex, freshShot.graphEditVideoGens
   );
   merged.graphEditNodes = mergeEditNodes(freshShot.graphEditNodes, incoming.graphEditNodes);
+  merged.graphVideoNodes = mergeVideoNodes(freshShot.graphVideoNodes, incoming.graphVideoNodes);
   merged.graphTweenBlocks = mergeTweenBlocks(freshShot.graphTweenBlocks, incoming.graphTweenBlocks);
   merged.graphCameraGrid = mergeCameraGrid(freshShot.graphCameraGrid, incoming.graphCameraGrid);
   merged.graphUpscale = mergeUpscale(freshShot.graphUpscale, incoming.graphUpscale);
@@ -412,6 +442,8 @@ function mergeRendererScenes(fresh: ProductionFile, incoming: Production): void 
     // Fold any legacy single-edit fields from a stale renderer payload into
     // the edit-node list before the output pipe is re-derived from it.
     migrateEditNodes(shot);
+    // Same for the legacy single video-generation node.
+    migrateVideoNodes(shot);
     // The output pipe is authoritative: re-derive artwork/videoPath so a
     // renderer save with a stale or missing frame can't diverge from the
     // graph's frame output node (e.g. an edit-image node piped to output).
@@ -502,19 +534,13 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     };
   }
   if (typeof p.meta.name === "string" && p.meta.name.trim()) fresh.meta.name = p.meta.name.trim();
-  // magicPrompts IS renderer-edited through saves (the prompt drawer writes
-  // magicPrompts[shotId]), so merge per key: incoming non-blank entries win,
-  // incoming blanks clear, and fresh-only keys survive a stale snapshot
-  // (e.g. a save captured before a bulk magic-prompt generation landed).
-  if (p.magicPrompts && typeof p.magicPrompts === "object") {
-    fresh.magicPrompts ??= {};
-    for (const [k, v] of Object.entries(p.magicPrompts)) {
-      if (typeof v === "string" && v.trim()) fresh.magicPrompts[k] = v.trim().slice(0, 2000);
-      else delete fresh.magicPrompts[k];
-    }
-  } else if (p.magicPrompts === undefined) {
-    fresh.magicPrompts = fresh.magicPrompts ?? {};
-  }
+  // magicPrompts is main-owned, like promptOverrides: every renderer magic edit
+  // goes through production:updateBoardPrompt, and bulk/per-shot generation
+  // writes it main-side. A whole-document save carries a snapshot that can
+  // predate a generation, so accepting its map would revert (or blank) fresh
+  // prompts on other shots — the fresh on-disk map always wins.
+  fresh.magicPrompts =
+    fresh.magicPrompts && typeof fresh.magicPrompts === "object" ? { ...fresh.magicPrompts } : {};
   if (typeof p.magicEnabled === "boolean") fresh.magicEnabled = p.magicEnabled;
   // The reference moodboard (node placements, viewport, notes) is renderer-owned
   // like the shot graph layouts. Its shape is repaired on read by the renderer's
@@ -522,6 +548,30 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // partitions it across two writers.
   if (p.moodboard && typeof p.moodboard === "object") fresh.moodboard = p.moodboard;
   return fresh;
+}
+
+/**
+ * Fold ONLY the magic-prompt keys a long-running job actually changed onto the
+ * fresh on-disk map. `magicPrompts` is keyed by shot id and written one entry
+ * at a time (bulk generation, per-shot regeneration, the prompt drawer's
+ * updateBoardPrompt), so rebasing a finished job must not copy its whole
+ * snapshot map — that reverts any other shot's prompt that landed while the job
+ * ran. Pure so the per-key delta is unit-testable.
+ */
+export function applyMagicPromptDelta(
+  fresh: Record<string, string> | undefined,
+  before: Record<string, string> | undefined,
+  after: Record<string, string> | undefined
+): Record<string, string> {
+  const out = { ...(fresh ?? {}) };
+  const b = before ?? {};
+  const a = after ?? {};
+  for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+    if (b[key] === a[key]) continue;
+    if (typeof a[key] === "string") out[key] = a[key];
+    else delete out[key];
+  }
+  return out;
 }
 
 /** Reference-image files (workspace-relative) that nothing on the production
@@ -549,6 +599,7 @@ function migrateBoardArtwork(p: Production): boolean {
       if (migrateGraphGenerations(s)) changed = true;
       if (migrateGraphPipes(s)) changed = true;
       if (migrateEditNodes(s)) changed = true;
+      if (migrateVideoNodes(s)) changed = true;
       if (syncTweenBlocks(p, s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;
@@ -590,7 +641,13 @@ function migrateBoardArtwork(p: Production): boolean {
  *  converges). Idempotent via `graph.migrated`. */
 export function migrateShotGraph(p: Production, shot: ProductionShot): boolean {
   if (shot.graph?.migrated) return false;
-  const { graph } = normalizeGraph(materializeGraph(shot, graphRefViews(p)));
+  let { graph } = normalizeGraph(materializeGraph(shot, graphRefViews(p)));
+  // Mirroring heal: the sidepanel shows a style (explicit pick or master
+  // fallback) but materialize only knows the explicit pick — an implicit
+  // master selection would otherwise open unwired. None never heals.
+  if (!shot.styleNone && (shot.style ?? p.styles?.[0]?.id) && !styleEdgePresent(graph, "composer")) {
+    graph = normalizeGraph(setStyleEdge(graph, "composer", true)).graph;
+  }
   stripMigratedCopies(p, shot, graph);
   graph.migrated = true;
   shot.graph = graph;
@@ -613,6 +670,10 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
   shot.prompt = stripField(shot.prompt, "composer");
   shot.graphVideoPrompt = stripField(shot.graphVideoPrompt, "videoprompt");
   shot.graphEditVideoPrompt = stripField(shot.graphEditVideoPrompt, "editvideoprompt");
+  for (const n of shot.graphVideoNodes ?? []) {
+    const next = stripField(n.prompt, { videoprompt: n.id });
+    if (next !== n.prompt) n.prompt = next ?? "";
+  }
   // graphEditPrompt (the classic draft for the NEXT edit) is left verbatim —
   // it seeds a future node, not a current consumer.
   for (const n of shot.graphEditNodes ?? []) {

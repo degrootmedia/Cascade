@@ -1,4 +1,81 @@
-﻿## 2026-09-22 — identical sibling blocks in NodeGraphModal; PowerShell rewrite (3rd)
+﻿## 2026-09-25 — Magic Prompt bled between frames (four stacked races)
+
+- Symptom: with Magic Prompt on, a frame's prompt sometimes went blank in the
+  side panel while the node view looked fine, and sometimes showed a *different*
+  shot's prompt.
+- Five independent causes, all fixed:
+  1. **Composer draft not scoped to its shot.** `NodeGraphModal` wasn't keyed by
+     shot, so switching frames (detached-window selection) reused the same
+     composer instance; its local draft (the old shot's) could be emitted under
+     the new shot's id on blur/close. Fix: `key={graphShotId}` remounts the
+     modal so the departing draft flushes to its own shot.
+  2. **Whole-document saves carried `magicPrompts`.** `saveField`/`saveProduction`
+     snapshots predate a long generation, so accepting their map reverted fresh
+     prompts. Fix: `applyRendererState` treats `magicPrompts` as main-owned (like
+     `promptOverrides`); every renderer magic edit goes through
+     `production:updateBoardPrompt` (the frame-drop tag was rerouted too).
+  3. **Rebase copied the whole map.** `rebaseProduction` replaced
+     `fresh.magicPrompts` with the job's snapshot map, reverting concurrent
+     per-shot edits. Fix: `applyMagicPromptDelta` folds only the changed keys.
+  4. **Reads blocked on the save queue.** The prompt fetch awaited
+     `promptSaveQueue`, which is chained behind main's per-production generation
+     queue — a bulk magic run left the side panel blank. Fix: bounded 300ms race;
+     the post-save snapshot refetches, so a read that slips ahead self-corrects.
+  5. **Composer edits didn't reach the side panel live.** The composer kept a
+     local draft and only published on blur (and for tag reorders), so the side
+     panel — bound to the shared `focusedPrompt` — lagged behind a node-graph
+     edit. Fix: publish on every change; the local draft still owns the DOM
+     (echo suppressed by `emitted`) and the save is coalesced by the prompt
+     queue's latest-value guard. The side panel already updated per keystroke
+     when *it* was edited, so this makes the two views symmetric.
+- Rules:
+  1. Per-key maps that long jobs mutate (magicPrompts) must have ONE writer:
+     main. Never accept them from a whole-document save; never rebase the whole
+     map.
+  2. A React component whose local draft belongs to an entity (shot) must be
+     keyed by that entity, or a switch silently transfers the draft.
+  3. Read paths must not await a write queue that can be stuck behind an
+     unrelated long job. Bound the wait and let the post-write snapshot correct
+     it.
+  4. Regression tests: assert against the on-disk map (main-owned), and make the
+     "stuck save" test fail without the bounded race (it does).
+
+## 2026-09-25 — never claim a UI control exists without grepping its call site
+
+- Symptom: told the user a per-frame "Refresh" button clears one shot's magic
+  prompt. `production:refreshBoardPrompt` existed in the IPC contract and
+  `.prod-board-prompt-refresh` existed in CSS, so it *looked* wired — but no
+  renderer component ever called it. There was no such button; the CSS/IPC were
+  orphans. The user was (rightly) baffled.
+- Rule: before telling a user where a control is, grep the RENDERER for the IPC
+  method / class name and confirm an `onClick` actually calls it. A contract
+  entry + stylesheet rule proves nothing about the UI.
+- Related fix shipped alongside: a stale magic entry survived regeneration
+  because (a) the gap-fill re-read the shot's own effective prompt — in magic
+  mode that IS the stale entry — and (b) the request re-sent the stale PROSE as
+  "current content", so the model parroted it. Both removed: gaps fill from the
+  script visual, the request sends only the draft's reference TAG NAMES, and
+  each shot is generated in its OWN call so adjacent similar shots can't bleed.
+  New per-frame IPC `production:regenerateMagicPrompt` + side-panel/graph buttons
+  give a real per-frame escape hatch.
+
+## 2026-09-24 — new node type missing its data-equality case (stale node data)
+
+- Symptom: connecting a reference to the edit-video prompt node added the
+  `@[name]` tag to the prompt but drew no connection line.
+- Cause: `NodeGraphModal`'s node-reconciliation effect classifies each derived
+  node's visible data with a per-`type` `equal` check before deciding to reuse
+  the old node. `editvideoprompt` had no case, so `equal` stayed `true` and the
+  node's `data` (including `refHandles`) was frozen at first mount — the newly
+  added `in-ref-N` socket never appeared, so the stored edge had no target
+  handle to attach to. The graph edge and tag were both written correctly.
+- Rule: every node view added to `nodeTypes` must also be added to BOTH the
+  `buildDerived` output and the reconciliation `equal` chain. Missing the
+  latter fails silently (edge written, wire invisible). Regression test:
+  `graph-shelf.test.ts` "wires a reference into the edit-video prompt node's
+  numbered socket" — assert the numbered handle appears after a connect.
+
+## 2026-09-22 — identical sibling blocks in NodeGraphModal; PowerShell rewrite (3rd)
 
 - Symptom: adding a second node view, an Edit whose `oldString` was a generic
   four-line state-declaration block (`const [schema…]` / `const busy = data.busy`

@@ -46,7 +46,11 @@ export { promptNodeId };
 /** Stored content per prompt target (may carry legacy pasted paragraphs). */
 export function promptContent(shot: ProductionShot, target: StylePromptTarget): string {
   if (target === "composer") return shot.prompt ?? "";
-  if (target === "videoprompt") return shot.graphVideoPrompt ?? "";
+  if (target === "videoprompt") return (shot.graphVideoNodes ?? [])[0]?.prompt ?? shot.graphVideoPrompt ?? "";
+  if (typeof target === "object" && "videoprompt" in target) {
+    const node = (shot.graphVideoNodes ?? []).find((n) => n.id === target.videoprompt);
+    return node?.prompt ?? (target.videoprompt === "vid0" ? shot.graphVideoPrompt ?? "" : "");
+  }
   if (target === "editvideoprompt") return shot.graphEditVideoPrompt ?? "";
   return (shot.graphEditNodes ?? []).find((n) => n.id === target.editprompt)?.prompt ?? "";
 }
@@ -65,7 +69,11 @@ export function brandEdgePresent(graph: Graph, target: StylePromptTarget): boole
 
 function styleFlagFor(shot: ProductionShot, target: StylePromptTarget): boolean | undefined {
   if (target === "composer") return shot.graphStyleConnected;
-  if (target === "videoprompt") return shot.graphVideoStyleConnected;
+  if (target === "videoprompt") return (shot.graphVideoNodes ?? [])[0]?.styleConnected ?? shot.graphVideoStyleConnected;
+  if (typeof target === "object" && "videoprompt" in target) {
+    const node = (shot.graphVideoNodes ?? []).find((n) => n.id === target.videoprompt);
+    return node?.styleConnected ?? (target.videoprompt === "vid0" ? shot.graphVideoStyleConnected : undefined);
+  }
   if (target === "editvideoprompt") return undefined;
   return (shot.graphEditNodes ?? []).find((n) => n.id === target.editprompt)?.styleConnected;
 }

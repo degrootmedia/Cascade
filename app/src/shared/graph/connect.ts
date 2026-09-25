@@ -15,7 +15,7 @@
  * step 10 deletes the legacy side.
  */
 import type { Graph, GraphEdge, GraphNode, GraphNodeKind } from "../ipc.js";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX } from "../ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX, VIDEOGEN_NODE_PREFIX, VIDEOPROMPT_NODE_PREFIX, videoGenNodeId, videoPromptNodeId, parseVideoGenNode, parseVideoPromptNode } from "../ipc.js";
 import { REF_SOCKET_RE } from "./ports.js";
 
 /** Structural canvas connection (ReactFlow Connection shape, no UI import). */
@@ -37,10 +37,25 @@ const STRUCTURAL_KINDS = new Set([
 /** Resolve a canvas node id to its graph kind (null = unknown). */
 export function nodeKindForId(id: string): GraphNodeKind | null {
   if (STRUCTURAL_KINDS.has(id)) return id as GraphNodeKind;
+  if (id.startsWith(VIDEOGEN_NODE_PREFIX)) return "videogen";
+  if (id.startsWith(VIDEOPROMPT_NODE_PREFIX)) return "videoprompt";
   if (id === "editgen" || id.startsWith(EDITGEN_PREFIX)) return "editgen";
   if (id === "editprompt" || id.startsWith(EDITPROMPT_PREFIX)) return "editprompt";
   if (id.startsWith("ref:")) return "ref";
   return null;
+}
+
+/** The edge id for a per-video-node wire: the first node keeps the historical
+ *  bare base id, additional nodes suffix the node id. Shared with the
+ *  materializer so both emit identical edges. */
+export function videoEdgeId(base: string, nodeId: string): string {
+  return nodeId === "vid0" ? base : `${base}:${nodeId}`;
+}
+
+/** The style/brand plug edge-id suffix for a video prompt node. */
+function videoPromptSuffix(target: string): string {
+  const id = parseVideoPromptNode(target);
+  return !id || id === "vid0" ? "-vp" : `-vp:${id}`;
 }
 
 /** Canonicalize legacy bare ids (`editgen`/`editprompt` = `edit0`). */
@@ -60,7 +75,8 @@ function refIdOf(nodeId: string): string | null {
 }
 
 function isPromptTarget(target: string): boolean {
-  return target === "composer" || target === "videoprompt" || target === "editvideoprompt" || nodeKindForId(target) === "editprompt";
+  const kind = nodeKindForId(target);
+  return kind === "composer" || kind === "videoprompt" || kind === "editvideoprompt" || kind === "editprompt";
 }
 
 /** Map a connection source to its tween keyframe id (mirror of onConnect). */
@@ -147,8 +163,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
 
   // Edit-video source socket.
   if (target === "editvideo" && handle === "in-video") {
-    if (source === "videogen") {
-      return { edge: mkEdge("e-vid-ev", "videogen", "out", "editvideo", "in-video"), dropIds: edgesInto(graph, "editvideo", "in-video").map((e) => e.id) };
+    const vidId = parseVideoGenNode(source);
+    if (vidId) {
+      return { edge: mkEdge(videoEdgeId("e-vid-ev", vidId), source, "out", "editvideo", "in-video"), dropIds: edgesInto(graph, "editvideo", "in-video").map((e) => e.id) };
     }
     const rid = refIdOf(source);
     if (rid) {
@@ -193,8 +210,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
 
   // Generation pipes out of the image node.
   if (source === "imagegen") {
-    if (target === "videogen" && handle === "in-image") {
-      return { edge: mkEdge("e-img-vid", "imagegen", "out", "videogen", "in-image"), dropIds: edgesInto(graph, "videogen", "in-image").map((e) => e.id) };
+    const vidId = parseVideoGenNode(target);
+    if (vidId && handle === "in-image") {
+      return { edge: mkEdge(videoEdgeId("e-img-vid", vidId), "imagegen", "out", target, "in-image"), dropIds: edgesInto(graph, target, "in-image").map((e) => e.id) };
     }
     if (target === "output") return { edge: mkEdge("e-img-out", "imagegen", "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
     if (srcKind === null) return null;
@@ -207,8 +225,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     if (target === "tween" && tweenSlot) return null;
     return null;
   }
-  if (source === "videogen" && target === "output") {
-    return { edge: mkEdge("e-vid-out", "videogen", "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
+  const srcVidId = parseVideoGenNode(source);
+  if (srcVidId && target === "output") {
+    return { edge: mkEdge(videoEdgeId("e-vid-out", srcVidId), source, "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
   }
   if (source === "tween" && target === "output") {
     return { edge: mkEdge("e-tween-out", "tween", "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
@@ -219,8 +238,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
 
   // Edit-node outputs.
   if (srcKind === "editgen") {
-    if (target === "videogen" && handle === "in-image") {
-      return { edge: mkEdge("e-edit-vid", source, "out", "videogen", "in-image"), dropIds: edgesInto(graph, "videogen", "in-image").map((e) => e.id) };
+    const vidId = parseVideoGenNode(target);
+    if (vidId && handle === "in-image") {
+      return { edge: mkEdge(videoEdgeId("e-edit-vid", vidId), source, "out", target, "in-image"), dropIds: edgesInto(graph, target, "in-image").map((e) => e.id) };
     }
     if (target === "output") {
       return { edge: mkEdge("e-edit-out", source, "out", "output", "in-out"), dropIds: edgesInto(graph, "output", "in-out").map((e) => e.id) };
@@ -241,8 +261,9 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     const tweenSlot = /^in-tween-(\d+)$/.exec(handle);
     // Keyframe sockets route through connectTweenKey (see above).
     if (target === "tween" && tweenSlot) return null;
-    if (target === "videogen" && handle === "in-image") {
-      return { edge: mkEdge("e-ref-vid", source, "out", "videogen", "in-image"), dropIds: edgesInto(graph, "videogen", "in-image").map((e) => e.id) };
+    const vidId = parseVideoGenNode(target);
+    if (vidId && handle === "in-image") {
+      return { edge: mkEdge(videoEdgeId("e-ref-vid", vidId), source, "out", target, "in-image"), dropIds: edgesInto(graph, target, "in-image").map((e) => e.id) };
     }
     if (nodeKindForId(target) === "editgen" && handle === "in-image") {
       return { edge: mkEdge(`e-ref-edit:${target.slice(EDITGEN_PREFIX.length)}`, source, "out", target, "in-image"), dropIds: edgesInto(graph, target, "in-image").map((e) => e.id) };
@@ -264,11 +285,11 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
 
   // Style / brand plugs (fixed socket ids per prompt node).
   if (source === "style" && isPromptTarget(target) && handle === "in-style") {
-    const suffix = target === "composer" ? "" : target === "videoprompt" ? "-vp" : target === "editvideoprompt" ? "-evp" : `-ep:${editPromptEditId(target)}`;
+    const suffix = target === "composer" ? "" : nodeKindForId(target) === "videoprompt" ? videoPromptSuffix(target) : target === "editvideoprompt" ? "-evp" : `-ep:${editPromptEditId(target)}`;
     return { edge: mkEdge(`e-style${suffix}`, "style", "out", target, "in-style"), dropIds: edgesInto(graph, target, "in-style").map((e) => e.id) };
   }
   if (source === "brand" && isPromptTarget(target) && handle === "in-brand") {
-    const suffix = target === "composer" ? "" : target === "videoprompt" ? "-vp" : target === "editvideoprompt" ? "-evp" : `-ep:${editPromptEditId(target)}`;
+    const suffix = target === "composer" ? "" : nodeKindForId(target) === "videoprompt" ? videoPromptSuffix(target) : target === "editvideoprompt" ? "-evp" : `-ep:${editPromptEditId(target)}`;
     return { edge: mkEdge(`e-brand${suffix}`, "brand", "out", target, "in-brand"), dropIds: edgesInto(graph, target, "in-brand").map((e) => e.id) };
   }
 
@@ -293,7 +314,8 @@ function promptPipeFor(genNode: string): { from: string; to: string; id: string 
     return { from: `${EDITPROMPT_PREFIX}${id}`, to: `${EDITGEN_PREFIX}${id}`, id: `e-ep-edit:${id}` };
   }
   if (genNode === "imagegen") return { from: "composer", to: "imagegen", id: "e-cmp-img" };
-  if (genNode === "videogen") return { from: "videoprompt", to: "videogen", id: "e-vp-vid" };
+  const vidId = parseVideoGenNode(genNode);
+  if (vidId) return { from: videoPromptNodeId(vidId), to: videoGenNodeId(vidId), id: videoEdgeId("e-vp-vid", vidId) };
   if (genNode === "editvideo") return { from: "editvideoprompt", to: "editvideo", id: "e-evp-ev" };
   return null;
 }
@@ -315,11 +337,12 @@ export function ensurePromptPipe(graph: Graph, genNode: string): Graph {
 }
 
 /** A prompt consumer that style/brand nodes can plug into. */
-export type PromptNodeTarget = "composer" | "videoprompt" | "editvideoprompt" | { editprompt: string };
+export type PromptNodeTarget = "composer" | "videoprompt" | "editvideoprompt" | { editprompt: string } | { videoprompt: string };
 
 /** Canonical prompt-node id for a target. */
 export function promptNodeId(target: PromptNodeTarget): string {
   if (typeof target === "string") return target;
+  if ("videoprompt" in target) return videoPromptNodeId(target.videoprompt);
   return `editprompt:${target.editprompt}`;
 }
 
@@ -330,7 +353,8 @@ function plugEdgeId(source: "style" | "brand", target: PromptNodeTarget): string
     target === "composer" ? "" :
     target === "videoprompt" ? "-vp" :
     target === "editvideoprompt" ? "-evp" :
-    `-ep:${target.editprompt}`;
+    "editprompt" in target ? `-ep:${target.editprompt}` :
+    `-vp:${target.videoprompt}`;
   return `e-${source}${suffix}`;
 }
 
@@ -392,8 +416,8 @@ export function graphEdgesForDetach(
       }
       return null;
     }
-    if (from.nodeId === "videogen" && from.handleId === "in-image") {
-      return dropInto("videogen", "in-image");
+    if (kind === "videogen" && from.handleId === "in-image") {
+      return dropInto(canonicalNodeId(from.nodeId), "in-image");
     }
     if (from.nodeId === "cameraGrid") {
       if (from.handleId === "in-image" || from.handleId === "in-grid") return dropInto("cameraGrid", from.handleId);
@@ -427,9 +451,9 @@ export function graphEdgesForDetach(
     if (node === "imagegen") return dropFrom("imagegen");
     // Legacy gap mirrored: dragging the video source off clears the video
     // output feed only (onUnpipeVideoGen), not the edit-video feed.
-    if (node === "videogen") {
-      const hit = graph.edges.some((e) => e.from.node === "videogen" && e.to.node === "output");
-      return hit ? { ...graph, edges: graph.edges.filter((e) => !(e.from.node === "videogen" && e.to.node === "output")) } : null;
+    if (nodeKindForId(node) === "videogen") {
+      const hit = graph.edges.some((e) => e.from.node === node && e.to.node === "output");
+      return hit ? { ...graph, edges: graph.edges.filter((e) => !(e.from.node === node && e.to.node === "output")) } : null;
     }
     if (node === "tween") {
       const hit = graph.edges.some((e) => e.from.node === "tween" && e.to.node === "output");

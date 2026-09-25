@@ -721,7 +721,7 @@ export interface CascadeApi {
    * when absent the shot's current frame is used. The result is stored on the
    * video generation node. Returns the updated production.
    */
-  generateVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
+  generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
   /**
    * Step 3 in-betweener node: generate one action block's clip (start keyframe
    * → end keyframe interpolation for `blockId`). The clip is stored on the
@@ -812,6 +812,8 @@ export interface CascadeApi {
   generateEditVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
+  /** Step 3: Magic Prompt — regenerate ONE shot's content prompt, replacing only that entry. */
+  regenerateMagicPrompt(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
   setMagicEnabled(productionId: string, enabled: boolean): Promise<Production>;
   /**

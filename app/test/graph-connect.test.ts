@@ -265,6 +265,36 @@ describe("ensurePromptPipe emits the runtime pair's fixed pipe", () => {
   });
 });
 
+describe("multi-instance video nodes", () => {
+  const videoGraph = (): Graph => {
+    let g: Graph = { version: 1, nodes: [], edges: [] };
+    for (const [id, kind] of [["imagegen", "imagegen"], ["style", "style"], ["videogen:vid1", "videogen"], ["videoprompt:vid1", "videoprompt"], ["output", "output"]] as const) {
+      g = addGraphNode(g, { id, kind, pos: { x: 0, y: 0 } });
+    }
+    return g;
+  };
+
+  it("maps a connection to a suffixed video node's edge ids", () => {
+    const g = videoGraph();
+    const feed = connectionToEdge(conn("imagegen", "videogen:vid1", "in-image"), g)!;
+    expect(feed.edge.id).toBe("e-img-vid:vid1");
+    expect(feed.edge.to.node).toBe("videogen:vid1");
+    const out = connectionToEdge(conn("videogen:vid1", "output", "in-out"), g)!;
+    expect(out.edge.id).toBe("e-vid-out:vid1");
+    const piped = ensurePromptPipe(g, "videogen:vid1");
+    expect(piped.edges.find((e) => e.id === "e-vp-vid:vid1")?.from.node).toBe("videoprompt:vid1");
+    const styleEdge = connectionToEdge(conn("style", "videoprompt:vid1", "in-style"), g)!;
+    expect(styleEdge.edge.id).toBe("e-style-vp:vid1");
+    expect(styleEdge.edge.to.node).toBe("videoprompt:vid1");
+  });
+
+  it("keeps vid0 on the historical bare ids", () => {
+    const g = baseGraph();
+    expect(connectionToEdge(conn("imagegen", "videogen", "in-image"), g)!.edge.id).toBe("e-img-vid");
+    expect(connectionToEdge(conn("videogen", "output", "in-out"), g)!.edge.id).toBe("e-vid-out");
+  });
+});
+
 describe("graph node/edge removal", () => {
   it("removeGraphEdge drops one wire; removeGraphNode drops node + incident wires", () => {
     const g = baseGraph();

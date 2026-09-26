@@ -18,7 +18,8 @@ import { ingestScript, refineStylePrompt, refineCharacterDescription, generateSt
 import { styleFramePrompt } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, resolveOutputRefByPath, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
+import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
@@ -44,7 +45,7 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -179,17 +180,18 @@ function registerMediaProtocol(): void {
 
 /**
  * External-edit watch. A board frame hands its archived original to the editor
- * and must re-encode the served JPEG when that original changes. A reference
- * image (character/product/custom) has no JPEG pair — but a reference piped to
- * a shot's frame output is a *copy* in the boards dir, so an external edit must
- * re-apply it to the output or the storyboard stays stale while the node canvas
- * (which reads the live reference) already shows the new pixels.
+ * and must re-encode the served JPEG when that original changes. `mtimeMs/size`
+ * are captured at open time; on window focus we compare and refresh when the
+ * file has changed.
  *
- * `mtimeMs/size` are captured at open time; on window focus we compare and
- * refresh when the file has changed.
+ * References (character/product/custom) are watched separately and
+ * immediately by `refWatcher` (see `ref-watch.ts`) — a reference piped to a
+ * shot's frame output is a *copy* in the boards dir, so an external edit must
+ * re-apply it to the output, and every surface that paints the reference
+ * bitmap must reload it, or the storyboard/grid/shelf stays stale while the
+ * node canvas (which reads the live reference) already shows the new pixels.
  */
 interface BoardEditWatch {
-  kind: "board";
   productionId: string;
   jpegRel: string;
   originalRel: string;
@@ -197,24 +199,13 @@ interface BoardEditWatch {
   mtimeMs: number;
   size: number;
 }
-interface RefEditWatch {
-  kind: "ref";
-  productionId: string;
-  refId: string;
-  refRel: string;
-  abs: string;
-  mtimeMs: number;
-  size: number;
-}
-type ExternalEditWatch = BoardEditWatch | RefEditWatch;
-const externalEditWatches = new Map<string, ExternalEditWatch>();
+const externalEditWatches = new Map<string, BoardEditWatch>();
 
 function trackExternalEdit(p: Production, jpegRel: string, originalRel: string): void {
   try {
     const originalAbs = assetPath(p, originalRel);
     const st = fs.statSync(originalAbs);
     externalEditWatches.set(originalAbs, {
-      kind: "board",
       productionId: p.meta.id,
       jpegRel,
       originalRel,
@@ -225,71 +216,88 @@ function trackExternalEdit(p: Production, jpegRel: string, originalRel: string):
   } catch {}
 }
 
-/** Watch a reference image opened in the external editor. No-op when the path
- *  doesn't belong to a character/product/custom reference. */
-function trackReferenceEdit(p: Production, refRel: string): void {
-  const ref = resolveOutputRefByPath(p, refRel);
-  if (!ref) return;
-  try {
-    const abs = assetPath(p, refRel);
-    const st = fs.statSync(abs);
-    externalEditWatches.set(abs, {
-      kind: "ref",
-      productionId: p.meta.id,
-      refId: ref.id,
-      refRel,
-      abs,
-      mtimeMs: st.mtimeMs,
-      size: st.size,
-    });
-  } catch {}
+/** Every image/video file backing a character, product, or custom reference. */
+function referenceAssetPaths(p: Production): Array<{ id: string; rel: string }> {
+  const out: Array<{ id: string; rel: string }> = [];
+  const push = (id: string, rel?: string) => { if (rel) out.push({ id, rel }); };
+  for (const c of p.characters ?? []) push(c.id, c.imagePath);
+  for (const pr of p.products ?? []) push(pr.id, pr.imagePath);
+  for (const r of p.references ?? []) { push(r.id, r.imagePath); push(r.id, r.mediaPath); }
+  return out;
 }
+
+/** An external save landed on a reference file: re-apply it wherever it is
+ *  piped to a shot's frame output, then tell the renderer to reload the
+ *  reference pixels (and those board copies) — no whole-document reload, so
+ *  unsaved renderer edits can't be clobbered. */
+function handleExternalRefChanges(productionId: string, changes: RefChange[]): void {
+  const p = productions.loadProduction(productionId);
+  if (!p) return;
+  const shots = p.scenes.flatMap((s) => s.shots);
+  let touched = false;
+  for (const change of changes) {
+    const shotIds: string[] = [];
+    for (const shot of shots) {
+      if (shot.graphOutputSource !== "ref" || shot.graphOutputRefId !== change.id) continue;
+      if (!refreshRefCopyFromFile(p, shot, change.rel)) continue;
+      touched = true;
+      if (shot.artwork) shotIds.push(shot.id);
+    }
+    win?.webContents.send("references:externalUpdate", {
+      productionId,
+      refId: change.id,
+      refRel: change.rel,
+      shotIds,
+    } satisfies ReferencesExternalUpdate);
+  }
+  if (touched) {
+    win?.webContents.send("production:event", {
+      id: productionId,
+      message: `External edit applied — refreshed the storyboard frame for reference ${changes.map((c) => c.rel).join(", ")}`,
+      level: "done",
+    } satisfies ProductionEvent);
+  }
+}
+
+const refWatcher = createRefWatcher(
+  {
+    loadProduction: (id) => productions.loadProduction(id),
+    collectRefs: referenceAssetPaths,
+    assetPath,
+    stat: (abs) => {
+      try {
+        const st = fs.statSync(abs);
+        return { mtimeMs: st.mtimeMs, size: st.size };
+      } catch {
+        return null;
+      }
+    },
+    watchDir: (dir, onChange) => fs.watch(dir, () => onChange()),
+  },
+  handleExternalRefChanges
+);
 
 async function checkExternalEdits(): Promise<void> {
   for (const [key, w] of externalEditWatches) {
     let st: fs.Stats;
     try {
-      st = fs.statSync(w.kind === "board" ? w.originalAbs : w.abs);
+      st = fs.statSync(w.originalAbs);
     } catch {
       continue;
     }
     if (!(st.mtimeMs > w.mtimeMs + 50 || st.size !== w.size)) continue;
     const p = productions.loadProduction(w.productionId);
     if (!p) continue;
-    if (w.kind === "board") {
-      const ok = regenerateBoardJpeg(p, w.originalRel, w.jpegRel);
-      if (ok) {
-        w.mtimeMs = st.mtimeMs;
-        w.size = st.size;
-        win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
-        win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
-      }
-      continue;
-    }
-    // Reference edit: refresh the storyboard copy wherever the reference feeds
-    // a shot's frame output. The node canvas reads the live reference, so it
-    // already shows the new pixels; the storyboard frame is a copy and would
-    // otherwise stay stale until the pipe was toggled.
-    const ref = resolveOutputRef(p, w.refId);
-    if (!ref) {
-      externalEditWatches.delete(key);
-      continue;
-    }
-    let touched = false;
-    for (const shot of p.scenes.flatMap((s) => s.shots)) {
-      if (shot.graphOutputSource !== "ref" || shot.graphOutputRefId !== w.refId) continue;
-      if (!refreshRefCopyFromFile(p, shot, w.refRel)) continue;
-      touched = true;
-      if (shot.artwork) {
-        win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: shot.artwork, originalRel: w.refRel });
-      }
-    }
-    w.mtimeMs = st.mtimeMs;
-    w.size = st.size;
-    if (touched) {
-      win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed the storyboard frame for reference ${w.refRel}`, level: "done" } satisfies ProductionEvent);
+    const ok = regenerateBoardJpeg(p, w.originalRel, w.jpegRel);
+    if (ok) {
+      w.mtimeMs = st.mtimeMs;
+      w.size = st.size;
+      win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
+      win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
     }
   }
+  // Catch any reference change the directory watchers missed while backgrounded.
+  refWatcher.scan();
 }
 
 /** Open a data-URL image in the external editor via a temp file. */
@@ -340,9 +348,8 @@ async function openImageExternally(win: BrowserWindow, target: { productionId?: 
       }
       const abs = assetPath(p, file.relPath);
       if (!fs.existsSync(abs)) throw new Error(`Image not found on disk: ${file.relPath}`);
-      // A reference image has no JPEG/original pair — watch it so an external
-      // edit re-applies any output pipe that copies it.
-      trackReferenceEdit(p, file.relPath);
+      // A reference image has no JPEG/original pair — `refWatcher` already
+      // follows the open production's references, so opening it is enough.
       await openWithExternalEditor(abs);
       return;
     }
@@ -1501,6 +1508,9 @@ function registerIpc() {
   handle("production:load", (_e, id: string) => {
     const p = productions.loadProduction(id);
     if (p) settings.addRecentProduction(p.meta.folder);
+    // Follow the open production's references so an external save lands
+    // immediately (not just on the next window focus).
+    refWatcher.watch(p ? p.meta.id : null);
     return p;
   });
 
@@ -1521,6 +1531,8 @@ function registerIpc() {
         /* non-fatal */
       }
     }
+    // A save may have added/removed references — keep the watcher following them.
+    refWatcher.watch(next.meta.id, next);
     return next;
   });
 

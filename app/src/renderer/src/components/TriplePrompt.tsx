@@ -14,7 +14,7 @@ import { composePromptBoxes, isTagOnlyDiff, parsePromptBoxes, type PromptBoxes }
 export type { PromptContentHandle } from "./PromptContentEditor.js";
 export type { PromptBoxes } from "../../../shared/prompt-grammar.js";
 
-export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentLabel, contentRef, styleControl, brandControl, styleReadOnly, brandReadOnly, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
+export function TriplePrompt({ value, includeBrand, className, sideRows, resizable, placeholder, contentLabel, contentRef, styleControl, brandControl, afterContent, styleReadOnly, brandReadOnly, onChange, onContentChange, onContentKeyDown, onFocus, onBlur, deferExternalWhileFocused }: {
   value: string;
   /** Label above the content box (defaults to "Content"). */
   contentLabel?: string;
@@ -36,6 +36,8 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
    *  sidebar's brand toggle). When provided, the label row stays visible
    *  even while the brand is excluded so it can be toggled back on. */
   brandControl?: ReactNode;
+  /** Optional node rendered between the Content box and the Brand section. */
+  afterContent?: ReactNode;
   /** Shared-reference previews are read-only: the Style box mirrors the
    *  plugged library style (edited in Design, Step 2), the Brand box the
    *  brand set. Content stays editable — it is the node's own text. */
@@ -210,6 +212,7 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
         onBlur={onBlur}
         deferExternalWhileFocused={deferExternalWhileFocused}
       />
+      {afterContent}
       {(includeBrand || brandControl) && (
         <>
           {includeBrand && resizable && (

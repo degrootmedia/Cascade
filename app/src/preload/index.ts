@@ -72,6 +72,11 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("board:externalUpdate", listener);
     return () => ipcRenderer.removeListener("board:externalUpdate", listener);
   };
+  api.onReferencesExternalUpdate = (cb: (e: import("../shared/ipc.js").ReferencesExternalUpdate) => void) => {
+    const listener = (_e: unknown, ev: import("../shared/ipc.js").ReferencesExternalUpdate) => cb(ev);
+    ipcRenderer.on("references:externalUpdate", listener);
+    return () => ipcRenderer.removeListener("references:externalUpdate", listener);
+  };
 
   // Detached canvas window (Spec 03). The detached renderer receives its
   // context + the main window's frame selection; the main window hears when it

@@ -67,6 +67,7 @@ import type {
   StoryboardPdfExportOptions,
   StoryboardPdfExportResult,
   ProductionEvent,
+  ReferencesExternalUpdate,
 } from "./ipc/production.js";
 import type {
   MediaProviderId,
@@ -833,6 +834,10 @@ export interface CascadeApi {
   checkExternalEdits(): Promise<void>;
   /** Fired after an externally edited board's JPEG preview has been regenerated. */
   onBoardExternalUpdate(cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void): () => void;
+  /** Fired the moment a reference file is saved over outside Cascade, so every
+   *  surface painting that reference (and any board frame copying it) reloads
+   *  its pixels. `shotIds` are the refreshed board copies. */
+  onReferencesExternalUpdate(cb: (e: ReferencesExternalUpdate) => void): () => void;
   /**
    * Step 5: gather all full-res frames + video clips + audio into the export
    * folder and write the EDL, After Effects rebuild script, and manifest.

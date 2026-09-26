@@ -740,4 +740,13 @@ export interface ProductionEvent {
   level: "info" | "error" | "done";
 }
 
+/** A reference file was saved over outside Cascade. `shotIds` are the shots
+ *  whose frame output copies that reference and were just refreshed. */
+export interface ReferencesExternalUpdate {
+  productionId: string;
+  refId: string;
+  refRel: string;
+  shotIds: string[];
+}
+
 /** A file attached to a chat message (image, PDF, document, etc.). */

@@ -108,10 +108,17 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   drop across categories also adopts the target's category. A dragged-in image
   whose derived name already exists gets a two-digit suffix (`uniqueRefName`:
   "Gondola" → "Gondola 01") instead of colliding/merging. Editing a reference
-  externally (its `imagePath`) is watched by main: on window focus a changed
-  reference re-copies itself into every storyboard frame that pipes it to the
-  output (`refreshRefCopyFromFile`), so the copied frame follows the live
-  reference the node canvas already reads.
+  externally (its `imagePath`/`mediaPath`) is caught **immediately** by
+  `createRefWatcher` (`app/src/main/ref-watch.ts`): main follows the open
+  production's reference files with per-directory watchers (reconciled on every
+  `production:load`/`production:save`, `mtimeMs`/`size` signatures), re-copies a
+  changed reference into every storyboard frame that pipes it to the output
+  (`refreshRefCopyFromFile`), and emits `references:externalUpdate` (`onReferencesExternalUpdate`)
+  so the renderer bumps the file's revision (`bumpMediaRev` → `cascadeMedia`'s
+  `?v=`, which fronts the strong-ETag revalidation) and re-fetches every surface
+  painting it — Design grid, node shelf, moodboard, suite — without a
+  whole-document reload, so unsaved edits survive. The node canvas already read
+  the live reference; the focus sweep (`checkExternalEdits`) stays as a fallback.
 - **Character sheet** — the generated reference image for a character (built by
   the Step 2 character builder): a full body shot (front, or front + back) with a
   face-closeup inset, always neutral pose/expression/lighting on a plain gray

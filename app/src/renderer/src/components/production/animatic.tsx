@@ -3,6 +3,7 @@ import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
+import { mediaRev } from "./media-rev.js";
 
 /** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
@@ -1127,7 +1128,9 @@ export function ProdLog({ lines }: { lines: LogLine[] }) {  const ref = useRef<H
 
 
 export function cascadeMedia(prodId: string, rel: string): string {
-  return `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
+  const base = `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
+  const rev = mediaRev(prodId, rel);
+  return rev ? `${base}?v=${rev}` : base;
 }
 
 

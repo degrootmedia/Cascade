@@ -28,6 +28,7 @@ import { ImageSuite } from "../features/suite/ImageSuite.js";
 import { SUITE_OPEN_EVENT, openImageSuite, takePendingSuiteSeed } from "../features/suite/suite-handoff.js";
 import { MoodboardCanvas } from "../features/moodboard/MoodboardCanvas.js";
 import { getMediaDefault, primeMediaDefaults, rememberMediaDefault, rememberedModel } from "./production/media-defaults.js";
+import { bumpMediaRev } from "./production/media-rev.js";
 import { StyleParamsForm } from "./production/style-params.js";
 import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
@@ -453,15 +454,31 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       } catch { bustAll(); }
       void refreshList();
     });
+    const offRef = window.cascade.onReferencesExternalUpdate((e) => {
+      if (prod?.meta.id && e.productionId !== prod.meta.id) return;
+      // A reference file was saved over outside Cascade: bump its revision so
+      // every surface re-fetches the pixels, refresh the copied board frames,
+      // and clone the reference object so the memoized tile re-renders. No
+      // whole-document reload — unsaved renderer edits stay intact.
+      bumpMediaRev(e.productionId, e.refRel);
+      if (e.shotIds.length) bustMany(e.shotIds);
+      setProd((p) => {
+        if (!p || p.meta.id !== e.productionId) return p;
+        const touch = <T extends { id: string }>(list: T[]): T[] =>
+          list.map((x) => (x.id === e.refId ? { ...x } : x));
+        return { ...p, references: p.references ? touch(p.references) : p.references, characters: touch(p.characters), products: touch(p.products) };
+      });
+    });
     const onWindowFocus = () => {
       void window.cascade.checkExternalEdits().catch(() => {});
     };
     window.addEventListener("focus", onWindowFocus);
     return () => {
       off();
+      offRef();
       window.removeEventListener("focus", onWindowFocus);
     };
-  }, [prod?.meta.id, refreshList, bustOne, bustAll]);
+  }, [prod?.meta.id, refreshList, bustOne, bustAll, bustMany]);
 
   /** Seed the Step 1 source controls from the persisted `scriptSource`: a
    *  Google Docs URL refills the URL input (one-click re-ingest), a local file
@@ -3718,7 +3735,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onClick={regenMagic}
                     title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
                   >
-                    <RegenerateIcon size={13} />
+                    <RegenerateIcon size={13} /> Regenerate all magic prompts
                   </button>
                 )}
               </div>
@@ -3980,7 +3997,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   magicActive={!!prod.magicEnabled}
                   magicBusy={magicBusy}
                   onToggleMagic={toggleMagic}
-                  onRegenMagic={regenMagic}
                   onRegenMagicShot={graphShotId ? () => regenMagicPrompt(graphShotId) : undefined}
                   initialLayout={gs.graphLayout}
                   onPromptChange={(value) => { setPromptForShot(graphShotId, value); if (graphShotId) { promptCacheRef.current[graphShotId] = value; void saveShotPrompt(graphShotId, value); } }}

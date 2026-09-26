@@ -71,6 +71,7 @@ function cascadeMock(): Record<string, unknown> {
     listProductions: async () => [{ id: "p1", name: "Test production", folder: "C:/test", shotCount: 2, stepDone: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
     onProductionEvent: () => () => {},
     onBoardExternalUpdate: () => () => {},
+    onReferencesExternalUpdate: () => () => {},
     checkExternalEdits: async () => {},
     loadProduction: async () => disk,
     boardImage: async () => "data:image/png;base64,AAAA",

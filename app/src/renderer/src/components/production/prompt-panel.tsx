@@ -5,7 +5,7 @@ import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 import { NodesIcon, RegenerateIcon } from "../icons.js";
 
-export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, styleReadOnly, brandReadOnly, onKeyDown, onFocus, onBlur }: {
+export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, afterContent, styleReadOnly, brandReadOnly, onKeyDown, onFocus, onBlur }: {
   value: string;
   includeBrand: boolean;
   onChange: (value: string) => void;
@@ -23,6 +23,8 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   /** Optional control under the Style label / next to the Brand identity label (see TriplePrompt). */
   styleControl?: ReactNode;
   brandControl?: ReactNode;
+  /** Optional node rendered between the Content box and the Brand section. */
+  afterContent?: ReactNode;
   /** Shared-reference previews are read-only (step 04). */
   styleReadOnly?: boolean;
   brandReadOnly?: boolean;
@@ -91,6 +93,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         contentLabel={contentLabel}
         styleControl={styleControl}
         brandControl={brandControl}
+        afterContent={afterContent}
         styleReadOnly={styleReadOnly}
         brandReadOnly={brandReadOnly}
         onChange={onChange}
@@ -142,16 +145,6 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber}` : "Frame prompt"}</span>
-        {shotNumber && magicActive && onRegenMagic && (
-          <button
-            className="prod-btn prod-magic-refresh"
-            disabled={magicBusy}
-            onClick={onRegenMagic}
-            title="Regenerate this shot's Magic Prompt with AI (other shots are untouched)"
-          >
-            {magicBusy ? "…" : <RegenerateIcon size={14} />} Regenerate
-          </button>
-        )}
         {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
       </div>
       {shotNumber ? <>
@@ -166,6 +159,16 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
           onChange={onChange}
           styleReadOnly
           brandReadOnly
+          afterContent={magicActive && onRegenMagic ? (
+            <button
+              className="prod-btn prod-magic-refresh"
+              disabled={magicBusy}
+              onClick={onRegenMagic}
+              title="Regenerate this shot's Magic Prompt with AI (other shots are untouched)"
+            >
+              {magicBusy ? "…" : <RegenerateIcon size={14} />} Regenerate this magic prompt
+            </button>
+          ) : undefined}
           styleControl={
             <select
               className="prod-openart-select prod-prompt-style"

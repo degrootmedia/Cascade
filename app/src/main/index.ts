@@ -3468,7 +3468,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
 
   // Shot sequence canvas: generate a clip for one of its video nodes. The
   // wired inputs (member frames + references, in socket order) ride as visual
-  // references — the first image doubles as the animated source frame. The
+  // references ONLY — no start/end frame slot. The member frames are peer
+  // references for a multi-shot timeline, not one animated still, and some
+  // Higgsfield models reject mixing reference media with frame slots. The
   // finished clip is relocated into the sequence's own folder so a board
   // renumber can never orphan it. Stored on the video node's take history;
   // the frame output node decides what actually feeds the animatic.
@@ -3483,6 +3485,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
+        // Peer-frame timeline: references only, never a start/end slot.
+        refsOnly: true,
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       // Wired inputs in socket order (falls back to the span): member frames
@@ -3508,8 +3512,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
       }
       if (!inputs.length) throw new Error("Nothing to animate yet — generate the member frames first (or wire references in).");
-      // The first IMAGE is the animated source frame; everything else (and any
-      // leading video reference) rides as an extra visual reference.
+      // Every input rides as a visual reference (refsOnly) — there is no
+      // animated source frame. Image member frames upload from disk via
+      // sourcePath only when a provider needs a file path; the data URLs
+      // below are what actually travel.
       const firstImage = inputs.find((r) => r.imageRel);
       const sourcePath = firstImage?.imageRel;
       const extraRefs = inputs.filter((r) => r !== firstImage).map((r) => ({ name: r.name, dataUrl: r.dataUrl }));

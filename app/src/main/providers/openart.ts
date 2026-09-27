@@ -192,7 +192,7 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
 
 /** Fit the uploaded visual references into the video model's reference field.
  *
- *  Two shapes, chosen by `opts.frames`:
+ *  Two shapes, chosen by `opts.frames` — plus a references-only shape:
  *   - Normal image/text-to-video (default): the source frame fills the
  *     start-frame slot (image2video forms mark it required — a submission
  *     without it is rejected) and every reference — the frame, @[name]
@@ -203,6 +203,9 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
  *     model's dedicated startFrame/endFrame object slots (falling back to the
  *     array when a slot is absent), since a start→end interpolation is exactly
  *     what those slots are for.
+ *   - References-only (`refsOnly: true`, the shot-sequence canvas): no frame
+ *     slot is set — every input rides the array field, like OpenArt's
+ *     element/reference modes expect for peer-frame timelines.
  *
  *  Returns null when no reference field is found — the caller then falls back
  *  to `params.visualReferences`.
@@ -215,9 +218,14 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
 export function videoRefsAssign(
   refs: Record<string, unknown>[],
   props: Record<string, unknown>,
-  opts?: { frames?: boolean }
+  opts?: { frames?: boolean; refsOnly?: boolean }
 ): Record<string, unknown> | null {
   if (!refs.length) return null;
+  if (opts?.refsOnly === true) {
+    const refKey = referenceArrayKey(props);
+    if (refKey) return { [refKey]: refs };
+    return null;
+  }
   const keys = Object.keys(props);
   const fillObject = (ref: Record<string, unknown>, properties: Record<string, unknown>): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
@@ -678,8 +686,9 @@ export class OpenArtClient implements MediaProvider {
 
 /** Fit the uploaded visual references into the video model's reference field.
    *  Normal generation binds them as an array; the in-betweener passes
-   *  `frames: true` to reach the dedicated start/end slots. See the free
-   *  function for the exact rules. */
+   *  `frames: true` to reach the dedicated start/end slots; the sequence
+   *  canvas passes `refsOnly: true` (via opts) to skip the frame slots
+   *  entirely. See the free function for the exact rules. */
 private videoRefsAssign = videoRefsAssign;
 
   /** Build the OpenArt generate-tool arguments for one board.
@@ -757,7 +766,7 @@ private videoRefsAssign = videoRefsAssign;
     const dur = this.videoDurationAssign(opts.durationSec, props);
     if (dur) Object.assign(params, dur);
     if (refs.length) {
-      const refAssign = this.videoRefsAssign(refs, props, { frames });
+      const refAssign = this.videoRefsAssign(refs, props, { frames, ...(opts.refsOnly === true ? { refsOnly: true } : {}) });
       if (refAssign) Object.assign(params, refAssign);
       else params.visualReferences = refs; // last-resort fallback
     }

@@ -1724,7 +1724,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
    * contract (same args, same { rel } result): the source frame fills
    * `--start-image`, a tween end keyframe fills `--end-image`, and extra
    * image/video refs ride the repeatable `--image-references` /
-   * `--video-references` flags the model accepts.
+   * `--video-references` flags the model accepts. With `opts.refsOnly`
+   * (the shot-sequence canvas) every input rides the reference arrays and
+   * no frame slot is set — some models reject mixing the two.
    */
   async generateVideoClip(
     p: Production,
@@ -1783,56 +1785,87 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
       const args = [modelId, "--prompt", fullPrompt];
-      // Start frame: `--start-image`, falling back to `--image` on models
-      // that only declare the legacy `image` role.
-      const startPath = paths[0];
-      if (startPath) {
-        if (accepts(["startimage"])) args.push("--start-image", startPath);
-        else if (accepts(["image"])) args.push("--image", startPath);
-        else {
-          uploaded[0] = null;
-          emit(`Reference "${refs[0].name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-        }
+      // References-only (the shot-sequence canvas): every input rides the
+      // reference arrays — NO --start-image/--end-image. Some models
+      // (minimax_h3_max) reject mixing reference media with frame slots
+      // outright, and a sequence's member frames are peer references, not
+      // one animated still.
+      const refsOnly = opts.refsOnly === true;
+      if (refsOnly && !accepts(["imagereferences", "image", "videoreferences", "video"])) {
+        throw new Error(`"${modelId}" doesn't accept reference images — pick a reference-capable model for the sequence.`);
       }
-      // End keyframe: `--end-image` ONLY for a real tween end frame. Models
-      // without the slot still get both frames through the array fallback.
-      // Every other ref rides the reference arrays, never the end slot.
-      const endIsTween = Boolean(frameRefs?.end) && paths.length > 1 && paths[1];
-      refs.forEach((r, i) => {
-        if (i === 0) return;
-        const f = paths[i];
-        if (!f) return;
-        const isVideo = /^data:video\//i.test(r.dataUrl);
-        if (endIsTween && i === 1) {
-          if (accepts(["endimage"])) {
-            args.push("--end-image", f);
+      if (refsOnly) {
+        refs.forEach((r, i) => {
+          const f = paths[i];
+          if (!f) return;
+          if (/^data:video\//i.test(r.dataUrl)) {
+            if (accepts(["videoreferences", "video"])) {
+              args.push("--video-references", f);
+              return;
+            }
+            uploaded[i] = null;
+            emit(`Video reference "${r.name}" isn't accepted by ${modelId} — continuing without it.`, "error");
             return;
           }
-          // Array fallback: the end frame rides the image references.
           if (accepts(["imagereferences", "image"])) {
             args.push("--image-references", f);
             return;
           }
           uploaded[i] = null;
           emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-          return;
+        });
+      } else {
+        // Start frame: `--start-image`, falling back to `--image` on models
+        // that only declare the legacy `image` role.
+        const startPath = paths[0];
+        if (startPath) {
+          if (accepts(["startimage"])) args.push("--start-image", startPath);
+          else if (accepts(["image"])) args.push("--image", startPath);
+          else {
+            uploaded[0] = null;
+            emit(`Reference "${refs[0].name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
+          }
         }
-        if (isVideo) {
-          if (accepts(["videoreferences", "video"])) {
-            args.push("--video-references", f);
+        // End keyframe: `--end-image` ONLY for a real tween end frame. Models
+        // without the slot still get both frames through the array fallback.
+        // Every other ref rides the reference arrays, never the end slot.
+        const endIsTween = Boolean(frameRefs?.end) && paths.length > 1 && paths[1];
+        refs.forEach((r, i) => {
+          if (i === 0) return;
+          const f = paths[i];
+          if (!f) return;
+          const isVideo = /^data:video\//i.test(r.dataUrl);
+          if (endIsTween && i === 1) {
+            if (accepts(["endimage"])) {
+              args.push("--end-image", f);
+              return;
+            }
+            // Array fallback: the end frame rides the image references.
+            if (accepts(["imagereferences", "image"])) {
+              args.push("--image-references", f);
+              return;
+            }
+            uploaded[i] = null;
+            emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
+            return;
+          }
+          if (isVideo) {
+            if (accepts(["videoreferences", "video"])) {
+              args.push("--video-references", f);
+              return;
+            }
+            uploaded[i] = null;
+            emit(`Video reference "${r.name}" isn't accepted by ${modelId} — continuing without it.`, "error");
+            return;
+          }
+          if (accepts(["imagereferences", "image"])) {
+            args.push("--image-references", f);
             return;
           }
           uploaded[i] = null;
-          emit(`Video reference "${r.name}" isn't accepted by ${modelId} — continuing without it.`, "error");
-          return;
-        }
-        if (accepts(["imagereferences", "image"])) {
-          args.push("--image-references", f);
-          return;
-        }
-        uploaded[i] = null;
-        emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-      });
+          emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
+        });
+      }
 
       // Schema-driven extras (genre, speedramp, batch_size, an explicit
       // mode, …) from the caller's params map. Runs before the seedance

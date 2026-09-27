@@ -472,6 +472,19 @@ describe("videoRefsAssign", () => {
       visualReferences: refs,
     });
   });
+
+  it("refsOnly skips the frame slots entirely (the sequence canvas)", () => {
+    const refs = [
+      { type: "image", label: "Shot 0100", url: "https://example.invalid/a.png", id: "vr-1" },
+      { type: "image", label: "Shot 0101", url: "https://example.invalid/b.png", id: "vr-2" },
+    ];
+    const props = {
+      startFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      visualReferences: { type: "array", items: { type: "object" } },
+    };
+    expect(videoRefsAssign(refs, props, { refsOnly: true })).toEqual({ visualReferences: refs });
+  });
 });
 
 describe("video-ref 720p ceiling", () => {

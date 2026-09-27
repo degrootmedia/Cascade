@@ -41,6 +41,8 @@ export interface SuiteEntry {
   sourcePath?: string;
   /** Reference ids passed in at submit time. */
   refIds: string[];
+  /** Generate mode: the production style applied (text + look frame). */
+  styleId?: string;
   params?: GenParams;
   /** Live credit quote captured at submit time (display only). */
   quotedCredits?: number;
@@ -59,6 +61,8 @@ export interface SuiteDraft {
   sourceRefId?: string;
   /** Production-relative source image when editing a non-reference frame. */
   sourcePath?: string;
+  /** Generate mode: the Design style to apply (its text + look frame). */
+  styleId?: string;
   params?: GenParams;
 }
 
@@ -96,6 +100,11 @@ export interface SuiteGenerateRequest {
   sourcePath?: string;
   /** Extra reference ids to upload (beyond @tag auto-resolution). */
   refIds?: string[];
+  /** Generate mode: the production style to apply — its prompt text becomes the
+   *  Style paragraph and, when the style owns a look frame, the frame is
+   *  uploaded at reference 0 with the shared LOOK clause prepended (the same
+   *  cohesion storyboard generation uses). Ignored for edit/upscale. */
+  styleId?: string;
   params?: GenParams;
   /** Live credit quote captured by the renderer (display only). */
   quotedCredits?: number;
@@ -162,6 +171,7 @@ function normalizeDraft(raw: unknown): SuiteDraft {
   if (aspect) draft.aspectRatio = aspect;
   if (typeof d.sourceRefId === "string" && d.sourceRefId) draft.sourceRefId = d.sourceRefId;
   if (typeof d.sourcePath === "string" && d.sourcePath && isProductionRelative(d.sourcePath)) draft.sourcePath = d.sourcePath;
+  if (typeof d.styleId === "string" && d.styleId) draft.styleId = d.styleId;
   const params = normalizeParams(d.params);
   if (params) draft.params = params;
   return draft;
@@ -188,6 +198,7 @@ function normalizeEntry(raw: unknown): SuiteEntry | null {
   if (aspect) entry.aspectRatio = aspect;
   if (typeof e.sourceRefId === "string" && e.sourceRefId) entry.sourceRefId = e.sourceRefId;
   if (typeof e.sourcePath === "string" && e.sourcePath && isProductionRelative(e.sourcePath)) entry.sourcePath = e.sourcePath;
+  if (typeof e.styleId === "string" && e.styleId) entry.styleId = e.styleId;
   const params = normalizeParams(e.params);
   if (params) entry.params = params;
   if (typeof e.quotedCredits === "number" && Number.isFinite(e.quotedCredits)) entry.quotedCredits = e.quotedCredits;

@@ -12,15 +12,17 @@
  * patches onto `seq.graph`. Generators a sequence has no home for yet are
  * disabled with a hint.
  */
-import { useCallback, useMemo } from "react";
-import type { GenParams, GraphLayout, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, ShotSequence } from "../../../../shared/ipc.js";
-import { sequenceSelectedTake } from "../../../../shared/ipc.js";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { GenParams, GraphLayout, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
+import { normalizeSequenceSegments, sequenceSelectedTake, sequenceSegmentLine, sequenceTotalDuration } from "../../../../shared/ipc.js";
 import {
   removeRefTag,
   refTagNames,
 } from "../../../../shared/prompt-grammar.js";
-import { promptRefsFor, renderPromptText } from "../../../../shared/graph/render.js";
+import { promptRefsFor, renderPromptText, stripSharedSections } from "../../../../shared/graph/render.js";
+import { styleFrameForShot } from "../../../../shared/look.js";
 import { setBrandEdge, setStyleEdge } from "../../../../shared/graph/connect.js";
+import { applySequenceFrames } from "../../../../shared/graph/connect.js";
 import { NodeGraphModal, type GraphRef } from "../NodeGraphModal.js";
 import { promptRefsForShot } from "./references.js";
 import { cascadeMedia } from "./animatic.js";
@@ -29,7 +31,7 @@ import { getPromptTemplate } from "./prompt-templates.js";
 /** The generators a sequence canvas hides entirely: image generation (with
  *  its composer prompt node) and the shot-only generator nodes. Only video
  *  generation and video editing remain, plus the frames/refs and the output. */
-export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale"] as const;
+export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand"] as const;
 
 /** The sequence's member frames as locked reference inputs: image nodes exactly
  *  like reference nodes, live-linked to each shot's current output frame. */
@@ -98,7 +100,7 @@ export interface SequenceEditVideoGenOpts {
 }
 
 /** Statement of what the sequence's graph can host. */
-export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onDeleteGeneration, onDetach }: {
+export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onDeleteGeneration, onDetach }: {
   prod: Production;
   seq: ShotSequence;
   imageModels: OpenArtModelChoice[];
@@ -109,6 +111,9 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
   /** Video node ids with a clip generation in flight. */
   busyNodeIds: string[];
   readOnly?: boolean;
+  /** The effective storyboard prompt for a member shot (Magic when on, else
+   *  the frame prompt), used to seed each timeline row's prompt. */
+  framePromptFor?: (shotId: string) => Promise<string>;
   onClose: () => void;
   /** Patch the sequence's canvas state (`seq.graph`, the shot-shaped document
    *  the graph reads). Accepts a value or an updater — the host evaluates an
@@ -130,6 +135,38 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
     return { ...(seq.graph ?? {}), ...base };
   }, [seq]);
 
+  // Per-member effective prompts (fetched by the workspace), seeded into each
+  // timeline row and restored by Revert.
+  const [framePrompts, setFramePrompts] = useState<Record<string, string>>({});
+  const loadFramePrompt = useCallback(async (shotId: string) => {
+    if (!framePromptFor) return;
+    try {
+      // The frame's effective prompt carries the shared Style/Brand sections;
+      // a timeline row is the shot's own description, so omit them.
+      const text = stripSharedSections(await framePromptFor(shotId)).trim();
+      setFramePrompts((p) => (p[shotId] === text ? p : { ...p, [shotId]: text }));
+    } catch { /* leave unseeded */ }
+  }, [framePromptFor]);
+  const shotIdsKey = seq.shotIds.join(",");
+  useEffect(() => {
+    for (const id of seq.shotIds) void loadFramePrompt(id);
+  }, [seq.id, shotIdsKey, loadFramePrompt]);
+
+  /** Replace the sequence's timeline segments (and keep the canvas's frame
+   *  edges in step). */
+  const setSegments = useCallback((segments: SequenceSegment[]) => {
+    onGraphField((g) => ({
+      graphSequence: { segments },
+      ...(g.graph ? { graph: applySequenceFrames(g.graph, segments) } : {}),
+    }));
+  }, [onGraphField]);
+
+  /** Clear a segment's override so it follows the frame prompt again. */
+  const revertFramePrompt = useCallback((shotId: string) => {
+    setSegments(normalizeSequenceSegments(gshot.graphSequence?.segments).map((s) => (s.shotId === shotId ? { ...s, prompt: "" } : s)));
+    void loadFramePrompt(shotId);
+  }, [setSegments, loadFramePrompt, gshot.graphSequence]);
+
   /** Patch one video node's fields in the freshest graph. */
   const patchVideoNode = useCallback((nodeId: string, p: Partial<GraphVideoNode>) => {
     onGraphField((g) => {
@@ -149,12 +186,46 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
    *  click time, after every earlier write has re-rendered.) */
   const runVideoGen = useCallback(async (nodeId: string, model: string, resolution: string, durationSec: number, params?: Record<string, string>) => {
     const node = (seq.graph?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
+    // A shot sequence submits its timed multi-shot timeline: the rendered
+    // Visuals body (Style/Brand + reference tags) followed by one numbered
+    // seconds line per member shot, with every member frame uploaded in order.
+    if (gshot.graphSequence) {
+      const segments = normalizeSequenceSegments(gshot.graphSequence.segments);
+      // The sequence prompt has no brand section: render Style + Visuals only.
+      const renderRefs = promptRefsFor(prod, gshot, { videoprompt: nodeId });
+      const visuals = renderPromptText(node?.prompt ?? "", { ...renderRefs, brandAttached: false, brand: "" });
+      const { ids } = sequenceVideoInputIds(prod, seq, nodeId);
+      // The frame token's number is its position in the submitted reference
+      // list: the style frame (when the shot resolves to one) and the Visuals
+      // references occupy the low numbers, then the member frames.
+      const shotIdSet = new Set(seq.shotIds);
+      const visualCount = ids.filter((id) => !shotIdSet.has(id)).length;
+      const imageOffset = (styleFrameForShot(prod, gshot) ? 1 : 0) + visualCount;
+      const lines = segments.map((s, i) => sequenceSegmentLine(
+        { ...s, prompt: s.prompt.trim() || (framePrompts[s.shotId] ?? "") },
+        i + 1,
+        imageOffset + i + 1,
+      ));
+      const body = [visuals, ...lines].filter((t) => t && t.trim()).join("\n\n");
+      onGenerate({
+        nodeId,
+        prompt: body,
+        model,
+        resolution,
+        // The selector (seeded to the timeline total) wins; fall back to the
+        // total when it is somehow unset.
+        durationSec: durationSec || sequenceTotalDuration(segments),
+        refIds: [...new Set([...segments.map((s) => s.shotId), ...ids])],
+        ...(params && Object.keys(params).length ? { params } : {}),
+      });
+      return;
+    }
     const { ids, frameNames } = sequenceVideoInputIds(prod, seq, nodeId);
     let promptText = (node?.prompt ?? "").trim() ? node!.prompt : getPromptTemplate("videoMotion");
     for (const name of frameNames) promptText = removeRefTag(promptText, name);
     const prompt = renderPromptText(promptText, promptRefsFor(prod, gshot, { videoprompt: nodeId }));
     onGenerate({ nodeId, prompt, model, resolution, durationSec, refIds: ids, ...(params && Object.keys(params).length ? { params } : {}) });
-  }, [prod, seq, gshot, onGenerate]);
+  }, [prod, seq, gshot, onGenerate, framePrompts]);
 
   /** Render one edit-video node's prompt and resolve the source clip it edits
    *  (a wired sequence take, a video reference, or the sequence's own take). */
@@ -248,6 +319,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       styleValue={gshot.style ?? ""}
       includeBrand={gshot.includeBrandIdentity === true}
       hiddenTools={SEQUENCE_HIDDEN_TOOLS}
+      hidePalette
       videoEditUnavailable={videoEditUnavailable}
       subjectLabel={seq.name}
       initialLayout={gshot.graphLayout}
@@ -278,6 +350,9 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onPasteFiles={onPasteFiles}
       onRenameRef={onRenameRef}
       onGraphField={onGraphField}
+      sequenceFramePrompts={framePrompts}
+      onSequenceSegments={setSegments}
+      onRevertFramePrompt={revertFramePrompt}
       onSaveLayout={(layout: GraphLayout) => onGraphField((g) => ({ graphLayout: { ...(g.graphLayout ?? {}), ...layout } }))}
       onRunImageGen={async () => {}}
       onRunVideoGen={runVideoGen}

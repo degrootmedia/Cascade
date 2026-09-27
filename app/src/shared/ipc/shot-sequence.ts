@@ -14,8 +14,9 @@
  * `sequenceGraphShot`, main prunes/merges sequences with it, and the animatic
  * and export read the resolved output media.
  */
-import type { GraphGenItem, GraphVideoNode } from "./graph.js";
+import type { GraphGenItem, GraphVideoNode, SequenceSegment } from "./graph.js";
 import type { ProductionShot } from "./production.js";
+import { refTagNames, removeRefTag } from "../prompt-grammar.js";
 
 /** One shot sequence. Renderer-owned (created/edited through `saveField`) with
  *  main-owned generation history (inside `graph`), merged per entry by
@@ -103,6 +104,70 @@ export function nextSequenceName(existing: ShotSequence[]): string {
   return `Sequence ${Date.now()}`;
 }
 
+/** Default segment length for a freshly seeded timeline (seconds). */
+export const SEQUENCE_SEGMENT_DEFAULT_SEC = 3;
+
+/**
+ * Repair/normalize a sequence timeline. Segments stay in order; each segment's
+ * `durationSec` is a whole number of seconds (min 1). A legacy stored segment
+ * carrying a `startSec`/`endSec` range migrates to its length. Segments with no
+ * shot id are dropped. Pure.
+ */
+export function normalizeSequenceSegments(segments: SequenceSegment[] | undefined): SequenceSegment[] {
+  const out: SequenceSegment[] = [];
+  for (const s of segments ?? []) {
+    if (!s || typeof s.shotId !== "string" || !s.shotId) continue;
+    const legacy = s as unknown as { startSec?: number; endSec?: number };
+    const raw = Number.isFinite(s.durationSec)
+      ? (s.durationSec as number)
+      : typeof legacy.endSec === "number" && typeof legacy.startSec === "number"
+        ? legacy.endSec - legacy.startSec
+        : SEQUENCE_SEGMENT_DEFAULT_SEC;
+    out.push({
+      shotId: s.shotId,
+      durationSec: Math.max(1, Math.round(Number.isFinite(raw) ? raw : SEQUENCE_SEGMENT_DEFAULT_SEC)),
+      prompt: typeof s.prompt === "string" ? s.prompt : "",
+    });
+  }
+  return out;
+}
+
+/** Total sequence length in seconds (the sum of the segments; 0 when empty). Pure. */
+export function sequenceTotalDuration(segments: SequenceSegment[] | undefined): number {
+  return (segments ?? []).reduce((n, s) => n + (Number.isFinite(s.durationSec) ? Math.max(0, Math.round(s.durationSec)) : 0), 0);
+}
+
+/** Seed a timeline for a span of member shots — each runs the member's own
+ *  duration (or 3s). Pure. */
+export function seedSequenceSegments(frames: { shotId: string; durationSec?: number }[]): SequenceSegment[] {
+  return frames.map((f) => {
+    const len = Number.isFinite(f.durationSec) && (f.durationSec as number) > 0 ? Math.round(f.durationSec as number) : SEQUENCE_SEGMENT_DEFAULT_SEC;
+    return { shotId: f.shotId, durationSec: Math.max(1, len), prompt: "" };
+  });
+}
+
+/** One vendor-prompt timeline line — the multi-shot framing form
+ *  `"Hard Cut to Shot 2. 3 Seconds. Framing Reference <<<image_4>>>"` followed
+ *  by the shot's prompt (`imageNumber` = the frame's 1-based position in the
+ *  submitted reference list). Without a `shotNumber` it degrades to `"3s"`. */
+export function sequenceSegmentLine(seg: SequenceSegment, shotNumber?: number, imageNumber?: number): string {
+  const text = (seg.prompt ?? "").trim();
+  const dur = Math.max(1, Math.round(seg.durationSec));
+  if (shotNumber === undefined) return text ? `${dur}s: ${text}` : `${dur}s`;
+  const head = `Hard Cut to Shot ${shotNumber}. ${dur} Seconds.` + (imageNumber !== undefined ? ` Framing Reference <<<image_${imageNumber}>>>` : "");
+  return text ? `${head}\n${text}` : head;
+}
+
+/** Strip legacy member-frame citations (`@[Shot NNNN]`) from stored video-node
+ *  prompts — frames are timeline segments now, not prompt tags. Pure. */
+export function stripSequenceFrameTags(text: string): string {
+  let out = text ?? "";
+  for (const name of refTagNames(out)) {
+    if (/^Shot\s+\d+$/i.test(name)) out = removeRefTag(out, name);
+  }
+  return out;
+}
+
 /** Why this span can't become a sequence right now, or null when it can. */
 export function sequenceOverlapReason(shotIds: string[], sequences: ShotSequence[]): string | null {
   const unique = [...new Set(shotIds)];
@@ -122,13 +187,12 @@ export function sequenceOverlapReason(shotIds: string[], sequences: ShotSequence
  *  label becomes the frame node's name and its `@[label]` prompt citation. */
 export function createShotSequence(
   id: string,
-  frames: { shotId: string; label: string }[],
+  frames: { shotId: string; label: string; durationSec?: number }[],
   existing: ShotSequence[]
 ): ShotSequence {
   const seen = new Set<string>();
   const unique = frames.filter((f) => (seen.has(f.shotId) ? false : (seen.add(f.shotId), true)));
   const name = nextSequenceName(existing);
-  const tags = unique.map((f) => `@[${f.label}]`).join(" ");
   return {
     id,
     name,
@@ -139,8 +203,10 @@ export function createShotSequence(
       audio: "",
       visual: "",
       prompt: "",
-      // The pre-loaded video generation node, citing every member frame.
-      graphVideoNodes: [{ id: "vid0", prompt: tags }],
+      // The timed multi-shot timeline: one segment per member frame. The
+      // ordinary video generator node carries the takes/picks/output.
+      graphSequence: { segments: seedSequenceSegments(unique.map((f) => ({ shotId: f.shotId, durationSec: f.durationSec }))) },
+      graphVideoNodes: [{ id: "vid0", prompt: "" }],
     },
     enabled: true,
     accent: defaultSequenceAccent(existing),
@@ -445,6 +511,26 @@ export function normalizeShotSequences(
         if (legacyLayout) g.graphLayout = legacyLayout as ProductionShot["graphLayout"];
         seq.graph = g;
       }
+    }
+    // The timed timeline is the sequence canvas's prompt structure. A stored
+    // one is repaired; a legacy sequence (no timeline yet) seeds one from its
+    // members and strips the old `@[Shot NNNN]` frame citations (frames are
+    // timeline segments now, not prompt tags). Every sequence canvas also shows
+    // the video generator node (its takes/picks/output ride it).
+    const g = seq.graph ?? (seq.graph = { id, number: seq.name, audio: "", visual: "" });
+    const stored = g.graphSequence?.segments
+      ? normalizeSequenceSegments(g.graphSequence.segments.filter((s) => liveShotIds.has(s.shotId)))
+      : [];
+    if (stored.length) {
+      g.graphSequence = { segments: stored };
+    } else {
+      g.graphSequence = { segments: seedSequenceSegments(shotIds.map((shotId) => ({ shotId }))) };
+      if (Array.isArray(g.graphVideoNodes)) {
+        g.graphVideoNodes = g.graphVideoNodes.map((n) => ({ ...n, prompt: stripSequenceFrameTags(n.prompt ?? "") }));
+      }
+    }
+    if (!Array.isArray(g.graphVideoNodes) || g.graphVideoNodes.length === 0) {
+      g.graphVideoNodes = [{ id: "vid0", prompt: "" }];
     }
     out.push(seq);
     seen.add(id);

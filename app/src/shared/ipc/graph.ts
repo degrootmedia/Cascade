@@ -229,6 +229,28 @@ export interface GraphVideoNode {
   styleConnected?: boolean;
 }
 
+/** One timed shot segment of a sequence node's timeline. A shot sequence is
+ *  ONE generated clip built from its member shots in order; each segment binds
+ *  a member shot's frame, a duration, and a prompt. */
+export interface SequenceSegment {
+  /** The member shot this segment renders; its frame is the segment input. */
+  shotId: string;
+  /** How many seconds this shot plays (editable; whole seconds, min 1). */
+  durationSec: number;
+  /** The segment's prompt override. Empty = use the frame's effective prompt
+   *  (Magic when on, else the storyboard prompt) — see `sequenceSegmentPrompt`. */
+  prompt: string;
+}
+
+/** The sequence node's timeline state, stored on `ProductionShot.graphSequence`
+ *  (only on a shot sequence's shot-shaped facade). The generator node, take
+ *  history, picks, output binding, and edit-video machinery are the ordinary
+ *  video-generation node's — this adds the timed multi-shot prompt structure. */
+export interface SequenceGraphData {
+  /** One segment per member shot, in reading order. */
+  segments?: SequenceSegment[];
+}
+
 /** Canvas node-id prefixes for the per-video-node pair. The first node keeps
  *  the historical bare ids (`videogen` / `videoprompt`) so pre-multi-node
  *  stored graphs and edges stay valid; additional nodes are suffixed

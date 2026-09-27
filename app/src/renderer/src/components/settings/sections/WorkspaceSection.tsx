@@ -7,14 +7,17 @@ export async function resetWorkspace(): Promise<void> {
 }
 
 export function WorkspaceSection() {
-  const { view, setError, onOpenAgents } = useSettings();
+  const { view, setError, refresh, onOpenAgents } = useSettings();
   const [workspace, setWorkspace] = useState(view.workspace);
 
   useEffect(() => setWorkspace(view.workspace), [view.workspace]);
 
   async function pickWorkspace() {
     const dir = await window.cascade.pickWorkspace();
-    if (dir) setWorkspace(dir);
+    if (dir) {
+      setWorkspace(dir);
+      await refresh();
+    }
   }
 
   return (
@@ -23,18 +26,28 @@ export function WorkspaceSection() {
         label="Default folder for new chats"
         help={
           <>
-            "None" makes new chats plain chat (no file access). Each chat can use its own folder — click the chip above the
+            "None" makes new chats plain chat (no file access). "Active Production" makes them mirror whatever project
+            is open in the Production Assistant. Each chat can use its own folder — click the chip above the
             conversation to change it. Cascade can only read and change files inside the chat's folder.
           </>
         }
       >
         <div className="row">
-          <span className="path">{workspace ?? "None — pure chat"}</span>
+          <span className="path">
+            {view.followProduction ? "Active Production" : (workspace ?? "None — pure chat")}
+          </span>
           <button onClick={() => void pickWorkspace()}>Choose…</button>
           <button
             onClick={() => {
+              void window.cascade.setDefaultWorkspaceProduction().then(() => refresh());
+            }}
+          >
+            Active Production
+          </button>
+          <button
+            onClick={() => {
               setWorkspace(null);
-              void window.cascade.clearDefaultWorkspace().catch((e) => setError(String(e)));
+              void window.cascade.clearDefaultWorkspace().then(() => refresh()).catch((e) => setError(String(e)));
             }}
           >
             None

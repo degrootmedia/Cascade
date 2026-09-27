@@ -140,7 +140,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
  *  (references are stored as files on disk now, so thumbnails + previews load
  *  through the streaming protocol rather than inline data URLs). */
 
-export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
+export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, queued, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; /** Extra regen clicks queued behind the running one for this shot. */ queued?: number; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
   return (
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
@@ -188,7 +188,15 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
             </label>
           }
         />
-        <button className="prod-btn prod-prompt-submit" disabled={submitting} onClick={onSubmit}>{submitting ? "Generating…" : <>Submit frame{submitSuffix}</>}</button>
+        <button
+          className="prod-btn prod-prompt-submit"
+          title={submitting ? "Click to queue another generation for this frame" : undefined}
+          onClick={onSubmit}
+        >
+          {submitting
+            ? (queued ? `Generating… (${queued} queued)` : "Generating…")
+            : <>Submit frame{submitSuffix}</>}
+        </button>
         {onOpenSuite && (
           <button className="prod-btn ghost" title="Open this prompt in the Image Suite" onClick={onOpenSuite}>Open in Suite</button>
         )}

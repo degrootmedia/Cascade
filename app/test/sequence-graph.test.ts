@@ -56,7 +56,11 @@ function seq(): ShotSequence {
       audio: "",
       visual: "",
       prompt: "",
-      graphVideoNodes: [{ id: "vid0", prompt: "@[Shot 0100] @[Shot 0200]" }],
+      graphVideoNodes: [{ id: "vid0", prompt: "" }],
+      graphSequence: { segments: [
+        { shotId: "s1", durationSec: 3, prompt: "" },
+        { shotId: "s2", durationSec: 3, prompt: "" },
+      ] },
     },
     enabled: true,
     accent: "blue",
@@ -113,36 +117,71 @@ function dropTool(host: HTMLElement, kind: string): void {
 }
 
 describe("sequence canvas (the node graph, hosted on the sequence)", () => {
-  it("comes pre-populated: the member frames as image nodes and a video node citing them", () => {
+  it("comes pre-populated: the member frames, a Sequence generator, and a timeline", () => {
     const { host } = renderCanvas();
     // Member frames render exactly like reference nodes, named per shot.
     const names = Array.from(host.querySelectorAll(".prod-graph-ref-name")).map((n) => n.textContent ?? "");
     expect(names).toContain("Shot 0100");
     expect(names).toContain("Shot 0200");
-    // The pre-loaded video generation node + its prompt node cite the frames.
+    // The generator reads "Sequence"; its prompt node is the timed timeline.
     expect(node(host, "videogen")).toBeTruthy();
-    expect(node(host, "videogen")!.textContent).toContain("Video generation");
+    expect(node(host, "videogen")!.textContent).toContain("Sequence");
     const promptNode = node(host, "videoprompt")!;
-    expect(promptNode.textContent).toContain("@[Shot 0100]");
-    expect(promptNode.textContent).toContain("@[Shot 0200]");
+    expect(promptNode.textContent).toContain("Sequence prompt");
+    expect(promptNode.textContent).toContain("Visuals");
+    // No brand node or socket on a sequence canvas.
+    expect(node(host, "brand")).toBeNull();
+    expect(promptNode.textContent).not.toContain("Brand identity");
+    // One interactive row per member shot (frame piped in, seconds dial, prompt).
+    const rows = promptNode.querySelectorAll(".prod-graph-seq-seg");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Shot 0100");
+    expect(rows[1].textContent).toContain("Shot 0200");
+    // The member-frame sockets live on the node's left edge (one "Shot" socket
+    // per segment), not inset into the rows.
+    const shotSockets = Array.from(promptNode.querySelectorAll(".prod-graph-socket-label")).filter((el) => el.textContent === "Shot");
+    expect(shotSockets).toHaveLength(2);
     // The frame output node is present (unbound → it says so).
     expect(node(host, "output")).toBeTruthy();
     expect(host.textContent).toContain("Frame output");
     expect(host.textContent).toContain("No output yet");
   });
 
-  it("has no image-gen node and only the video tools in the shelf", () => {
+  it("edits a shot's duration and updates the Sequence Total", () => {
+    const { host } = renderCanvas();
+    expect(node(host, "videoprompt")!.querySelector(".prod-graph-seq-total")!.textContent).toContain("Sequence Total: 6 Seconds");
+    const input = node(host, "videoprompt")!.querySelectorAll(".prod-graph-seq-seg")[0].querySelector("input") as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!;
+    act(() => { setter.call(input, "5"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+    const promptNode = node(host, "videoprompt")!;
+    expect((promptNode.querySelectorAll(".prod-graph-seq-seg")[0].querySelector("input") as HTMLInputElement).value).toBe("5");
+    expect(promptNode.querySelector(".prod-graph-seq-total")!.textContent).toContain("Sequence Total: 8 Seconds");
+  });
+
+  it("reverts an edited segment's prompt back to the frame prompt", () => {
+    const s = seq();
+    s.graph!.graphSequence!.segments![0].prompt = "custom push-in";
+    const { host } = renderCanvas(s);
+    const row = node(host, "videoprompt")!.querySelectorAll(".prod-graph-seq-seg")[0];
+    // The override shows a Revert button; the frame-prompt row shows "frame prompt".
+    const revert = row.querySelector(".prod-graph-seq-seg-revert") as HTMLButtonElement;
+    expect(revert).toBeTruthy();
+    act(() => { revert.click(); });
+    const row2 = node(host, "videoprompt")!.querySelectorAll(".prod-graph-seq-seg")[0];
+    expect(row2.querySelector(".prod-graph-seq-seg-revert")).toBeNull();
+    expect(row2.querySelector(".prod-graph-seq-seg-auto")).toBeTruthy();
+  });
+
+  it("drops image generation, hides the node palette, and keeps the reference shelf", () => {
     const { host } = renderCanvas();
     // Image generation (and the composer prompt node that feeds it) is absent.
     expect(node(host, "imagegen")).toBeNull();
     expect(node(host, "composer")).toBeNull();
     expect(host.querySelector(".prod-graph-imagegen")).toBeNull();
-    // The right shelf keeps only video generation + video editing.
-    const labels = Array.from(host.querySelectorAll(".prod-graph-tools-item .prod-graph-tools-label")).map((l) => l.textContent);
-    expect(labels).toEqual(["Video generation", "Edit video"]);
-    // Video generation is usable (its tile is draggable and the node generates).
-    const vidTile = host.querySelectorAll(".prod-graph-tools-item")[0] as HTMLElement;
-    expect(vidTile.getAttribute("draggable")).toBe("true");
+    // The right-hand node palette is hidden; the left reference shelf remains.
+    expect((host.querySelector(".prod-graph-tools") as HTMLElement).classList.contains("hidden")).toBe(true);
+    expect(host.querySelector(".prod-graph-shelf")).toBeTruthy();
+    // Video generation is usable (its node generates).
     const vidBtn = node(host, "videogen")!.querySelector(".prod-graph-gen-go") as HTMLButtonElement;
     expect(vidBtn.disabled).toBe(false);
   });
@@ -156,6 +195,12 @@ describe("sequence canvas (the node graph, hosted on the sequence)", () => {
     const opts = generated[0];
     expect(opts.nodeId).toBe("vid0");
     expect(opts.refIds).toEqual(["s1", "s2"]);
+    // Each segment is a "Hard Cut to Shot N… Framing Reference <<<image_K>>>"
+    // line (K = the frame's submitted position; no style/visual refs here, so
+    // it equals the shot order), and the clip length is the timeline total.
+    expect(String(opts.prompt)).toContain("Hard Cut to Shot 1. 3 Seconds. Framing Reference <<<image_1>>>");
+    expect(String(opts.prompt)).toContain("Hard Cut to Shot 2. 3 Seconds. Framing Reference <<<image_2>>>");
+    expect(opts.durationSec).toBe(6);
     // The frame citations are host inputs, not references — the vendor prompt
     // must not carry the dotted tags.
     expect(String(opts.prompt)).not.toContain("@[Shot");

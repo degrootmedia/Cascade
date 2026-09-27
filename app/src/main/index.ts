@@ -15,7 +15,7 @@ import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle } from "./pipeline.js";
-import { styleFramePrompt } from "../shared/look.js";
+import { styleFramePrompt, withLookClause } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
 import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
@@ -47,7 +47,7 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -447,7 +447,7 @@ let curId: string | null = null;
 function live(id: string): LiveChat {
   let e = chats.get(id);
   if (!e) {
-    const loaded = sessions.loadSession(id) ?? sessions.newSessionFile(settings.getWorkspace());
+    const loaded = sessions.loadSession(id) ?? sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
     e = { session: loaded, agent: null, running: false, sendToken: 0 };
     chats.set(id, e);
   }
@@ -462,10 +462,46 @@ function broadcastSessions(): void {
   win?.webContents.send("sessions:updated", sessions.listSessions());
 }
 
-/** Working folder for a given chat: pure chat wins, then per-session, then default. */
+/** Working folder for a given chat: following the active production wins, then
+ *  pure chat, then per-session, then the default. */
 function workspaceFor(e: LiveChat | null): string | null {
-  if (e?.session.pureChat) return null;
-  return e?.session.workspace ?? settings.getWorkspace();
+  if (!e) return null;
+  return sessions.resolveWorkspace(e.session, activeProductionFolder(), settings.getWorkspace());
+}
+
+/** The active Production Assistant project (id/name/folder), or null. */
+function activeProduction(): ActiveProductionInfo | null {
+  const id = settings.getActiveProductionId();
+  if (!id) return null;
+  const meta = productions.getProductionMeta(id);
+  return meta ? { id: meta.id, name: meta.name, folder: meta.folder } : null;
+}
+
+function activeProductionFolder(): string | null {
+  return activeProduction()?.folder ?? null;
+}
+
+/** Rebuild the agents of chats whose folder mirrors the active production. */
+function rebindFollowChats(): void {
+  for (const e of chats.values()) {
+    if (e.session.followProduction) {
+      e.agent?.stop();
+      e.agent = null;
+    }
+  }
+}
+
+/** Tell the renderer the current chat's folder binding may have changed. */
+function emitWorkspaceChanged(): void {
+  win?.webContents.send("workspace:changed");
+}
+
+/** Record which production is open; re-point follower chats when it changes. */
+function setActiveProduction(id: string | null): void {
+  if (settings.getActiveProductionId() === id) return;
+  settings.setActiveProductionId(id);
+  rebindFollowChats();
+  emitWorkspaceChanged();
 }
 
 // ---- approval plumbing ----------------------------------------------------
@@ -930,6 +966,7 @@ function registerIpc() {
     const res = await dialog.showOpenDialog(win!, { properties: ["openDirectory", "createDirectory"] });
     if (res.canceled || !res.filePaths[0]) return null;
     settings.setWorkspace(res.filePaths[0]);
+    settings.setFollowProduction(false);
     settings.addRecentWorkspace(res.filePaths[0]);
     resetAllAgents();
     return res.filePaths[0];
@@ -944,6 +981,7 @@ function registerIpc() {
     if (entry) {
       entry.session.workspace = dir;
       entry.session.pureChat = false;
+      entry.session.followProduction = false;
     }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
@@ -962,6 +1000,7 @@ function registerIpc() {
     if (entry) {
       entry.session.workspace = dir;
       entry.session.pureChat = false;
+      entry.session.followProduction = false;
     }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
@@ -972,12 +1011,25 @@ function registerIpc() {
     }
   });
 
+  // Bind the current chat's folder to the active Production Assistant project.
+  handle("workspace:setSessionProduction", () => {
+    const entry = cur();
+    if (!entry) return;
+    entry.session.followProduction = true;
+    entry.session.pureChat = false;
+    sessions.saveSession(entry.session);
+    entry.agent?.stop();
+    entry.agent = null; // rebuild against the active production's folder next message
+    emitWorkspaceChanged();
+  });
+
   // Switch the current chat to pure-chat mode (no folder, no tools).
   handle("workspace:setSessionNone", () => {
     const entry = cur();
     if (!entry) return;
     entry.session.workspace = null;
     entry.session.pureChat = true;
+    entry.session.followProduction = false;
     entry.session.agentId = null; // agents require a workspace — drop the binding
     sessions.saveSession(entry.session);
     entry.agent?.stop();
@@ -987,19 +1039,35 @@ function registerIpc() {
   // Clear the default folder for new chats (Settings → None).
   handle("settings:clearWorkspace", () => {
     settings.setWorkspace(null);
+    settings.setFollowProduction(false);
+    resetAllAgents();
+  });
+
+  // Default for new chats: mirror the active Production Assistant project.
+  handle("settings:setWorkspaceProduction", () => {
+    settings.setFollowProduction(true);
     resetAllAgents();
   });
 
   // Recent folders for the header dropdown.
   handle("workspace:recent", () => settings.getRecentWorkspaces());
 
-  handle("workspace:current", () => effectiveWorkspace());
+  // The current chat's folder binding for the header chip.
+  handle("workspace:state", (): WorkspaceState => {
+    const e = cur();
+    return {
+      workspace: workspaceFor(e),
+      followProduction: !!e?.session.followProduction,
+      production: activeProduction(),
+    };
+  });
 
   handle("settings:get", () => ({
     provider: settings.getProviderId(),
     hasApiKey: settings.hasApiKey(),
     model: settings.getModel(),
     workspace: settings.getWorkspace(),
+    followProduction: settings.getFollowProduction(),
     accent: settings.getAccent(),
     externalEditor: settings.getExternalEditor(),
     has3daiApiKey: settings.has3daiApiKey(),
@@ -1270,10 +1338,12 @@ function registerIpc() {
   // in sync without reloading from disk (the transcript stays in memory).
   on("sessions:activate", (_e, id: string) => {
     if (typeof id === "string" && id) curId = id;
+    // The focused chat's folder binding may differ (follow flag) — refresh the chip.
+    emitWorkspaceChanged();
   });
 
   handle("sessions:new", () => {
-    const s = sessions.newSessionFile(settings.getWorkspace());
+    const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
     sessions.saveSession(s); // persist so it's visible in the sidebar immediately
     const entry: LiveChat = { session: s, agent: null, running: false, sendToken: 0 };
     chats.set(s.id, entry);
@@ -1302,7 +1372,7 @@ function registerIpc() {
     // If the removed chat was the one open, start a fresh one so the live
     // session object doesn't point at a deleted/dead file.
     if (ok && id === curId) {
-      const s = sessions.newSessionFile(settings.getWorkspace());
+      const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
       chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
       curId = s.id;
     }
@@ -1490,6 +1560,7 @@ function registerIpc() {
     // subfolder named after the production inside it.
     const p = productions.newProduction(name, folder);
     settings.addRecentProduction(p.meta.folder);
+    setActiveProduction(p.meta.id);
     return p;
   });
 
@@ -1504,12 +1575,16 @@ function registerIpc() {
     // its boards/, script.md, … are adopted as-is).
     const p = productions.importProduction(folder);
     settings.addRecentProduction(p.meta.folder);
+    setActiveProduction(p.meta.id);
     return p;
   });
 
   handle("production:load", (_e, id: string) => {
     const p = productions.loadProduction(id);
-    if (p) settings.addRecentProduction(p.meta.folder);
+    if (p) {
+      settings.addRecentProduction(p.meta.folder);
+      setActiveProduction(p.meta.id);
+    }
     // Follow the open production's references so an external save lands
     // immediately (not just on the next window focus).
     refWatcher.watch(p ? p.meta.id : null);
@@ -1544,6 +1619,8 @@ function registerIpc() {
     if (ok) {
       if (mode === "archive") ledger.archiveProject(id);
       else ledger.removeProject(id);
+      // A hard-deleted active production stops being a valid chat workspace.
+      if (mode === "delete" && settings.getActiveProductionId() === id) setActiveProduction(null);
     }
     return ok;
   });
@@ -1927,14 +2004,36 @@ function registerIpc() {
     })
   );
 
-  /** Per-production FIFO so concurrent Step-3 jobs (batch generation + AI
-   *  edits) don't hold stale copies of the production and overwrite each
-   *  other's saved frames. Later submissions queue behind running ones. */
+  /** Per-production FIFO for SHORT critical sections that return whole-
+   *  production snapshots — structural edits (`insertShot`/`deleteShot`/…),
+   *  prompt saves (`updateBoardPrompt`), and the rebased commit every
+   *  generation runner performs. Serializing them keeps response order matching
+   *  request order and prevents two load→mutate→save blocks from clobbering
+   *  each other. Long-running generation work runs off this queue (see
+   *  `enqueueGeneration`) so it can't block a prompt save for minutes. */
   const productionQueues = new Map<string, Promise<unknown>>();
   function enqueueProduction<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const prev = productionQueues.get(id) ?? Promise.resolve();
     const next = prev.then(fn, fn);
     productionQueues.set(id, next.catch(() => {}));
+    return next;
+  }
+
+  /** Per-production chain for LONG-RUNNING generation jobs (image batches,
+   *  per-frame/node generations, LLM prompt batches). The work runs OFF the
+   *  shared production queue so the short writes that share it — prompt saves
+   *  (`updateBoardPrompt`), structural edits — commit immediately while a
+   *  frame renders; a job's finished work is committed back through
+   *  `enqueueProduction` (every runner rebases onto the freshest on-disk
+   *  production), so the commit stays mutually exclusive with those writes.
+   *  Jobs still serialize among themselves per production, so each sees the
+   *  frames recorded by earlier jobs. `runVideoJob` runs even its work fully
+   *  concurrently (long vendor polls). */
+  const generationQueues = new Map<string, Promise<unknown>>();
+  function enqueueGeneration<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const prev = generationQueues.get(id) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    generationQueues.set(id, next.catch(() => {}));
     return next;
   }
 
@@ -2074,9 +2173,13 @@ function registerIpc() {
     productions.saveProduction(p);
     productionEmit(id, `Step ${step} started: ${label}`);
     try {
-      // Load the production INSIDE the queue so this job sees every frame
-      // recorded by earlier jobs, and its save can't clobber them.
-      await enqueueProduction(id, async () => {
+      // The generation runs under the generation chain (off the shared
+      // production queue) so a prompt edit made while a frame renders commits
+      // immediately; the rebased save commits back on the shared queue. The
+      // production is loaded INSIDE the generation chain so this job sees
+      // every frame recorded by earlier jobs, and its commit can't clobber
+      // them.
+      await enqueueGeneration(id, async () => {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         pq.status[step] = "running";
@@ -2092,7 +2195,11 @@ function registerIpc() {
         // board failed) still recorded a pending job per shot — the only
         // handle on a vendor job still rendering — and its error status. A
         // skipped save here dropped the pending record and stranded the frame.
-        productions.saveProduction(rebaseProduction(before, pq));
+        // The commit rides the shared queue (rebase is synchronous), so a
+        // concurrent prompt save can't be lost.
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
         if (failure) throw failure;
       });
     } catch (e) {
@@ -2104,7 +2211,9 @@ function registerIpc() {
 
   /** Background job runner for per-shot work that isn't tied to a pipeline step
    *  (video generation, removal) — serialized per production, rebased onto the
-   *  freshest on-disk state before saving, logged via productionEmit. */
+   *  freshest on-disk state before saving, logged via productionEmit. Like
+   *  `runProductionStep`, the job runs off the shared production queue and only
+   *  its rebased commit rides `enqueueProduction`. */
   async function runProductionJob(
     id: string,
     label: string,
@@ -2114,7 +2223,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     productionEmit(id, `${label}…`);
     try {
-      await enqueueProduction(id, async () => {
+      await enqueueGeneration(id, async () => {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
@@ -2127,7 +2236,9 @@ function registerIpc() {
         // Persist even on failure: a recheck that finds a dead job deletes its
         // pending record (which must stick), and a job that records one must
         // keep it. Dropping the save left the shot stuck showing as pending.
-        productions.saveProduction(rebaseProduction(before, pq));
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
         if (failure) throw failure;
       });
     } catch (e) {
@@ -2622,12 +2733,16 @@ function registerIpc() {
     if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, "Magic Prompt: generating content prompts for all shots…");
     try {
-      await enqueueProduction(id, async () => {
+      // Runs off the shared production queue so a prompt edit committed while
+      // the LLM batch runs isn't blocked; the rebased save takes the queue.
+      await enqueueGeneration(id, async () => {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
         await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl());
-        productions.saveProduction(rebaseProduction(before, pq));
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
       });
     } catch (e) {
       productionEmit(id, friendlyApiError(e), "error");
@@ -2647,12 +2762,15 @@ function registerIpc() {
     if (!apiKey) throw new Error(apiKeyRequired());
     productionEmit(id, `Magic Prompt: regenerating shot ${shot.number}…`);
     try {
-      await enqueueProduction(id, async () => {
+      // Off the shared production queue (see generateMagicPrompts above).
+      await enqueueGeneration(id, async () => {
         const pq = productions.loadProduction(id);
         if (!pq) throw new Error("Production not found.");
         const before = structuredClone(pq);
         await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl(), [shotId]);
-        productions.saveProduction(rebaseProduction(before, pq));
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
       });
     } catch (e) {
       productionEmit(id, friendlyApiError(e), "error");
@@ -2806,6 +2924,19 @@ function registerIpc() {
       if (!sourceDataUrl) throw new Error(`This source has no image to ${verb}.`);
     }
 
+    // Generate mode may apply one Design style: its text is the prompt's Style
+    // paragraph (the renderer mirrors it into the text; re-applied here so a
+    // stale draft can't lose it) and, when the style owns a look frame, the
+    // frame is uploaded at reference 0 with the shared LOOK clause — the same
+    // cohesion storyboard generation uses. styleId is ignored for edit/upscale
+    // (their source image already owns reference 0).
+    const styleId = kind === "generate" && typeof req?.styleId === "string" && req.styleId ? req.styleId : undefined;
+    const style = styleId ? (p.styles ?? []).find((s) => s.id === styleId) : undefined;
+    const styleFrameDataUrl = style?.imagePath ? refArtworkDataUrl(p, { imagePath: style.imagePath }) : undefined;
+    const styleFrame = styleFrameDataUrl
+      ? { name: style!.name || `Style ${style!.index}`, dataUrl: styleFrameDataUrl }
+      : undefined;
+
     let promptText: string;
     let refs: { name: string; dataUrl: string }[];
     if (kind === "upscale") {
@@ -2818,9 +2949,12 @@ function registerIpc() {
       promptText = buildEditGenPrompt(resolved, settings.getPromptTemplates().editImage);
       refs = [{ name: sourceLabel, dataUrl: sourceDataUrl! }, ...extras];
     } else {
-      const { resolved, extras } = resolvePromptRefs(p, text, 0);
-      promptText = resolved;
-      refs = extras;
+      // The style frame takes reference 0, so tag resolution starts at token 1.
+      const { resolved, extras } = resolvePromptRefs(p, text, styleFrame ? 1 : 0);
+      let genPrompt = style ? addStyleParagraph(resolved, style.prompt) : resolved;
+      if (styleFrame) genPrompt = withLookClause(genPrompt, resolvePromptTemplate("lookClause", settings.getPromptTemplates()));
+      promptText = genPrompt;
+      refs = styleFrame ? [styleFrame, ...extras] : extras;
     }
     // Explicitly attached reference ids (a handoff seed's refIds) upload too,
     // deduped against the @tag-resolved refs already in `refs`. Ids may point
@@ -2865,6 +2999,7 @@ function registerIpc() {
       ...(sourceRef ? { sourceRefId: sourceRef.id } : {}),
       ...(sourcePath ? { sourcePath } : {}),
       refIds: Array.isArray(req?.refIds) ? req.refIds.filter((r): r is string => typeof r === "string") : [],
+      ...(style ? { styleId: style.id } : {}),
       ...(params ? { params: params as GenParams } : {}),
       ...(typeof req?.quotedCredits === "number" && Number.isFinite(req.quotedCredits) ? { quotedCredits: req.quotedCredits } : {}),
     };
@@ -5015,7 +5150,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   // First chat inherits the default folder.
-  const s = sessions.newSessionFile(settings.getWorkspace());
+  const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
   sessions.saveSession(s); // persist so the active chat shows in the sidebar
   chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
   curId = s.id;

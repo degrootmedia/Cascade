@@ -299,6 +299,43 @@ describe("video nodes (multi-instance)", () => {
   });
 });
 
+describe("shot-sequence timeline wiring", () => {
+  const SEQ_REFS: GraphRefView[] = [
+    ...REFS,
+    { id: "seqframe:s1", name: "Shot 0100", artwork: "f1.png" },
+    { id: "seqframe:s2", name: "Shot 0200", artwork: "f2.png" },
+  ];
+
+  it("emits one member-frame edge per timeline segment, wired to its frame node", () => {
+    const g = stable(materializeGraph(shot({
+      graphVideoNodes: [{ id: "vid0", prompt: "Visuals @[Gondola]" }],
+      graphSequence: { segments: [
+        { shotId: "s1", durationSec: 3, prompt: "" },
+        { shotId: "s2", durationSec: 3, prompt: "" },
+      ] },
+    }), SEQ_REFS));
+    // The frame nodes the locked refs resolve to are on the canvas.
+    expect(nodeIds(g)).toContain("ref:seqframe:s1");
+    expect(nodeIds(g)).toContain("ref:seqframe:s2");
+    // One structural socket per segment on the video prompt node.
+    const frameEdges = g.edges.filter((e) => e.to.node === "videoprompt" && /^in-frame-/.test(e.to.port));
+    expect(frameEdges.map((e) => [e.id, e.from.node, e.to.port])).toEqual([
+      ["e-seqframe-0", "ref:seqframe:s1", "in-frame-0"],
+      ["e-seqframe-1", "ref:seqframe:s2", "in-frame-1"],
+    ]);
+  });
+
+  it("is deterministic and normalize-stable (so a reopen never strips it)", () => {
+    const s = shot({
+      graphVideoNodes: [{ id: "vid0", prompt: "Visuals" }],
+      graphSequence: { segments: [{ shotId: "s1", durationSec: 3, prompt: "slow push" }] },
+    });
+    const a = materializeGraph(s, SEQ_REFS);
+    expect(materializeGraph(s, SEQ_REFS)).toEqual(a);
+    expect(stable(a)).toEqual(a);
+  });
+});
+
 describe("idempotence", () => {
   it("materialize is deterministic and normalize-stable on a rich shot", () => {
     const s = shot({

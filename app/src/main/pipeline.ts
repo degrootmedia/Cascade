@@ -1837,8 +1837,19 @@ export function removeShotsFromSequences(p: Production, shotIds: Iterable<string
       ...seq,
       shotIds: members,
       // Wired inputs live on the graph's video nodes; drop the removed shots.
-      ...(seq.graph?.graphVideoNodes
-        ? { graph: { ...seq.graph, graphVideoNodes: seq.graph.graphVideoNodes.map((n) => (Array.isArray(n.refIds) ? { ...n, refIds: n.refIds.filter((id) => !gone.has(id)) } : n)) } }
+      // The timed timeline drops a removed member's segment too.
+      ...(seq.graph
+        ? {
+            graph: {
+              ...seq.graph,
+              ...(seq.graph.graphVideoNodes
+                ? { graphVideoNodes: seq.graph.graphVideoNodes.map((n) => (Array.isArray(n.refIds) ? { ...n, refIds: n.refIds.filter((id) => !gone.has(id)) } : n)) }
+                : {}),
+              ...(seq.graph.graphSequence?.segments
+                ? { graphSequence: { segments: seq.graph.graphSequence.segments.filter((s) => !gone.has(s.shotId)) } }
+                : {}),
+            },
+          }
         : {}),
     });
   }

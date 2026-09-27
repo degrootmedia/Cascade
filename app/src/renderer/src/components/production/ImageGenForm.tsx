@@ -47,6 +47,12 @@ export interface ImageGenFormProps {
   promptLabel?: string;
   promptPlaceholder?: string;
   onPromptKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
+  /** Optional control under the prompt editor's Style label (e.g. the Image
+   *  Suite's render-style picker). When supplied the Style section is always
+   *  shown, even with no Style paragraph in the prompt. */
+  styleControl?: ReactNode;
+  /** Make the Style preview read-only (the picker above owns the choice). */
+  styleReadOnly?: boolean;
   /** Persist a dropdown choice to the caller's remembered default. */
   onRemember?: (patch: MediaDefaultChoice) => void;
   /** Resolution buckets offered (default 1k/2k/4k). */
@@ -79,6 +85,8 @@ export function ImageGenForm({
   promptLabel,
   promptPlaceholder,
   onPromptKeyDown,
+  styleControl,
+  styleReadOnly,
   onRemember,
   resolutions = ["1k", "2k", "4k"],
   render = "all",
@@ -166,6 +174,8 @@ export function ImageGenForm({
             includeBrand={false}
             references={promptRefs}
             placeholder={promptPlaceholder ?? ""}
+            styleControl={styleControl}
+            styleReadOnly={styleReadOnly}
             onChange={onPromptChange}
             onKeyDown={onPromptKeyDown}
           />

@@ -1,4 +1,35 @@
-﻿## 2026-09-25 — Magic Prompt bled between frames (four stacked races)
+﻿## 2026-09-27 — Node-graph prompt blanked after a style change (selection ≠ focus)
+
+- Symptom: changing the style plugged into a node made the composer prompt in
+  the node graph disappear; the side panel (behind it) stayed correct, and
+  closing/reopening the graph brought the text back. Only auto-derived shots
+  (no manual `shot.prompt`) were affected.
+- Cause: two layers.
+  1. `PromptContentEditor`'s `deferExternalWhileFocused` guard treated a
+     selection living inside the box (`inBox`) as focus. But the effect's own
+     rebuild path restores a caret into the box **even while it is unfocused**,
+     so once the style swap pushed a transient empty content through (auto
+     shots render `Style: …` alone from the renderer's snapshot, then main's
+     authoritative refetch restores the content), the restoring update was
+     deferred forever — the box held `inBox` with no focus.
+  2. The transient itself: the style dropdown eagerly re-renders the prompt
+     from the render-closure snapshot, which cannot reproduce main's
+     auto-derived board prompt.
+- Fix: require actual focus (`document.activeElement === el ||
+  el.contains(document.activeElement)`) before deferring, not merely a
+  selection. The defer still protects caret position while typing.
+- Rules:
+  1. A selection inside a contenteditable is NOT proof of focus. Programmatic
+     caret restoration sets one while unfocused. Gate "don't clobber the
+     user's edit" behavior on `document.activeElement`, and treat `inBox` as a
+     secondary signal only.
+  2. A component that both writes a caret and defers external updates must not
+     let its own writes look like user intent.
+  3. "Reopen fixes it" is the signature of local component state stuck out of
+     sync with a correct prop — look at the sync/echo guards (`emitted`,
+     `inBox`) before the data layer.
+
+## 2026-09-25 — Magic Prompt bled between frames (four stacked races)
 
 - Symptom: with Magic Prompt on, a frame's prompt sometimes went blank in the
   side panel while the node view looked fine, and sometimes showed a *different*

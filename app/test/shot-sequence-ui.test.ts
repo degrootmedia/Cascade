@@ -182,10 +182,16 @@ describe("shot sequence storyboard flow", () => {
     expect(sequencesOnDisk()).toHaveLength(1);
     const seq = sequencesOnDisk()[0];
     expect(seq).toMatchObject({ name: "Sequence 01", shotIds: ["s1", "s2", "s3"], enabled: true });
-    // Pre-populated: a video node citing the member frames. Unbound until the
-    // user pipes the output node (so the animatic starts as the slate).
-    const graph = seq.graph as { graphVideoNodes?: Array<{ prompt?: string }>; graphOutputSource?: string };
-    expect(graph.graphVideoNodes![0].prompt).toBe("@[Shot 0100] @[Shot 0200] @[Shot 0300]");
+    // Pre-populated: a video generator node plus a timed timeline (one segment
+    // per member frame). Unbound until the user pipes the output node (so the
+    // animatic starts as the slate).
+    const graph = seq.graph as { graphVideoNodes?: Array<{ prompt?: string }>; graphSequence?: { segments?: Array<{ shotId: string; durationSec: number }> }; graphOutputSource?: string };
+    expect(graph.graphVideoNodes![0].prompt).toBe("");
+    expect(graph.graphSequence!.segments).toEqual([
+      { shotId: "s1", durationSec: 3, prompt: "" },
+      { shotId: "s2", durationSec: 3, prompt: "" },
+      { shotId: "s3", durationSec: 3, prompt: "" },
+    ]);
     expect(graph.graphOutputSource).toBeUndefined();
     expect(typeof seq.accent).toBe("string");
     // The strip is gone, the bar is under the span.

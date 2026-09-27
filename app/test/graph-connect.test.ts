@@ -9,6 +9,7 @@ import {
   addGraphNode,
   applyCameraGridRefs,
   applyConnection,
+  applySequenceFrames,
   applyTweenKeys,
   canonicalNodeId,
   connectionToEdge,
@@ -508,5 +509,21 @@ describe("upscale node wiring", () => {
     const withOut = connect(g, conn("upscale", "output", "in-out"));
     const dropped = graphEdgesForDetach(withOut, detach("source", "upscale", ""), ctx)!;
     expect(dropped.edges.some((e) => e.to.node === "output")).toBe(false);
+  });
+});
+
+describe("applySequenceFrames", () => {
+  it("rebuilds one frame edge per segment and adds the frame nodes", () => {
+    let g = materializeGraph(shot({ graphVideoNodes: [{ id: "vid0", prompt: "" }] }), REFS);
+    g = applySequenceFrames(g, [{ shotId: "s1" }, { shotId: "s2" }]);
+    expect(g.nodes.some((n) => n.id === "ref:seqframe:s1")).toBe(true);
+    const frameEdges = g.edges.filter((e) => /^in-frame-/.test(e.to.port));
+    expect(frameEdges.map((e) => [e.id, e.from.node, e.to.port])).toEqual([
+      ["e-seqframe-0", "ref:seqframe:s1", "in-frame-0"],
+      ["e-seqframe-1", "ref:seqframe:s2", "in-frame-1"],
+    ]);
+    // Re-applying with fewer segments drops the stale wire (positional rebuild).
+    const g2 = applySequenceFrames(g, [{ shotId: "s2" }]);
+    expect(g2.edges.filter((e) => /^in-frame-/.test(e.to.port)).map((e) => e.to.port)).toEqual(["in-frame-0"]);
   });
 });

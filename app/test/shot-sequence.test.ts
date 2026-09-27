@@ -14,6 +14,11 @@ import {
   nextSequenceName,
   normalizeSequenceAccent,
   normalizeShotSequences,
+  normalizeSequenceSegments,
+  seedSequenceSegments,
+  sequenceSegmentLine,
+  sequenceTotalDuration,
+  stripSequenceFrameTags,
   parseSequenceTimelineId,
   recordSequenceVideoGen,
   sequenceAccentHex,
@@ -300,11 +305,87 @@ describe("creation guards", () => {
     expect(created.shotIds).toEqual(["a", "b"]);
     expect(created.enabled).toBe(true);
     expect(created.accent).toBeTruthy();
-    // The only difference from any other canvas: a pre-loaded video node
-    // citing the member frames. Unbound until the user pipes an output.
-    expect(created.graph!.graphVideoNodes).toEqual([{ id: "vid0", prompt: "@[Shot 0100] @[Shot 0200]" }]);
+    // The canvas is the ordinary node graph plus a timed timeline: one segment
+    // per member frame (3s each by default) and a pre-loaded video generator
+    // node. Unbound until the user pipes an output.
+    expect(created.graph!.graphVideoNodes).toEqual([{ id: "vid0", prompt: "" }]);
+    expect(created.graph!.graphSequence!.segments).toEqual([
+      { shotId: "a", durationSec: 3, prompt: "" },
+      { shotId: "b", durationSec: 3, prompt: "" },
+    ]);
     expect(created.graph!.graphOutputSource).toBeUndefined();
     expect(sequenceOutputMedia(created, { shots: [] })).toBeNull();
+  });
+});
+
+describe("sequence timeline (segments)", () => {
+  it("clamps each shot's duration to a whole second, min 1", () => {
+    const out = normalizeSequenceSegments([
+      { shotId: "a", durationSec: 4.4, prompt: "x" },
+      { shotId: "b", durationSec: 0, prompt: "" },
+      { shotId: "c", durationSec: 12, prompt: "" },
+    ]);
+    expect(out).toEqual([
+      { shotId: "a", durationSec: 4, prompt: "x" },
+      { shotId: "b", durationSec: 1, prompt: "" },
+      { shotId: "c", durationSec: 12, prompt: "" },
+    ]);
+  });
+
+  it("migrates a legacy start/end range to a duration and sums the total", () => {
+    const out = normalizeSequenceSegments([
+      { shotId: "a", startSec: 0, endSec: 5, prompt: "" } as never,
+      { shotId: "b", startSec: 5, endSec: 8, prompt: "" } as never,
+    ]);
+    expect(out).toEqual([
+      { shotId: "a", durationSec: 5, prompt: "" },
+      { shotId: "b", durationSec: 3, prompt: "" },
+    ]);
+    expect(sequenceTotalDuration(out)).toBe(8);
+    expect(sequenceTotalDuration(seedSequenceSegments([{ shotId: "a" }, { shotId: "b" }, { shotId: "c" }]))).toBe(9);
+  });
+
+  it("renders a vendor timeline line and strips legacy frame tags", () => {
+    expect(sequenceSegmentLine({ shotId: "a", durationSec: 3, prompt: "pan left" })).toBe("3s: pan left");
+    expect(sequenceSegmentLine({ shotId: "a", durationSec: 3, prompt: "  " })).toBe("3s");
+    // The multi-shot framing form names the shot + duration + frame token.
+    expect(sequenceSegmentLine({ shotId: "a", durationSec: 3, prompt: "wide" }, 2, 4))
+      .toBe("Hard Cut to Shot 2. 3 Seconds. Framing Reference <<<image_4>>>\nwide");
+    expect(sequenceSegmentLine({ shotId: "a", durationSec: 3, prompt: "" }, 1, 3))
+      .toBe("Hard Cut to Shot 1. 3 Seconds. Framing Reference <<<image_3>>>");
+    expect(stripSequenceFrameTags("wide @[Shot 0100] then @[Anna]")).toBe("wide  then @[Anna]");
+  });
+});
+
+describe("normalizeShotSequences timeline migration", () => {
+  const live = new Set(["a", "b"]);
+
+  it("seeds a timeline for a legacy sequence and strips frame tags", () => {
+    const out = normalizeShotSequences(
+      [{ id: "s1", name: "S", shotIds: ["a", "b"], graph: { graphVideoNodes: [{ id: "vid0", prompt: "@[Shot 0100] @[Shot 0200]", gens: [{ path: "v.mp4" }] }] } }],
+      live
+    );
+    expect(out[0].graph!.graphSequence!.segments).toEqual([
+      { shotId: "a", durationSec: 3, prompt: "" },
+      { shotId: "b", durationSec: 3, prompt: "" },
+    ]);
+    expect(out[0].graph!.graphVideoNodes![0].prompt).toBe("");
+    expect(out[0].graph!.graphVideoNodes![0].gens).toEqual([{ path: "v.mp4" }]);
+  });
+
+  it("keeps and repairs a stored timeline, pruning dead members", () => {
+    const out = normalizeShotSequences(
+      [{ id: "s1", name: "S", shotIds: ["a", "b"], graph: { graphSequence: { segments: [
+        { shotId: "a", durationSec: 4, prompt: "one" },
+        { shotId: "gone", durationSec: 2, prompt: "" },
+        { shotId: "b", durationSec: 5, prompt: "two" },
+      ] }, graphVideoNodes: [{ id: "vid0", prompt: "" }] } }],
+      live
+    );
+    expect(out[0].graph!.graphSequence!.segments).toEqual([
+      { shotId: "a", durationSec: 4, prompt: "one" },
+      { shotId: "b", durationSec: 5, prompt: "two" },
+    ]);
   });
 });
 

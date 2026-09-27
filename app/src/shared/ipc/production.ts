@@ -15,6 +15,7 @@ import type {
   TweenBlock,
   PendingImageGen,
   PendingVideoGen,
+  SequenceGraphData,
   UpscaleData,
 } from "./graph.js";
 import type { ShotSequence } from "./shot-sequence.js";
@@ -213,6 +214,11 @@ graphImageGenIndex?: number;
    *  A generator node with a source-image input and an image output; absent
    *  until the user drags one out. Optional/additive. */
   graphUpscale?: UpscaleData;
+  /** The shot-sequence canvas's timed timeline. Present only on a sequence's
+   *  shot-shaped facade; it turns the canvas's video generator + prompt node
+   *  into the timed multi-shot Sequence node (`segments`, one per member shot).
+   *  Optional/additive — a normal shot never carries one. */
+  graphSequence?: SequenceGraphData;
   /** Workspace-relative path of the last stitched tween output (the single
    *  continuous clip previewed by the output node and the animatic). */
   graphTweenOutput?: string;

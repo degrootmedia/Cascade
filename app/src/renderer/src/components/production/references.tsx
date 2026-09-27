@@ -18,6 +18,7 @@ import { refThumbUrl } from "./thumb-url.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
+import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
   id: string;
@@ -731,7 +732,8 @@ export function CharacterBuilderSection({ prodId, characters, models, references
   // characters and productions).
   const [model, setModel] = useState(() => getMediaDefault("character")?.model ?? imageModels[0]?.id ?? "");
   const [resolution, setResolution] = useState(() => getMediaDefault("character")?.resolution ?? "1k");
-  const [busy, setBusy] = useState(false);
+  const gen = useGenStatus(genKeys.character(characterId || "new"));
+  const busy = gen.running;
   const [refining, setRefining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState<{ name: string; url: string } | null>(null);
@@ -758,18 +760,21 @@ export function CharacterBuilderSection({ prodId, characters, models, references
   }, [effCharModel]);
 
   const canSubmit = name.trim().length > 0 && description.trim().length > 0;
-  const submit = async () => {
-    if (!canSubmit || busy) return;
-    setBusy(true); setError(null);
-    try {
-      await onGenerate({
-        model, resolution, name: name.trim(), description: description.trim(), view,
-        ...(Object.keys(charParams).length ? { params: { ...charParams } } : {}),
-      });
-    } catch (e) {
-      setError(String(e).replace(/^Error:\s*/, ""));
-    }
-    setBusy(false);
+  const submit = () => {
+    if (!canSubmit) return;
+    setError(null);
+    const opts: CharacterSheetGenOptions = {
+      model, resolution, name: name.trim(), description: description.trim(), view,
+      ...(Object.keys(charParams).length ? { params: { ...charParams } } : {}),
+    };
+    // Queue (serial) so repeated clicks build sheets one after another.
+    genQueue.enqueue(genKeys.character(characterId || "new"), async () => {
+      try {
+        await onGenerate(opts);
+      } catch (e) {
+        setError(String(e).replace(/^Error:\s*/, ""));
+      }
+    });
   };
   // Live per-config quote (Higgsfield CLI only) for the Build button.
   const charCostReq = isQuotableCostModel(effCharModel) ? {
@@ -906,8 +911,8 @@ export function CharacterBuilderSection({ prodId, characters, models, references
           persistKey="cascade.modelOptions.advanced.character"
         />
         {error && <p className="error-text">{error}</p>}
-        <button className="prod-btn" disabled={!canSubmit || busy} onClick={() => void submit()}>
-          {busy ? "Generating…" : <>＋ Build character sheet<GenerationCostSuffix req={charCostReq} /></>}
+        <button className="prod-btn" disabled={!canSubmit} title={busy ? "Generating… click to queue another" : undefined} onClick={submit}>
+          {busy ? genButtonLabel({ running: true, pending: gen.pending }, "＋ Build character sheet") : <>＋ Build character sheet<GenerationCostSuffix req={charCostReq} /></>}
         </button>
       </div>
       <div className="prod-char-sheets">
@@ -1028,7 +1033,8 @@ export function RefGenModal({ prodId, models, editModels, categories, references
   const [sourceRefId, setSourceRefId] = useState(
     initialRefId && editable.some((r) => r.id === initialRefId) ? initialRefId : editable[0]?.id ?? ""
   );
-  const [busy, setBusy] = useState(false);
+  const gen = useGenStatus(genKeys.reference(prodId));
+  const busy = gen.running;
   const [error, setError] = useState<string | null>(null);
   const sourceRef = editable.find((r) => r.id === sourceRefId);
   const sourceUrl = sourceRef?.imagePath ? cascadeMedia(prodId, sourceRef.imagePath) : sourceRef?.artwork;
@@ -1041,25 +1047,28 @@ export function RefGenModal({ prodId, models, editModels, categories, references
     ...(productionQuality ? { quality: productionQuality } : {}),
     ...(Object.keys(params).length ? { params: { ...params } } : {}),
   } : null;
-  const submit = async () => {
-    if (!canSubmit || busy) return;
-    setBusy(true); setError(null);
-    try {
-      await onSubmit({
-        model,
-        resolution,
-        aspectRatio,
-        prompt: prompt.trim(),
-        ...(Object.keys(params).length ? { params } : {}),
-        ...(mode === "edit"
-          ? { sourceRefId }
-          : { name: name.trim() || "Generated reference", categoryId: categoryId || undefined }),
-      });
-      onClose();
-    } catch (e) {
-      setError(String(e).replace(/^Error:\s*/, ""));
-      setBusy(false);
-    }
+  const submit = () => {
+    if (!canSubmit) return;
+    setError(null);
+    const opts: ReferenceImageGenOptions = {
+      model,
+      resolution,
+      aspectRatio,
+      prompt: prompt.trim(),
+      ...(Object.keys(params).length ? { params } : {}),
+      ...(mode === "edit"
+        ? { sourceRefId }
+        : { name: name.trim() || "Generated reference", categoryId: categoryId || undefined }),
+    };
+    // Queue (serial per reference modal) so repeated submits wait their turn.
+    genQueue.enqueue(genKeys.reference(prodId), async () => {
+      try {
+        await onSubmit(opts);
+        onClose();
+      } catch (e) {
+        setError(String(e).replace(/^Error:\s*/, ""));
+      }
+    });
   };
 
   return (
@@ -1145,8 +1154,8 @@ export function RefGenModal({ prodId, models, editModels, categories, references
             : "The generated image is added as a new reference in the chosen category. @ tags reuse other references as inputs; drag a tag to move it. Ctrl+Enter to submit."}
         </p>
         {error && <p className="error-text">{error}</p>}
-        <button className="prod-btn prod-edit-go" disabled={!canSubmit || busy} onClick={() => void submit()}>
-          {busy ? "Generating…" : <>{mode === "edit" ? "Edit reference" : "Generate reference"}<GenerationCostSuffix req={refCostReq} /></>}
+        <button className="prod-btn prod-edit-go" disabled={!canSubmit} title={busy ? "Generating… click to queue another" : undefined} onClick={submit}>
+          {busy ? genButtonLabel({ running: true, pending: gen.pending }, mode === "edit" ? "Edit reference" : "Generate reference") : <>{mode === "edit" ? "Edit reference" : "Generate reference"}<GenerationCostSuffix req={refCostReq} /></>}
         </button>
       </div>
     </div>

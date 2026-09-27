@@ -4,9 +4,11 @@ export const workspaceChannels = {
   "workspace:pickSession": { method: "pickSessionWorkspace", kind: "invoke" },
   "workspace:setSession": { method: "setSessionWorkspace", kind: "invoke" },
   "workspace:setSessionNone": { method: "setSessionWorkspaceNone", kind: "invoke" },
+  "workspace:setSessionProduction": { method: "setSessionWorkspaceProduction", kind: "invoke" },
   "settings:clearWorkspace": { method: "clearDefaultWorkspace", kind: "invoke" },
+  "settings:setWorkspaceProduction": { method: "setDefaultWorkspaceProduction", kind: "invoke" },
   "workspace:recent": { method: "getRecentWorkspaces", kind: "invoke" },
-  "workspace:current": { method: "getCurrentWorkspace", kind: "invoke" },
+  "workspace:state": { method: "getWorkspaceState", kind: "invoke" },
 } as const;
 
 export const settingsChannels = {

@@ -127,6 +127,12 @@ export function listProductions(): ProductionMeta[] {
   return store.list().map(summary);
 }
 
+/** One production's identity + folder without returning the whole document. */
+export function getProductionMeta(id: string): ProductionMeta | null {
+  const p = store.load(id);
+  return p ? summary(p) : null;
+}
+
 /** Current production schema version. Bump when adding a one-time migration
  *  to migrateBoardArtwork; loads with >= this value skip the board walk. */
 export const PRODUCTION_SCHEMA_VERSION = 3;

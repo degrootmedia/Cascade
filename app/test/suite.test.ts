@@ -90,6 +90,18 @@ describe("normalizeSuiteSession", () => {
     expect(s.draft.mode).toBe("upscale");
   });
 
+  it("carries a generate style id on the draft and entries", () => {
+    const s = normalizeSuiteSession({
+      version: 1,
+      entries: [entry("1", { styleId: "st1" }), entry("2", { styleId: "" })],
+      selectedId: "1",
+      draft: { mode: "generate", prompt: "hi", model: "m", resolution: "1k", refIds: [], styleId: "st2" },
+    });
+    expect(s.entries[0].styleId).toBe("st1");
+    expect(s.entries[1].styleId).toBeUndefined();
+    expect(s.draft.styleId).toBe("st2");
+  });
+
   it("carries sourcePath only when production-relative", () => {
     const s = normalizeSuiteSession({
       version: 1,

@@ -21,7 +21,7 @@ import {
 
 /** Bottom slot height member cards open for a bar — must match the
  *  `.prod-board.seq-slot` padding in styles.css. */
-export const SEQUENCE_BAR_SLOT = 52;
+export const SEQUENCE_BAR_SLOT = 40;
 
 /** One bar/strip to draw under a set of member cards. */
 export interface SequenceBarTarget {

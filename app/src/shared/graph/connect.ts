@@ -16,7 +16,7 @@
  */
 import type { Graph, GraphEdge, GraphNode, GraphNodeKind, GraphVideoNode } from "../ipc.js";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX, VIDEOGEN_NODE_PREFIX, VIDEOPROMPT_NODE_PREFIX, EDITVIDEO_NODE_PREFIX, EDITVIDEOPROMPT_NODE_PREFIX, videoGenNodeId, videoPromptNodeId, parseVideoGenNode, parseVideoPromptNode, editVideoGenNodeId, editVideoPromptNodeId, parseEditVideoGenNode, parseEditVideoPromptNode } from "../ipc.js";
-import { REF_SOCKET_RE } from "./ports.js";
+import { REF_SOCKET_RE, FRAME_SOCKET_RE } from "./ports.js";
 
 /** Structural canvas connection (ReactFlow Connection shape, no UI import). */
 export interface FlowConnection {
@@ -562,6 +562,26 @@ export function wireComposerRefs(graph: Graph, refIds: string[]): Graph {
   refIds.forEach((id, i) => {
     const nodeId = `ref:${id}`;
     if (have.has(nodeId)) fresh.push(mkEdge(`e-${nodeId}-composer-${i}`, nodeId, "out", "composer", `in-ref-${i}`));
+  });
+  return { ...graph, nodes, edges: [...kept, ...fresh] };
+}
+
+/**
+ * Rebuild a sequence prompt node's member-frame edges from its timeline
+ * segments (one structural socket per segment, `in-frame-<i>`), adding each
+ * member's locked frame node so the wire resolves. Mirrors `materializeGraph`.
+ */
+export function applySequenceFrames(graph: Graph, segments: { shotId: string }[]): Graph {
+  const promptId = videoPromptNodeId("vid0");
+  const kept = graph.edges.filter((e) => !(e.to.node === promptId && FRAME_SOCKET_RE.test(e.to.port)));
+  const nodes = [...graph.nodes];
+  const have = new Set(nodes.map((n) => n.id));
+  const fresh: GraphEdge[] = [];
+  (segments ?? []).forEach((seg, i) => {
+    if (!seg?.shotId) return;
+    const nodeId = `ref:seqframe:${seg.shotId}`;
+    if (!have.has(nodeId)) { have.add(nodeId); nodes.push({ id: nodeId, kind: "ref", pos: { x: 0, y: 0 } }); }
+    fresh.push(mkEdge(`e-seqframe-${i}`, nodeId, "out", promptId, `in-frame-${i}`));
   });
   return { ...graph, nodes, edges: [...kept, ...fresh] };
 }

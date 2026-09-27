@@ -18,11 +18,13 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
   regenerating: boolean;
+  /** Extra regen clicks queued behind the running one for this shot. */
+  regenQueued?: number;
   videoBusy: boolean;
   /** A frame job outlived its wait — show a pending badge + recheck. */
   pending?: boolean;
@@ -354,7 +356,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         </button>
       )}
       <div
-        className="prod-board-frame"
+        className={"prod-board-frame" + (regenerating ? " regenerating" : "")}
         onClick={frameClick}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-cascade-frame")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
@@ -498,11 +500,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         <div className="prod-board-actions">
           <button
             className="prod-board-regen"
-            title="Regenerate this frame"
-            disabled={regenerating}
+            title={regenerating
+              ? `Generating…${regenQueued ? ` (${regenQueued} queued)` : ""} — click to queue another`
+              : "Regenerate this frame"}
             onClick={() => onRegenerate(shot.id)}
           >
-            {regenerating ? "…" : <RegenerateIcon size={12} />}
+            {regenerating ? (regenQueued ? `Generating (${regenQueued})` : "Generating") : <RegenerateIcon size={12} />}
           </button>
           <button
             className="prod-board-edit"

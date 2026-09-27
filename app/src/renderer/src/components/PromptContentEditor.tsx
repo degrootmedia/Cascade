@@ -213,6 +213,42 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     isDraggingRef.current = false;
   }
 
+  /** Commit the box's current plain text to the parent. Shared by typing and
+   *  programmatic insertion; records it in `emitted` so the parent's echo does
+   *  not trigger a rebuild that would move the caret. */
+  function commitText() {
+    const el = elRef.current;
+    if (!el) return;
+    const t = el.textContent ?? "";
+    if (emitted.current.size > 100) emitted.current.clear();
+    emitted.current.add(t);
+    onChange(t);
+  }
+
+  /** Insert plain text at the caret as a literal text node. Chromium's
+   *  `insertText` turns embedded newlines into block elements / `<br>`, which
+   *  `textContent` drops — so paragraph breaks (and pasted text) are inserted
+   *  by hand here to survive the save/reload round trip. */
+  function insertPlainText(raw: string) {
+    const el = elRef.current;
+    if (!el) return;
+    const text = raw.replace(/\r\n?/g, "\n");
+    if (!text) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.startContainer)) return;
+    range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    const after = document.createRange();
+    after.setStartAfter(node);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+    commitText();
+  }
+
   /** Build the box DOM from plain text: text nodes + non-editable tag chips. */
   function buildDom(el: HTMLElement, t: string) {
     el.textContent = "";
@@ -294,11 +330,17 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     if (!hasPendingDrag && el.textContent === text) return;
     const sel = window.getSelection();
     const inBox = !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
+    // `inBox` alone is NOT focus: the rebuild path below restores a caret into
+    // the box even while it is unfocused (selection sits inside without the
+    // element holding focus), so a later external change would be wrongly
+    // deferred forever. Require the box (or a chip inside it) to actually be
+    // the active element.
+    const focusedHere = document.activeElement === el || el.contains(document.activeElement);
     // While the caret lives in the box, external text is deferred so typing
     // never jumps — except tag-only diffs (graph connect/disconnect), which
     // must rebuild under the caret (mapped through below) or the chips
     // diverge from the saved prompt permanently.
-    if (deferExternalWhileFocused && inBox && pendingCaret.current === null && !isTagOnlyDiff(el.textContent ?? "", text)) return;
+    if (deferExternalWhileFocused && focusedHere && inBox && pendingCaret.current === null && !isTagOnlyDiff(el.textContent ?? "", text)) return;
     const oldText = el.textContent ?? "";
     const oldCaret = pendingCaret.current ?? (inBox ? selectionOffsets(el).start : null);
     buildDom(el, text);
@@ -413,25 +455,18 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
           if (isDraggingRef.current) updateDropCaret(e.clientX, e.clientY);
         }}
         onMouseDown={(e) => e.stopPropagation()}
-        onInput={() => {
-          const el = elRef.current;
-          if (!el) return;
-          const t = el.textContent ?? "";
-          if (emitted.current.size > 100) emitted.current.clear();
-          emitted.current.add(t);
-          onChange(t);
-        }}
+        onInput={commitText}
         onKeyDown={(e) => {
           onKeyDown?.(e);
-          if (!e.defaultPrevented && e.key === "Enter") {
+          if (!e.defaultPrevented && e.key === "Enter" && !e.nativeEvent.isComposing) {
             e.preventDefault();
-            document.execCommand("insertText", false, "\n");
+            insertPlainText("\n");
           }
         }}
         onPaste={(e) => {
           e.preventDefault();
           const t = e.clipboardData.getData("text/plain");
-          if (t) document.execCommand("insertText", false, t);
+          if (t) insertPlainText(t);
         }}
         onDrop={(e) => {
           e.preventDefault();

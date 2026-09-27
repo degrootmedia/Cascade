@@ -138,6 +138,8 @@ export interface SettingsView {
   hasApiKey: boolean;
   model: string;
   workspace: string | null;
+  /** Default for new chats: follow the active Production Assistant project. */
+  followProduction: boolean;
   /** UI accent color (hex). */
   accent: string;
   /** Absolute path to the external image editor, or null when not set. */
@@ -195,6 +197,25 @@ export interface WorkspaceInstructionsInfo {
   active: boolean;
   /** Absolute path to the active instructions file (or the folder if none yet). */
   file: string | null;
+}
+
+/** The Production Assistant project a chat can bind its folder to. */
+export interface ActiveProductionInfo {
+  id: string;
+  name: string;
+  /** Absolute path of the production's own folder (the chat's workspace root). */
+  folder: string;
+}
+
+/** The current chat's folder binding: a fixed folder, pure chat, or the active
+ *  Production Assistant project (which mirrors whatever production is open). */
+export interface WorkspaceState {
+  /** Effective folder the agent may touch, or null when it has none. */
+  workspace: string | null;
+  /** True when this chat follows the active Production Assistant project. */
+  followProduction: boolean;
+  /** The active production, when one has been opened (for the picker label). */
+  production: ActiveProductionInfo | null;
 }
 
 export interface SessionMeta {
@@ -280,10 +301,18 @@ export interface CascadeApi {
   setSessionWorkspace(dir: string): Promise<void>; // set current chat's folder (from a recent)
   /** Switch the current chat to pure chat (no folder, no tools). */
   setSessionWorkspaceNone(): Promise<void>;
+  /** Bind the current chat's folder to the active Production Assistant project. */
+  setSessionWorkspaceProduction(): Promise<void>;
   /** Clear the default folder for new chats (Settings → None). */
   clearDefaultWorkspace(): Promise<void>;
+  /** Make new chats follow the active Production Assistant project by default. */
+  setDefaultWorkspaceProduction(): Promise<void>;
   getRecentWorkspaces(): Promise<string[]>; // recent folders
-  getCurrentWorkspace(): Promise<string | null>;
+  /** The current chat's folder binding (effective folder, follow flag, production). */
+  getWorkspaceState(): Promise<WorkspaceState>;
+  /** Fired when the current chat's folder binding can change (active production
+   *  opened/closed, chat focused) so the header chip re-reads it. */
+  onWorkspaceChanged(cb: () => void): () => void;
   getSettings(): Promise<SettingsView>;
   setApiKey(key: string): Promise<void>;
   setModel(model: string): Promise<void>;
@@ -1022,6 +1051,7 @@ type SubscriptionMethod =
   | "onSessionRenamed"
   | "onTodosChanged"
   | "onGoalChanged"
+  | "onWorkspaceChanged"
   | "onAgentSwitched"
   | "onBoardExternalUpdate"
   | "onProductionEvent"

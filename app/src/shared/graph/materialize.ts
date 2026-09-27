@@ -263,6 +263,17 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   for (const n of editNodes) refEdges(refTagNames(n.prompt ?? ""), editPromptId(n.id));
   for (const n of drawEditVidNodes) refEdges(refTagNames(n.prompt ?? ""), editVideoPromptNodeId(n.id));
 
+  // Sequence timeline: one member-frame socket per segment on the first video
+  // prompt node (`in-frame-<i>`), wired to the member's locked frame node.
+  // Structural (host-owned), rebuilt here so a reopen never strips it.
+  if (shot.graphSequence?.segments?.length && drawVideoNodes[0]) {
+    const promptTarget = videoPromptNodeId(drawVideoNodes[0].id);
+    shot.graphSequence.segments.forEach((seg, i) => {
+      const frameNode = ensureRefNode(`seqframe:${seg.shotId}`);
+      if (frameNode) edge(`e-seqframe-${i}`, frameNode, "out", promptTarget, `in-frame-${i}`);
+    });
+  }
+
   // Style / brand plugs (flag wins, prompt paragraph is the fallback).
   // Mirroring: an explicit style selection is always wired (None never is),
   // so a shot whose sidepanel shows a style materializes with the style edge.

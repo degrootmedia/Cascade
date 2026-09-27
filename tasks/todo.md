@@ -1,4 +1,388 @@
-﻿# Node graph: multi-instance nodes + edit-video availability
+﻿# Prompt text editing polish (caret/focus/backspace) — across all surfaces
+
+User report: regression of an old bug. Editing prompts in the node view is very
+buggy — focus is lost while typing, the caret jumps to the end. The side-panel
+prompt is buggy too: deleting a space before a reference block deletes the whole
+block. Request: review and polish ALL text editing so it feels like a word
+editor, while keeping `@` reference + block functionality.
+
+## Root causes (verified)
+
+- The Content box is a `contentEditable` (`PromptContentEditor.tsx`) that renders
+  `@[Name]` as atomic `contenteditable=false` chips. External value changes call
+  `buildDom` (full DOM rebuild); when no selection lives in the box the caret
+  defaults to `text.length` (`PromptContentEditor.tsx:348`) → "jump to end".
+- `isPromptTextarea` (`ProductionWorkspace.tsx:76`) only accepts `TEXTAREA` and
+  the now-dead `prod-board-prompt`/`prod-prompt-drawer-text` classes, so it
+  doesn't recognize the contenteditable Content box → the `getBoardPrompt`
+  refetch guard (`ProductionWorkspace.tsx:803`) doesn't protect in-flight typing.
+- `ReferencePromptEditor` deliberately does NOT pass `deferExternalWhileFocused`
+  to `TriplePrompt` (prompt-panel.tsx:85) because `choose()` (autocomplete) writes
+  a composed value from outside; so external saves re-decompose while focused.
+- No Backspace/Delete handler exists in `PromptContentEditor` → the browser
+  deletes the whole atomic chip at the boundary (the reported bug).
+- Duplicated draft/emitted/defer logic in `ComposerNodeView`
+  (`NodeGraphModal.tsx:644`) and `PromptNodeView` (`:1505`).
+- Native undo is destroyed by programmatic `textContent` rebuilds.
+- `SequenceSegmentList` textarea uses `value={seg.prompt || seg.framePrompt}`
+  (`NodeGraphModal.tsx:1687`) → can't be cleared; no draft guard.
+
+## Plan
+
+### Phase 1 — Content box behaves like a real editor
+- [ ] `PromptContentEditor.tsx`: handle collapsed Backspace/Delete against the
+      plain-text model — a reference is one unit; deleting an adjacent space/char
+      deletes only that char, deleting into a reference deletes the whole chip.
+- [ ] `PromptContentEditor.tsx`: never rebuild while focused except tag-only
+      diffs; if a rebuild is unavoidable, map the caret (never default to end).
+- [ ] `PromptContentEditor.tsx`: undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y):
+      snapshot stack with typing coalesced; boundaries on paste/delete/insert/drag.
+- [ ] `PromptContentHandle`: add an internal `insertRefTag`/`replaceRange` so the
+      side panel's `choose()` edits inside the editor (stays in `emitted`).
+- [ ] `prompt-panel.tsx`: pass `deferExternalWhileFocused` + route `choose()`
+      through the new handle method.
+- [ ] `ProductionWorkspace.tsx`: `isPromptTextarea` → recognize the content
+      editor + any prompt field (closest `.prompt-content-editor` / `.prod-prompt-box`).
+
+### Phase 2 — one shared editing foundation
+- [ ] Extract the duplicated draft/emitted/defer logic from `ComposerNodeView` +
+      `PromptNodeView` into one shared hook/component used by every node prompt.
+- [ ] Shared `PromptTextarea` wrapper (defer-while-focused) used by Style/Brand
+      and the other plain prompt textareas.
+
+### Phase 3 — remaining rough edges
+- [ ] `SequenceSegmentList`: allow clearing (`??` not `||`), protect typing.
+- [ ] Style/Brand boxes: no caret jump on external refresh.
+- [ ] Audit: character description, video modal, edit modal, Image Suite, tween
+      action prompt, prompt templates, moodboard notes — apply shared wrapper.
+
+### Phase 4 — tests + verify
+- [ ] Tests: backspace beside a chip keeps it; deleting the chip works; caret
+      stays in side panel + node view; undo/redo; autocomplete inserts; sequence
+      box clears.
+- [ ] `npm run typecheck`, `npm test`, `npm run build`.
+
+## Review
+(pending — awaiting user approval)
+
+---
+
+# Prompt saves during generation + queued image-gen button state
+
+User report (two linked bugs):
+1. Editing a prompt (specifically a magic prompt) while an image generates in
+   another panel doesn't save until the generation finishes.
+2. Image-gen buttons don't hold their state, so multiple gens get queued by
+   accident. Wanted: the button shows **"Generating" + the number queued** and
+   stays clickable so more gens can be queued. Scope chosen: **all image-gen
+   surfaces**.
+
+## Findings
+
+- Main serializes every operation on a per-production FIFO `enqueueProduction`
+  (`index.ts:2010`). `runProductionStep` holds that queue for the WHOLE image
+  generation (`index.ts:2156`), so `production:updateBoardPrompt`
+  (`index.ts:2630`) — the only route to persist a magic prompt — waits minutes.
+  `runVideoJob` already avoids this (work off-queue, short commit on it).
+- Renderer `regenBoard` awaits `promptSaveQueue.current` (stuck behind the same
+  generation) before setting `regenIds`, so the per-frame button never shows
+  "Generating…" → the user clicks again → accidental queue.
+- No surface tracks a per-target queued COUNT; node/suite buttons are disabled
+  while busy, so intentional queueing is impossible outside the storyboard.
+
+## Plan
+
+### Phase A — main: long jobs off the shared production queue
+- [x] Add `enqueueGeneration` (per-production chain for long jobs) alongside
+      `enqueueProduction` (short critical sections).
+- [x] `runProductionStep` / `runProductionJob`: run `fn` under
+      `enqueueGeneration`, commit via `enqueueProduction(rebase…save)`. Same for
+      the two magic-prompt LLM handlers. Prompt saves now commit immediately and
+      the generation's rebase preserves them.
+
+### Phase B — renderer generation queue (deep, tested)
+- [x] `components/production/gen-queue.ts`: pure `GenerationQueue` (per-key
+      serial drain, `running`, `pending`), singleton `genQueue`, `useGenStatus`
+      hook, `genKeys`, `genButtonLabel`; + `nextRegenRound`/`countByShot`.
+- [x] Unit test the class (serial per key, independent keys, pending count,
+      no flicker between consecutive jobs).
+
+### Phase C — wire surfaces
+- [x] Storyboard per-frame: keep the batching queue but count duplicates per
+      shot; button stays clickable, shows "Generating (N)"; prompt-panel Submit
+      frame label too.
+- [x] Node graph: image-gen / edit-image / camera-grid / upscale nodes enqueue
+      under per-node keys and read `useGenStatus` (node `data.genKey`).
+- [x] Image Suite: submit through the queue; label shows the queued count.
+- [x] References / character sheet / style frame: enqueue + count.
+
+### Phase D — verify
+- [x] `npm run typecheck`, `npm test` (1276 passed + 1 skip), `npm run build`;
+      `CONTEXT.md` row added.
+
+## Review
+
+Implemented. Root cause from the investigation: the per-production FIFO
+(`enqueueProduction`) held image generations for their whole duration, and the
+magic-prompt save — whose only route is `production:updateBoardPrompt` on that
+same FIFO — had to wait for the generation. The fix mirrors `runVideoJob`'s
+documented pattern: a new `enqueueGeneration` chain serializes long jobs among
+themselves while running their work OFF the shared queue, and each commits its
+rebased snapshot back through `enqueueProduction`. Prompt writes therefore
+commit immediately and the generation's rebase (per-key magic delta + per-shot
+field diff) preserves them; commits stay mutually exclusive with the writes
+because `rebaseProduction` + `saveProduction` is one synchronous block.
+
+The button work became a renderer-side deep module (`GenerationQueue`): pure,
+unit-tested scheduling, a singleton + `useGenStatus` hook, and stable `genKeys`.
+Every image-gen surface now enqueues through it and reads its `running`/`pending`
+so it stays clickable and shows the queued count; the storyboard keeps its
+batch optimization via `nextRegenRound` (distinct shots parallel, repeats next
+round). Self-caught: the queue originally published an idle+pending notification
+between `enqueue` and `drain` (button flicker) — fixed by publishing only from
+`drain` after taking a job / from `enqueue` when already active, pinned by the
+"no idle flicker" test.
+
+# Shot sequence canvas: dedicated Sequence node + timed multi-shot prompt
+
+User is rethinking the sequence canvas. The generic video-generation node is
+replaced by a dedicated **Sequence** node whose prompt node is a timeline:
+
+1. Style socket/box at the top (unchanged — shows the wired style prompt).
+2. A **Visuals** panel below it: reference sockets + a shared description of
+   the visuals for the whole sequence.
+3. One panel **per member shot**: its frame piped in, a seconds-range dial
+   (`0-1`, and the next shot auto-starts at the previous end), and a per-shot
+   prompt auto-populated from the frame's storyboard prompt, editable, with a
+   **Revert** button back to the frame prompt.
+
+Confirmed decisions: **one** Sequence node per sequence (replaces the generic
+video node); every member frame uploaded as an **ordered reference**; only each
+segment's **end** is editable (start = previous end; first = 0; 1s steps);
+each segment prompt seeds from the shot's **effective** prompt (Magic when
+Magic is on, else the frame prompt) and Revert re-pulls it.
+
+## Findings / scope
+
+- The sequence canvas IS the node graph (`sequence-graph.tsx` hosts
+  `NodeGraphModal` on `seq.graph`, a `ProductionShot`). Today it is
+  pre-populated with `vid0` (`createShotSequence`, `shot-sequence.ts:123`)
+  citing member frames as `@[Shot NNNN]`; the host strips those tags and uploads
+  the frames as host inputs (`sequence-graph.tsx:150`, `main/index.ts:3369`).
+- **Hard constraint**: on every open the canvas rebuilds the graph from domain
+  state via `materializeGraph(shot, refs)` and persists if different
+  (`NodeGraphModal.tsx:3739-3762`). Any new wiring not reproduced there is
+  stripped on reopen (this exact bug bit the camera-grid node). So the sequence
+  pair + all its edges MUST be emitted by `materializeGraph` from
+  `graphSequence` (mirroring `graphCameraGrid`, `materialize.ts:208-233`).
+- Reference sockets on prompt nodes are positional (`in-ref-N`) and their edges
+  are rebuilt from tag order; camera-grid/video use explicit domain `refIds`
+  (`applyCameraGridRefs`, `connect.ts:530`). The Visuals refs follow the
+  camera-grid `refIds` precedent; the per-segment frame wires are **structural**
+  (one fixed socket per segment, host-supplied locked frame refs), like the
+  prompt→generator pipe.
+- Take lifecycle currently reads `graphVideoNodes`:
+  `sequenceSelectedTake` (`shot-sequence.ts:160`), `recordSequenceVideoGen`
+  (`:233`), `sequenceOutputMedia` (`:175`), main `deleteSequenceTake`/
+  `saveSequenceVideoAsReference` (`pipeline.ts:1735`/`1770`), merge
+  (`productions.ts:337`). Moving the node to a dedicated `graphSequence` means
+  updating these call sites (kept generic where possible).
+- Existing sequences may already hold **paid** takes in
+  `graphVideoNodes[0].gens`; migration must carry them forward.
+
+## Plan
+
+### Phase 0 — types, pure segment math, prompt template
+- [ ] `shared/ipc/graph.ts`: `SequenceSegment { shotId; startSec; endSec;
+      prompt; }`, `SequenceGraphData { visuals?; refIds?; segments?;
+      styleConnected?; model?; resolution?; params?; gens?; genIndex?;
+      generation? }`. `GraphNodeKind` += `"sequence" | "sequenceprompt"`.
+      `GraphSource` += `{ kind: "sequence" }`. Canvas-id constants/titles.
+- [ ] `shared/ipc/production.ts`: `ProductionShot.graphSequence?:
+      SequenceGraphData`; extend `graphOutputSource` with `"sequence"`.
+- [ ] `shot-sequence.ts` pure helpers (unit-tested):
+      `normalizeSequenceSegments` (start_0 = 0; start_i = end_{i-1}; end_i >
+      start_i else bump; ordered by shotIds), `reflowSegmentEnd(segs, i, end)`
+      (cascade forward), `sequenceTotalDuration`, `sequenceSegmentLine`
+      (`"{start}-{end}s @[Shot NNNN]: {prompt}"` — mechanical grammar in code),
+      `seedSequenceSegments(shotIds)` (blank prompts). Update
+      `createShotSequence` to build `graphSequence` (visuals "", segments from
+      frames) instead of `graphVideoNodes`.
+- [ ] `shared/prompt-templates.ts`: new `sequenceTimeline` template (outer
+      wording; placeholders `{{visuals}}`/`{{shots}}`/`{{duration}}`), built-in
+      + editor entry.
+- [ ] `sequenceSelectedTake`/`sequenceOutputMedia`/`recordSequenceVideoGen`
+      read/write `graphSequence`; `sequenceOutputMedia` handles
+      `graphOutputSource === "sequence"`.
+
+### Phase 1 — graph wiring (ports/connect/materialize/normalize)
+- [ ] `shared/graph/ports.ts`: `sequenceprompt` decl (`in-style`, `in-brand`,
+      `in-ref-open`+`in-ref-N`, `in-frame-open`+`in-frame-N`); `sequence` decl
+      (`in-prompt` from `sequenceprompt`, `out` video). `output`/`editvideo`
+      accept a `sequence` source. `portDecl` expands `in-frame-N`.
+- [ ] `shared/graph/connect.ts`: resolve the bare `sequence`/`sequenceprompt`
+      ids in `nodeKindForId`; map the prompt pipe, style/brand plugs, Visuals
+      ref slots (positional `applySequenceRefs`), output feed, and a
+      `sequence` edit-video source; detach rules (style/brand/ref); frame slots
+      are non-connectable (structural).
+- [ ] `shared/graph/materialize.ts`: emit the sequence pair whenever
+      `shot.graphSequence` exists; add the member-frame ref nodes
+      (`ref:seqframe:<shotId>`, via the host-supplied refs) + one structural
+      `ref:seqframe:x → sequenceprompt.in-frame-<i>` edge per segment, the
+      Visuals `in-ref-N` edges from `refIds`, style/brand plugs from
+      `styleConnected`/prompt paragraphs, the prompt pipe, and the output feed
+      for `graphOutputSource === "sequence"`.
+- [ ] `components/graphFlow.ts`: sequence prompt node sockets (frame labels) +
+      edge strokes; keep `promptSockets` for the Visuals style/ref/brand set.
+
+### Phase 2 — canvas nodes (NodeGraphModal)
+- [ ] `nodeTypes` += `sequence`, `sequenceprompt`; new `SequenceNodeView`
+      (generator: model/resolution/params, takes, Generate, pending/busy,
+      pipe-to-output, save-as-ref, delete) and `SequencePromptNodeView`
+      (Style box; **Visuals** textarea + ref sockets; one row per segment: the
+      piped frame thumb, `start–end` dial with an editable end stepper, the
+      prompt textarea seeded from the frame, and a Revert button; Brand box).
+- [ ] `hiddenTools` += `"videogen"` (union, `nodeKindHidden`, palette +
+      `addTool` gates) so the sequence canvas hides the generic video pair and
+      the legacy `vid0` is stripped on open; the sequence tile is never in the
+      palette (present from `graphSequence`).
+- [ ] `buildDerived`: build the sequence pair from `graphSequence`; label it
+      from `seq.name`; resolve the output preview/`"sequence"` binding;
+      select/cycle takes for the sequence node.
+- [ ] Wiring handlers: `onConnect`/`isValidConnection`/`graphEdgesForDetach`
+      for Visuals ref sockets, style/brand, the structural prompt pipe, the
+      output pipe, and the edit-video `in-video` accepting the sequence output.
+
+### Phase 3 — host + workspace
+- [ ] `sequence-graph.tsx`: patch `graphSequence` (visuals, refIds, segments,
+      styleConnected, model/resolution/params); assemble the vendor prompt
+      (style → visuals → timed segment lines) and ordered `refIds`
+      (frames then visual refs); `onRunSequenceGen`; output pipes; take
+      select/delete/save-ref; supply member-frame `GraphRef`s (`seqframe:`).
+- [ ] Segment prompt seeding: host resolves each member's effective prompt via
+      `getBoardPrompt` (ProductionWorkspace already owns this) and shows
+      `override ?? fetched`; edit writes the override; Revert clears it and
+      re-fetches.
+- [ ] `ProductionWorkspace`: `runSequenceVideoGen` (IPC), frame-prompt resolver,
+      sequence take select/delete/save-reference wrappers; remove the old
+      `graphVideoNodes`-based sequence generation path.
+
+### Phase 4 — main, persistence, migration
+- [ ] `main/index.ts`: `production:generateSequenceVideo` takes the assembled
+      prompt + ordered `refIds` (frames → sourcePath, rest → extraRefs) +
+      `durationSec`; write via `relocateClipToSequence` and
+      `recordSequenceVideoGen` onto `graphSequence`; `recheckVideo` target for
+      the sequence node; `deleteSequenceTake`/`saveSequenceVideoAsReference`
+      read `graphSequence`.
+- [ ] `productions.ts`: `mergeRendererShot` handles `graphSequence` (skip-list
+      entry + `mergeSequenceNode`: main owns `gens`/`genIndex`, renderer owns
+      visuals/refIds/segments/picks — mirror `mergeUpscale`).
+- [ ] `normalizeShotSequences` migration: when `graphSequence` is absent but the
+      sequence has members, synthesize it (segments from `shotIds`, blank
+      prompts) and carry `graphVideoNodes[0]`'s `gens`/`genIndex`/picks/
+      `styleConnected` into it; re-point `graphOutputSource` `"videogen"` →
+      `"sequence"`; drop the legacy video nodes/positions.
+
+### Phase 5 — animatic/export, tests, verify
+- [ ] `applyShotSequences`/animatic/`assemblyPlan` already consume
+      `sequenceOutputMedia`; confirm `"sequence"` resolves and the `SQ<NNNN>`
+      reel/skipped-shots behaviour is unchanged.
+- [ ] Tests: pure segment math (reflow/cascade/duration); ports + connect +
+      materialize round-trip (reopen keeps every wire; the camera-grid bug
+      guard); sequence take lifecycle + merge + migration (paid takes survive);
+      node render + Revert + dial cascade (`shot-sequence-ui.test.ts`);
+      generation handler opts. Then `npm run typecheck`, `npm test` (app),
+      `npm run build`, `npm test` (core).
+- [ ] `CONTEXT.md`: shot-sequences row + "Shot sequence" glossary bullet.
+
+## Risks / notes
+- **Take-lifecycle ripple** (Phase 4) is the main risk; if it proves too broad,
+  the lower-risk fallback is to keep takes on a `vid0` `GraphVideoNode` and add
+  only the timeline fields — at the cost of splitting the concept. Recommending
+  the dedicated `graphSequence` for locality.
+- `materializeGraph` MUST reproduce every sequence wire or the first reopen
+  strips it (the camera-grid precedent).
+- Existing sequences with paid clips must migrate their `gens` before the
+  legacy video node is hidden/stripped.
+
+## Review
+
+**IMPLEMENTED — hybrid variant of the plan.** The full user-facing redesign
+shipped, but the take-lifecycle move (Phase 4) was deliberately NOT done:
+rather than relocating `gens`/output/edit-video wiring onto a dedicated
+`graphSequence`, the sequence keeps the ordinary video generator node (takes,
+picks, output binding, recheck, delete/save-reference, and the animatic/export
+`sequenceOutputMedia` all unchanged). `graphSequence` carries only the timed
+timeline (`segments`), and the prompt node renders as the `sequenceprompt` type.
+This delivered the requested UX with a fraction of the blast radius and no
+migration of paid takes.
+
+What shipped:
+- `shared/ipc/graph.ts`: `SequenceSegment` + `SequenceGraphData`;
+  `ProductionShot.graphSequence`.
+- `shot-sequence.ts`: pure `normalizeSequenceSegments` (anchored starts,
+  collision cascade), `reflowSequenceSegments`, `sequenceTotalDuration`,
+  `seedSequenceSegments`, `sequenceSegmentLine`, `stripSequenceFrameTags`;
+  `createShotSequence` seeds a 3s-per-shot timeline; `normalizeShotSequences`
+  repairs/normalizes a stored timeline and MIGRATES a legacy sequence (seeds
+  segments from `shotIds`, strips `@[Shot NNNN]` from the video prompt) so old
+  sequences show the new prompt node.
+- Graph wiring: `videoprompt` gains positional `in-frame-N` sockets
+  (`FRAME_SOCKET_RE`); `materializeGraph` emits one structural frame edge per
+  segment from the locked `seqframe:<shotId>` refs; `applySequenceFrames`
+  rebuilds them at runtime; detach/connect leave frame sockets structural.
+- `NodeGraphModal`: new `sequenceprompt` node type (`SequencePromptNodeView` +
+  `SequenceSegmentList`) rendered from `graphSequence` — Style + "Visuals"
+  body + one row per shot (frame thumb, editable end dial, per-shot prompt,
+  Revert). The generator reads "Sequence" and hides the clip-length selector
+  (timing comes from the timeline). Added the missing `sequenceprompt`
+  reconciliation comparator (a stale-data bug the new UI test caught).
+- `sequence-graph.tsx`: seeds each row's prompt from the member's effective
+  prompt via a `framePromptFor` fetch (wired in `ProductionWorkspace` to
+  `getBoardPrompt`), assembles the vendor prompt (rendered Visuals + one
+  `"{start}-{end}s: prompt"` line per shot) and uploads member frames in order;
+  `setSegments`/`revertFramePrompt` patch the timeline + keep frame edges.
+- `pipeline.ts` `removeShotsFromSequences` prunes a removed member's segment.
+- CSS for the timeline rows; `CONTEXT.md` row + glossary updated.
+
+Verify: `npm run typecheck` clean; `npm test` (app) 1254 passed + 1 skipped;
+`npm run build` clean; `npm test` (core) 147 passed.
+
+Not done (by design): a dedicated `sequence`/`sequenceprompt` generator node
+that owns the takes. If pursued later, it is the Phase 4 work above.
+
+### Follow-up (user feedback)
+- Per-shot prompts now strip the shared Style/Brand sections (`stripSharedSections`
+  on the fetched frame prompt) — a row is the shot's own description.
+- The submitted line is now the multi-shot framing form:
+  `Hard Cut to Shot N. X Seconds. Framing Reference <<<image_K>>>` + the shot
+  prompt, where K is the frame's position in the submitted refs (style frame +
+  Visuals references counted first, per the user's "absolute upload position").
+- Member-frame sockets moved from inside the rows to the node's **left edge**
+  (`in-frame-<i>` beside Style/Reference), via a `sockets` override on
+  `PromptNodeView`.
+- Brand removed from the sequence prompt node (no socket/box) and the Brand
+  node hidden on the sequence canvas (`SEQUENCE_HIDDEN_TOOLS` += `"brand"`;
+  `nodeKindHidden`); generation renders Style-only visuals.
+- New UI coverage: no brand node, two left-edge `Shot` sockets, the Hard Cut
+  lines + total duration on submit.
+
+### Follow-up 2 (user feedback)
+- Segment timing simplified from a `startSec`/`endSec` range to a single
+  `SequenceSegment.durationSec` (whole seconds, min 1); `reflowSequenceSegments`
+  removed, `sequenceTotalDuration` is now the sum, and a legacy stored range
+  migrates to its length. The row shows one "N Seconds" input.
+- The node footer shows `Sequence Total: n Seconds`.
+- The generator's clip-length selector is back and seeds / re-seeds from the
+  timeline total (`VideoGenData.sequenceTotal`), snapping to a model-supported
+  length once its options load.
+- The right-hand node palette is hidden on the sequence canvas via a new
+  `NodeGraphModal` `hidePalette` prop (`SequenceGraphModal` passes it); the
+  reference shelf is kept.
+
+---
+
+# Node graph: multi-instance nodes + edit-video availability
 
 User request (3 parts):
 1. Disable the edit-video node when using the OpenArt MCP provider (it has no
@@ -2224,3 +2608,47 @@ new). No existing assertion weakened.
 
 Verification: `app` typecheck clean; `app` tests **1231 passed / 1 skipped** (105
 files); `app` build clean; `core` tests **147 passed** (16 files).
+
+---
+
+# Image Suite: flat history rail + Style picker in the generate flow
+
+User: the history rail's branch/tree indentation isn't needed — make it a
+straight list; and the generate flow should always expose a **Style dropdown**
+(not a bare Style text box that only appeared with a Style paragraph). Chosen
+behavior: full style cohesion.
+
+## Plan
+
+- [x] `SuiteHistoryRail.tsx`: drop the depth/indent computation, the `↳`
+      branch marker, and the inline `paddingLeft` — newest-first flat rows.
+      Removed the orphan `.suite-rail-branch` rule.
+- [x] `shared/ipc/suite.ts`: `styleId?` on `SuiteEntry`/`SuiteDraft`/
+      `SuiteGenerateRequest` + normalization.
+- [x] Pure `features/suite/suite-style.ts` `withSuiteStyle(prompt, style)`:
+      mirrors a style's text into the draft prompt's Style paragraph (None
+      clears it), only owning the stored text.
+- [x] `ImageGenForm`: optional `styleControl`/`styleReadOnly` props forwarded to
+      the prompt editor, so a caller can always show the Style section.
+- [x] `SuitePromptPanel`: in generate mode pass the Design-style `<select>` as
+      `styleControl` + `styleReadOnly`; change → `withSuiteStyle` + `styleId`.
+- [x] `suite:generate` (main): resolve `styleId` → style; in generate the style
+      frame is uploaded at reference 0 (tag resolution starts at token 1) and
+      the shared LOOK clause is prepended when the style owns a frame — the same
+      cohesion as `buildGenerationRequest`/`openArtPrompt`. `styleId` recorded
+      on the entry.
+- [x] `ImageSuite`: submit carries `styleId`; selecting an entry restores it.
+      The shot prompt's "Open in Suite" handoff seeds the shot's style id.
+
+## Review
+
+Done. The rail is a plain timeline (`parentId` is still stored — replay/branch
+semantics are unchanged — it's just no longer visualised as a tree). The
+generate flow's Style control is a real dropdown that is always present, and
+picking a style composes its text into the prompt (so the read-only preview
+matches) while main applies the frame + LOOK clause for full cohesion; edit and
+upscale ignore it (their source owns reference 0). Tests:
+`suite-style.test.ts` (pure mirroring) + `suite-ui.test.ts` (flat rail, dropdown
+presence/mirror/hidden outside generate) + a normalization case in
+`suite.test.ts`. Verified: `app` typecheck clean; `app` tests **1263 passed / 1
+skipped** (108 files); `app` build clean.

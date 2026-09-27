@@ -3,7 +3,7 @@
  * then a 5-step pipeline view. Step 1 (script ingestion + shot table) is live;
  * later steps show their planned surface and keep persisted state (style).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
@@ -36,6 +36,7 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
+import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
@@ -108,7 +109,7 @@ function ErrorNotice({ message, onClear }: { message: string; onClear: () => voi
     <div className="prod-error" role="alert">
       <span className="error-text">{message}</span>
       <button className="prod-error-clear" onClick={onClear} title="Dismiss error" aria-label="Dismiss error">
-        <XIcon size={12} />
+        Clear
       </button>
     </div>
   );
@@ -174,6 +175,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [styleZoom, setStyleZoom] = useState<string | null>(null);
   // step 2: set when the active chat model can't see images (shows a popup)
   const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
+  // Re-render when any generation queue changes so surfaces that read
+  // `genQueue.status(key)` during render (the style frames) show live counts.
+  const [, bumpGenQueue] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => genQueue.subscribe(bumpGenQueue), []);
   // step 3: board generation
   const [frameZoom, setFrameZoom] = useState(250);
   const [boardsBusy, setBoardsBusy] = useState(false);
@@ -181,6 +186,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [showBoardText, setShowBoardText] = useState(true);
   /** Shot ids currently regenerating (a Set so several frames can run in parallel). */
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
+  /** Per-shot count of regen clicks waiting behind the running batch. Reads as
+   *  "Generating… (N queued)" on the frame buttons. */
+  const [regenQueued, setRegenQueued] = useState<Record<string, number>>({});
   /** Shot ids whose pending generation job is being rechecked. */
   const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
   /** Shot ids whose pending video job is being fetched. */
@@ -188,7 +196,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
   // each load/save the whole production and clobber each other, so batches run
-  // strictly one at a time; clicks during a run join the next batch.
+  // strictly one at a time; every extra click during a run joins the next
+  // round (distinct shots stay parallel within one batch, repeats get their
+  // own round).
   const regenRunningRef = useRef(false);
   const regenPendingRef = useRef<string[]>([]);
   // Per-shot thumbnail cache-busters: bumping one shot reloads only that
@@ -1392,10 +1402,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 2: generate a style frame (look plate) for one style via IPC,
    *  forwarding its per-style model/resolution/params overrides ("auto"/
-   *  absent = inherit the production default). */
+   *  absent = inherit the production default). Queued per style so repeated
+   *  clicks wait their turn and the button shows the queued count. */
   function generateStyleFrame(styleId: string) {
-    if (!prod || styleFrameBusy) return;
-    const style = (prod.styles ?? []).find((s) => s.id === styleId);
+    const current = prodRef.current;
+    if (!current) return;
+    const style = (current.styles ?? []).find((s) => s.id === styleId);
     // A stored pick missing from the active vendor's list falls back to the
     // production default instead of billing (or failing on) a stale slug.
     const liveModel = style?.model && style.model !== "auto" && imageMasterModels.some((m) => m.id === style.model)
@@ -1404,9 +1416,15 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const model = styleFrameOverride(liveModel);
     const resolution = styleFrameOverride(style?.resolution);
     const params = style?.params && Object.keys(style.params).length ? { ...style.params } : undefined;
-    setStyleFrameBusy(styleId);
     setErr(null);
-    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution, params).finally(() => setStyleFrameBusy(null)));
+    genQueue.enqueue(genKeys.styleFrame(styleId), () => {
+      // Keep the sibling style-frame controls disabled while this job runs.
+      setStyleFrameBusy(styleId);
+      return window.cascade.generateStyleFrame(current.meta.id, styleId, model, resolution, params)
+        .then((next) => { applySnapshot(next); void refreshList(); })
+        .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
+        .finally(() => setStyleFrameBusy(null));
+    });
   }
 
   /** Step 2: reclaim a style frame from a vendor job that outlived the
@@ -1693,7 +1711,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    * `regenerateBoards` runs — several frames generate in parallel inside one
    * shared production (so their artwork never clobbers each other on save),
    * while batches themselves never overlap. Each shot tracks its own in-flight
-   * state in `regenIds`. */
+   * state in `regenIds`; repeated clicks queue another round and are counted in
+   * `regenQueued` so the button reads "Generating… (N queued)". */
   async function runRegenBatch(batch: string[]) {
     if (!prod) return;
     regenRunningRef.current = true;
@@ -1706,29 +1725,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
+      const pending = regenPendingRef.current;
+      // Keep a frame spinning while it still has a queued round, so the button
+      // never flickers to idle between batches.
       setRegenIds((prev) => {
         const n = new Set(prev);
-        batch.forEach((id) => n.delete(id));
+        batch.forEach((id) => { if (!pending.includes(id)) n.delete(id); });
         return n;
       });
       regenRunningRef.current = false;
-      // Dispatch anything queued while this batch was running.
-      if (regenPendingRef.current.length) {
-        const next = regenPendingRef.current.splice(0);
-        void runRegenBatch(next);
-      }
+      // Dispatch the next round (distinct shots together, repeats next round).
+      const { batch: nextBatch, remaining } = nextRegenRound(pending);
+      regenPendingRef.current = remaining;
+      setRegenQueued(countByShot(remaining));
+      if (nextBatch.length) void runRegenBatch(nextBatch);
     }
   }
 
   async function regenBoard(shotId: string) {
     if (!prod) return;
     await promptSaveQueue.current;
-    // Already queued/running — ignore the duplicate click.
-    if (regenPendingRef.current.includes(shotId) || regenIds.has(shotId)) return;
     if (regenRunningRef.current) {
-      // A batch is in flight; queue this shot for the next one.
+      // A batch is in flight; queue another round for this shot.
       regenPendingRef.current.push(shotId);
-      setRegenIds((prev) => new Set(prev).add(shotId)); // show its spinner while queued
+      setRegenQueued(countByShot(regenPendingRef.current));
     } else {
       void runRegenBatch([shotId]);
     }
@@ -3198,7 +3218,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const ids = order.map((s) => s.id).filter((id) => seqSelection.has(id));
     const reason = sequenceOverlapReason(ids, current.shotSequences ?? []);
     if (reason) { setErr(reason); return; }
-    const frames = ids.map((id) => ({ shotId: id, label: `Shot ${order.find((s) => s.id === id)?.number ?? "?"}` }));
+    const frames = ids.map((id) => {
+      const shot = order.find((s) => s.id === id);
+      return { shotId: id, label: `Shot ${shot?.number ?? "?"}`, durationSec: shot?.durationSec };
+    });
     saveField({ shotSequences: [...(current.shotSequences ?? []), createShotSequence(uid("seq"), frames, current.shotSequences ?? [])] });
     clearSeqSelection();
   }
@@ -3809,11 +3832,15 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                         <div className="prod-style-frame-row">
                           <button
                             className="prod-btn"
-                            disabled={styleFrameBusy !== null || !s.prompt.trim()}
-                            onClick={() => void generateStyleFrame(s.id)}
-                            title="Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"
+                            disabled={!s.prompt.trim()}
+                            onClick={() => generateStyleFrame(s.id)}
+                            title={genQueue.status(genKeys.styleFrame(s.id)).running
+                              ? "Generating… click to queue another"
+                              : "Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"}
                           >
-                            {styleFrameBusy === s.id ? "Working…" : <>{s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}<GenerationCostSuffix req={(() => {
+                            {genQueue.status(genKeys.styleFrame(s.id)).running
+                              ? genButtonLabel({ running: true, pending: genQueue.status(genKeys.styleFrame(s.id)).pending }, "Generate frame")
+                              : <>{s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}<GenerationCostSuffix req={(() => {
                               const liveModel = s.model && s.model !== "auto" && imageMasterModels.some((m) => m.id === s.model)
                                 ? s.model
                                 : prod.openArt?.model ?? "auto";
@@ -4214,6 +4241,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     shot={shot}
                     bust={boardBustFor(shot.id)}
                     regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
+                    regenQueued={regenQueued[shot.id] ?? 0}
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyShots.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
@@ -4303,12 +4331,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                   onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
                   submitting={!!promptShotId && regenIds.has(promptShotId)}
+                  queued={promptShotId ? regenQueued[promptShotId] ?? 0 : 0}
                   submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
                   onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
                   onOpenSuite={() => {
                     if (!promptShotId) return;
                     const shot = prod.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId);
-                    openImageSuite(prod.meta.id, { mode: "generate", prompt: liveFocusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}) });
+                    openImageSuite(prod.meta.id, { mode: "generate", prompt: liveFocusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}), ...(shot ? { styleId: shotStyleSelectValue(shot, prod) || undefined } : {}) });
                   }}
                   magicActive={!!prod.magicEnabled}
                   onRegenMagic={promptShotId ? () => regenMagicPrompt(promptShotId) : undefined}
@@ -4416,6 +4445,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   videoEditUnavailable={videoEditUnavailable}
                   busyNodeIds={(seq.graph?.graphVideoNodes ?? [{ id: "vid0", prompt: "" }]).map((n) => n.id).filter((id) => seqBusyAll.has(`${seq.id}:${id}`))}
                   readOnly={!detached && detachedWindow?.open === true && detachedWindow.target === "sequence"}
+                  framePromptFor={(shotId) => window.cascade.getBoardPrompt(prod.meta.id, shotId).then((t) => t ?? "")}
                   onClose={() => { setSeqCanvasId(null); }}
                   onGraphField={(patch) => updateSequenceGraph(seqCanvasId, patch)}
                   onGenerate={(opts) => runSequenceVideoGen(seqCanvasId, opts)}

@@ -143,11 +143,12 @@ describe("removeShotsFromSequences", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-seq-del-"));
     try {
       const p = makeProduction(root, [
-        { id: "s1", name: "Sequence 01", shotIds: ["a", "b"], graph: { id: "s1", number: "Sequence 01", audio: "", visual: "", graphVideoNodes: [{ id: "vid0", prompt: "", refIds: ["a", "b"] }] } },
+        { id: "s1", name: "Sequence 01", shotIds: ["a", "b"], graph: { id: "s1", number: "Sequence 01", audio: "", visual: "", graphVideoNodes: [{ id: "vid0", prompt: "", refIds: ["a", "b"] }], graphSequence: { segments: [{ shotId: "a", durationSec: 3, prompt: "" }, { shotId: "b", durationSec: 3, prompt: "" }] } } },
       ]);
       expect(removeShotsFromSequences(p, ["a"])).toEqual([]);
       expect(p.shotSequences![0]).toMatchObject({ shotIds: ["b"] });
       expect(p.shotSequences![0].graph!.graphVideoNodes![0].refIds).toEqual(["b"]);
+      expect(p.shotSequences![0].graph!.graphSequence!.segments).toEqual([{ shotId: "b", durationSec: 3, prompt: "" }]);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

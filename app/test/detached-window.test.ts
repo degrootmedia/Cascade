@@ -63,7 +63,7 @@ function controller(overrides: Partial<{ onClosed: () => void; url: string }> = 
   return c;
 }
 
-const graphCtx = (productionId = "p1", frameId: string | null = "s1") => ({ productionId, target: "graph" as const, frameId });
+const graphCtx = (productionId = "p1", frameId: string | null = "s1") => ({ productionId, target: "graph" as const, frameId, sequenceId: null });
 
 describe("validateDetachedContext", () => {
   it("rejects a malformed target", () => {
@@ -76,6 +76,16 @@ describe("validateDetachedContext", () => {
       productionId: "p1",
       target: "moodboard",
       frameId: null,
+      sequenceId: null,
+    });
+  });
+  it("requires a sequenceId for the sequence target", () => {
+    expect(() => validateDetachedContext({ productionId: "p1", target: "sequence" })).toThrow(/sequenceId/);
+    expect(validateDetachedContext({ productionId: "p1", target: "sequence", sequenceId: "sq1" })).toEqual({
+      productionId: "p1",
+      target: "sequence",
+      frameId: null,
+      sequenceId: "sq1",
     });
   });
 });
@@ -89,7 +99,7 @@ describe("DetachedCanvasController", () => {
 
     const first = FakeWindow.created[0];
     expect(first.loadUrls).toEqual(["http://localhost/?window=detached&target=graph"]);
-    expect(c.state()).toEqual({ open: true, productionId: "p1", target: "graph", frameId: "s1" });
+    expect(c.state()).toEqual({ open: true, productionId: "p1", target: "graph", frameId: "s1", sequenceId: null });
 
     c.open(graphCtx("p2", "s2"));
     expect(FakeWindow.created).toHaveLength(1); // still one window
@@ -97,7 +107,7 @@ describe("DetachedCanvasController", () => {
     expect(first.shown).toBe(1);
     // Retarget pushed to the same window.
     expect(first.sent.at(-1)).toEqual({ channel: "canvas:context", args: [graphCtx("p2", "s2")] });
-    expect(c.state()).toEqual({ open: true, productionId: "p2", target: "graph", frameId: "s2" });
+    expect(c.state()).toEqual({ open: true, productionId: "p2", target: "graph", frameId: "s2", sequenceId: null });
   });
 
   it("never loosens webPreferences (contextIsolation, no nodeIntegration, sandbox, shared preload)", () => {
@@ -140,7 +150,7 @@ describe("DetachedCanvasController", () => {
     c.open(graphCtx());
     FakeWindow.created[0].emitClosed();
     expect(closed).toBe(1);
-    expect(c.state()).toEqual({ open: false, productionId: null, target: null, frameId: null });
+    expect(c.state()).toEqual({ open: false, productionId: null, target: null, frameId: null, sequenceId: null });
     expect(c.isOpen()).toBe(false);
   });
 

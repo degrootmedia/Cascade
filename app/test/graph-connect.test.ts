@@ -59,9 +59,10 @@ function videoEditGraph(): Graph {
   let g = materializeGraph(
     shot({
       prompt: "Base @[Gondola]",
-      graphVideoPrompt: "Drift",
-      graphImageToVideo: true,
-      graphEditVideoPrompt: "Cut",
+      graphVideoNodes: [
+        { id: "vid0", prompt: "Drift", source: { kind: "imagegen" } },
+        { id: "ev0", mode: "edit", prompt: "Cut" },
+      ],
       graphOutputSource: "imagegen",
     }),
     REFS
@@ -407,6 +408,22 @@ describe("camera-grid wiring", () => {
     const next = graphEdgesForDetach(g, { type: "target", nodeId: "cameraGrid", handleId: "in-grid" }, camCtx);
     expect(next).not.toBeNull();
     expect(keysOf(next!)).not.toContain("e-ref-camgrid-grid");
+  });
+
+  it("the style node plugs the style socket (singleton)", () => {
+    const g = connect(withGrid(), conn("style", "cameraGrid", "in-style"));
+    expect(keysOf(g)).toContain("e-style-camgrid");
+    // Re-plugging is idempotent; a non-style source is rejected.
+    const again = connect(g, conn("style", "cameraGrid", "in-style"));
+    expect(keysOf(again).filter((id) => id === "e-style-camgrid")).toHaveLength(1);
+    expect(connectionToEdge(conn("brand", "cameraGrid", "in-style"), g)).toBeNull();
+  });
+
+  it("dragging the style wire off drops only that socket", () => {
+    const g = connect(withGrid(), conn("style", "cameraGrid", "in-style"));
+    const next = graphEdgesForDetach(g, detach("target", "cameraGrid", "in-style"), camCtx);
+    expect(next).not.toBeNull();
+    expect(keysOf(next!)).not.toContain("e-style-camgrid");
   });
 
   it("reference sockets route through applyCameraGridRefs, not connectionToEdge", () => {

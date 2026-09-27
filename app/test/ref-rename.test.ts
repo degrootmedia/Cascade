@@ -44,9 +44,11 @@ describe("renameReference", () => {
   it("renames the entry and rewrites its tags across every prompt store", () => {
     const shot = makeShot("0100", {
       prompt: "@[Hero] standing in the valley",
-      graphVideoPrompt: "slow push in @[Hero]",
       graphEditPrompt: "next edit @[Hero]",
-      graphEditVideoPrompt: "grade @[Hero]",
+      graphVideoNodes: [
+        { id: "vid0", prompt: "slow push in @[Hero]" },
+        { id: "ev0", mode: "edit", prompt: "grade @[Hero]" },
+      ],
       graphTweenBlocks: [
         { id: "tw0", startRefId: "r1", endRefId: "r2", prompt: "turn toward @[hero]", startSec: 0, durationSec: 2 },
       ],
@@ -74,9 +76,9 @@ describe("renameReference", () => {
 
     // Tags rewritten everywhere (case-insensitive), no old-name stragglers.
     expect(shot.prompt).toBe("@[Champion] standing in the valley");
-    expect(shot.graphVideoPrompt).toBe("slow push in @[Champion]");
+    expect(shot.graphVideoNodes?.find((n) => n.id === "vid0")?.prompt).toBe("slow push in @[Champion]");
     expect(shot.graphEditPrompt).toBe("next edit @[Champion]");
-    expect(shot.graphEditVideoPrompt).toBe("grade @[Champion]");
+    expect(shot.graphVideoNodes?.find((n) => n.id === "ev0")?.prompt).toBe("grade @[Champion]");
     expect(shot.graphEditNodes?.[0].prompt).toBe("make it night @[Champion]");
     expect(shot.graphTweenBlocks?.[0].prompt).toBe("turn toward @[Champion]");
     expect((p as unknown as Record<string, { [k: string]: string }>).magicPrompts["shot-0100"]).toBe("hello @[Champion]");

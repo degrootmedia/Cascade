@@ -96,7 +96,7 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
     kind: "editvideo",
     inputs: [
       { id: "in-prompt", label: "Prompt", media: "text", from: ["editvideoprompt"] },
-      { id: "in-video", label: "Source video", media: "video", from: ["videogen", "ref"] },
+      { id: "in-video", label: "Source video", media: "video", from: ["videogen", "editvideo", "ref"] },
     ],
     outputs: [{ id: "out", label: "Edit", media: "video" }],
   },
@@ -126,9 +126,11 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
     // A generator node: a source image plus reference sockets feed a 4x4 sheet
     // generation. It has no output (its panels are marqueed out as references).
     // The grid-image socket takes an already-made sheet to cut up (manual
-    // fallback), bypassing generation.
+    // fallback), bypassing generation. A style socket prepends the shot's
+    // effective style to the generated prompt, like every other prompt.
     kind: "cameraGrid",
     inputs: [
+      { id: "in-style", label: "Style", media: "text", from: ["style"] },
       { id: "in-image", label: "Source image", media: "image", from: ["imagegen", "editgen", "ref"] },
       { id: "in-grid", label: "Grid image", media: "image", from: ["imagegen", "editgen", "ref"] },
       { id: "in-ref-open", label: "Reference (open)", media: "image", accepts: ["image"] },

@@ -7,7 +7,7 @@
  *  the latest state on `did-finish-load`. */
 
 /** Which canvas a detached window hosts. */
-export type DetachedCanvasTarget = "graph" | "moodboard";
+export type DetachedCanvasTarget = "graph" | "moodboard" | "sequence";
 
 /** The context main pushes to the detached window (and tracks as "current"). */
 export interface DetachedCanvasContext {
@@ -15,6 +15,8 @@ export interface DetachedCanvasContext {
   target: DetachedCanvasTarget;
   /** The storyboard frame the detached graph follows (null = none selected). */
   frameId: string | null;
+  /** The shot sequence the detached canvas hosts (`target: "sequence"`). */
+  sequenceId?: string | null;
 }
 
 /** Snapshot of the detached window's state, returned by the window: channels. */
@@ -23,6 +25,7 @@ export interface DetachedCanvasState {
   productionId: string | null;
   target: DetachedCanvasTarget | null;
   frameId: string | null;
+  sequenceId: string | null;
 }
 
 /** In-flight canvas jobs for one production, mirrored between the main and the
@@ -42,6 +45,8 @@ export interface CanvasBusySnapshot {
   tween: Record<string, string>;
   /** Shot ids with a stitch/unstitch in flight. */
   stitching: string[];
+  /** `${sequenceId}:${nodeId}` for shot-sequence video nodes. */
+  sequences: string[];
 }
 
 /** Validate + sanitize an untrusted busy snapshot (main-side IPC boundary).
@@ -76,5 +81,6 @@ export function normalizeCanvasBusy(value: unknown): CanvasBusySnapshot {
     editNodes: strArray(o.editNodes, "editNodes"),
     tween,
     stitching: strArray(o.stitching, "stitching"),
+    sequences: strArray(o.sequences, "sequences"),
   };
 }

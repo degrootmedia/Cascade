@@ -43,14 +43,14 @@ describe("findGeneration", () => {
     const shot = makeShot("0100", {
       graphImageGens: [gen("i.jpg")],
       graphVideoGens: [gen("v.mp4")],
-      graphEditVideoGens: [gen("ev.mp4")],
+      graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "", gens: [gen("ev.mp4")] }],
       graphEditNodes: [{ id: "edit0", prompt: "", gens: [gen("e.jpg")] }],
       graphTweenBlocks: [{ id: "tw0", startRefId: "a", endRefId: "b", prompt: "", startSec: 0, durationSec: 2, gens: [gen("t.mp4")] }],
       artworkHistory: ["legacy.jpg"],
     });
     expect(findGeneration(shot, "i.jpg")).toMatchObject({ kind: "image", index: 0 });
     expect(findGeneration(shot, "v.mp4")).toMatchObject({ kind: "video", index: 0 });
-    expect(findGeneration(shot, "ev.mp4")).toMatchObject({ kind: "editvideo", index: 0 });
+    expect(findGeneration(shot, "ev.mp4")).toMatchObject({ kind: "video", index: 0, nodeId: "ev0" });
     expect(findGeneration(shot, "e.jpg")).toMatchObject({ kind: "edit", index: 0, nodeId: "edit0" });
     expect(findGeneration(shot, "t.mp4")).toMatchObject({ kind: "tween", index: 0, blockId: "tw0" });
     expect(findGeneration(shot, "legacy.jpg")).toBeNull();

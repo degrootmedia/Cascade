@@ -79,11 +79,13 @@ export interface Graph {
 
 /** What feeds a generation node's source input. `imagegen` = the image node's
  *  selected frame, `editgen` = an edit node's selected edit, `ref` = a
- *  reference's artwork. */
+ *  reference's artwork, `video` = another video node's selected clip (an
+ *  edit-video node's source). */
 export type GraphSource =
   | { kind: "imagegen" }
   | { kind: "editgen"; nodeId: string }
-  | { kind: "ref"; refId: string };
+  | { kind: "ref"; refId: string }
+  | { kind: "video"; nodeId: string };
 
 /** One panel rect on a camera-grid sheet, in normalized [0..1] sheet
  *  coordinates (row-major). Stored generically for any cols x rows grid. */
@@ -128,6 +130,10 @@ export interface CameraGridData {
   gridSource?: GraphSource;
   /** Reference ids wired into the reference sockets, in socket order. */
   refIds?: string[];
+  /** Whether the style node is plugged into the node's style socket
+   *  (`in-style`). When set, the shot's effective style is prepended to the
+   *  camera-grid prompt (`Style: …`, mirroring every other prompt). */
+  styleConnected?: boolean;
   /** The node's own model pick (per-node; wins over the media default). */
   model?: string;
   /** The node's own resolution tier. */
@@ -191,10 +197,16 @@ export interface GraphEditNode {
 /** One node-graph video-generation node. A shot may hold several; each owns
  *  its motion prompt, clip history, source frame, references, and model picks.
  *  The list is the source of truth; the legacy flat `graphVideo*` fields
- *  migrate into a single `vid0` entry on load. Mirrors `GraphEditNode`. */
+ *  migrate into a single `vid0` entry on load. Mirrors `GraphEditNode`.
+ *  An `edit`-mode entry is an edit-video node (id `ev0`, `ev1`, …) that rides
+ *  the same list machinery; its `source` is a video-node clip or a reference,
+ *  absent = the shot's own clip. */
 export interface GraphVideoNode {
-  /** Stable identity within the shot: "vid0", "vid1", …. */
+  /** Stable identity within the shot: "vid0", "vid1", … for generate nodes
+   *  and "ev0", "ev1", … for edit nodes. Absent `mode` = "generate". */
   id: string;
+  /** "generate" (default) or "edit" (an edit-video node). */
+  mode?: "generate" | "edit";
   /** The node's own motion prompt (its `videoprompt` node's text). */
   prompt: string;
   /** Stored clips (newest first) + the selected index. */
@@ -208,8 +220,8 @@ export interface GraphVideoNode {
   /** Schema-driven advanced/variant params for this node (keyed by canonical
    *  flag). Optional/additive. */
   params?: GenParams;
-  /** What feeds this node's source input (`in-image`). Absent = the shot's
-   *  current frame. */
+  /** What feeds this node's source input (`in-image` for generate nodes,
+   *  `in-video` for edit nodes). Absent = the shot's current frame/clip. */
   source?: GraphSource;
   /** Reference ids feeding this node's extra reference sockets, in order. */
   refIds?: string[];
@@ -240,6 +252,48 @@ export function parseVideoGenNode(id: string): string | null {
 export function parseVideoPromptNode(id: string): string | null {
   if (id === "videoprompt") return "vid0";
   return id.startsWith(VIDEOPROMPT_NODE_PREFIX) ? id.slice(VIDEOPROMPT_NODE_PREFIX.length) : null;
+}
+
+/** The next unused video node id in a node list ("vid0", "vid1", …). */
+export function nextVideoNodeId(nodes: { id: string }[]): string {
+  let i = 0;
+  while (nodes.some((n) => n.id === `vid${i}`)) i++;
+  return `vid${i}`;
+}
+
+/** Canvas node-id prefixes for the per-edit-video-node pair. The first node
+ *  keeps the historical bare ids (`editvideo` / `editvideoprompt`) so
+ *  pre-multi-node stored graphs and edges stay valid; additional nodes are
+ *  suffixed (`editvideo:ev1`). */
+export const EDITVIDEO_NODE_PREFIX = "editvideo:";
+export const EDITVIDEOPROMPT_NODE_PREFIX = "editvideoprompt:";
+/** Canvas id for an edit-video node's generator (ev0 = bare legacy id). */
+export function editVideoGenNodeId(nodeId: string): string {
+  return nodeId === "ev0" ? "editvideo" : `${EDITVIDEO_NODE_PREFIX}${nodeId}`;
+}
+/** Canvas id for an edit-video node's prompt node (ev0 = bare). */
+export function editVideoPromptNodeId(nodeId: string): string {
+  return nodeId === "ev0" ? "editvideoprompt" : `${EDITVIDEOPROMPT_NODE_PREFIX}${nodeId}`;
+}
+/** The node id a canvas editvideo node refers to (bare = ev0). */
+export function parseEditVideoGenNode(id: string): string | null {
+  if (id === "editvideo") return "ev0";
+  return id.startsWith(EDITVIDEO_NODE_PREFIX) ? id.slice(EDITVIDEO_NODE_PREFIX.length) : null;
+}
+/** The node id a canvas editvideoprompt node refers to (bare = ev0). */
+export function parseEditVideoPromptNode(id: string): string | null {
+  if (id === "editvideoprompt") return "ev0";
+  return id.startsWith(EDITVIDEOPROMPT_NODE_PREFIX) ? id.slice(EDITVIDEOPROMPT_NODE_PREFIX.length) : null;
+}
+/** The next unused edit-video node id in a node list ("ev0", "ev1", …). */
+export function nextEditVideoNodeId(nodes: { id: string }[]): string {
+  let i = 0;
+  while (nodes.some((n) => n.id === `ev${i}`)) i++;
+  return `ev${i}`;
+}
+/** The edit-mode entries of a video node list. */
+export function editVideoNodes(nodes: GraphVideoNode[] | undefined): GraphVideoNode[] {
+  return (nodes ?? []).filter((n) => n.mode === "edit");
 }
 
 /** In-betweener keyframe source sentinels that read a generation node's output

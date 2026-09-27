@@ -7,10 +7,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, TweenBlock, UpscaleData }
+import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, ShotSequence, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
-import { sanitizeGenParams } from "../shared/ipc.js";
-import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateGraphGenerations,
+import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
+import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath }
 from "./pipeline.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
@@ -79,6 +79,20 @@ function normalize(p: ProductionFile): ProductionFile {
   // main only drops a non-object so a corrupt file can't poison the merge.
   if (p.moodboard !== undefined && (p.moodboard === null || typeof p.moodboard !== "object")) {
     delete (p as { moodboard?: unknown }).moodboard;
+  }
+  // Shot sequences are read-repaired here: dead member ids are pruned,
+  // duplicates/corrupt entries dropped, and a sequence left with no member
+  // vanishes. Outdated panels count as live members (like magicPrompts keys
+  // above) so a re-ingest preserves sequences whole and a restore brings them
+  // back; their clips are preserved by the write-side `removeShotSequence`
+  // paths when a member is deleted for good. Absent stays absent (additive).
+  if (p.shotSequences !== undefined) {
+    const liveIds = new Set([
+      ...p.scenes.flatMap((sc) => sc.shots.map((s) => s.id)),
+      ...(p.outdatedShots ?? []).map((s) => s.id),
+    ]);
+    const liveRefIds = new Set((p.references ?? []).map((r) => r.id));
+    p.shotSequences = normalizeShotSequences(p.shotSequences, liveIds, liveRefIds);
   }
   return p;
 }
@@ -215,8 +229,13 @@ function takeGenIndex(
  *  fresh generation. */
 function mergeCameraGrid(
   freshGrid: CameraGridData | undefined,
-  incomingGrid: CameraGridData | undefined
+  incomingGrid: CameraGridData | undefined,
+  removed: boolean
 ): CameraGridData | undefined {
+  // The renderer explicitly cleared the node (delete-key held no sheet to
+  // block it) — honour the deletion so it can't resurrect from the fresh
+  // document. A plain absent value still keeps the fresh main-written sheet.
+  if (removed) return undefined;
   if (!incomingGrid) return freshGrid;
   if (!freshGrid) return incomingGrid;
   const freshAt = typeof freshGrid.sheetAt === "string" ? freshGrid.sheetAt : "";
@@ -245,8 +264,11 @@ function mergeCameraGrid(
  *  wiring and model/resolution/params picks. */
 function mergeUpscale(
   freshNode: UpscaleData | undefined,
-  incomingNode: UpscaleData | undefined
+  incomingNode: UpscaleData | undefined,
+  removed: boolean
 ): UpscaleData | undefined {
+  // The renderer explicitly cleared the node — honour the deletion.
+  if (removed) return undefined;
   if (!incomingNode) return freshNode;
   if (!freshNode) return incomingNode;
   const { gens: _gens, genIndex: _idx, ...rest } = incomingNode;
@@ -255,59 +277,82 @@ function mergeUpscale(
   return node;
 }
 
-/** Merge one shot's edit-image nodes by stable node id: the fresh node owns
- *  its generation history (main-side appends), the incoming snapshot owns the
- *  node's editable fields (prompt, wiring, model picks). Nodes only the
- *  incoming snapshot has are creations racing this save — adopt them whole. */
-function mergeEditNodes(
-  freshNodes: GraphEditNode[] | undefined,
-  incomingNodes: GraphEditNode[] | undefined
-): GraphEditNode[] | undefined {
+/** The identity + generation-history shape every node-graph list entry
+ *  (edit-image / video / edit-video) shares, so membership + history merge
+ *  once. */
+interface GraphNodeHistory {
+  id: string;
+  gens?: { path: string }[];
+  genIndex?: number;
+}
+
+/**
+ * Merge one shot's node-graph list (edit-image or video nodes) by stable node
+ * id. **The renderer owns membership** — the incoming snapshot's node list is
+ * authoritative, so a deletion sticks (the union this replaced could never
+ * tell "deleted" from "stale snapshot" and resurrected every node the fresh
+ * document still held; see `mergeShotSequences`, which already works this way).
+ * For a surviving id the fresh document owns the generation history (main-side
+ * appends) and the incoming snapshot owns the editable fields (prompt, wiring,
+ * model picks); an id only the incoming snapshot has is a renderer creation,
+ * adopted whole.
+ */
+function mergeGraphNodes<T extends GraphNodeHistory>(
+  freshNodes: T[] | undefined,
+  incomingNodes: T[] | undefined
+): T[] | undefined {
   if (!incomingNodes) return freshNodes;
-  const incomingById = new Map<string, GraphEditNode>();
-  for (const n of incomingNodes) {
-    if (n && typeof n.id === "string" && !incomingById.has(n.id)) incomingById.set(n.id, n);
+  const freshById = new Map<string, T>();
+  for (const n of freshNodes ?? []) {
+    if (n && typeof n.id === "string" && !freshById.has(n.id)) freshById.set(n.id, n);
   }
-  const out = (freshNodes ?? []).map((fn) => {
-    const inc = incomingById.get(fn.id);
-    if (!inc) return fn;
+  const out: T[] = [];
+  const seen = new Set<string>();
+  for (const inc of incomingNodes) {
+    if (!inc || typeof inc.id !== "string" || seen.has(inc.id)) continue;
+    seen.add(inc.id);
+    const fn = freshById.get(inc.id);
+    if (!fn) { out.push({ ...inc }); continue; }
     const { gens: _gens, genIndex: _idx, id: _id, ...rest } = inc;
-    const node: GraphEditNode = { ...fn, ...rest };
+    const node = { ...fn, ...rest } as T;
     node.genIndex = takeGenIndex(inc.genIndex, inc.gens, fn.genIndex, fn.gens);
-    return node;
-  });
-  for (const [id, inc] of incomingById) {
-    if (!(freshNodes ?? []).some((n) => n.id === id)) out.push({ ...inc });
+    out.push(node);
   }
   return out;
 }
 
-/** Merge one shot's video-generation nodes by stable node id: the fresh node
- *  owns its clip history (main-side appends), the incoming snapshot owns the
- *  node's editable fields (prompt, wiring, model picks). Nodes only the
- *  incoming snapshot has are creations racing this save — adopt them whole.
- *  Mirrors `mergeEditNodes`. */
-function mergeVideoNodes(
-  freshNodes: GraphVideoNode[] | undefined,
-  incomingNodes: GraphVideoNode[] | undefined
-): GraphVideoNode[] | undefined {
-  if (!incomingNodes) return freshNodes;
-  const incomingById = new Map<string, GraphVideoNode>();
-  for (const n of incomingNodes) {
-    if (n && typeof n.id === "string" && !incomingById.has(n.id)) incomingById.set(n.id, n);
+/** Merge the shot-sequence list by stable id. The renderer owns the list and
+ *  every editable field (span, canvas layout, accent, enable, duration, picks)
+ *  so creations/edits/deletions ride through; only the per-entry video node's
+ *  generation history is main-owned (generated takes land there) and merges
+ *  exactly like the shot's video nodes — a stale renderer snapshot can never
+ *  revert a finished sequence clip. Entries only the incoming snapshot has are
+ *  creations racing this save — adopt them whole. */
+function mergeShotSequences(
+  freshSeqs: ShotSequence[] | undefined,
+  incomingSeqs: ShotSequence[] | undefined
+): ShotSequence[] {
+  if (!incomingSeqs) return freshSeqs ?? [];
+  const freshById = new Map<string, ShotSequence>();
+  for (const s of freshSeqs ?? []) {
+    if (s && typeof s.id === "string" && !freshById.has(s.id)) freshById.set(s.id, s);
   }
-  const out = (freshNodes ?? []).map((fn) => {
-    const inc = incomingById.get(fn.id);
-    if (!inc) return fn;
-    const { gens: _gens, genIndex: _idx, id: _id, ...rest } = inc;
-    const node: GraphVideoNode = { ...fn, ...rest };
-    node.genIndex = takeGenIndex(inc.genIndex, inc.gens, fn.genIndex, fn.gens);
-    return node;
+  return incomingSeqs.map((inc) => {
+    const f = inc && typeof inc.id === "string" ? freshById.get(inc.id) : undefined;
+    if (!f) return inc;
+    const { graph: incGraph, id: _id, ...rest } = inc;
+    const merged: ShotSequence = { ...f, ...rest, id: inc.id };
+    // The canvas state is a shot-shaped sub-document: merge it with the same
+    // per-shot rules (main owns the take histories, the renderer the wiring,
+    // prompts, picks, and layout).
+    if (incGraph) {
+      merged.graph = mergeRendererShot(
+        f.graph ?? { id: inc.id, number: inc.name, audio: "", visual: "" },
+        incGraph
+      );
+    }
+    return merged;
   });
-  for (const [id, inc] of incomingById) {
-    if (!(freshNodes ?? []).some((n) => n.id === id)) out.push({ ...inc });
-  }
-  return out;
 }
 
 /** Merge in-betweener action blocks by keyframe pair (start/end source ids —
@@ -360,6 +405,14 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     "graphImageGens", "graphVideoGens", "graphEditGens", "graphEditVideoGens",
     "graphTweenOutput", "pendingImageGen", "pendingVideoGen", "graphMigrated",
     "graphImageGenIndex", "graphVideoGenIndex", "graphEditVideoGenIndex",
+    // Legacy flat edit-video fields: `migrateEditVideoNodes` folds them into an
+    // `ev0` entry and its guard is "no edit-mode node present", so a stale
+    // snapshot re-introducing them could re-synthesize a node the user
+    // deleted. Main owns the migration (the fresh document is already folded),
+    // so they are never accepted from the renderer.
+    "graphEditVideoPrompt", "graphEditVideoModel", "graphEditVideoResolution",
+    "graphEditVideoParams", "graphEditVideoRefIds", "graphEditVideoSourceRefId",
+    "graphVideoToEditVideo",
   ]);
   const merged: ProductionShot = { ...freshShot };
   const mergedRec = merged as unknown as Record<string, unknown>;
@@ -381,15 +434,19 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     incoming.graphVideoGenIndex, incoming.graphVideoGens,
     freshShot.graphVideoGenIndex, freshShot.graphVideoGens
   );
-  merged.graphEditVideoGenIndex = takeGenIndex(
-    incoming.graphEditVideoGenIndex, incoming.graphEditVideoGens,
-    freshShot.graphEditVideoGenIndex, freshShot.graphEditVideoGens
-  );
-  merged.graphEditNodes = mergeEditNodes(freshShot.graphEditNodes, incoming.graphEditNodes);
-  merged.graphVideoNodes = mergeVideoNodes(freshShot.graphVideoNodes, incoming.graphVideoNodes);
+  // Node-graph membership is renderer-owned: the incoming node list is
+  // authoritative, so deleting a node sticks. The fresh document still owns
+  // each surviving node's generation history (see mergeGraphNodes).
+  merged.graphEditNodes = mergeGraphNodes(freshShot.graphEditNodes, incoming.graphEditNodes);
+  merged.graphVideoNodes = mergeGraphNodes(freshShot.graphVideoNodes, incoming.graphVideoNodes);
   merged.graphTweenBlocks = mergeTweenBlocks(freshShot.graphTweenBlocks, incoming.graphTweenBlocks);
-  merged.graphCameraGrid = mergeCameraGrid(freshShot.graphCameraGrid, incoming.graphCameraGrid);
-  merged.graphUpscale = mergeUpscale(freshShot.graphUpscale, incoming.graphUpscale);
+  // The singleton tool nodes carry their deletion as an explicit undefined
+  // (like the artwork/videoPath clears below): a plain absent value keeps the
+  // fresh main-written sheet/output, but an explicit clear means "deleted".
+  const clearedCameraGrid = "graphCameraGrid" in incomingRec && (incoming as { graphCameraGrid?: unknown }).graphCameraGrid == null;
+  const clearedUpscale = "graphUpscale" in incomingRec && (incoming as { graphUpscale?: unknown }).graphUpscale == null;
+  merged.graphCameraGrid = mergeCameraGrid(freshShot.graphCameraGrid, incoming.graphCameraGrid, clearedCameraGrid);
+  merged.graphUpscale = mergeUpscale(freshShot.graphUpscale, incoming.graphUpscale, clearedUpscale);
   // Explicit clears ride the whole-document save (unpipe flows send
   // artwork/videoPath as explicit nulls). A stale echo carries paths, never
   // nulls, so honouring nulls cannot resurrect or cross-wire frames.
@@ -442,8 +499,10 @@ function mergeRendererScenes(fresh: ProductionFile, incoming: Production): void 
     // Fold any legacy single-edit fields from a stale renderer payload into
     // the edit-node list before the output pipe is re-derived from it.
     migrateEditNodes(shot);
-    // Same for the legacy single video-generation node.
+    // Same for the legacy single video-generation node, then the legacy
+    // single edit-video node (which folds into the video-node list).
     migrateVideoNodes(shot);
+    migrateEditVideoNodes(shot);
     // The output pipe is authoritative: re-derive artwork/videoPath so a
     // renderer save with a stale or missing frame can't diverge from the
     // graph's frame output node (e.g. an edit-image node piped to output).
@@ -547,6 +606,12 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // `normalizeMoodboardLayout`; main only stores it verbatim so a save never
   // partitions it across two writers.
   if (p.moodboard && typeof p.moodboard === "object") fresh.moodboard = p.moodboard;
+  // Shot sequences: renderer-owned span/canvas/picks (see mergeShotSequences),
+  // with the per-entry generation history kept main-side — the same deal the
+  // shot's video nodes get, one level up. Absent stays absent (additive).
+  if (p.shotSequences !== undefined || fresh.shotSequences !== undefined) {
+    fresh.shotSequences = mergeShotSequences(fresh.shotSequences, Array.isArray(p.shotSequences) ? p.shotSequences : undefined);
+  }
   return fresh;
 }
 
@@ -600,6 +665,7 @@ function migrateBoardArtwork(p: Production): boolean {
       if (migrateGraphPipes(s)) changed = true;
       if (migrateEditNodes(s)) changed = true;
       if (migrateVideoNodes(s)) changed = true;
+      if (migrateEditVideoNodes(s)) changed = true;
       if (syncTweenBlocks(p, s)) changed = true;
       if (s.artwork && migrateBoardArtworkToJpeg(p, s)) changed = true;
       if (relocateBoardLayout(p, s)) changed = true;
@@ -669,9 +735,10 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
   };
   shot.prompt = stripField(shot.prompt, "composer");
   shot.graphVideoPrompt = stripField(shot.graphVideoPrompt, "videoprompt");
-  shot.graphEditVideoPrompt = stripField(shot.graphEditVideoPrompt, "editvideoprompt");
   for (const n of shot.graphVideoNodes ?? []) {
-    const next = stripField(n.prompt, { videoprompt: n.id });
+    const next = n.mode === "edit"
+      ? stripField(n.prompt, { editvideoprompt: n.id })
+      : stripField(n.prompt, { videoprompt: n.id });
     if (next !== n.prompt) n.prompt = next ?? "";
   }
   // graphEditPrompt (the classic draft for the NEXT edit) is left verbatim —

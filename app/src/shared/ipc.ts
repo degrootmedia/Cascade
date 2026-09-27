@@ -101,6 +101,7 @@ export * from "./ipc/suite.js";
 export * from "./ipc/todos.js";
 export * from "./ipc/window.js";
 export * from "./ipc/camera-grid.js";
+export * from "./ipc/shot-sequence.js";
 
 
 export interface ApprovalRequestIpc {
@@ -566,6 +567,19 @@ export interface CascadeApi {
   restoreOutdatedShot(productionId: string, shotId: string): Promise<Production>;
   /** Permanently delete an outdated panel and its preserved board files. */
   removeOutdatedShot(productionId: string, shotId: string): Promise<Production>;
+  /**
+   * Delete a shot sequence. When the sequence has a generated video, the clip
+   * is first copied into the references panel's "Shot Sequences" category (the
+   * confirm dialog warns about this), so the generated work survives the
+   * span. Returns the updated production.
+   */
+  deleteShotSequence(productionId: string, sequenceId: string): Promise<Production>;
+  /**
+   * Delete one stored take from a shot sequence's canvas (right-click a take).
+   * The file is unlinked and the history entry dropped. Returns the updated
+   * production.
+   */
+  deleteSequenceTake(productionId: string, sequenceId: string, rel: string): Promise<Production>;
   /** Start a production without a script: one scene with five blank shots (refuses when scenes already exist). */
   startBlank(productionId: string): Promise<Production>;
   /** Insert an empty scene after the given ordinal (0 = before the first, null = at the end); later scenes renumber. */
@@ -683,7 +697,7 @@ export interface CascadeApi {
    * (then _01, _02, …), without tagging any prompt. Returns the updated
    * production.
    */
-  saveGenerationAsReference(productionId: string, shotId: string, rel: string): Promise<Production>;
+  saveGenerationAsReference(productionId: string, shotId: string, rel: string, sequenceId?: string): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
@@ -723,6 +737,15 @@ export interface CascadeApi {
    * video generation node. Returns the updated production.
    */
   generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
+  /**
+   * Shot sequence canvas: generate the sequence's clip. The member frames
+   * wired into the video node ride as visual references (the first doubles as
+   * the animated source frame). The clip is written to the sequence's own
+   * folder under `out/sequences/` and recorded on its video node — the
+   * selected take IS the sequence video that replaces the span in the
+   * animatic. Returns the updated production.
+   */
+  generateSequenceVideo(productionId: string, sequenceId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /**
    * Step 3 in-betweener node: generate one action block's clip (start keyframe
    * → end keyframe interpolation for `blockId`). The clip is stored on the
@@ -810,7 +833,11 @@ export interface CascadeApi {
   generationCost(req: GenerationCostRequest): Promise<number | null>;
   /** Step 3 node graph: edit one video (mandatory video source + prompt +
    *  references) and store the result on the shot's edit-video node. */
-  generateEditVideoNode(productionId: string, shotId: string, opts: { prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  generateEditVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  /** Shot sequence canvas: edit one video on one of its edit-mode video nodes
+   *  (mandatory source clip + prompt + references). The result is stored on the
+   *  sequence's video node take history. */
+  generateSequenceEditVideo(productionId: string, sequenceId: string, opts: { nodeId?: string; prompt: string; model: string; resolution?: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
   /** Step 3: Magic Prompt — regenerate ONE shot's content prompt, replacing only that entry. */

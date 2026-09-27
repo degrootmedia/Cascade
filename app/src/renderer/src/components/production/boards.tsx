@@ -18,7 +18,7 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -47,6 +47,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   /** Whether the Audio/Visual direction boxes render under the frame. */
   showScript: boolean;
   onPromptFocus: (shotId: string, prompt: string) => void;
+  /** Frame-click selection: "single" anchors (and clears) the shot-sequence
+   *  range, "range" extends it from the anchor (Shift-click). Plain clicks
+   *  still focus the prompt afterwards; Shift-clicks only select. */
+  onFrameSelect?: (shotId: string, mode: "single" | "range") => void;
+  /** This card sits inside the current shot-sequence range (highlight). */
+  inRange?: boolean;
+  /** Room for the sequence bar under this card (animated bottom slot). */
+  seqSlot?: boolean;
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
   onDropFrame: (shotId: string, source: { prodId: string; shotId: string; number: number }) => void;
@@ -287,10 +295,19 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
   // focused-shot effect) only when a card is clicked — see onPromptFocus.
 
+  // Frame clicks drive BOTH focus (the prompt panel follows) and the shot-
+  // sequence range selection. Shift-click extends the range from the anchor
+  // and leaves the prompt panel where it is; a plain click re-anchors.
+  function frameClick(e: React.MouseEvent) {
+    if (onFrameSelect) onFrameSelect(shot.id, e.shiftKey ? "range" : "single");
+    if (!e.shiftKey) onPromptFocus(shot.id, "");
+  }
+
   return (
     <figure
       ref={cardRef}
-      className={"prod-board" + (selected ? " selected" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
+      data-shot-id={shot.id}
+      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
       onContextMenu={onDelete ? openPanelMenu : undefined}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
@@ -338,7 +355,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
       )}
       <div
         className="prod-board-frame"
-        onClick={() => onPromptFocus(shot.id, "")}
+        onClick={frameClick}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-cascade-frame")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
           else if (onDropFiles && Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
@@ -410,7 +427,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             onMouseEnter={() => { try { boardVideoRef.current?.play(); } catch {} }}
             onMouseLeave={() => { try { boardVideoRef.current?.pause(); } catch {} }}
             onError={() => setVideoFailed(true)}
-            onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+            onClick={(e) => { e.stopPropagation(); frameClick(e); }}
             onContextMenu={onDelete ? openPanelMenu : undefined}
             onDragStart={(e) => {
               // Carry this frame's identity so another frame can accept it as a reference.
@@ -432,7 +449,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
               // already waited for first paint + viewport + queue slot.
               loading="lazy"
               decoding="async"
-              onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+              onClick={(e) => { e.stopPropagation(); frameClick(e); }}
               onContextMenu={onDelete ? openPanelMenu : undefined}
               onDragStart={(e) => {
                 // Carry this frame's identity so another frame can accept it as a reference.

@@ -572,10 +572,10 @@ describe("node-graph tool panel", () => {
     expect(pos.videoprompt.y).toBe(pos.videogen.y);
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(1);
 
-    // Unused → removable; returns the pair to the panel.
-    const removeBtn = host.querySelector(".prod-graph-tools-remove:not(:disabled)") as HTMLButtonElement;
-    expect(removeBtn).toBeTruthy();
-    await act(async () => { removeBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
+    // Unused → removable (select + Delete); returns the pair to the panel.
+    selectNode(host, ".prod-graph-node.prod-graph-videogen");
+    await pressDeleteKey(host);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(toolNodeCount(host)).toBe(0);
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 

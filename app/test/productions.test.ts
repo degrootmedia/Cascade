@@ -445,9 +445,12 @@ describe("applyRendererState", () => {
   });
 
   it("keeps an edit-video clip path the renderer selects", () => {
-    // pipeEditVideoToOutput is a whole-document save with no follow-up
-    // channel, and no pipe sync derives the edit-video path — so the string
-    // must ride through the merge.
+    // An edit-mode video node owns the take history; the output pipe sync
+    // derives the shot's videoPath from the node's selected take.
+    const gens = [
+      { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
+      { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
+    ];
     const fresh = baseProduction({
       scenes: [{
         number: 1,
@@ -458,12 +461,9 @@ describe("applyRendererState", () => {
           audio: "",
           visual: "Hero",
           videoPath: "boards/0100/video/shot-0100-old.mp4",
-          graphEditVideoGens: [
-            { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
-            { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
-          ],
-          graphEditVideoGenIndex: 1,
-          graphOutputSource: "editvideo" as const,
+          graphVideoNodes: [{ id: "ev0", mode: "edit" as const, prompt: "e", gens, genIndex: 1 }],
+          graphOutputSource: "videogen" as const,
+          graphOutputVideoNodeId: "ev0",
         }],
       }],
     });
@@ -477,18 +477,15 @@ describe("applyRendererState", () => {
           audio: "",
           visual: "Hero",
           videoPath: "boards/0100/video/shot-0100-new.mp4",
-          graphEditVideoGens: [
-            { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
-            { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
-          ],
-          graphEditVideoGenIndex: 0,
-          graphOutputSource: "editvideo" as const,
+          graphVideoNodes: [{ id: "ev0", mode: "edit" as const, prompt: "e", gens, genIndex: 0 }],
+          graphOutputSource: "videogen" as const,
+          graphOutputVideoNodeId: "ev0",
         }],
       }],
     });
     const merged = applyRendererState(fresh, incoming);
     expect(merged.scenes[0].shots[0].videoPath).toBe("boards/0100/video/shot-0100-new.mp4");
-    expect(merged.scenes[0].shots[0].graphEditVideoGenIndex).toBe(0);
+    expect(merged.scenes[0].shots[0].graphVideoNodes?.[0].genIndex).toBe(0);
   });
 
   it("adopts edit nodes created after the snapshot and keeps fresh histories", () => {
@@ -537,6 +534,125 @@ describe("applyRendererState", () => {
     expect(nodes[0].prompt).toBe("new prompt");
     expect(nodes[0].gens).toEqual(fresh.scenes[0].shots[0].graphEditNodes![0].gens);
     expect(nodes[1].prompt).toBe("second pass");
+  });
+
+  it("keeps graph nodes the renderer deleted deleted (renderer owns membership)", () => {
+    // The renderer's node list is authoritative: an empty list means "deleted",
+    // not "stale snapshot". The previous id-keyed union kept every fresh node
+    // the incoming list omitted, resurrecting deleted edit/video nodes on the
+    // next reload.
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          graphEditNodes: [
+            { id: "edit0", prompt: "a", gens: [{ path: "boards/0100/a.jpg", prompt: "a", model: "m", at: "" }] },
+            { id: "edit1", prompt: "b" },
+            { id: "edit2", prompt: "c" },
+          ],
+          graphVideoNodes: [
+            { id: "vid0", prompt: "v" },
+            { id: "ev0", mode: "edit" as const, prompt: "e" },
+          ],
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{ id: "shot1", number: "0100", audio: "", visual: "Hero", graphEditNodes: [], graphVideoNodes: [] }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots[0].graphEditNodes).toEqual([]);
+    expect(merged.scenes[0].shots[0].graphVideoNodes).toEqual([]);
+  });
+
+  it("drops a surviving node's fresh history onto the incoming list by id", () => {
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          graphVideoNodes: [
+            { id: "vid0", prompt: "keep", gens: [{ path: "boards/0100/v0.mp4", prompt: "keep", model: "m", at: "" }] },
+            { id: "vid1", prompt: "gone" },
+          ],
+        }],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [{
+          id: "shot1",
+          number: "0100",
+          audio: "",
+          visual: "Hero",
+          // vid1 deleted; vid0's prompt edited after the snapshot.
+          graphVideoNodes: [{ id: "vid0", prompt: "edited" }],
+        }],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    const nodes = merged.scenes[0].shots[0].graphVideoNodes!;
+    expect(nodes.map((n) => n.id)).toEqual(["vid0"]);
+    expect(nodes[0].prompt).toBe("edited");
+    // Main-owned clip history survives on the kept node.
+    expect(nodes[0].gens).toEqual(fresh.scenes[0].shots[0].graphVideoNodes![0].gens);
+  });
+
+  it("honours an explicit camera-grid/upscale deletion but keeps an untouched fresh one", () => {
+    const fresh = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [
+          {
+            id: "deleted",
+            number: "0100",
+            audio: "",
+            visual: "A",
+            graphCameraGrid: { cols: 4, rows: 4, source: { kind: "imagegen" } } as CameraGridData,
+            graphUpscale: { source: { kind: "imagegen" }, model: "topaz" },
+          },
+          {
+            id: "kept",
+            number: "0200",
+            audio: "",
+            visual: "B",
+            graphCameraGrid: { cols: 4, rows: 4, sheetPath: "references/grids/g.png" } as CameraGridData,
+          },
+        ],
+      }],
+    });
+    const incoming = baseProduction({
+      scenes: [{
+        number: 1,
+        title: "S1",
+        shots: [
+          // Explicit undefined = the renderer deleted the singleton nodes.
+          { id: "deleted", number: "0100", audio: "", visual: "A", graphCameraGrid: undefined, graphUpscale: undefined },
+          // Untouched: no explicit clear, so the fresh main-written sheet stays.
+          { id: "kept", number: "0200", audio: "", visual: "B" },
+        ],
+      }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.scenes[0].shots[0].graphCameraGrid).toBeUndefined();
+    expect(merged.scenes[0].shots[0].graphUpscale).toBeUndefined();
+    expect(merged.scenes[0].shots[1].graphCameraGrid?.sheetPath).toBe("references/grids/g.png");
   });
 
   it("overlays tween block prompts by keyframe pair and keeps fresh histories", () => {
@@ -999,5 +1115,109 @@ describe("too-old production guard (step 10 T5)", () => {
     delete (legacy as { schemaVersion?: number }).schemaVersion;
     saveProduction(legacy);
     expect(loadProduction(legacy.meta.id)?.schemaVersion).toBe(3);
+  });
+});
+
+describe("shotSequences persistence", () => {
+  type SeqGraph = NonNullable<Production["shotSequences"]>[number]["graph"];
+  const live = (): Production["scenes"] => [
+    { number: 1, title: "S1", shots: [
+      { id: "a", number: "0100", audio: "", visual: "v" },
+      { id: "b", number: "0200", audio: "", visual: "v" },
+      { id: "c", number: "0300", audio: "", visual: "v" },
+    ] },
+  ];
+
+  it("keeps the fresh take history against a stale renderer snapshot", () => {
+    // A generation landed after the renderer snapshotted: the stale snapshot's
+    // empty history must not revert the finished sequence clip.
+    const gens = [{ path: "out/sequences/s1/clip.mp4", prompt: "motion", model: "m", at: "2026-01-01T00:00:00.000Z" }];
+    const graph = (nodes: unknown[]) => ({ id: "s1", number: "Sequence 01", audio: "", visual: "", graphVideoNodes: nodes }) as SeqGraph;
+    const fresh = baseProduction({
+      scenes: live(),
+      shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"], graph: graph([{ id: "vid0", prompt: "", gens }]) }],
+    });
+    const incoming = baseProduction({
+      scenes: live(),
+      shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"], graph: graph([{ id: "vid0", prompt: "new prompt" }]) }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.shotSequences![0].graph!.graphVideoNodes![0].gens).toEqual(gens);
+    // Renderer-owned fields (the prompt / wiring) still ride through.
+    expect(merged.shotSequences![0].graph!.graphVideoNodes![0].prompt).toBe("new prompt");
+  });
+
+  it("follows the renderer's take selection when the histories agree", () => {
+    const gens = [{ path: "v1.mp4", prompt: "", model: "m", at: "" }, { path: "v0.mp4", prompt: "", model: "m", at: "" }];
+    const seqWith = (genIndex: number) => baseProduction({
+      scenes: live(),
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["a", "b"],
+        graph: { id: "s1", number: "Sequence 01", audio: "", visual: "", graphVideoNodes: [{ id: "vid0", prompt: "", gens, genIndex }] } as SeqGraph,
+      }],
+    });
+    const merged = applyRendererState(seqWith(0), seqWith(1));
+    expect(merged.shotSequences![0].graph!.graphVideoNodes![0].genIndex).toBe(1);
+  });
+
+  it("adopts renderer creations and keeps renderer deletions", () => {
+    const created = baseProduction({
+      scenes: live(),
+      shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"] }],
+    });
+    expect(applyRendererState(baseProduction({ scenes: live() }), created).shotSequences).toHaveLength(1);
+    // Deleted in the renderer: the stale fresh entry stays gone.
+    const deleted = applyRendererState(
+      baseProduction({ scenes: live(), shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"] }] }),
+      baseProduction({ scenes: live(), shotSequences: [] })
+    );
+    expect(deleted.shotSequences).toEqual([]);
+  });
+
+  it("leaves the field absent when neither side has sequences", () => {
+    const merged = applyRendererState(baseProduction({ scenes: live() }), baseProduction({ scenes: live() }));
+    expect(merged.shotSequences).toBeUndefined();
+  });
+
+  it("repairs the array on save: dead members pruned, empty sequences dropped", () => {
+    const p = baseProduction({
+      scenes: live(),
+      shotSequences: [
+        { id: "s1", name: "Sequence 01", shotIds: ["a", "gone", "b", "b"] },
+        { id: "s2", name: "Sequence 02", shotIds: ["gone"] },
+        { id: "s1", name: "dupe", shotIds: ["c"] },
+      ] as Production["shotSequences"],
+    });
+    saveProduction(p);
+    const reloaded = loadProduction(p.meta.id)!;
+    expect(reloaded.shotSequences).toHaveLength(1);
+    expect(reloaded.shotSequences![0]).toMatchObject({ id: "s1", shotIds: ["a", "b"] });
+    expect(reloaded.shotSequences![0].name).toBe("Sequence 01");
+  });
+
+  it("folds the legacy flat sequence model into its graph on save", () => {
+    const p = baseProduction({
+      scenes: live(),
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["a", "b"],
+        graph: { id: "s1", number: "Sequence 01", audio: "", visual: "", graphVideoNodes: [{ id: "vid0", prompt: "", refIds: ["a", "b"] }] } as SeqGraph,
+      }],
+    });
+    saveProduction(p);
+    const reloaded = loadProduction(p.meta.id)!;
+    expect(reloaded.shotSequences![0].graph!.graphVideoNodes![0].refIds).toEqual(["a", "b"]);
+    // Legacy flat fields on disk fold in too (raw shape bypasses the type).
+    const legacy = baseProduction({
+      scenes: live(),
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["a"],
+        videoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "v1.mp4", prompt: "", model: "m", at: "" }] }],
+        output: { kind: "videogen", nodeId: "vid0" },
+      } as unknown as NonNullable<Production["shotSequences"]>[number]],
+    });
+    saveProduction(legacy);
+    const reloadedLegacy = loadProduction(legacy.meta.id)!;
+    expect(reloadedLegacy.shotSequences![0].graph!.graphOutputSource).toBe("videogen");
+    expect(reloadedLegacy.shotSequences![0].graph!.graphVideoNodes![0].gens).toHaveLength(1);
   });
 });

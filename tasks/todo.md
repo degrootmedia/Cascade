@@ -1725,3 +1725,502 @@ clean). Magic remains tag-authoritative; the graph now follows its citations by
 rebuilding the composer ref sockets from the tag order, so an AI-written or
 dropped `@[name]` shows wired when the graph opens. Additive to the stored
 graph's other wiring and idempotent (a settled graph saves nothing).
+
+---
+
+# Shot Sequences: multi-frame spans with their own node canvas
+
+User: shift-click to select consecutive storyboard frames; a create option pops
+up underneath (frames animate to make space); the created span gets an accent
+bar with "Open Sequence" opening a node canvas pre-loaded with the frames'
+outputs as image nodes (like reference nodes) plugged into a pre-loaded video
+generator node. The sequence replaces its frames in the animatic, can be
+disabled, multiple sequences may exist (non-overlapping; one canvas at a time),
+deleting one saves its generated video to References/"Shot Sequences" (with
+confirm), bars cycle accent colors (right-click to change).
+
+## Decisions (user-confirmed)
+
+- Multiple sequences enabled at once when non-overlapping (a shot belongs to at
+  most one sequence); "active" = the one open in the canvas (single modal).
+- Replacement applies to Step 4 animatic AND Step 5 export/assembly.
+- Enabled sequence with no clip shows one slate placeholder block over its span.
+- Frame nodes live-link to the member shot's `artwork` (no file copies) and are
+  canvas-only (never become CustomRefs).
+- Bar = one spanning bar per grid row, measured to the selected cards' edges.
+- Defaults chosen: `durationSec` = sum of members (roll-edit overrides);
+  `enabled: true` at creation; clips under `<outDir>/sequences/<id>/`; v1 canvas
+  is a main-window modal (no detached target); `pendingVideoGen` recheck for
+  sequences is a follow-up, not v1.
+
+## Plan
+
+### Phase 1 - pure domain (`shared/ipc/shot-sequence.ts`)
+- [x] `ShotSequence` type (id, name, shotIds, enabled, accent, durationSec,
+      videoPath, videoNodes, frameShotIds, graph, graphLayout) +
+      `SEQUENCE_ACCENT_COLORS` (mirror `MOODBOARD_FRAME_COLORS`).
+- [x] `applyShotSequences(flatShots, sequences)` -> timeline items
+      (`kind: "shot" | "sequence"`, slate fallback when enabled w/o clip,
+      disabled pass-through, duration = `seq.durationSec ?? sum(members)`).
+- [x] `normalizeShotSequences` (prune dead shot ids, repair accent/arrays),
+      `sequenceBarSpans` (row-span math for the bar overlay),
+      `nextSequenceName`/`defaultSequenceAccent` (index cycling).
+- [x] `Production.shotSequences?: ShotSequence[]` in `shared/ipc/production.ts`
+      (additive, like `moodboard`).
+- [x] Tests: `app/test/shot-sequence.test.ts` (projection collapse/slate/
+      disabled/duration, normalize, bar spans, accent cycling).
+
+### Phase 2 - persistence
+- [x] `main/productions.ts`: `normalize()` back-fills `shotSequences ??= []`
+      (drop corrupt entries like `moodboard`).
+- [x] `mergeShotSequences` in `applyRendererState` (merge by id; renderer owns
+      span/canvas/accent/enabled/duration; main owns `videoNodes` gens +
+      `videoPath`, mirroring `mergeVideoNodes`/`mergeUpscale`) - a stale
+      renderer save must never revert a generated take.
+- [x] Tests: stale-snapshot merge keeps takes; normalize repairs.
+
+### Phase 3 - storyboard selection + bars
+- [x] Shift-click range selection in `ProductionWorkspace` (copy
+      `references.tsx:251-279` anchor pattern over `scenes.flatMap` order);
+      plain click behavior byte-identical (focus + prompt panel + detached
+      sync); Esc clears range.
+- [x] `BoardCard` frame click carries the modifier (`onFrameClick(shotId, mode)`)
+      without breaking the memoized `boardActions`.
+- [x] "Create Shot Sequence" strip under the range (>=2 frames); member cards
+      animate a bottom slot open (ShotTable push-apart idiom) so frames below
+      move down; creation rejects overlap with an existing sequence.
+- [x] `production/sequence-bar.tsx`: accent bar per grid row (overlay measured
+      from member cards, ResizeObserver + frameZoom), label + "Open Sequence" +
+      enable/disable + delete; right-click accent swatches
+      (`.session-context-menu` pattern). Default accent cycles by index.
+- [x] Styles in `styles.css` (bar, slot animation, accent vars).
+
+### Phase 4 - sequence canvas
+- [x] Extract `RefNodeView` verbatim from `NodeGraphModal.tsx` into
+      `components/graph/ref-node.tsx` (both import it); fallback: lean clone,
+      zero `NodeGraphModal` changes.
+- [x] `production/sequence-graph.tsx` modal: React Flow canvas over
+      `shared/graph/*` pure modules; pre-loaded `seqframe:<shotId>` nodes
+      (live `shot.artwork`, "Shot 0100" labels) + `videoprompt`/`videogen`
+      pair; pre-wired frames -> `in-ref-0...N` (like `applyCameraGridRefs`) +
+      structural `in-prompt` pipe; pre-placed positions.
+- [x] Video node UI: model/resolution/duration pickers (media-defaults
+      seeding), prompt, Generate, take strip (cycle + select-as-sequence-video
+      = `seq.videoPath`), `GenerationMenu` on takes.
+- [x] Workspace host: open/close (single instance), `saveField` persistence of
+      canvas state.
+
+### Phase 5 - generation + deletion (main)
+- [x] `main/shot-sequence.ts`: `sequenceVideoDir`/`sequenceVideoRelPath`,
+      `recordSequenceVideoGen` (mirror `shotVideoDir`/`recordGraphVideoGen`).
+- [x] `production:generateSequenceVideo` (ipcContract entry + handler in the
+      `runVideoJob` style of `production:generateVideoNode`, `index.ts:3161`):
+      first frame = `sourcePathOverride`, remaining frames = `extraRefs`;
+      relocate the clip to `<outDir>/sequences/<id>/`; record takes; skip
+      frame-less members (error when none).
+- [x] `production:deleteShotSequence`: confirm constant (mentions the ref save
+      when a clip exists) -> one main-side save: copy clip to `referencesDir`,
+      provision "Shot Sequences" category (`ensureReferenceCategory` extracted
+      from `upsertCharacterSheetRef`), append `CustomRef` (media: "video"),
+      drop the sequence.
+- [x] Tests: category provisioning + video-ref creation pure fn.
+
+### Phase 6 - animatic + assembly projection
+- [x] `animatic.tsx`: `sequences` prop + `applyShotSequences` at the `flatShots`
+      seam; `seq:<id>` items (slate block when no clip, pooled video when
+      clipped); roll-edit writes `seq.durationSec`; `fitShotsToTotal` scales
+      shots + sequences; mute/remove-video/save-as-reference target the
+      sequence.
+- [x] `main/assembly.ts` `assemblyPlan`: enabled sequence = one `clip` event
+      spanning its members' slots; member numbers -> `skippedShots` (tween
+      sub-events precedent, `assembly.ts:143-165`).
+- [x] Tests: assembly projection + skippedShots bookkeeping.
+
+### Phase 7 - docs + verification
+- [x] `CONTEXT.md`: "Shot Sequence" glossary term + module rows.
+- [x] `npm run typecheck` + `npm test` + `npm run build` (app/), `npm test`
+      (core/ - untouched). Review section below.
+
+## Review
+
+Done, verified. `npm run typecheck` clean; app suite **1216 pass + 1 skip**;
+`npm run build` clean; core suite 147 pass (untouched). New coverage:
+`shot-sequence.test.ts` (26), `shot-sequence-main.test.ts` (10),
+`shot-sequence-ui.test.ts` (6 DOM flow), `assembly.test.ts` (+4),
+`productions.test.ts` (+5).
+
+What shipped: shift-click ranges on the Step 3 storyboard pop a "Create Shot
+Sequence" strip (the selected cards animate a bottom slot open so the frames
+below move down — the ShotTable push-apart idiom); the created span gets an
+accent bar (one measured span per grid row via `sequenceBarSpans`, so it
+survives wrapping/reflow) with Open Sequence / On-Off / delete and a
+right-click accent palette. "Open Sequence" opens the sequence's node canvas:
+member frames as image nodes (the extracted `RefNodeView`, now shared with the
+shot graph) plugged positionally into a pre-loaded video-generator node
+(`frameShotIds` is the wiring truth — the `placeCameraGridRef` socket pattern);
+the selected take on `vid0` is THE sequence video (`sequenceVideoPath`,
+derived, never stored twice). The enabled span collapses into one slot in the
+animatic AND the Step 5 export (`SQ<NNNN>` event; members in `skippedShots`),
+with the clip-less slate fallback; disabling plays the frames individually.
+Delete (or losing the last member) preserves the clip as a "Shot Sequences"
+reference behind a warning confirm.
+
+Deliberate shape notes: the canvas is a dedicated modal, not a `NodeGraphModal`
+mode — its tool palette and ~15 generate/pipe IPCs are all shot-addressed, and
+a reduced sequence surface is safer ("don't break other functionality"); the
+provider seam stayed untouched (a sequence generation borrows the first member
+shot for the vendor call and `relocateClipToSequence` detaches the result into
+`out/sequences/<id>/` so a renumber can't orphan it). `recordSequenceVideoGen`
+lives in the shared pure module rather than a new `main/shot-sequence.ts`
+(deleted from the plan — path helpers joined `shotVideoDir`/`shotVideoRelPath`
+in `pipeline.ts`, the existing home for workspace path math). Re-ingest keeps
+sequences whole: `normalizeShotSequences` counts outdated panels as live
+members (the magicPrompts precedent), and a restore brings the span back.
+Self-caught during the work: a PowerShell rewrite smuggled literal `` `u{...} ``
+glyph escapes into the extracted `RefNodeView` (the recurring lessons.md
+violation) — repaired with the Edit tool; and one projection test asserted the
+pre-decision behavior (artwork on a clip-less block) and was corrected to the
+slate rule the user chose.
+
+---
+
+# Shot Sequence canvas: parity with the normal node canvas
+
+User: refine the sequence canvas to have most of the same features as the
+normal canvas — wheel zoom, MMB/RMB pan, reference shelf (left), frame output
+node (this is what feeds the animatic), node shelf (right), and a Pop out
+button.
+
+## Plan
+
+### A. Shared model (`shared/ipc/shot-sequence.ts`)
+- [x] `frameShotIds` -> per-video-node `refIds` (ordered wired inputs: member
+      shot ids OR reference ids; normalize migrates legacy `frameShotIds`/`inputIds`).
+- [x] `ShotSequence.output?: { kind: "videogen"; nodeId } | { kind: "ref"; refId } | { kind: "frame"; shotId }` —
+      the output node's binding = what feeds the animatic. New sequences
+      pre-bind `videogen/vid0`; normalize back-fills that binding on legacy
+      sequences with takes (so behavior is unchanged).
+- [x] `sequenceOutputMedia(seq, shots, refs)` -> `{ kind: "video"|"image"; rel } | null`
+      (null = slate); `sequenceVideoPath` derives through it (video outputs);
+      `sequenceSelectedTake` = the generated clip the delete flow preserves.
+- [x] `applyShotSequences` carries the output media (videoPath / held-still
+      artwork; slate only when unbound).
+- [x] Tests for resolution, migration, projection.
+
+### B. Canvas chrome parity (`production/sequence-graph.tsx`)
+- [x] Navigation: mirror NodeGraphModal's React Flow props (`panOnDrag={[1,2]}`,
+      `selectionOnDrag`, wheel zoom, `minZoom 0.2`, `connectionRadius 30`,
+      Bezier lines, `fitView` + saved viewport, Backspace/Delete).
+- [x] Extract the left reference shelf from NodeGraphModal into
+      `components/graph/ref-shelf.tsx` (groups/search/thumbs/zoom/resize/rail)
+      and use it from both canvases (graph-shelf tests guard the move).
+- [x] Ref drops place `ref:<id>` nodes (extracted `RefNodeView` — rename rides
+      the real `renameReference` IPC); wire into video nodes' input sockets.
+- [x] Right node shelf: "Video generation" tiles (multi-instance vid0..N via
+      `nextVideoNodeId` — moved to `shared/ipc/graph.ts`), each with
+      prompt/picks/takes.
+- [x] File drops onto the canvas create references (the normal canvas's
+      `onDropFile` path) and place them.
+
+### C. Frame output node
+- [x] `seqoutput` node (`in-out` target, image|video): wires from a video
+      node's clip, a frame node, or a ref node set `seq.output`; shows the
+      bound media; unbound = "No output yet" (the animatic's slate).
+- [x] Generate resolves `refIds` -> frames (shot artwork) + refs (extraRefs).
+- [x] Bar chip follows the output media (video / still / slate).
+
+### D. Pop out (detached window)
+- [x] `DetachedCanvasTarget` += `"sequence"`; context/state gain `sequenceId`;
+      validators + `detachedLoadUrl` + DetachedCanvasApp + workspace detached
+      boot (opens `seqCanvasId`, title = sequence name).
+- [x] `detachSequence()` + read-only rules for the main window's sequence
+      canvas while the sibling hosts it; busy mirroring gains `sequences[]`.
+
+### E. Animatic + assembly follow the output media
+- [x] Clip output -> pooled video; image output -> held still (AnimaticThumb
+      `explicitRel`); unbound -> slate.
+- [x] `assemblyPlan` emits `clip` / `still` / `blank` for the sequence slot.
+
+### F. Verification
+- [x] `npm run typecheck` + `npm test` + `npm run build` (app/), `npm test`
+      (core/). CONTEXT.md module-row update + review below.
+
+## Review
+
+Done, verified. `npm run typecheck` clean; app suite **1229 pass + 1 skip**;
+`npm run build` clean; core suite 147 pass (untouched). Coverage added:
+`sequence-graph.test.ts` (4 canvas DOM tests: chrome/pre-loaded nodes, output
+binding preview, shelf + tool drops, file drop), `detached-window.test.ts` (+1
+sequence-target validation), plus updated shape assertions across
+shot-sequence/assembly/productions/ipc-validation.
+
+What shipped: the sequence canvas now has the shot graph's chrome — wheel
+zoom, middle/right-drag pan (its exact React Flow props), the reference shelf
+on the left (extracted `RefShelf`, now shared by both canvases; the
+graph-shelf suite guarded the move), a node shelf on the right (video
+generation tiles, multi-instance `vid0..N`), and Pop out (`DetachedCanvasTarget
+"sequence"` + `sequenceId` context, busy mirrored over
+`CanvasBusySnapshot.sequences`, main window read-only while the sibling hosts
+it). The centerpiece is the **frame output node**: wire a video node's clip, a
+reference, or a member frame into it and THAT becomes what feeds the animatic
+and the Step 5 export — `sequenceOutputMedia` resolves it (`clip` plays, an
+image is held over the span, unbound is the slate), the bar chip reads
+video/still/slate, and the delete flow still preserves the GENERATED take
+(`sequenceSelectedTake`) whatever the output is bound to.
+
+Model refinement while implementing: the per-sequence `frameShotIds` wiring
+became each video node's `refIds` (the existing "extra reference sockets in
+order" channel, so multi video nodes each own their inputs and the generate
+opts mirror `generateVideoNode` exactly); normalize folds the legacy field
+into `vid0`. Also extracted `nextVideoNodeId` into `shared/ipc/graph.ts` (the
+id-scheme home) instead of a second copy.
+
+Self-caught: the extracted shelf initially lost three glyphs/quotes (the
+`…`/`▶`/`♪` placeholders and curly-quote empty states) to console mangling —
+re-verified byte-level and repaired; one projection test asserted the
+pre-output-node rule and was updated to the binding semantics.
+
+---
+
+# Shot Sequence canvas, take 2: host the REAL node canvas
+
+User: the bespoke sequence canvas invented a different video-generation node.
+It should be **the same canvas** as every other graph — the only differences
+being that it comes pre-populated with a video-generation node and the images
+from the encompassed frames, and that its output replaces the span in the
+animatic/assembly when bound.
+
+## Findings (research)
+
+- `NodeGraphModal` needs a `ProductionShot`-shaped state home: `onGraphField`
+  carries `graph`, `graphOutputSource`/`graphOutput*`, gen arrays/params, edit
+  nodes, tween, camera-grid, upscale; the first-open effect ALWAYS persists a
+  materialized `graph`. Its output pipe + take select/cycle are **host-computed**
+  (11 pipe/unpipe callbacks + 2 select/cycle callbacks), not internal.
+- The output node's preview is derived by the modal from `graphOutputSource` +
+  the feeding node's selected take — so a sequence host only needs to persist
+  the graph fields, not materialize artwork/videoPath.
+- Ref nodes are hard-coded `deletable: true` and renameable via `onRenameRef`;
+  a small `GraphRef.locked` flag (non-deletable, plain name) covers the member
+  frames, which the modal renders like any other reference node.
+- A "carrier shot" alternative (a hidden real `ProductionShot`) would make every
+  generator work for free, but main has **29 shot lookups in index.ts + 15 in
+  pipeline.ts** (52 more in the renderer) that would all need carrier awareness
+  while staying excluded from numbering/animatic/assembly — too broad, breaks
+  the "don't break other functionality" bar. Rejected.
+
+## Plan
+
+### A. Model
+- [x] `ShotSequence.graph?: ProductionShot` — the sequence's graph/prompt state
+      in the exact shot shape (`id` = sequence id, `number` = sequence name).
+      Replaces `output`/`videoNodes`/`graphLayout`; normalize migrates those
+      legacy fields into `graph`.
+- [x] `sequenceGraphShot(seq)` shared helper (the facade the canvas renders).
+- [x] `sequenceOutputMedia(seq, { shots, refs })` derives the animatic/export
+      media from `graph.graphOutputSource` (+ gens / tween output / ref) —
+      mirroring the modal's output-node resolution; `sequenceSelectedTake` for
+      the delete flow.
+- [x] `createShotSequence(id, frames, existing)` seeds `graph` with a
+      pre-loaded video node citing the member frames (`@[Shot NNNN]`).
+- [x] `GraphRef.locked?: boolean` (shared) — the modal honors it (plain name,
+      no rename, not deletable).
+
+### B. Canvas host (deleted the bespoke `sequence-graph.tsx`)
+- [x] A thin `SequenceGraphModal` renders `NodeGraphModal` with the facade shot
+      and sequence-scoped callbacks: `onGraphField` (merge into `seq.graph`),
+      `onSaveLayout`, prompt/style/brand, the pipe/unpipe callbacks, take
+      select/cycle — all local graph patches.
+- [x] Pre-population: member frames as `locked` refs named "Shot NNNN" (live
+      artwork) cited by the video node's prompt; `vid0` pre-loaded; output node.
+- [x] Reference shelf / drops / tags / rename (locked frames excluded) — the
+      shared behavior, no special casing.
+- [x] Video generation → `production:generateSequenceVideo` (host maps the
+      video prompt's `@[Shot NNNN]` citations + legacy `refIds` to input ids,
+      strips the frame tags from the vendor prompt).
+- [x] Tool scope: video + output now; other generators disabled via
+      `NodeGraphModal.unavailableTools` (tiles + the structural imagegen node),
+      Magic hidden, `subjectLabel` for the header.
+
+### C. Follow-through
+- [x] Animatic/assembly/bar read the new output derivation; bespoke node views
+      deleted; the detached "sequence" target kept.
+- [x] `mergeShotSequences` defers to `mergeRendererShot` for `seq.graph`;
+      normalize folds the legacy model in.
+- [x] Take management: `production:deleteSequenceTake` + optional `sequenceId`
+      on `production:saveGenerationAsReference`.
+- [x] Tests + `typecheck`/`test`/`build` (app + core) + CONTEXT.md.
+
+## Review
+
+Done, verified. `npm run typecheck` clean; app suite **1225 pass + 1 skip**;
+`npm run build` clean; core suite 147 pass. The bespoke canvas and its node
+views are gone; the sequence canvas now renders `NodeGraphModal` itself, so
+its video-generation node, prompt node, output node, shelves, navigation, and
+Pop out are literally the same components and behavior as every other canvas.
+
+What survived from take 1: the storyboard bar (shift-click ranges, accent
+colors, enable/disable, delete-with-preserve), the projection/assembly
+integration, the detached "sequence" target, and the busy mirroring. What
+changed: `ShotSequence` now carries `graph` — the same `ProductionShot` shape a
+shot uses — so `onGraphField` patches merge straight in and
+`mergeShotSequences` defers to `mergeRendererShot` (main keeps the take
+histories). The output node's binding (`graphOutputSource` + the feeding
+node's take / tween / reference) IS the animatic feed;
+`sequenceOutputMedia` mirrors the modal's own output resolution, including a
+member frame cited as a `seqframe:<shotId>` reference. The member frames are
+host-supplied `locked` `GraphRef`s (live-linked, plain names, not deletable or
+renameable) that the modal renders like any reference node — pre-cited
+`@[Shot NNNN]` in the pre-loaded video prompt, so the wires materialize through
+the normal tag machinery. `createShotSequence(id, frames, existing)` takes the
+member frames (ids + labels) to seed that prompt.
+
+Per the user's calls: **video + output now, the other generators next** — image
+generation, edit image, in-betweener, camera grid, upscale, and edit-video
+render disabled with a hint (`unavailableTools`, which also disables the
+structural imagegen node's Generate; `addTool` refuses a drop with the same
+hint), and Magic Prompt is hidden (no button) since it is a storyboard-wide,
+shot-keyed feature. Individual take management still works (save as reference
+via the optional `sequenceId`, delete via `production:deleteSequenceTake`).
+
+Notes/limits: an unbound output keeps the slate block over the span (the
+user's earlier explicit choice); the frame citations are name-based
+(`Shot NNNN`), so renumbering a member after creation leaves its tag dangling
+— visible as a missing frame node, the same way a renamed reference does
+anywhere else. Legacy sequences from take 1 (flat `videoNodes`/`output`/
+`graphLayout`) fold into `graph` on load, takes intact.
+
+Self-caught: the modal's `data-id` node wrappers and its non-textarea prompt
+editor (TriplePrompt) tripped the first canvas test; the palette's "edit tile
+never reports on-canvas" invariant (asserted by graph-shelf) was broken by a
+careless class addition and restored; and two PowerShell string-replaces were
+used on ASCII-only test literals (no glyph risk) — noted for the lessons file.
+
+---
+
+# Shot Sequence canvas, take 3: hide image gen; video-only shelf
+
+User: (1) the sequence canvas should not have the image-generation node;
+(2) the right shelf should keep only video generation and video editing, each
+addable multiple times.
+
+## Plan
+
+- [x] `NodeGraphModal` gains `hiddenTools` (hide, not disable): hidden kinds are
+      not rendered, not draggable, and stripped from a stored graph (the
+      ensure-effect materialization filters their nodes + edges). Hiding
+      "imagegen" also hides the composer prompt node that feeds it.
+      (`unavailableTools` — the disable-with-hint version — was removed.)
+- [x] Sequence host passes `hiddenTools={["imagegen","edit","tween","cameraGrid","upscale"]}`;
+      the shelf then shows only **Video generation** + **Edit video**. The
+      provider gate (`videoEditUnavailable`) still disables the edit-video tile
+      when the active provider has no video-edit path, and Magic stays hidden.
+- [x] Video generation is already multi-instance (drag the tile repeatedly;
+      `vid0..N`).
+- [ ] **Edit-video multi-instance: NOT done** — it is still a singleton in the
+      data model (`graphEditVideo*` flat fields, 280 references across 19 files,
+      139 in `NodeGraphModal` alone). Making it a list is the same size as the
+      original "multiple video-generation nodes" migration and wants its own
+      pass: `GraphEditVideoNode` + id helpers, `graphEditVideoNodes[]` +
+      output node id, `migrateEditVideoNodes`, materialize/connect/merge/ports,
+      pipeline record/select, `generateEditVideoNode` by nodeId + pending
+      target, the modal's per-node factory/reconciliation/select/cycle/busy, and
+      the workspace/host wiring. Asked the user whether to do it next.
+
+## Review
+
+Done and verified for (1) + the shelf restriction: `typecheck` clean, app suite
+**1225 pass**, `build` clean, core 147 pass. The sequence canvas now renders no
+image-generation or composer node (nor any shot-only generator), and its right
+shelf lists exactly Video generation and Edit video; a stored graph that
+carries any hidden node has it stripped on open. `sequence-graph.test.ts`
+asserts the absence of the imagegen/composer nodes and the two-tile shelf.
+
+(2) is half-delivered: video generation is multi-instance today; edit-video is
+a single node in the data model and needs the list conversion described above.
+
+## Follow-up: sequence canvas bugs + edit-video multi-instance
+
+### Fixed: a second video node vanished
+Root cause: the sequence host built each `seq.graph` patch as a FULL object
+from its render-time `seq` closure. Adding a node writes twice in one tick
+(`onGraphField({graphVideoNodes})` then the layout save), so the second write
+carried a stale copy of the list and clobbered the first. Fix: the workspace
+now owns `updateSequenceGraph(sequenceId, patch | (graph) => patch)`, which
+evaluates an updater against the FRESHEST on-disk state (exactly like
+`saveGraphShotFields` for shots), and every host callback (node field patches,
+pipes, select/cycle, layout, style/brand) goes through it. Regression test:
+`sequence-graph.test.ts` drops the video tool and asserts both `videogen` and
+`videogen:vid1` survive. Verified: typecheck, 1226 app tests, build, core 147.
+
+### Edit-video multi-instance (model conversion) — planned, not started
+The edit-video node is a singleton (`graphEditVideo*` flat fields, ~280
+references across 19 files, 138 in `NodeGraphModal`). Recommended design:
+**unify it into the existing `graphVideoNodes` list** with a `mode?: "generate"
+| "edit"` field (absent = generate; ids `vidN` / `evN`), reusing everything the
+video list already has — per-node id scheme, materialize pairs, `mergeVideoNodes`
+(by id, non-gens fields renderer-owned), per-node select/cycle/busy/pending,
+output binding (`graphOutputVideoNodeId` names either mode; both produce a
+clip), and `recordGraphVideoGen(shot, nodeId, …)` (works for `evN`). The flat
+fields become migration-only (`migrateEditVideoNodes` folds them into an `ev0`
+entry, like `migrateVideoNodes` did for the video singleton), and the canvas
+nodes keep the `editvideo`/`editvideoprompt` kinds via `editVideoGenNodeId`/
+`editVideoPromptNodeId` (`ev0` keeps the bare ids). `GraphSource` gains
+`{ kind: "video"; nodeId }` for the edit node's source socket. The palette's
+Edit-video tile appends another entry like video generation; generation routes
+per mode (`onRunEditVideo(nodeId, …)`), and the sequence canvas needs a
+`production:generateSequenceEditVideo` handler mirroring
+`generateSequenceVideo` (borrow an anchor member shot, call
+`mediaProvider.generateVideoEdit`, relocate to `out/sequences/<id>/`). The
+alternative (a second `graphEditVideoNodes[]` list) duplicates the video list's
+plumbing. Awaiting the user's design nod, then implementing with the full suite
+as the guard.
+
+## Review — edit-video multi-instance (model conversion)
+
+Implemented the planned unification. The edit-video node is now a multi-instance
+`graphVideoNodes` entry with `mode: "edit"` (`ev0`, `ev1`, …), with the flat
+`graphEditVideo*` fields read once by `migrateEditVideoNodes` (folded into `ev0`,
+output re-expressed as `videogen` + `graphOutputVideoNodeId: "ev0"`) and never
+written again.
+
+What changed:
+
+- `shared/ipc/graph.ts`: `GraphVideoNode.mode`, `GraphSource` `{kind:"video"}`,
+  and the `editVideoGenNodeId`/`editVideoPromptNodeId`/`parseEditVideo*`/
+  `nextEditVideoNodeId`/`editVideoNodes` id helpers. `production.ts` flat fields
+  marked `@deprecated`; `graphOutputSource`'s `"editvideo"` member noted
+  migration-only.
+- `main/pipeline.ts`: `migrateEditVideoNodes` (called alongside
+  `migrateVideoNodes` in `migrateBoardArtwork` + `mergeRendererScenes`); dropped
+  the flat media-path/scrub/rename special cases (the `graphVideoNodes[*]`
+  passes now cover both modes); removed `recordGraphEditVideoGen` (callers use
+  `recordGraphVideoGen(shot, nodeId, …)`).
+- `shared/graph`: `materialize.ts` builds one pair per edit entry (source edge
+  from `{kind:"video"|"ref"}`, output from the named node across both modes),
+  `connect.ts` handles the `editvideo`/`editvideoprompt` canvas ids
+  (`nodeKindForId`, `promptPipeFor`, `connectionToEdge`, `graphEdgesForDetach`),
+  `ports.ts` lets `editvideo` accept `videogen`/`editvideo`/`ref`, and
+  `render.ts` reads the per-node `{editvideoprompt: nodeId}` target.
+- `shared/generations.ts`: edit takes are found on `graphVideoNodes` (kind
+  `"video"` with the node id); `generationInUse` blocks an edit node's output
+  feed and a wired source clip.
+- `main/index.ts`: `generateEditVideoNode` takes `nodeId`, resolves the node's
+  source, reuses the video-node pending target, and applies to the output when
+  piped; new `production:generateSequenceEditVideo` (contract + `CascadeApi`).
+- Renderer: `NodeGraphModal` builds one edit pair per list entry (multi add /
+  remove-all / delete, per-node select/cycle/busy/pipe, prompt draft appliers);
+  `ProductionWorkspace` keys edit-video busy per `shot:node` and reroutes the
+  pipe through `pipeVideoToOutput`; `sequence-graph.tsx` wires `onRunEditVideo`.
+- Docs: `CONTEXT.md` "Edit-video node" term, the "Shot sequences" module row,
+  and the node-graph term updated to the unified list.
+
+Tests: updated the flat-field tests to the unified list (graph-connect,
+graph-materialize, productions, ref-delete, ref-rename, video-layout,
+generation-delete). Added (a) `migrateEditVideoNodes` load-path migration
+(`graph-migration.test.ts`), (b) a second edit-video node persists
+(`sequence-graph.test.ts`), (c) per-node take cycle (`edit-video-node.test.ts`,
+new). No existing assertion weakened.
+
+Verification: `app` typecheck clean; `app` tests **1231 passed / 1 skipped** (105
+files); `app` build clean; `core` tests **147 passed** (16 files).

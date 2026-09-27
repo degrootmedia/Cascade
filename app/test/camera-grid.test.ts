@@ -194,6 +194,11 @@ describe("normalizeCameraGridData", () => {
     expect(d?.refIds).toEqual(["a"]);
     expect(d?.params).toEqual({ ok: "yes" });
   });
+  it("keeps only a true styleConnected plug", () => {
+    expect(normalizeCameraGridData({ cols: 4, rows: 4, styleConnected: true })?.styleConnected).toBe(true);
+    expect(normalizeCameraGridData({ cols: 4, rows: 4, styleConnected: false })?.styleConnected).toBeUndefined();
+    expect(normalizeCameraGridData({ cols: 4, rows: 4 })?.styleConnected).toBeUndefined();
+  });
 });
 
 describe("normalizeGraphSource", () => {

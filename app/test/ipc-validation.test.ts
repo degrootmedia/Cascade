@@ -59,6 +59,7 @@ describe("canvas busy snapshot (Spec 03 cross-window relay)", () => {
       editNodes: [],
       tween: {},
       stitching: [],
+      sequences: [],
     });
   });
   it("keeps valid entries", () => {

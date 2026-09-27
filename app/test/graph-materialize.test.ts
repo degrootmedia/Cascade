@@ -90,6 +90,20 @@ describe("materializeGraph basics", () => {
     expect(edgeIds(g)).not.toContain("e-ref-camgrid");
   });
 
+  it("camera-grid style plug materializes from the styleConnected flag", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphCameraGrid: { cols: 4, rows: 4, styleConnected: true } }),
+        REFS,
+      )
+    );
+    expect(edgeIds(g)).toContain("e-style-camgrid");
+    const unplugged = stable(
+      materializeGraph(shot({ graphCameraGrid: { cols: 4, rows: 4 } }), REFS)
+    );
+    expect(edgeIds(unplugged)).not.toContain("e-style-camgrid");
+  });
+
   it("upscale node materializes its source + output feed from domain state", () => {
     const g = stable(
       materializeGraph(
@@ -191,15 +205,16 @@ describe("video / edit / tween / edit-video wires", () => {
     expect(e0.to).toEqual({ node: "tween", port: "in-tween-0" });
   });
 
-  it("edit-video source wires and output (fills the canvas gap)", () => {
+  it("edit-video source wires and output (multi-instance graphVideoNodes)", () => {
     const g = stable(
       materializeGraph(
         shot({
-          graphVideoPrompt: "x",
-          graphImageToVideo: true,
-          graphVideoToEditVideo: true,
-          graphEditVideoPrompt: "Cut",
-          graphOutputSource: "editvideo",
+          graphVideoNodes: [
+            { id: "vid0", prompt: "x", source: { kind: "imagegen" } },
+            { id: "ev0", mode: "edit", prompt: "Cut", source: { kind: "video", nodeId: "vid0" } },
+          ],
+          graphOutputSource: "videogen",
+          graphOutputVideoNodeId: "ev0",
         }),
         REFS
       )

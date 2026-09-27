@@ -43,8 +43,6 @@ export function findGeneration(shot: ProductionShot, rel: string): GenerationRef
     index = indexOfPath(node.gens, rel);
     if (index >= 0) return { kind: "video", rel, index, nodeId: node.id };
   }
-  index = indexOfPath(shot.graphEditVideoGens, rel);
-  if (index >= 0) return { kind: "editvideo", rel, index };
   index = indexOfPath(shot.graphUpscale?.gens, rel);
   if (index >= 0) return { kind: "upscale", rel, index };
   for (const node of shot.graphEditNodes ?? []) {
@@ -79,13 +77,20 @@ export function generationInUse(shot: ProductionShot, gen: GenerationRef): strin
     return null;
   }
   if (gen.kind === "video") {
+    const node = gen.nodeId ? (shot.graphVideoNodes ?? []).find((n) => n.id === gen.nodeId) : undefined;
     if (gen.nodeId) {
-      const node = (shot.graphVideoNodes ?? []).find((n) => n.id === gen.nodeId);
       if (!node || selectedPath(node.gens, node.genIndex) !== rel) return null;
     } else if (selectedPath(shot.graphVideoGens, shot.graphVideoGenIndex) !== rel) {
       return null;
     }
+    const sourceId = gen.nodeId ?? "vid0";
+    if (node?.mode === "edit" && shot.graphOutputSource === "videogen" && shot.graphOutputVideoNodeId === node.id) {
+      return "the storyboard's current clip";
+    }
     if (shot.graphVideoToEditVideo) return "the edit-video node's source clip";
+    if ((shot.graphVideoNodes ?? []).some((n) => n.mode === "edit" && n.source?.kind === "video" && n.source.nodeId === sourceId)) {
+      return "the edit-video node's source clip";
+    }
     return null;
   }
   if (gen.kind === "editvideo") {

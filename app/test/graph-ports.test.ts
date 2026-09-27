@@ -27,12 +27,15 @@ describe("port table", () => {
     }
   });
 
-  it("declares the cameraGrid generator with a source + grid image + reference inputs, no output", () => {
+  it("declares the cameraGrid generator with a style + source + grid image + reference inputs, no output", () => {
     const d = nodeDecl("cameraGrid")!;
-    expect(d.inputs.map((p) => p.id)).toEqual(["in-image", "in-grid", "in-ref-open"]);
+    expect(d.inputs.map((p) => p.id)).toEqual(["in-style", "in-image", "in-grid", "in-ref-open"]);
     expect(d.outputs).toEqual([]);
     expect(portDecl("cameraGrid", "in", "in-ref-2")?.id).toBe("in-ref-open");
-    // The grid-image socket takes the same image sources as the source socket.
+    // The style socket takes only the style node; the grid-image socket takes
+    // the same image sources as the source socket.
+    expect(canConnect(ep("style", "out", "text"), to("cameraGrid", "in-style"))).toBe(true);
+    expect(canConnect(ep("brand", "out", "text"), to("cameraGrid", "in-style"))).toBe(false);
     expect(canConnect(ep("imagegen", "out", "image"), to("cameraGrid", "in-grid"))).toBe(true);
     expect(canConnect(ep("ref", "out", "image"), to("cameraGrid", "in-grid"))).toBe(true);
   });

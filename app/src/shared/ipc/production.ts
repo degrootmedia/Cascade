@@ -17,6 +17,7 @@ import type {
   PendingVideoGen,
   UpscaleData,
 } from "./graph.js";
+import type { ShotSequence } from "./shot-sequence.js";
 
 export interface ProductionMeta {
   id: string;
@@ -181,23 +182,25 @@ graphImageGenIndex?: number;
   graphTweenModel?: string;
   /** The in-betweener node's output resolution label (e.g. "1080p"). */
   graphTweenResolution?: string;
-  /** Node-graph edit-video node: stored edited clips (newest first) + index. */
+  /** Node-graph edit-video node: stored edited clips (newest first) + index.
+   *  @deprecated Migrated into `graphVideoNodes` (an `ev0` edit-mode entry) by
+   *  `migrateEditVideoNodes`; never written any more. */
   graphEditVideoGens?: GraphGenItem[];
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0`). */
   graphEditVideoGenIndex?: number;
-  /** The edit-video node's prompt. */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.prompt`). */
   graphEditVideoPrompt?: string;
-  /** The edit-video node's model (a video-edit model). */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.model`). */
   graphEditVideoModel?: string;
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.resolution`). */
   graphEditVideoResolution?: string;
-  /** Schema-driven advanced params for the edit-video node. */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.params`). */
   graphEditVideoParams?: GenParams;
-  /** Reference ids feeding the edit-video node (beyond the mandatory source). */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.refIds`). */
   graphEditVideoRefIds?: string[];
-  /** A video reference feeding the edit-video source input (the video to
-   *  edit). Absent = the shot's video, or a clip piped from the video node
-   *  (`graphVideoToEditVideo`). */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.source`). */
   graphEditVideoSourceRefId?: string;
-  /** Whether the video generation node's output feeds the edit-video source. */
+  /** @deprecated Migrated into `graphVideoNodes` (`ev0.source`). */
   graphVideoToEditVideo?: boolean;
   /** Schema-driven advanced/variant params for the in-betweener (keyed by
    *  canonical flag; `aspect_ratio` lives here). Optional/additive. */
@@ -229,7 +232,9 @@ graphImageGenIndex?: number;
   graphEditStyleConnected?: boolean;
   /** Which node is piped into the output (becomes the shot's primary
    *  artwork/videoPath): an image/video generation node, the in-betweener
-   *  node, or a reference. */
+   *  node, or a reference. The `"editvideo"` member is migration-only — an
+   *  edit-video output now rides `"videogen"` + `graphOutputVideoNodeId`
+   *  (migrated by `migrateEditVideoNodes`). */
   graphOutputSource?: "imagegen" | "videogen" | "editgen" | "editvideo" | "tween" | "ref" | "upscale";
   /** The reference feeding the output when `graphOutputSource === "ref"`. */
   graphOutputRefId?: string;
@@ -699,6 +704,13 @@ export interface Production {
    *  node placements, viewport, background, and notes. Optional/additive —
    *  absent on documents that never opened the board. */
   moodboard?: MoodboardLayout;
+  /**
+   * Shot Sequences: spans of storyboard shots played as one generated clip
+   * (each with its own node canvas). Optional/additive — absent on documents
+   * that never created one. Renderer-owned except the per-entry video-node
+   * generation history (see `applyRendererState`).
+   */
+  shotSequences?: ShotSequence[];
   assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string; /** @deprecated Legacy flat video folder; clips now live in each shot's board folder under `video/`. Read only by the one-time relocation migration. */ videosDir?: string };
   /** Schema version gating the one-time board-artwork migrations (perf 1.2):
    *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk

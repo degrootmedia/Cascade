@@ -915,6 +915,7 @@ body {
 .prod-model-options-caret.collapsed { transform: rotate(0deg); }
 .prod-model-options-caret:not(.collapsed) { transform: rotate(90deg); }
 .prod-boards-grid {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--frame-min-width, 250px), 1fr));
   gap: 14px;
@@ -1073,6 +1074,106 @@ body {
 .prod-board-drag-handle:active { cursor: grabbing; }
 .prod-board:hover .prod-board-drag-handle { opacity: 1; }
 .prod-board.selected .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 12px 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+/* ---- Shot sequences: range highlight, animated bottom slot, bars ----
+   Member cards open a bottom slot for the sequence bar ("the frames animate
+   to make space" — the row grows, cards below move down); the bar layer
+   (`sequence-bar.tsx`) draws measured, per-row spans into that slot. */
+.prod-board { transition: padding-bottom 0.18s ease; }
+.prod-board.seq-slot { padding-bottom: 52px; }
+.prod-board.in-range .prod-board-frame { border-color: color-mix(in srgb, var(--accent) 70%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.seq-bar-slot { position: absolute; z-index: 5; pointer-events: none; }
+.seq-bar-slot > * { pointer-events: auto; }
+.seq-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--seq-accent, var(--accent)) 70%, var(--border));
+  border-radius: 9px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--seq-accent, var(--accent)) 32%, var(--bg-raised)), color-mix(in srgb, var(--seq-accent, var(--accent)) 16%, var(--bg-raised)));
+  color: var(--text);
+  font-size: 0.78rem;
+  cursor: context-menu;
+  overflow: hidden;
+}
+.seq-bar.disabled { opacity: 0.55; filter: saturate(0.5); }
+.seq-bar-ghost { flex: 1; height: 100%; }
+.seq-bar-label { display: inline-flex; align-items: baseline; gap: 8px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.seq-bar-label em { font-style: normal; font-weight: 400; color: var(--text-dim); font-size: 0.72rem; }
+.seq-bar-status {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.seq-bar-status.ready { color: var(--seq-accent, var(--accent)); border-color: color-mix(in srgb, var(--seq-accent, var(--accent)) 55%, var(--border)); }
+.seq-bar-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.seq-bar-open,
+.seq-bar-toggle,
+.seq-bar-delete {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.seq-bar-open:hover, .seq-bar-toggle:hover { border-color: var(--accent); color: var(--text); }
+.seq-bar-open { font-weight: 600; }
+.seq-bar-delete { padding: 2px 8px; color: var(--text-dim); font-size: 0.95rem; line-height: 1.2; }
+.seq-bar-delete:hover { border-color: var(--danger); color: var(--danger); }
+.seq-create-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 0 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  font-size: 0.8rem;
+}
+.seq-create-button {
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 85%, black);
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.seq-create-button:hover { filter: brightness(1.08); }
+.seq-create-reason { color: var(--text-dim); }
+.seq-create-count { color: var(--text-dim); font-size: 0.74rem; }
+.seq-create-cancel {
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.seq-create-cancel:hover { color: var(--text); border-color: var(--text-dim); }
+.seq-accent-menu { padding: 8px; }
+.seq-accent-menu .ctx-title { padding: 2px 6px 6px; font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.seq-accent-grid { display: grid; grid-template-columns: repeat(4, 22px); gap: 6px; padding: 0 4px 2px; }
+.seq-accent-swatch { width: 22px; height: 22px; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 6px; cursor: pointer; }
+.seq-accent-swatch:hover { filter: brightness(1.12); }
+.seq-accent-swatch.current { outline: 2px solid var(--text); outline-offset: 1px; }
+/* Shot sequence canvas ("Open Sequence"): the video-generator node + the
+   frame tiles (shared `prod-graph-*` node chrome). */
+.seq-graph-canvas { --graph-socket-ref: var(--accent); }
+.seq-video-node { width: 330px; }
+.seq-video-node .seq-video-prompt { min-height: 56px; }
+.seq-video-node .prod-graph-socket-label.ref { pointer-events: none; }
 .prod-board-frame {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -3963,7 +4064,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-head { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .prod-graph-title { font-weight: 600; color: var(--text); white-space: nowrap; }
 .prod-graph-hint { flex: 1; min-width: 0; font-size: 0.74rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prod-graph-canvas { flex: 1; min-height: 0; position: relative; --graph-socket-ref: var(--accent); --graph-socket-style: #34d399; --graph-socket-brand: #f59e0b; }
+.prod-graph-canvas { flex: 1; min-height: 0; position: relative; --graph-socket-ref: var(--accent); --graph-socket-style: #34d399; --graph-socket-brand: #f59e0b; --graph-socket-grid: #f97316; }
 .prod-graph-body { display: flex; flex: 1; min-height: 0; }
 .prod-graph-shelf {
   width: 220px;
@@ -4211,24 +4312,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-tools-item.disabled { opacity: 0.4; cursor: not-allowed; }
 .prod-graph-tools-item.disabled:active { cursor: not-allowed; }
 .prod-graph-tools-item.disabled .prod-graph-tools-icon { color: var(--text-dim); }
-.prod-graph-tools-remove {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 0.72rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-}
-.prod-graph-tools-remove:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.prod-graph-tools-remove:disabled { opacity: 0.4; cursor: default; }
 .prod-graph-drop-hint {
   position: absolute;
   left: 50%;
@@ -4270,6 +4353,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-node .react-flow__handle.socket-ref { background: var(--graph-socket-ref); }
 .prod-graph-node .react-flow__handle.socket-style { background: var(--graph-socket-style); }
 .prod-graph-node .react-flow__handle.socket-brand { background: var(--graph-socket-brand); }
+.prod-graph-node .react-flow__handle.socket-grid { background: var(--graph-socket-grid); }
 /* The always-open reference socket renders hollow until a connection lands. */
 .prod-graph-node .react-flow__handle.socket-ref.open { background: var(--bg); border-color: var(--graph-socket-ref); box-shadow: 0 0 0 1px var(--graph-socket-ref); }
 .prod-graph-socket-label {
@@ -4287,6 +4371,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-socket-label.ref { color: var(--graph-socket-ref); }
 .prod-graph-socket-label.style { color: var(--graph-socket-style); }
 .prod-graph-socket-label.brand { color: var(--graph-socket-brand); }
+.prod-graph-socket-label.grid { color: var(--graph-socket-grid); }
 /* Reserve a left gutter in the prompt nodes so the labels don't cover text. */
 .prod-graph-composer { padding-left: 84px; }
 .prod-graph-videoprompt, .prod-graph-editprompt { padding-left: 84px; }

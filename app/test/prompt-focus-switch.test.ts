@@ -225,7 +225,7 @@ describe("side-panel prompt follows frame switches after edits (magic on)", () =
     document.body.removeChild(host);
   });
 
-  it("publishes node-graph composer edits to the side panel live", async () => {
+  it("commits node-graph composer edits to the side panel when the node loses focus", async () => {
     const { host, root } = await mount();
     await clickFrame(host, 0);
     expect(panelText(host)).toContain("Magic one.");
@@ -238,14 +238,22 @@ describe("side-panel prompt follows frame switches after edits (magic on)", () =
     expect(editor).toBeTruthy();
     expect(editor.textContent).toContain("Magic one.");
 
-    // Edit the composer. The side panel shares the same prompt, so it must
-    // update live — not only after the composer blurs.
+    // Edit the composer: the node's own draft updates immediately, but the
+    // shared side panel is NOT touched while the node is in "edit mode" — the
+    // per-keystroke mirror was what made the caret jump to the end.
     await act(async () => {
       editor.textContent = "GRAPH EDIT";
       editor.dispatchEvent(new Event("input", { bubbles: true }));
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(host.querySelector(".prod-graph-composer")?.textContent).toContain("GRAPH EDIT");
+    expect(panelText(host)).not.toContain("GRAPH EDIT");
+
+    // Clicking off the node commits the draft to the shared prompt.
+    await act(async () => {
+      editor.dispatchEvent(new Event("focusout", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 30));
+    });
     expect(panelText(host)).toContain("GRAPH EDIT");
 
     await act(async () => { root.unmount(); });

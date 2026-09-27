@@ -42,6 +42,7 @@ export const productionChannels = {
   "production:regenerateBoard": { method: "regenerateBoard", kind: "invoke" },
   "production:regenerateBoards": { method: "regenerateBoards", kind: "invoke" },
   "production:recheckBoard": { method: "recheckBoard", kind: "invoke" },
+  "production:clearPending": { method: "clearPending", kind: "invoke" },
   "production:boardPrompts": { method: "exportBoardPrompts", kind: "invoke" },
   "production:boardPrompt": { method: "getBoardPrompt", kind: "invoke" },
   "production:updateBoardPrompt": { method: "updateBoardPrompt", kind: "invoke" },

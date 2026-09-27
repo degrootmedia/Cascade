@@ -40,7 +40,7 @@ import { normalizeSequenceSegments, sequenceTotalDuration, type SequenceSegment 
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { closestResolution } from "./resolution.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, replaceRefTagAt, stripBrandParagraph } from "../../../shared/prompt-grammar.js";
-import { TriplePrompt } from "./TriplePrompt.js";
+import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed, usePersistedNumber } from "./production/persisted-state.js";
 import { refThumbUrl } from "./production/thumb-url.js";
@@ -637,30 +637,47 @@ type UpscaleFlowNode = Node<UpscaleNodeData, "upscale">;
 
 type GraphNode = RefFlowNode | ComposerFlowNode | StyleFlowNode | BrandFlowNode | OutputFlowNode | ImageGenFlowNode | VideoGenFlowNode | TweenFlowNode | EditVideoFlowNode | EditGenFlowNode | VideoPromptFlowNode | SequencePromptFlowNode | EditPromptFlowNode | EditVideoPromptFlowNode | CameraGridFlowNode | UpscaleFlowNode;
 
+/** True while focus is inside an editable (a prompt box, a chip within one, or
+ *  any input/textarea/select) — Escape must not close the canvas out from
+ *  under the user while typing. Mirrors the workspace's `isPromptTextarea`
+ *  guard (kept local: this file must not import the workspace). */
+function isEditingTarget(el: unknown): boolean {
+  const node = el as HTMLElement | null;
+  if (!node || typeof node.tagName !== "string") return false;
+  const tag = node.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return typeof node.closest === "function"
+    && !!node.closest(".prompt-content-editor, .prod-ref-prompt-editor, .prod-graph-composer");
+}
+
 /* ------------------------------------------------------------------ */
 /* Custom node views                                                   */
 /* ------------------------------------------------------------------ */
 
-const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<ComposerFlowNode>) {
-  // All inputs live on the left edge: style at top, one socket per connected
-  // reference (plus one always-open socket) in the middle, brand at the
-  // bottom — each named + color-coded by the input it accepts. Occupied
-  // sockets are not connectable: new links always land on the open socket.
-  const updateNodeInternals = useUpdateNodeInternals();
-  useEffect(() => {
-    // Socket positions are percentage-offset styles — when the count changes
-    // they move without the node resizing, so force a bounds re-measure.
-    updateNodeInternals(id);
-  }, [id, data.refHandles.length, updateNodeInternals]);
-  // The prompt text is now a local draft while this node holds focus.
-  // Updating the parent (`focusedPrompt` + side panel + prod) on every
-  // keystroke re-renders the whole workspace, churns `buildDerived` with a
-  // fresh `references` array, and `setNodes` remounts the composer — the
-  // purple focus ring vanishes every other keystroke. Local draft + sync on
-  // blur/close keeps the side panel stable and the caret put.
+/** Shared contract for the node-graph prompt editors (the composer and every
+ *  prompt node). The local-draft plumbing below is identical for all of them. */
+interface PromptNodeData {
+  value: string;
+  refHandles: string[];
+  openHandleId: string;
+  includeBrand: boolean;
+  magicActive?: boolean;
+  onChange: (text: string) => void;
+  registerApplier: (applier: PromptDraftApplier | undefined) => void;
+}
+
+/** Shared local-draft state for a node-graph prompt editor. Keeping the prompt
+ *  as a local draft while the node holds focus avoids re-rendering the whole
+ *  workspace (and remounting the node) on every keystroke — which dropped the
+ *  caret/focus. `emitted` suppresses the parent's echo; external changes to the
+ *  UNFOCUSED boxes still fold in; the draft flushes on blur / unmount. When
+ *  `publishEveryEdit` is false (every node today), only tag REORDERS publish
+ *  live — plain prose commits when the user clicks off. */
+function usePromptNodeDraft(data: PromptNodeData, publishEveryEdit: boolean) {
   const [localValue, setLocalValue] = useState(data.value);
   const emitted = useRef<Set<string>>(new Set([data.value]));
   const rootRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<PromptContentHandle | null>(null);
   const draftRef = useRef(localValue);
   const dataRef = useRef(data);
   const prevMagicRef = useRef(data.magicActive);
@@ -676,14 +693,14 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     }
   };
   const handleBlur = () => {
-    setTimeout(() => {
-      if (!rootRef.current?.contains(document.activeElement)) syncToParent();
-    }, 0);
+    setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
   };
   // Magic toggle switches the whole content (original <-> magic). A focused
   // composer would otherwise keep its local content draft and silently undo
   // the toggle on blur — force a full resync so both views mirror each other.
+  // (Only the composer passes magicActive.)
   useEffect(() => {
+    if (data.magicActive === undefined) return;
     if (prevMagicRef.current !== data.magicActive) {
       prevMagicRef.current = data.magicActive;
       emitted.current.clear();
@@ -692,16 +709,14 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
       draftRef.current = data.value;
     }
   }, [data.magicActive, data.value]);
+  // External value changes merge into the UNFOCUSED boxes while the node holds
+  // focus (changing the style dropdown must update Style without resetting the
+  // Content caret, and vice-versa). The focused box stays authoritative.
   useEffect(() => {
     if (emitted.current.has(data.value)) return;
     const active = document.activeElement as HTMLElement | null;
     const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
     if (isFocused) {
-      // While the composer is focused, keep the focused box authoritative
-      // but still allow the other boxes (style/brand) to follow external
-      // changes. This implements the “separate logical sections” rule:
-      // style, content, brand are independent and only combined at
-      // persistence / MCP submission.
       const incoming = parsePromptBoxes(data.value);
       const current = parsePromptBoxes(localValue);
       const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
@@ -710,32 +725,27 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
       const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
       let next: string | null = null;
       if (isContentFocused) {
-        // Preserve local content (including tag positions), take incoming style/brand
         if (incoming.style !== current.style || incoming.brand !== current.brand) {
-          const merged = { ...current, style: incoming.style, brand: incoming.brand };
-          next = composePromptBoxes(merged);
+          next = composePromptBoxes({ ...current, style: incoming.style, brand: incoming.brand });
         }
       } else if (activeIsStyle) {
         if (incoming.content !== current.content || incoming.brand !== current.brand) {
-          const merged = { ...current, content: incoming.content, brand: incoming.brand };
-          next = composePromptBoxes(merged);
+          next = composePromptBoxes({ ...current, content: incoming.content, brand: incoming.brand });
         }
       } else if (activeIsBrand) {
         if (incoming.content !== current.content || incoming.style !== current.style) {
-          const merged = { ...current, style: incoming.style, content: incoming.content };
-          next = composePromptBoxes(merged);
+          next = composePromptBoxes({ ...current, style: incoming.style, content: incoming.content });
         }
       } else {
-        // Focus is inside the node but not in a specific box (e.g. header);
-        // treat as not focused for prompt purposes and allow full sync.
-        // Fall through to full sync below.
+        // Focus is inside the node but not in a specific box (e.g. header):
+        // keep the local draft authoritative.
+        return;
       }
       if (next !== null) {
         emitted.current.add(next);
         if (emitted.current.size > 100) emitted.current.clear();
         setLocalValue(next);
         draftRef.current = next;
-        return;
       }
       return;
     }
@@ -757,18 +767,60 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
     register({
       get: () => draftRef.current,
       apply: (fn) => {
-        const next = fn(draftRef.current);
-        if (next === draftRef.current) return;
+        const before = draftRef.current;
+        const next = fn(before);
+        if (next === before) return;
         draftRef.current = next;
         setLocalValue(next);
         const s = emitted.current;
         if (s.size > 100) s.clear();
         s.add(next);
         dataRef.current.onChange(next);
+        // A reference socket connect/disconnect is a TAG-only edit. When it
+        // ADDS a tag, land the caret right after the new block and focus the
+        // box so the user can keep typing immediately.
+        const priorNames = new Set(refTagNames(before).map((n) => n.toLowerCase()));
+        const added = refTagNames(next).find((n) => !priorNames.has(n.toLowerCase()));
+        if (added) contentRef.current?.focusAfterTag(added);
       },
     });
     return () => register?.(undefined);
   }, []);
+  const commit = (v: string) => {
+    const prev = draftRef.current;
+    setLocalValue(v);
+    draftRef.current = v;
+    const s = emitted.current;
+    if (s.size > 100) s.clear();
+    s.add(v);
+    if (publishEveryEdit) { dataRef.current.onChange(v); return; }
+    try {
+      const pc = parsePromptBoxes(prev).content;
+      const nc = parsePromptBoxes(v).content;
+      if (isTagReorder(pc, nc)) dataRef.current.onChange(v);
+    } catch { /* ignore */ }
+  };
+  return { localValue, rootRef, contentRef, handleBlur, commit };
+}
+
+const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<ComposerFlowNode>) {
+  // All inputs live on the left edge: style at top, one socket per connected
+  // reference (plus one always-open socket) in the middle, brand at the
+  // bottom — each named + color-coded by the input it accepts. Occupied
+  // sockets are not connectable: new links always land on the open socket.
+  const updateNodeInternals = useUpdateNodeInternals();
+  useEffect(() => {
+    // Socket positions are percentage-offset styles — when the count changes
+    // they move without the node resizing, so force a bounds re-measure.
+    updateNodeInternals(id);
+  }, [id, data.refHandles.length, updateNodeInternals]);
+  // The prompt is a local draft while this node holds focus (see
+  // usePromptNodeDraft). The composer also commits on blur/close instead of
+  // publishing every keystroke: a per-keystroke publish fired a save, a
+  // `getBoardPrompt` refetch, and a whole-workspace re-render on every
+  // character — which is what made the caret jump to the end while typing. The
+  // side panel catches up the moment the user clicks off the node.
+  const { localValue, rootRef, contentRef, handleBlur, commit } = usePromptNodeDraft(data, false);
   const sockets = promptSockets(data.refHandles, data.openHandleId);
   return (
     <div ref={rootRef} className={"prod-graph-node prod-graph-composer" + (data.magicActive ? " magic-active" : "")}>
@@ -791,26 +843,14 @@ const ComposerNodeView = memo(function ComposerNodeView({ id, data }: NodeProps<
         sideRows={3}
         resizable
         deferExternalWhileFocused
+        contentRef={contentRef}
         value={localValue}
         includeBrand={data.includeBrand}
         styleReadOnly
         brandReadOnly
         placeholder="Describe the frame — connect references, type @, or edit the boxes"
         onBlur={handleBlur}
-        onChange={(v) => {
-          setLocalValue(v);
-          draftRef.current = v;
-          const s = emitted.current;
-          if (s.size > 100) s.clear();
-          s.add(v);
-          // Publish every edit to the parent immediately: the composer and the
-          // classic side panel are two views of the SAME shot prompt (they share
-          // `focusedPrompt`), so the side panel must never lag behind a
-          // node-graph edit. The local draft still owns the DOM (the echoed
-          // value is suppressed by `emitted`), so the caret stays put; the save
-          // is coalesced by the prompt queue's latest-value guard.
-          dataRef.current.onChange(v);
-        }}
+        onChange={commit}
       />
       <Handle type="source" position={Position.Right} />
     </div>
@@ -1493,102 +1533,14 @@ const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<Ed
  *  Reference(s) + Brand sockets on the left, a TriplePrompt body, a source
  *  handle on the right. The wrappers below supply the title/placeholder/class. */
 /** The body PromptNodeView renders — shared by every prompt node kind. */
-interface PromptBodyData {
-  value: string;
-  refHandles: string[];
-  openHandleId: string;
-  includeBrand: boolean;
-  onChange: (text: string) => void;
-  registerApplier: (applier: PromptDraftApplier | undefined) => void;
-}
+type PromptBodyData = PromptNodeData;
 
 const PromptNodeView = memo(function PromptNodeView({ id, data, title, placeholder, containerClass, contentLabel, afterContent, sockets: socketsProp }: { id: string; data: PromptBodyData; title: string; placeholder: string; containerClass: string; contentLabel?: string; afterContent?: ReactNode; sockets?: PromptSocket[] }) {
   const updateNodeInternals = useUpdateNodeInternals();
   useEffect(() => { updateNodeInternals(id); }, [id, data.refHandles.length, updateNodeInternals]);
-  const [localValue, setLocalValue] = useState(data.value);
-  const emitted = useRef<Set<string>>(new Set([data.value]));
-  const rootRef = useRef<HTMLDivElement>(null);
-  const draftRef = useRef(localValue);
-  const dataRef = useRef(data);
-  useEffect(() => { draftRef.current = localValue; }, [localValue]);
-  useEffect(() => { dataRef.current = data; }, [data]);
-  const syncToParent = () => {
-    const latest = draftRef.current;
-    const cur = dataRef.current.value;
-    if (latest !== cur) {
-      emitted.current.add(latest);
-      if (emitted.current.size > 100) emitted.current.clear();
-      dataRef.current.onChange(latest);
-    }
-  };
-  const handleBlur = () => {
-    setTimeout(() => { if (!rootRef.current?.contains(document.activeElement)) syncToParent(); }, 0);
-  };
-  useEffect(() => {
-    if (emitted.current.has(data.value)) return;
-    const active = document.activeElement as HTMLElement | null;
-    const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
-    if (isFocused) {
-      const incoming = parsePromptBoxes(data.value);
-      const current = parsePromptBoxes(localValue);
-      const contentEl = rootRef.current?.querySelector(".prompt-content-editor") as HTMLElement | null;
-      const isContentFocused = !!contentEl && !!active && (contentEl === active || contentEl.contains(active));
-      const activeIsStyle = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Visual style");
-      const activeIsBrand = !!active && active.tagName === "TEXTAREA" && (active as HTMLTextAreaElement).placeholder.includes("Palette");
-      let next: string | null = null;
-      if (isContentFocused) {
-        if (incoming.style !== current.style || incoming.brand !== current.brand) {
-          const merged = { ...current, style: incoming.style, brand: incoming.brand };
-          next = composePromptBoxes(merged);
-        }
-      } else if (activeIsStyle) {
-        if (incoming.content !== current.content || incoming.brand !== current.brand) {
-          const merged = { ...current, content: incoming.content, brand: incoming.brand };
-          next = composePromptBoxes(merged);
-        }
-      } else if (activeIsBrand) {
-        if (incoming.content !== current.content || incoming.style !== current.style) {
-          const merged = { ...current, style: incoming.style, content: incoming.content };
-          next = composePromptBoxes(merged);
-        }
-      } else if (!isContentFocused && !activeIsStyle && !activeIsBrand) {
-        // Generic focus inside node (e.g. header) — preserve local draft
-        return;
-      }
-      if (next !== null) {
-        emitted.current.add(next);
-        if (emitted.current.size > 100) emitted.current.clear();
-        setLocalValue(next);
-        draftRef.current = next;
-        return;
-      }
-      return;
-    }
-    emitted.current.clear();
-    emitted.current.add(data.value);
-    setLocalValue(data.value);
-    draftRef.current = data.value;
-  }, [data.value]);
-  useEffect(() => () => { syncToParent(); }, []);
-  // Live-draft handle for the video-prompt node (see ComposerNodeView).
-  useEffect(() => {
-    const register = dataRef.current.registerApplier as ((a: PromptDraftApplier | undefined) => void) | undefined;
-    if (!register) return;
-    register({
-      get: () => draftRef.current,
-      apply: (fn) => {
-        const next = fn(draftRef.current);
-        if (next === draftRef.current) return;
-        draftRef.current = next;
-        setLocalValue(next);
-        const s = emitted.current;
-        if (s.size > 100) s.clear();
-        s.add(next);
-        dataRef.current.onChange(next);
-      },
-    });
-    return () => register?.(undefined);
-  }, []);
+  // Plain prose stays local until blur; only tag reorders publish live (see
+  // usePromptNodeDraft).
+  const { localValue, rootRef, contentRef, handleBlur, commit } = usePromptNodeDraft(data, false);
   const sockets = socketsProp ?? promptSockets(data.refHandles, data.openHandleId);
   return (
     <div ref={rootRef} className={"prod-graph-node prod-graph-composer " + containerClass}>
@@ -1604,6 +1556,7 @@ const PromptNodeView = memo(function PromptNodeView({ id, data, title, placehold
         sideRows={3}
         resizable
         deferExternalWhileFocused
+        contentRef={contentRef}
         value={localValue}
         includeBrand={data.includeBrand}
         styleReadOnly
@@ -1612,19 +1565,7 @@ const PromptNodeView = memo(function PromptNodeView({ id, data, title, placehold
         placeholder={placeholder}
         afterContent={afterContent}
         onBlur={handleBlur}
-        onChange={(v) => {
-          const prev = localValue;
-          setLocalValue(v);
-          draftRef.current = v;
-          const s = emitted.current;
-          if (s.size > 100) s.clear();
-          s.add(v);
-          try {
-            const pc = parsePromptBoxes(prev).content;
-            const nc = parsePromptBoxes(v).content;
-            if (isTagReorder(pc, nc)) dataRef.current.onChange(v);
-          } catch {}
-        }}
+        onChange={commit}
       />
       <Handle type="source" position={Position.Right} />
     </div>
@@ -1649,6 +1590,62 @@ const VideoPromptNodeView = memo((props: NodeProps<VideoPromptFlowNode>) => {
       title={`Video prompt${videoNodeLabel(data.nodeId)}`}
       placeholder="Motion prompt — connect references, type @, or edit the boxes"
       containerClass="prod-graph-videoprompt"
+    />
+  );
+});
+
+/** The per-shot prompt box under a sequence segment. An empty override is
+ *  meaningful ("use the frame prompt"), so the box commits each change and
+ *  keeps a local draft while focused — that way the frame prompt arriving
+ *  asynchronously can't yank the caret, and the box can be emptied mid-edit
+ *  before it snaps back to the frame prompt on blur. */
+export const SegmentPromptBox = memo(function SegmentPromptBox({ shotId, value, fallback, onChange }: { shotId: string; value: string; fallback: string; onChange: (shotId: string, text: string) => void }) {
+  const external = value || fallback;
+  const [draft, setDraft] = useState(external);
+  const emitted = useRef<Set<string>>(new Set([external]));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focused.current) return;
+    if (emitted.current.has(external)) return;
+    emitted.current.clear();
+    emitted.current.add(external);
+    setDraft(external);
+  }, [external]);
+  return (
+    <textarea
+      className="prod-graph-seq-seg-prompt nodrag"
+      rows={2}
+      value={draft}
+      placeholder="Frame prompt — edit here, or Revert to the storyboard prompt"
+      onFocus={() => { focused.current = true; }}
+      onBlur={() => {
+        focused.current = false;
+        if (draft === external) return;
+        if (draft === "") {
+          // Empty override means "use the frame prompt": show the fallback
+          // text. The per-keystroke onChange("") already cleared the stored
+          // override; teaching `emitted` the fallback keeps that echo from
+          // rebuilding the box under the next focus.
+          const s = emitted.current;
+          if (s.size > 100) s.clear();
+          s.add(fallback);
+          setDraft(fallback);
+          return;
+        }
+        // Commit (never revert): the parent echo can lag behind blur across an
+        // async save/rebase, and reverting to the stale `external` here — then
+        // early-returning on the real echo because `emitted` holds it — would
+        // discard the edit permanently.
+        onChange(shotId, draft);
+      }}
+      onChange={(e) => {
+        const v = e.target.value;
+        setDraft(v);
+        const s = emitted.current;
+        if (s.size > 100) s.clear();
+        s.add(v);
+        onChange(shotId, v);
+      }}
     />
   );
 });
@@ -1681,12 +1678,11 @@ const SequenceSegmentList = memo(function SequenceSegmentList({ data }: { data: 
               <span className="prod-graph-seq-seg-unit">Seconds</span>
             </div>
           </div>
-          <textarea
-            className="prod-graph-seq-seg-prompt nodrag"
-            rows={2}
-            value={seg.prompt || seg.framePrompt}
-            placeholder="Frame prompt — edit here, or Revert to the storyboard prompt"
-            onChange={(e) => data.onSegmentPrompt(seg.shotId, e.target.value)}
+          <SegmentPromptBox
+            shotId={seg.shotId}
+            value={seg.prompt}
+            fallback={seg.framePrompt}
+            onChange={data.onSegmentPrompt}
           />
           {seg.prompt
             ? <button className="prod-graph-seq-seg-revert nodrag" onClick={() => data.onRevert(seg.shotId)} title="Revert to the frame's storyboard prompt">Revert</button>
@@ -2664,12 +2660,19 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   // Escape closes the lightbox first, then the graph. When a stacked dialog
   // (video generation, tween timeline) is open above the graph, it owns Escape.
+  // While the user is typing in a prompt box, Escape only yields focus (which
+  // commits the node's draft) instead of closing the whole canvas.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.isComposing) return;
       if (lightbox) { setLightbox(null); return; }
       if (document.querySelector(".prod-video-overlay")) return;
       if (document.querySelector(".prod-tween-overlay")) return;
+      if (isEditingTarget(e.target)) {
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && typeof ae.blur === "function") ae.blur();
+        return;
+      }
       onClose();
     };
     document.addEventListener("keydown", onKey);
@@ -4830,11 +4833,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   }, [references, shot.graphTweenRefIds, shot]);
 
   const onConnectEnd = useCallback<OnConnectEnd>((_event, state) => {
-    // Blender-style disconnect: grab a link at either end and release it into
-    // empty space. Releasing on/near any socket snaps back instead.
+    // Input-socket-only disconnect: grab a link at its input (target) end and
+    // release it into empty space. Dragging out from an output (source) socket
+    // does nothing so the wire snaps back. Releasing on/near any socket snaps
+    // back instead.
     if (state.isValid || state.toHandle) return;
     const from = state.fromHandle;
     if (!from) return;
+    if (from.type !== "target") return;
     // Stored-graph removal first (see header note): mirrors the legacy strip
     // below handle-for-handle. Null = no mapped wire; the legacy path still runs.
     {
@@ -4945,154 +4951,6 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       cb.current.onUnpipeOutput();
       return;
     }
-    if (from.type === "source" && from.nodeId === "imagegen") {
-      if (cb.current.graphCameraGrid?.source?.kind === "imagegen") stable.onCameraGridSave({ source: undefined });
-      if (cb.current.graphUpscale?.source?.kind === "imagegen") stable.onUpscaleSave({ source: undefined });
-      cb.current.onUnpipeImageGen();
-      return;
-    }
-    if (from.type === "source" && from.nodeId === "upscale") {
-      if (cb.current.graphOutputSource === "upscale") cb.current.onUnpipeOutput();
-      return;
-    }
-    if (from.type === "source" && parseVideoGenNode(from.nodeId ?? "") !== null) {
-      cb.current.onUnpipeVideoGen();
-      return;
-    }
-    if (from.type === "source" && from.nodeId === "tween") {
-      cb.current.onUnpipeTweenGen();
-      return;
-    }
-    if (from.type === "source") {
-      const editSrcId = parseEditGenNode(from.nodeId ?? "");
-      if (editSrcId) {
-        const gs = cb.current.graphCameraGrid?.source;
-        if (gs?.kind === "editgen" && gs.nodeId === editSrcId) stable.onCameraGridSave({ source: undefined });
-        const us = cb.current.graphUpscale?.source;
-        if (us?.kind === "editgen" && us.nodeId === editSrcId) stable.onUpscaleSave({ source: undefined });
-        cb.current.onUnpipeEditGen(editSrcId);
-        return;
-      }
-    }
-    if (from.type === "source") {
-      if (from.nodeId === "style") {
-        // The style edge(s) were removed above; clear the legacy plug flags
-        // only. The shot's style selection (which style / None) is independent
-        // of the connection and must survive a disconnect.
-        const editNodesNext = (cb.current.graphEditNodes ?? []).map((n) => (n.styleConnected ? { ...n, styleConnected: false } : n));
-        cb.current.onGraphField({
-          graphStyleConnected: false,
-          graphVideoStyleConnected: false,
-          ...(editNodesNext.some((n, i) => n !== (cb.current.graphEditNodes ?? [])[i]) ? { graphEditNodes: editNodesNext } : {}),
-        });
-        return;
-      }
-      if (from.nodeId === "brand") {
-        // The brand edge(s) were removed above; the clause renders from the
-        // set. Clear the composer's shot-level toggle mirror too.
-        cb.current.onToggleBrand(false);
-        return;
-      }
-      const m = /^ref:(.+)$/.exec(from.nodeId ?? "");
-      if (!m) return;
-      const refId = m[1];
-      // Remove this ref from any prompt where it is tagged (fresh draft text
-      // wins over the saved prop so a focused prompt can't resurrect the tag
-      // on blur).
-      const findName = (list: { name: string; ref: GraphRef | null }[]) =>
-        list.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId)?.name;
-      const composerName = findName(tagged);
-      if (composerName) {
-        if (!applyDraftEdit("composer", (t) => removeRefTag(t, composerName))) {
-          if (refTagNames(cb.current.prompt).some((n) => n.toLowerCase() === composerName.toLowerCase())) cb.current.onPromptChange(removeRefTag(cb.current.prompt, composerName));
-        }
-      }
-      // Every video node: strip the ref from its prompt (draft-aware) and drop
-      // it as a source/reference.
-      const vidNext = (cb.current.graphVideoNodes ?? []).map((n) => {
-        const key = n.mode === "edit" ? editVideoApplierKey(n.id) : videoApplierKey(n.id);
-        const fresh = appliers.current[key]?.get() ?? cb.current.videoPromptValues?.get(n.id) ?? n.prompt ?? "";
-        const name = findName(cb.current.taggedVideoByNode?.get(n.id) ?? []);
-        const needsStrip = !!name && refTagNames(fresh).some((nm) => nm.toLowerCase() === name.toLowerCase());
-        if (needsStrip && name) applyDraftEdit(key, (t) => removeRefTag(t, name));
-        const source = n.source?.kind === "ref" && n.source.refId === refId ? undefined : n.source;
-        const refIds = n.refIds?.includes(refId) ? n.refIds.filter((id) => id !== refId) : n.refIds;
-        const prompt = needsStrip && name ? removeRefTag(fresh, name) : n.prompt;
-        return prompt !== n.prompt || source !== n.source || refIds !== n.refIds ? { ...n, prompt, source, refIds } : n;
-      });
-      if (vidNext.some((n, i) => n !== (cb.current.graphVideoNodes ?? [])[i])) cb.current.onGraphField({ graphVideoNodes: vidNext });
-      // Edit nodes: strip the ref from every node prompt (draft-aware) and
-      // clear its source. The batch carries the same stripped text the draft
-      // already saved so the two writes can't fight.
-      const refName = cb.current.references.find((r) => r.id === refId)?.name
-        ?? unionTagged.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId)?.name;
-      if (refName) {
-        const editNext = (cb.current.graphEditNodes ?? []).map((n) => {
-          const fresh = appliers.current[`edit:${n.id}`]?.get() ?? n.prompt ?? "";
-          const needsStrip = refTagNames(fresh).some((nm) => nm.toLowerCase() === refName.toLowerCase());
-          const nextPrompt = needsStrip ? removeRefTag(fresh, refName) : null;
-          if (needsStrip) applyDraftEdit(`edit:${n.id}`, (t) => removeRefTag(t, refName));
-          const source = n.source?.kind === "ref" && n.source.refId === refId ? undefined : n.source;
-          if (nextPrompt === null && source === n.source) return n;
-          return { ...n, ...(nextPrompt !== null ? { prompt: nextPrompt } : {}), source };
-        });
-        if (editNext.some((n, i) => n !== (cb.current.graphEditNodes ?? [])[i])) cb.current.onGraphField({ graphEditNodes: editNext });
-      } else {
-        const editNodesNext = (cb.current.graphEditNodes ?? []).map((n) => {
-          const source = n.source?.kind === "ref" && n.source.refId === refId ? undefined : n.source;
-          return source !== n.source ? { ...n, source } : n;
-        });
-        if (editNodesNext.some((n, i) => n !== (cb.current.graphEditNodes ?? [])[i])) cb.current.onGraphField({ graphEditNodes: editNodesNext });
-      }
-      // Also check union dangling tag by name
-      const unionEntry = unionTagged.find((t) => (t.ref?.id ?? `missing:${t.name.toLowerCase()}`) === refId || t.ref?.id === refId);
-      if (unionEntry) {
-        // Ensure removal even if not in per-prompt list due to timing
-        const freshComposer = appliers.current["composer"]?.get() ?? cb.current.prompt;
-        if (refTagNames(freshComposer).some((n) => n.toLowerCase() === unionEntry.name.toLowerCase())) { if (!applyDraftEdit("composer", (t) => removeRefTag(t, unionEntry.name))) cb.current.onPromptChange(removeRefTag(cb.current.prompt, unionEntry.name)); }
-        const unionVidNext = (cb.current.graphVideoNodes ?? []).map((n) => {
-          const key = n.mode === "edit" ? editVideoApplierKey(n.id) : videoApplierKey(n.id);
-          const fresh = appliers.current[key]?.get() ?? cb.current.videoPromptValues?.get(n.id) ?? n.prompt ?? "";
-          if (!refTagNames(fresh).some((nm) => nm.toLowerCase() === unionEntry.name.toLowerCase())) return n;
-          applyDraftEdit(key, (t) => removeRefTag(t, unionEntry.name));
-          return { ...n, prompt: removeRefTag(fresh, unionEntry.name) };
-        });
-        if (unionVidNext.some((n, i) => n !== (cb.current.graphVideoNodes ?? [])[i])) cb.current.onGraphField({ graphVideoNodes: unionVidNext });
-        const editUnionNext = (cb.current.graphEditNodes ?? []).map((n) => {
-          const fresh = appliers.current[`edit:${n.id}`]?.get() ?? n.prompt ?? "";
-          if (!refTagNames(fresh).some((nm) => nm.toLowerCase() === unionEntry.name.toLowerCase())) return n;
-          applyDraftEdit(`edit:${n.id}`, (t) => removeRefTag(t, unionEntry.name));
-          return { ...n, prompt: removeRefTag(fresh, unionEntry.name) };
-        });
-        if (editUnionNext.some((n, i) => n !== (cb.current.graphEditNodes ?? [])[i])) cb.current.onGraphField({ graphEditNodes: editUnionNext });
-      }
-      if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
-      if (cb.current.graphVideoSourceRefId === refId) cb.current.onGraphField({ graphVideoSourceRefId: undefined });
-      // A keyframe removed from the canvas leaves the tween wiring too.
-      if ((cb.current.graphTweenRefIds ?? []).includes(refId)) {
-        cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId));
-      }
-      // The camera grid may have this ref as its source image, its grid image,
-      // or a wired reference — drop any. Removing a reference socket renumbers
-      // the remaining ones, so rebuild the positional edges too.
-      const gridSrc = cb.current.graphCameraGrid?.source;
-      const gridImageSrc = cb.current.graphCameraGrid?.gridSource;
-      const gridRefIds = cb.current.graphCameraGrid?.refIds ?? [];
-      if ((gridSrc?.kind === "ref" && gridSrc.refId === refId)
-        || (gridImageSrc?.kind === "ref" && gridImageSrc.refId === refId)
-        || gridRefIds.includes(refId)) {
-        const refIds = gridRefIds.filter((id) => id !== refId);
-        stable.onCameraGridSave({
-          ...(gridSrc?.kind === "ref" && gridSrc.refId === refId ? { source: undefined } : {}),
-          ...(gridImageSrc?.kind === "ref" && gridImageSrc.refId === refId ? { gridSource: undefined } : {}),
-          ...(gridRefIds.includes(refId) ? { refIds: refIds.length ? refIds : undefined } : {}),
-        });
-        if (gridRefIds.includes(refId)) {
-          const g = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
-          saveGraph(applyCameraGridRefs(g, refIds));
-        }
-      }
-    }
   }, [tagged, taggedVideo, taggedEditByNode, unionTagged]);
 
   useEffect(() => () => { if (hintTimer.current !== null) window.clearTimeout(hintTimer.current); }, []);
@@ -5191,7 +5049,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       <div className={"prod-graph-panel" + (magicActive ? " magic-active" : "") + (readOnly ? " prod-graph-readonly" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="prod-graph-head">
           <span className="prod-graph-title">{subjectLabel ?? `Shot ${shot.number}`} — node graph</span>
-          <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off a socket to detach it</span>
+          <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off an input socket to detach it</span>
           {onToggleMagic && (
             <button
               className={"prod-btn prod-magic-btn" + (magicActive ? " active" : "")}

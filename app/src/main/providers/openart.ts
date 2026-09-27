@@ -840,6 +840,23 @@ private videoRefsAssign = videoRefsAssign;
     return urls.size || hashes.size ? { urls, hashes } : undefined;
   }
 
+  /** Rebuild the submit-time input exclusion from a persisted pending record,
+   *  so a recheck excludes the same echoed inputs the original wait did. */
+  private pendingExclusion(rec: PendingImageGen): InputExclusion | undefined {
+    const urls = new Set(rec.refUrls ?? []);
+    const hashes = new Set(rec.refHashes ?? []);
+    return urls.size || hashes.size ? { urls, hashes } : undefined;
+  }
+
+  /** Serialize an exclusion for persistence on the pending record. */
+  private static exclusionArrays(exclude?: InputExclusion): { refHashes?: string[]; refUrls?: string[] } {
+    if (!exclude) return {};
+    const out: { refHashes?: string[]; refUrls?: string[] } = {};
+    if (exclude.hashes.size) out.refHashes = [...exclude.hashes];
+    if (exclude.urls.size) out.refUrls = [...exclude.urls];
+    return out;
+  }
+
   /** Whether a candidate buffer is one of the submission's uploaded inputs. */
   private isExcludedInput(buf: Buffer, exclude?: InputExclusion): boolean {
     return !!exclude && exclude.hashes.size > 0 && exclude.hashes.has(createHash("sha1").update(buf).digest("hex"));
@@ -946,7 +963,12 @@ private videoRefsAssign = videoRefsAssign;
   async recheckPendingImage(rec: PendingImageGen): Promise<Buffer | null> {
     if (rec.historyId) {
       if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
-      const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS);
+      // The original wait excluded the submitted references (style frame +
+      // content refs) by identity — without the same exclusion a recheck whose
+      // reply carries no result URL picks the echoed input attachment (usually
+      // the style frame) as the "finished" frame.
+      const exclude = this.pendingExclusion(rec);
+      const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS, exclude);
       if (buf) return buf;
       if (failed) throw new OpenArtImageFailedError(rec.historyId, failed);
       return null;
@@ -1244,8 +1266,10 @@ private videoRefsAssign = videoRefsAssign;
           // transport error — leaves the job rendering server-side. Record it
           // as pending so the finished frame can be rechecked and downloaded
           // without paying twice. Only a dead (FAILED/CANCELLED) job is skipped.
+          // The input identity rides along so the recheck excludes the same
+          // echoed references (notably the style frame) the wait did.
           if (!(e instanceof OpenArtImageFailedError)) {
-            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
           }
           throw e;
         }
@@ -1266,8 +1290,10 @@ private videoRefsAssign = videoRefsAssign;
           downloaded = Buffer.from(await res.arrayBuffer());
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
-          // recheck can retry the download without regenerating.
-          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+          // recheck can retry the download without regenerating. The input
+          // identity rides along so a later historyId recheck (or an echo
+          // check) can still tell input from output.
+          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
           throw e;
         }
         if (this.isExcludedInput(downloaded, exclude)) {

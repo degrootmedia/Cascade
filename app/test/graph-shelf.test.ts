@@ -148,6 +148,18 @@ async function connectRefToSocket(host: HTMLDivElement, refName: string, targetH
 const refNodeCount = (host: HTMLDivElement) => host.querySelectorAll(".prod-graph-node.prod-graph-ref").length;
 const toolNodeCount = (host: HTMLDivElement) => host.querySelectorAll(".prod-graph-node.prod-graph-videogen, .prod-graph-node.prod-graph-videoprompt, .prod-graph-node.prod-graph-editgen, .prod-graph-node.prod-graph-editprompt").length;
 
+/** Serialized-text caret offset inside an editor (-1 when the selection is out). */
+function caretOffsetIn(box: HTMLElement): number {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return -1;
+  const range = sel.getRangeAt(0);
+  if (!box.contains(range.startContainer)) return -1;
+  const pre = document.createRange();
+  pre.selectNodeContents(box);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return pre.toString().length;
+}
+
 /** Click a node to select it (pointer events, like a real user). */
 function selectNode(host: HTMLDivElement, nodeSelector: string): void {
   const wrapper = (host.querySelector(nodeSelector) as HTMLElement).closest(".react-flow__node") as HTMLElement;
@@ -767,6 +779,31 @@ describe("node-graph reference attach", () => {
       expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref:r2-composer-1");
       const handles = [...host.querySelectorAll(".prod-graph-composer .react-flow__handle")].map((h) => (h as HTMLElement).getAttribute("data-handleid"));
       expect(handles).toContain("in-ref-1");
+
+      await act(async () => { root.unmount(); });
+      document.body.removeChild(host);
+    } finally {
+      if (had) (document as unknown as { elementFromPoint?: unknown }).elementFromPoint = orig;
+      else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    }
+  });
+
+  it("places the caret right after a reference block added by a socket connect", async () => {
+    const had = "elementFromPoint" in document;
+    const orig = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: () => null }).elementFromPoint = () => null;
+    try {
+      const { root, host } = renderModal();
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      await openShelf(host);
+      await act(async () => { dropOnCanvas(host, "application/x-cascade-ref", "r2"); await new Promise((r) => setTimeout(r, 0)); });
+
+      await connectRefToSocket(host, "Villain", "in-ref-open");
+
+      const box = host.querySelector(".prod-graph-composer .prompt-content-editor") as HTMLElement;
+      expect(box.textContent).toContain("@[Villain]");
+      // The caret lands right after the new block so the user can keep typing.
+      expect(caretOffsetIn(box)).toBe(box.textContent!.length);
 
       await act(async () => { root.unmount(); });
       document.body.removeChild(host);

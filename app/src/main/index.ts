@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, planContinuation, continuationPrompt, type ChatMessage, type AgentTool, type GoalRecord } from "@core";
 import * as settings from "./settings.js";
 import * as sessions from "./sessions.js";
@@ -14,8 +15,8 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle } from "./pipeline.js";
-import { styleFramePrompt, withLookClause } from "../shared/look.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
 import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
@@ -2340,6 +2341,27 @@ function registerIpc() {
         emit(`Shot ${shot.number}: nothing pending to recheck.`, "info");
         return;
       }
+      // Backfill pre-fix pending records (no stored input identity): hash the
+      // shot's current style frame + content refs so the recheck can still
+      // tell an echoed input attachment (usually the style frame) apart from
+      // the finished generation. Persists via the runner's save even when the
+      // job is still rendering.
+      if (pending.historyId && (!pending.refHashes || !pending.refHashes.length)) {
+        try {
+          const style = styleFrameForShot(p, shot);
+          const styleDataUrl = style ? styleFrameDataUrl(p, style) : undefined;
+          const dataUrls = [
+            ...(styleDataUrl ? [styleDataUrl] : []),
+            ...shotReferences(p, shot).filter((r) => r.artwork).map((r) => r.artwork!),
+          ];
+          const hashes = new Set(pending.refHashes ?? []);
+          for (const du of dataUrls) {
+            const bytes = dataUrlToBytes(du);
+            if (bytes && bytes.length) hashes.add(createHash("sha1").update(bytes).digest("hex"));
+          }
+          if (hashes.size) pending.refHashes = [...hashes];
+        } catch { /* backfill is best-effort — recheck still runs */ }
+      }
       emit(`Shot ${shot.number}: rechecking the pending generation job…`, "info");
       let buf: Buffer;
       try {
@@ -2387,6 +2409,32 @@ function registerIpc() {
       delete shot.pendingImageGen;
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
     })
+  );
+
+  // Step 3/4: discard a shot's pending vendor job without reclaiming it.
+  // The escape hatch for a job stuck past recovery (an expired result URL or
+  // a dead vendor job that never reported FAILED): the pending record is
+  // dropped so the shot stops showing as pending, and a later Regenerate
+  // submits fresh. A discarded job can't be reclaimed afterwards.
+  handle("production:clearPending", (_e, id: string, shotId: string, kind?: "image" | "video") =>
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        if (kind !== undefined && kind !== "image" && kind !== "video") throw new Error(`Unknown pending kind "${kind}".`);
+        const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+        if (!shot) throw new Error("Shot not found.");
+        const cleared: string[] = [];
+        if ((kind === undefined || kind === "image") && shot.pendingImageGen) {
+          delete shot.pendingImageGen;
+          cleared.push("frame");
+        }
+        if ((kind === undefined || kind === "video") && shot.pendingVideoGen) {
+          delete shot.pendingVideoGen;
+          cleared.push("video");
+        }
+        if (!cleared.length) throw new Error(`Shot ${shot.number}: nothing pending to clear.`);
+        productionEmit(id, `Shot ${shot.number}: discarded the pending ${cleared.join(" + ")} job — regenerate to try again.`, "info");
+      })
+    )
   );
 
   // Step 3/4: reclaim a video clip whose vendor job outlived the generating

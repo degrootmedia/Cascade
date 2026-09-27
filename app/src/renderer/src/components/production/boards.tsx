@@ -18,7 +18,7 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -39,6 +39,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   onRecheck?: (shotId: string) => void;
   /** Fetch the shot's pending video job and download the clip when ready. */
   onRecheckVideo?: (shotId: string) => void;
+  /** Discard the shot's pending frame/video job (right-click escape hatch for
+   *  a job stuck past recovery — it can't be rechecked afterwards). */
+  onClearPending?: (shotId: string, kind: "image" | "video") => void;
   onImport: (shotId: string) => void;
   /** Open the AI edit dialog for this frame. */
   onEdit: (shotId: string) => void;
@@ -261,6 +264,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   function deleteMenuGeneration() {
     setMenu(null);
     if (histPath && onDeleteGeneration) onDeleteGeneration(shot.id, histPath);
+  }
+  function clearMenuPending(kind: "image" | "video") {
+    setMenu(null);
+    const label = kind === "video" ? "video" : "frame";
+    if (!window.confirm(`Clear the pending ${label} job for Shot ${shot.number}? The vendor job can't be reclaimed afterwards — regenerate to try again.`)) return;
+    onClearPending?.(shot.id, kind);
   }
   function saveMenuImage() {
     if (!nativeSrc) return;
@@ -660,6 +669,22 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               onClick={deleteMenuGeneration}
             >
               Delete generation…
+            </button>
+          )}
+          {pending && onClearPending && (
+            <button
+              className="ctx-item"
+              onClick={() => clearMenuPending("image")}
+            >
+              Clear pending frame…
+            </button>
+          )}
+          {videoPending && onClearPending && (
+            <button
+              className="ctx-item"
+              onClick={() => clearMenuPending("video")}
+            >
+              Clear pending video…
             </button>
           )}
           <button

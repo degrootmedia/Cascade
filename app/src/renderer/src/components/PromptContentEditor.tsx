@@ -9,7 +9,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { isTagOnlyDiff, refTagMatches } from "../../../shared/prompt-grammar.js";
+import { isTagOnlyDiff, refTagMatches, type RefTagMatch } from "../../../shared/prompt-grammar.js";
 
 export interface PromptContentHandle {
   focus(): void;
@@ -21,6 +21,17 @@ export interface PromptContentHandle {
   caretRect(): DOMRect | null;
   /** Whether the content box currently holds focus. */
   isActive(): boolean;
+  /** Replace an in-progress `@query` before the caret with a full `@[Name]`
+   *  tag as an INTERNAL edit (caret after the tag). The side panel's @
+   *  autocomplete routes through this so the insertion rides the editor's own
+   *  commit path instead of arriving as an external rebuild that resets the
+   *  caret. No-op when there is no open `@` before the caret. */
+  insertRefTag(name: string): void;
+  /** Focus the box and place the caret right after `name`'s `@[Name]` tag on
+   *  the next external rebuild. Used by the node graph: connecting a reference
+   *  socket adds the tag from OUTSIDE the editor, and the user should be able
+   *  to keep typing immediately after the new block. */
+  focusAfterTag(name: string): void;
 }
 
 /** Text length (in the box's serialized form) before a range's start. */
@@ -115,6 +126,43 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   // be a SET — a one-shot flag let the second echo slip through and force a
   // rebuild that dropped the caret to the end.
   const emitted = useRef<Set<string>>(new Set());
+  // A tag name whose block the caret should land right after on the next
+  // rebuild (set by `focusAfterTag` when a graph socket adds a tag externally).
+  const pendingFocusTag = useRef<string | null>(null);
+  // The latest `onChange` — the imperative handle is created once, so it must
+  // not close over a stale prop identity.
+  const onChangeRef = useRef(onChange);
+  useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
+  // Native undo history is destroyed every time the DOM is rebuilt from plain
+  // text, so the editor keeps its own: a stack of (text, caret) snapshots taken
+  // BEFORE each edit. Consecutive typing coalesces into one step (a 700ms
+  // boundary breaks a run), matching a word processor.
+  const undoStack = useRef<{ text: string; caret: number }[]>([]);
+  const redoStack = useRef<{ text: string; caret: number }[]>([]);
+  const lastPush = useRef<{ kind: string; time: number }>({ kind: "", time: 0 });
+
+  /** The box's current plain text + caret offset, for the undo stacks. */
+  function snapshot(): { text: string; caret: number } {
+    const el = elRef.current;
+    const text = el?.textContent ?? "";
+    const caret = el ? selectionOffsets(el).start : text.length;
+    return { text, caret };
+  }
+
+  /** Record the pre-edit state. `kind` groups edits: consecutive `typing` within
+   *  700ms collapses to one undo step; anything else always starts a step. */
+  function pushUndo(kind: string) {
+    const now = Date.now();
+    if (kind === "typing" && lastPush.current.kind === "typing" && now - lastPush.current.time < 700) {
+      lastPush.current.time = now;
+      redoStack.current = [];
+      return;
+    }
+    undoStack.current.push(snapshot());
+    if (undoStack.current.length > 200) undoStack.current.shift();
+    redoStack.current = [];
+    lastPush.current = { kind, time: now };
+  }
 
   function updateDropCaret(clientX: number, clientY: number) {
     const el = elRef.current;
@@ -204,8 +252,9 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
       // and the caret placed after the moved tag. Do NOT add to `emitted` —
       // that would suppress the rebuild and leave the old chip order visible.
       // pendingCaret drives the caret placement in the rebuild effect.
+      pushUndo("drag");
       pendingCaret.current = at + st.tag.length;
-      onChange(out);
+      onChangeRef.current(out);
     }
     st.chip?.classList.remove("dragging");
     dragState.current = null;
@@ -222,7 +271,118 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     const t = el.textContent ?? "";
     if (emitted.current.size > 100) emitted.current.clear();
     emitted.current.add(t);
-    onChange(t);
+    onChangeRef.current(t);
+  }
+
+  /** Rebuild the DOM from `next`, place the collapsed caret at `caret`, and
+   *  commit. Shared by Backspace/Delete, undo/redo, and the autocomplete's
+   *  in-editor tag insertion so they all update the box and the parent together. */
+  function applyEdit(el: HTMLElement, next: string, caret: number) {
+    buildDom(el, next);
+    const at = Math.max(0, Math.min(caret, next.length));
+    const r = offsetToRange(el, at);
+    const sel = window.getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+    commitText();
+  }
+
+  /** Collapse the caret right after `name`'s tag in the CURRENT DOM and focus
+   *  the box. Used when an external rebuild already carries the tag (or when a
+   *  rebuild is not needed). */
+  function placeCaretAfterTag(el: HTMLElement, text: string, name: string) {
+    const m = refTagMatches(text).find((x) => x.name.toLowerCase() === name.toLowerCase());
+    if (!m) return;
+    const r = offsetToRange(el, m.index + m.tag.length);
+    const sel = window.getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+    el.focus();
+  }
+
+  function undo() {
+    const el = elRef.current;
+    if (!el) return;
+    const prev = undoStack.current.pop();
+    if (!prev) return;
+    redoStack.current.push(snapshot());
+    lastPush.current = { kind: "", time: 0 };
+    applyEdit(el, prev.text, prev.caret);
+  }
+
+  function redo() {
+    const el = elRef.current;
+    if (!el) return;
+    const next = redoStack.current.pop();
+    if (!next) return;
+    undoStack.current.push(snapshot());
+    lastPush.current = { kind: "", time: 0 };
+    applyEdit(el, next.text, next.caret);
+  }
+
+  /** The `@[Name]` tag a collapsed Backspace at `caret` must remove as one unit
+   *  (the tag whose end is exactly the caret), or null to delete one character. */
+  function tagBeforeCaret(text: string, caret: number): RefTagMatch | null {
+    for (const m of refTagMatches(text)) {
+      if (m.index + m.tag.length === caret) return m;
+      if (m.index >= caret) break;
+    }
+    return null;
+  }
+
+  /** The tag a collapsed forward Delete at `caret` must remove as one unit. */
+  function tagAtCaret(text: string, caret: number): RefTagMatch | null {
+    for (const m of refTagMatches(text)) {
+      if (m.index === caret) return m;
+      if (m.index > caret) break;
+    }
+    return null;
+  }
+
+  /** Collapsed/seleced Backspace or Delete, reference-block aware: a tag is one
+   *  unit, so deleting the space beside it deletes only that character while
+   *  deleting INTO a tag removes the whole chip. Returns true when the browser's
+   *  default deletion must be suppressed. */
+  function handleEditKey(e: React.KeyboardEvent<HTMLDivElement>): boolean {
+    if (e.nativeEvent.isComposing) return false;
+    const back = e.key === "Backspace";
+    const fwd = e.key === "Delete";
+    if (!back && !fwd) return false;
+    const el = elRef.current;
+    if (!el) return false;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    if (!el.contains(sel.getRangeAt(0).startContainer)) return false;
+    const { start, end } = selectionOffsets(el);
+    const text = el.textContent ?? "";
+    if (start !== end) {
+      if (start >= end) return false;
+      pushUndo("delete");
+      applyEdit(el, text.slice(0, start) + text.slice(end), start);
+      return true;
+    }
+    if (back) {
+      if (start === 0) return true;
+      const tag = tagBeforeCaret(text, start);
+      pushUndo("delete");
+      applyEdit(
+        el,
+        tag
+          ? text.slice(0, tag.index) + text.slice(tag.index + tag.tag.length)
+          : text.slice(0, start - 1) + text.slice(start),
+        tag ? tag.index : start - 1,
+      );
+      return true;
+    }
+    if (start >= text.length) return true;
+    const tag = tagAtCaret(text, start);
+    pushUndo("delete");
+    applyEdit(
+      el,
+      tag
+        ? text.slice(0, tag.index) + text.slice(tag.index + tag.tag.length)
+        : text.slice(0, start) + text.slice(start + 1),
+      start,
+    );
+    return true;
   }
 
   /** Insert plain text at the caret as a literal text node. Chromium's
@@ -325,9 +485,17 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
+    const focusTag = pendingFocusTag.current;
+    pendingFocusTag.current = null;
     const hasPendingDrag = pendingCaret.current !== null;
-    if (!hasPendingDrag && emitted.current.has(text)) return;
-    if (!hasPendingDrag && el.textContent === text) return;
+    if (!hasPendingDrag && emitted.current.has(text)) {
+      if (focusTag) placeCaretAfterTag(el, text, focusTag);
+      return;
+    }
+    if (!hasPendingDrag && el.textContent === text) {
+      if (focusTag) placeCaretAfterTag(el, text, focusTag);
+      return;
+    }
     const sel = window.getSelection();
     const inBox = !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer);
     // `inBox` alone is NOT focus: the rebuild path below restores a caret into
@@ -336,17 +504,29 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     // deferred forever. Require the box (or a chip inside it) to actually be
     // the active element.
     const focusedHere = document.activeElement === el || el.contains(document.activeElement);
-    // While the caret lives in the box, external text is deferred so typing
-    // never jumps — except tag-only diffs (graph connect/disconnect), which
-    // must rebuild under the caret (mapped through below) or the chips
-    // diverge from the saved prompt permanently.
-    if (deferExternalWhileFocused && focusedHere && inBox && pendingCaret.current === null && !isTagOnlyDiff(el.textContent ?? "", text)) return;
+    // While the box (or a chip inside it) actually holds focus, external text
+    // is deferred so typing never jumps — except tag-only diffs (graph
+    // connect/disconnect), which must rebuild under the caret (mapped through
+    // below) or the chips diverge from the saved prompt permanently.
+    if (deferExternalWhileFocused && focusedHere && pendingCaret.current === null && !isTagOnlyDiff(el.textContent ?? "", text)) return;
     const oldText = el.textContent ?? "";
     const oldCaret = pendingCaret.current ?? (inBox ? selectionOffsets(el).start : null);
     buildDom(el, text);
     pendingCaret.current = null;
+    // A genuine external rewrite (not one of our own echoes, not a drag we
+    // initiated) is a new document — start its undo history fresh.
+    if (!hasPendingDrag && !emitted.current.has(text)) {
+      undoStack.current = [];
+      redoStack.current = [];
+      lastPush.current = { kind: "", time: 0 };
+    }
     let at = text.length;
-    if (oldCaret !== null) {
+    // An externally added tag (a graph reference connect) wins: land the caret
+    // right after the new block so the user can keep typing.
+    const tag = focusTag ? refTagMatches(text).find((m) => m.name.toLowerCase() === focusTag.toLowerCase()) : undefined;
+    if (tag) {
+      at = tag.index + tag.tag.length;
+    } else if (oldCaret !== null) {
       if (oldCaret >= oldText.length) {
         at = text.length;
       } else {
@@ -433,6 +613,19 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
       return rect;
     },
     isActive() { return document.activeElement === elRef.current; },
+    insertRefTag(name: string) {
+      const el = elRef.current; if (!el) return;
+      const text = el.textContent ?? "";
+      const before = text.slice(0, selectionOffsets(el).start);
+      const open = before.lastIndexOf("@");
+      if (open < 0) return;
+      pushUndo("insert-ref");
+      applyEdit(el, `${text.slice(0, open)}@[${name}]${text.slice(selectionOffsets(el).start)}`, open + name.length + 3);
+    },
+    focusAfterTag(name: string) {
+      pendingFocusTag.current = name;
+      elRef.current?.focus();
+    },
   }), []);
 
   return (
@@ -455,18 +648,41 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
           if (isDraggingRef.current) updateDropCaret(e.clientX, e.clientY);
         }}
         onMouseDown={(e) => e.stopPropagation()}
+        onBeforeInput={(e) => {
+          // Snapshot the pre-edit state for undo. Backspace/Delete are handled
+          // in onKeyDown (they preventDefault, so they never reach here); this
+          // covers typing, IME, cut, and any other native edit.
+          const it = (e.nativeEvent as InputEvent).inputType;
+          if (it === "insertText" || it === "insertCompositionText" || it === "insertReplacementText") pushUndo("typing");
+          else if (it === "deleteContentBackward" || it === "deleteContentForward" || it === "deleteContent" || it === "deleteByCut") pushUndo("delete");
+        }}
         onInput={commitText}
         onKeyDown={(e) => {
           onKeyDown?.(e);
-          if (!e.defaultPrevented && e.key === "Enter" && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            insertPlainText("\n");
+          if (e.defaultPrevented) return;
+          if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+            const k = e.key.toLowerCase();
+            if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+            if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); redo(); return; }
           }
+          // Undo snapshot for typing. `onBeforeInput` is the primary source,
+          // but it does not fire on a contentEditable in every engine — this
+          // covers the rest. A double push coalesces (same "typing" kind).
+          if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && !e.nativeEvent.isComposing) {
+            pushUndo("typing");
+          }
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            pushUndo("newline");
+            insertPlainText("\n");
+            return;
+          }
+          if (handleEditKey(e)) { e.preventDefault(); return; }
         }}
         onPaste={(e) => {
           e.preventDefault();
           const t = e.clipboardData.getData("text/plain");
-          if (t) insertPlainText(t);
+          if (t) { pushUndo("paste"); insertPlainText(t); }
         }}
         onDrop={(e) => {
           e.preventDefault();

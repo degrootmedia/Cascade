@@ -63,7 +63,71 @@ editor, while keeping `@` reference + block functionality.
 - [ ] `npm run typecheck`, `npm test`, `npm run build`.
 
 ## Review
-(pending — awaiting user approval)
+
+Done. The reported regressions had one root: the Content box is a
+`contentEditable` whose `@[Name]` chips are atomic to the browser, and external
+prompt refreshes rebuilt its DOM (defaulting the caret to the end) while the
+workspace's "is the user typing?" guard didn't even recognize it.
+
+What shipped:
+- `PromptContentEditor.tsx`: a collapsed/seleced Backspace/Delete handler that
+  edits the PLAIN TEXT model — a reference is one unit, so deleting the space
+  beside it deletes only that character while deleting INTO it removes the whole
+  chip (`tagBeforeCaret`/`tagAtCaret`). Own undo/redo (Ctrl+Z / Ctrl+Shift+Z /
+  Ctrl+Y) with a snapshot stack that coalesces a typing run (700ms boundary;
+  breaks on newline/paste/delete/drag/ref-insert), since programmatic rebuilds
+  destroy the browser's history. The rebuild effect now defers whenever the box
+  (or a chip) actually holds focus, for every surface, and starts a fresh undo
+  history only on a genuine external rewrite. New handle method `insertRefTag`.
+- `prompt-panel.tsx`: `ReferencePromptEditor` now passes
+  `deferExternalWhileFocused` (the missing piece behind the side-panel caret
+  jump), and the `@` autocomplete inserts THROUGH the editor (`insertRefTag`)
+  instead of writing a composed value from outside — which is what made deferral
+  safe.
+- `ProductionWorkspace.tsx`: `isPromptTextarea` now recognizes the content
+  editor / prompt fields via `closest`, so an async `getBoardPrompt` refetch can
+  no longer clobber in-flight typing (cursor jump / focus loss).
+- `NodeGraphModal.tsx`: the composer and every prompt node's duplicated
+  draft/echo/deferral plumbing is now one `usePromptNodeDraft` hook (composer
+  publishes every edit, prompt nodes only tag reorders), and the sequence row's
+  prompt box got the same focused-draft treatment (it can be emptied mid-edit
+  and no longer snaps back when a frame prompt arrives).
+- Style/Brand and every other `ReferencePromptEditor` surface inherit the
+  protection through `TriplePrompt`'s defer merge — no new wrapper was needed.
+
+Tests: `prompt-content-editor.test.ts` (5) pins backspace-beside-chip keeps the
+reference, backspace-into-chip removes it, forward delete, undo/redo, and
+`insertRefTag`. Verify: `npm run typecheck` clean; `npm test` (app) 1284 passed
++ 1 skipped; `npm run build` clean; `npm test` (core) 147 passed.
+
+Not changed: the sequence segment's "empty override = use the frame prompt"
+storage semantics (still reverts on blur, by design).
+
+### Follow-up (user feedback): caret active right after an added block
+- The side-panel @ autocomplete already left the caret after the block (pinned by
+  `prompt-autocomplete-caret.test.ts`); hardened its deferred blur cleanup to
+  mirror the LIVE value so a stale closure can't strip the just-inserted block.
+- The real gap was the node graph: connecting a reference socket adds `@[Name]`
+  from outside the editor and didn't position the caret. Added
+  `PromptContentHandle.focusAfterTag(name)`; `usePromptNodeDraft`'s applier now
+  detects a newly added tag (diffing `refTagNames`) and focuses the box with the
+  caret right after it. Pinned end-to-end in `graph-shelf.test.ts` (socket
+  connect → caret at end of the new block) + a unit test in
+  `prompt-content-editor.test.ts`. Verify: typecheck clean, 1288 app + 147 core
+  pass, build clean.
+
+### Follow-up 2: composer caret — commit on blur ("edit mode")
+The composer still published EVERY keystroke to `focusedPrompt`, so each
+character fired a save → `updateBoardPrompt` → `applySnapshot` (prod change) →
+`focusedSig` change → `getBoardPrompt` refetch + full-workspace re-render. Even
+with the refetch guard, that churn let the caret jump to the end. Per the user:
+the node can be in edit mode and commit on click-off. `ComposerNodeView` now
+uses `usePromptNodeDraft(data, false)` — same as every prompt node: local draft,
+commit on blur/close, tag reorders the only live publish. The side panel catches
+up when the user clicks off the node. The `graph-focus` rapid-typing test now
+asserts the caret STAYS after each character; the former "publishes live" test
+became "commits on blur" (side panel intentionally not updated mid-edit).
+Verify: typecheck clean, 1288 app pass, build clean.
 
 ---
 

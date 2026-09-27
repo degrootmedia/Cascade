@@ -69,16 +69,23 @@ function rememberProduction(id: string | null): void {
   } catch { /* ignore */ }
 }
 
-/** True while the user is typing in a board prompt editor (card or side
- *  panel). Tag-name based instead of `instanceof HTMLTextAreaElement` so a
- *  missing DOM global can never throw — a throw here would be swallowed by
+/** True while focus is inside a prompt editor (the classic side panel, the
+ *  node composer, the Style/Brand boxes, or any tag chip within them), so an
+ *  async prompt refresh must never overwrite what the user is typing. The
+ *  Content box is a `contentEditable` (not a `TEXTAREA`), so the check is
+ *  structural via `closest` as well as tag-name based — and defensively built
+ *  so a missing DOM global can never throw: a throw here would be swallowed by
  *  the surrounding `.catch` and silently discard a fetched prompt. */
 function isPromptTextarea(el: unknown): boolean {
-  if (!el || typeof (el as HTMLElement).tagName !== "string") return false;
-  if ((el as HTMLElement).tagName !== "TEXTAREA") return false;
-  const cls = (el as HTMLElement).classList;
-  return typeof cls?.contains === "function"
-    && (cls.contains("prod-board-prompt") || cls.contains("prod-prompt-drawer-text"));
+  const node = el as HTMLElement | null;
+  if (!node || typeof node.tagName !== "string") return false;
+  if (node.tagName === "TEXTAREA") {
+    const cls = node.classList;
+    return typeof cls?.contains === "function"
+      && (cls.contains("prod-board-prompt") || cls.contains("prod-prompt-drawer-text"));
+  }
+  return typeof node.closest === "function"
+    && !!node.closest(".prompt-content-editor, .prod-ref-prompt-editor, .prod-graph-composer");
 }
 
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
@@ -392,6 +399,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     regenerate: (id: string) => void;
     recheck: (id: string) => void;
     recheckVideo: (id: string) => void;
+    clearPending: (id: string, kind: "image" | "video") => void;
     importFrame: (id: string) => void;
     edit: (id: string) => void;
     video: (id: string) => void;
@@ -416,6 +424,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     regenerate: (id) => void regenBoard(id),
     recheck: (id) => void recheckBoard(id),
     recheckVideo: (id) => void recheckVideo(id),
+    clearPending: (id, kind) => void clearPending(id, kind),
     importFrame: (id) => void importFrames(id),
     edit: (id) => setEditShotId(id),
     video: (id) => setVideoShotId(id),
@@ -475,6 +484,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onRegenerate: (id: string) => boardHandlerRef.current.regenerate(id),
     onRecheck: (id: string) => boardHandlerRef.current.recheck(id),
     onRecheckVideo: (id: string) => boardHandlerRef.current.recheckVideo(id),
+    onClearPending: (id: string, kind: "image" | "video") => boardHandlerRef.current.clearPending(id, kind),
     onImport: (id: string) => boardHandlerRef.current.importFrame(id),
     onEdit: (id: string) => boardHandlerRef.current.edit(id),
     onVideo: (id: string) => boardHandlerRef.current.video(id),
@@ -1034,6 +1044,21 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
     return () => { live = false; off(); };
   }, [detached, applySnapshot]);
+
+  // Re-validate the detached lock whenever an embedded canvas opens. The
+  // close notification above is best-effort (a killed/crashed detached window
+  // never sends it), and the state above is otherwise fetched once on mount —
+  // so a missed close would leave every embedded graph permanently read-only
+  // ("Editing in separate window") until reload. Re-reading main's live state
+  // on open self-heals a stale lock; an accurate `open:true` still locks.
+  useEffect(() => {
+    if (detached) return;
+    if (!graphShotId && !seqCanvasId && !showMoodboard) return;
+    if (typeof window.cascade.getDetachedCanvasState !== "function") return;
+    let live = true;
+    void window.cascade.getDetachedCanvasState().then((s) => { if (live) setDetachedWindow(s); }).catch(() => {});
+    return () => { live = false; };
+  }, [detached, graphShotId, seqCanvasId, showMoodboard]);
 
   // ---- Cross-window in-flight canvas jobs (Spec 03) ----------------------
   // Both windows mirror each other's busy sets through main so "Generating…"
@@ -1799,6 +1824,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         n.delete(shotId);
         return n;
       });
+    }
+  }
+
+  /** Discard a shot's pending vendor job without reclaiming it (right-click
+   *  menu escape hatch). The job can't be rechecked afterwards — Regenerate
+   *  submits fresh. */
+  async function clearPending(shotId: string, kind: "image" | "video") {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.clearPending(prod.meta.id, shotId, kind);
+      setProd(next);
+      bustOne(shotId);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -4250,6 +4291,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onRegenerate={boardActions.onRegenerate}
                     onRecheck={boardActions.onRecheck}
                     onRecheckVideo={boardActions.onRecheckVideo}
+                    onClearPending={boardActions.onClearPending}
                     onImport={boardActions.onImport}
                     onEdit={boardActions.onEdit}
                     onVideo={boardActions.onVideo}

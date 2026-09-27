@@ -212,6 +212,22 @@ describe("connectionToEdge: references", () => {
     const g = baseGraph();
     expect(connectionToEdge(conn("ref:r1", "tween", "in-tween-0"), g)).toBeNull();
   });
+
+  it("ref→sequence prompt open socket ignores member-frame edges", () => {
+    let g = materializeGraph(
+      shot({
+        graphVideoNodes: [{ id: "vid0", prompt: "" }],
+        graphSequence: { segments: [{ shotId: "s1", durationSec: 2, prompt: "" }, { shotId: "s2", durationSec: 2, prompt: "" }] },
+      }),
+      REFS
+    );
+    g = applySequenceFrames(g, [{ shotId: "s1" }, { shotId: "s2" }]);
+    g = addGraphNode(g, { id: "ref:r1", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Gondola" } });
+    const op = connectionToEdge(conn("ref:r1", "videoprompt", "in-ref-open"), g);
+    expect(op?.edge.to.port).toBe("in-ref-0");
+    const next = applyConnection(g, op!);
+    expect(next.edges.find((e) => e.id === op!.edge.id)?.to.port).toBe("in-ref-0");
+  });
 });
 
 describe("connectionToEdge: style / brand plugs", () => {
@@ -346,16 +362,13 @@ describe("graphEdgesForDetach mirrors onConnectEnd strips", () => {
     expect(graphEdgesForDetach(g, detach("target", "tween", "in-tween-9"), ctx)).toBeNull();
   });
 
-  it("source drags unbind outputs (videogen gap mirrored)", () => {
+  it("source (output-socket) drags detach nothing — only input drags unwire", () => {
     const g = applyConnection(baseGraph(), connectionToEdge(conn("videogen", "output", "in-out"), baseGraph())!);
-    const ungen = graphEdgesForDetach(g, detach("source", "imagegen", ""), ctx)!;
-    expect(ungen.edges.some((e) => e.from.node === "imagegen")).toBe(false);
-    expect(ungen.edges.some((e) => e.id === "e-cmp-img")).toBe(true);
-    const unvid = graphEdgesForDetach(g, detach("source", "videogen", ""), ctx)!;
-    expect(keysOf(unvid)).not.toContain("e-vid-out");
-    // edit-video feed survives the drag-off exactly as the legacy unpipe does.
+    // Output-socket drag-offs snap back: no edge is dropped.
+    expect(graphEdgesForDetach(g, detach("source", "imagegen", ""), ctx)).toBeNull();
+    expect(graphEdgesForDetach(g, detach("source", "videogen", ""), ctx)).toBeNull();
     const withEv = applyConnection(g, { edge: { id: "e-vid-ev", from: { node: "videogen", port: "out" }, to: { node: "editvideo", port: "in-video" } }, dropIds: [] });
-    expect(keysOf(graphEdgesForDetach(withEv, detach("source", "videogen", ""), ctx)!)).toContain("e-vid-ev");
+    expect(graphEdgesForDetach(withEv, detach("source", "videogen", ""), ctx)).toBeNull();
     expect(graphEdgesForDetach(g, detach("source", "style", ""), ctx)).toBeNull();
     expect(graphEdgesForDetach(g, detach("source", "ref:r9", ""), ctx)).toBeNull();
   });
@@ -445,13 +458,12 @@ describe("camera-grid wiring", () => {
     expect(normalizeGraph(rebuilt).issues).toEqual([]);
   });
 
-  it("source detach drops the feed; ref sockets are rebuilt by the caller", () => {
+  it("input detach drops the feed; ref sockets are rebuilt by the caller", () => {
     const g = connect(withGrid(), conn("imagegen", "cameraGrid", "in-image"));
     expect(graphEdgesForDetach(g, detach("target", "cameraGrid", "in-image"), camCtx)?.edges.map((e) => e.id)).not.toContain("e-img-camgrid");
     expect(graphEdgesForDetach(g, detach("target", "cameraGrid", "in-ref-0"), camCtx)).toBeNull();
-    // A source drag-off removes every camera-grid edge from that node.
-    const dropped = graphEdgesForDetach(g, detach("source", "imagegen", ""), camCtx)!;
-    expect(dropped.edges.some((e) => e.to.node === "cameraGrid")).toBe(false);
+    // An output-socket drag-off snaps back: camera-grid edges survive it.
+    expect(graphEdgesForDetach(g, detach("source", "imagegen", ""), camCtx)).toBeNull();
   });
 });
 
@@ -503,12 +515,11 @@ describe("upscale node wiring", () => {
     expect(keysOf(next)).not.toContain("e-ref-upscale");
   });
 
-  it("detach drops the source feed and the output feed", () => {
+  it("input detach drops the source feed; output drags snap back", () => {
     const g = connect(withUpscale(), conn("imagegen", "upscale", "in-image"));
     expect(graphEdgesForDetach(g, detach("target", "upscale", "in-image"), ctx)?.edges.map((e) => e.id)).not.toContain("e-img-upscale");
     const withOut = connect(g, conn("upscale", "output", "in-out"));
-    const dropped = graphEdgesForDetach(withOut, detach("source", "upscale", ""), ctx)!;
-    expect(dropped.edges.some((e) => e.to.node === "output")).toBe(false);
+    expect(graphEdgesForDetach(withOut, detach("source", "upscale", ""), ctx)).toBeNull();
   });
 });
 

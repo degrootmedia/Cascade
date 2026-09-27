@@ -3722,11 +3722,14 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-board-promote:hover { border-color: var(--accent); color: white; }
 
-/* "pending" badge â€” an OpenArt frame job outlived its wait; recheck to claim it. */
+/* "pending" badge — an OpenArt frame job outlived its wait; recheck to claim it.
+   Both the badge and its fetch button anchor to the upper-right corner (the
+   zoom button owns the upper left), the badge sitting left of its button. */
 .prod-board-pending {
   position: absolute;
-  top: 6px;
-  left: 6px;
+  top: 8px;
+  left: auto;
+  right: 38px;
   padding: 2px 6px;
   border-radius: 8px;
   border: 1px solid var(--accent);
@@ -3742,7 +3745,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-board-recheck {
   position: absolute;
   top: 6px;
-  right: 102px;
+  right: 6px;
   width: 26px;
   height: 26px;
   padding: 0;
@@ -3760,9 +3763,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-board-recheck:hover:not(:disabled) { border-color: var(--accent); color: white; }
 .prod-board-recheck:disabled { opacity: 0.5; cursor: default; }
 
-/* A video job outlived its wait — its badge/recheck sit below the frame one. */
-.prod-board-pending-video { top: 28px; }
-.prod-board-recheck-video { right: 74px; }
+/* A video job outlived its wait — its badge/fetch row sits below the frame one,
+   both still anchored upper-right. */
+.prod-board-pending-video { top: 38px; left: auto; right: 38px; }
+.prod-board-recheck-video { top: 38px; right: 6px; }
 
 /* ---------- EditBoardModal (AI frame edit) ---------- */
 .prod-edit-overlay {

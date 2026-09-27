@@ -37,9 +37,14 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
+  // Live mirrors for the deferred blur cleanup — a stale closure there once
+  // re-composed from an old value and stripped a just-inserted reference block.
+  const valueRef = useRef(value);
+  useEffect(() => { valueRef.current = value; }, [value]);
+  const queryRef = useRef(query);
+  useEffect(() => { queryRef.current = query; }, [query]);
   const matches = query === null ? [] : references.filter((r) => r.name.toLowerCase().includes(query.toLowerCase()));
   const tags = refTagNames(value);
-  const content = parsePromptBoxes(value).content;
 
   /** Autocomplete tracking lives on the content box only. */
   function updateQuery(next: string, caret = contentRef.current?.selectionStart ?? next.length) {
@@ -61,15 +66,12 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   function choose(ref: PromptReference) {
     const el = contentRef.current;
     if (!el) return;
-    const caret = el.selectionStart;
-    const before = content.slice(0, caret);
-    const open = before.lastIndexOf("@");
-    if (open < 0) return;
-    const next = `${content.slice(0, open)}@[${ref.name}]${content.slice(caret)}`;
-    const nextCaret = open + ref.name.length + 3;
-    onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: next }));
+    // Route the insertion THROUGH the editor so it rides its own commit path
+    // (and caret placement) instead of arriving as an external rebuild — which
+    // is what lets the editor safely defer external changes while focused.
+    el.insertRefTag(ref.name);
     setQuery(null);
-    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(nextCaret, nextCaret); });
+    requestAnimationFrame(() => el.focus());
   }
   function keyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (query !== null && matches.length) {
@@ -96,6 +98,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         afterContent={afterContent}
         styleReadOnly={styleReadOnly}
         brandReadOnly={brandReadOnly}
+        deferExternalWhileFocused
         onChange={onChange}
         onContentChange={updateQuery}
         onContentKeyDown={keyDown}
@@ -103,13 +106,15 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         onBlur={() => {
           onBlur?.();
           window.setTimeout(() => {
-            if (contentRef.current?.isActive() || query === null) return;
-            const caret = contentRef.current?.selectionStart ?? content.length;
-            const before = content.slice(0, caret);
+            if (contentRef.current?.isActive() || queryRef.current === null) return;
+            const live = valueRef.current;
+            const liveContent = parsePromptBoxes(live).content;
+            const caret = contentRef.current?.selectionStart ?? liveContent.length;
+            const before = liveContent.slice(0, caret);
             const open = before.lastIndexOf("@");
             const tail = open >= 0 ? before.slice(open + 1) : "";
             if (open >= 0 && !/[\s\[\]]/.test(tail)) {
-              onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: content.slice(0, open) + content.slice(caret) }));
+              onChange(composePromptBoxes({ ...parsePromptBoxes(live), content: liveContent.slice(0, open) + liveContent.slice(caret) }));
             }
             setQuery(null);
           }, 120);

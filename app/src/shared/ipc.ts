@@ -637,6 +637,14 @@ export interface CascadeApi {
    * applying it to whichever node/field submitted it (`pendingVideoGen.target`).
    */
   recheckVideo(productionId: string, shotId: string): Promise<Production>;
+  /**
+   * Step 3/4: discard a shot's pending vendor job without reclaiming it (the
+   * job can't be rechecked afterwards — regenerate to try again). `kind`
+   * selects the frame or the video job; omitted clears whichever is pending.
+   * The escape hatch for a job stuck past recovery (expired result URL, dead
+   * vendor job that never reported FAILED).
+   */
+  clearPending(productionId: string, shotId: string, kind?: "image" | "video"): Promise<Production>;
   /** Step 3: write every shot's generation prompt to <folder>/boards/prompts.md. */
   exportBoardPrompts(productionId: string): Promise<Production>;
   /** Step 3: return one shot's full generation prompt (used by the per-frame copy button). */

@@ -449,6 +449,13 @@ export interface PendingImageGen {
   /** Schema-driven options the job was submitted with (same purpose as
    *  resolution) — lets a reclaimed frame bill exactly like the original. */
   params?: Record<string, string | number | boolean | string[]>;
+  /** SHA-1 hashes of the submitted reference bytes (style frame + content
+   *  refs). Kept so a recheck can exclude an echoed input image attachment
+   *  instead of downloading the style frame as the result. */
+  refHashes?: string[];
+  /** Uploaded reference URLs from the submission. Kept so a recheck can
+   *  exclude an echoed reference URL the same way the submit-time wait did. */
+  refUrls?: string[];
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }

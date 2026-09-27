@@ -51,9 +51,10 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   onBlur?: () => void;
   /** While a box is focused, ignore EXTERNAL value changes: the user's local
    *  edits stay authoritative until blur. This is what keeps the caret put
-   *  when the parent re-derives the prompt mid-keystroke (the node graph's
-   *  composer passes it; the side panel's @-autocomplete needs external
-   *  re-decomposes while focused, so it does not). */
+   *  when the parent re-derives the prompt mid-keystroke. Every prompt surface
+   *  passes it now — the side panel's @ autocomplete inserts THROUGH the
+   *  editor (`PromptContentHandle.insertRefTag`), so it no longer needs an
+   *  external re-decompose while focused. */
   deferExternalWhileFocused?: boolean;
 }) {
   const [boxes, setBoxes] = useState<PromptBoxes>(() => parsePromptBoxes(value));

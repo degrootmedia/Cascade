@@ -18,6 +18,7 @@ import {
   sequenceAccentHex,
   sequenceBarSpans,
 } from "../../../../shared/ipc.js";
+import { useClampedMenuStyle } from "../menu-position.js";
 
 /** Bottom slot height member cards open for a bar — must match the
  *  `.prod-board.seq-slot` padding in styles.css. */
@@ -131,6 +132,7 @@ export function SequenceBarChrome({ seq, frameCount, outputMedia, collapsed, onO
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuStyle = useClampedMenuStyle(menu, menuRef);
   const accent = sequenceAccentHex(seq.accent);
   const enabled = seq.enabled !== false;
   useEffect(() => {
@@ -196,7 +198,7 @@ export function SequenceBarChrome({ seq, frameCount, outputMedia, collapsed, onO
         <div
           ref={menuRef}
           className="session-context-menu seq-accent-menu"
-          style={{ position: "fixed", top: menu.y, left: menu.x, zIndex: 60 }}
+          style={{ ...menuStyle, zIndex: 60 }}
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >

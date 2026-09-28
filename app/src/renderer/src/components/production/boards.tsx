@@ -18,6 +18,7 @@ import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
+import { useClampedMenuStyle } from "../menu-position.js";
 
 function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
@@ -234,6 +235,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuStyle = useClampedMenuStyle(menu, menuRef);
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => {
@@ -573,7 +575,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               onChange={(e) => setAudio(e.target.value)}
               onFocus={() => setTextFocused(true)}
               onBlur={() => setTextFocused(false)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
             />
           </label>
           <label className="prod-board-script-field">
@@ -586,7 +588,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               onChange={(e) => setVisual(e.target.value)}
               onFocus={() => setTextFocused(true)}
               onBlur={() => setTextFocused(false)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
             />
           </label>
         </div>
@@ -619,7 +621,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
         <div
           ref={menuRef}
           className="session-context-menu"
-          style={{ position: "fixed", top: menu.y, left: menu.x, zIndex: 60 }}
+          style={{ ...menuStyle, zIndex: 60 }}
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >

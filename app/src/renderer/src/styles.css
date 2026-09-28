@@ -2683,6 +2683,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border: 1px solid var(--border);
   border-radius: 10px;
   min-width: 160px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 20;
   padding: 4px;

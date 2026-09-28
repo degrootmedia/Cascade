@@ -101,6 +101,14 @@ export function App() {
       return 230;
     }
   });
+  // The composer's growth cap must follow window resizes; innerHeight read inline
+  // only refreshed when an unrelated render happened to occur.
+  const [viewportH, setViewportH] = useState(() => window.innerHeight);
+  useEffect(() => {
+    const onResize = () => setViewportH(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
 
@@ -288,14 +296,15 @@ export function App() {
 
   /** Dial selection: optimistic flip, then broadcast so production views refresh. */
   const selectMedia = useCallback((id: MediaProviderId) => {
-    setMediaProvider((prev) => {
-      if (prev === id) return prev;
-      void window.cascade.setMediaProvider(id).then(() => {
-        window.dispatchEvent(new Event("cascade:media-provider-changed"));
-      }).catch(() => void refreshMedia());
-      return id;
-    });
-  }, [refreshMedia]);
+    if (mediaProvider === id) return;
+    setMediaProvider(id);
+    // Side effects stay OUT of the state updater: React may invoke updaters more
+    // than once (StrictMode, future concurrent features), which would duplicate
+    // the provider write and the refresh broadcast.
+    void window.cascade.setMediaProvider(id).then(() => {
+      window.dispatchEvent(new Event("cascade:media-provider-changed"));
+    }).catch(() => void refreshMedia());
+  }, [mediaProvider, refreshMedia]);
 
   /** Transport flip: persist the mode first, then reconcile the active
    *  provider so it never points at the hidden transport. When nothing is
@@ -689,13 +698,13 @@ export function App() {
           </button>
           <AutoTextarea
             ref={textareaRef}
-            maxHeight={Math.round(window.innerHeight * 0.4)}
+            maxHeight={Math.round(viewportH * 0.4)}
             value={input}
             placeholder={busy ? "Working…" : pureChat ? "Ask Cascade anything…" : "Ask Cascade to do something in your workspace…"}
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 void send();
               }

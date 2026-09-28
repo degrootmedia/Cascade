@@ -2124,6 +2124,12 @@ function registerIpc() {
           prevUp.gens, prevUp.genIndex, shot.graphUpscale.gens, shot.graphUpscale.genIndex, nextUp.gens, nextUp.genIndex,
         );
       }
+      // The copied artwork/videoPath came from the job's snapshot while the
+      // indices above may have been re-anchored to a mid-job user selection —
+      // re-derive the primary frame/clip from the final pipe so the two can't
+      // disagree (a new take that briefly shows then reverts on the next save
+      // looked like the generation never applied until an unplug/replug).
+      syncBoardOutputToPipe(shot);
     }
     // Shot sequences hold their video-node histories like the shot graph does
     // (a sequence generation commits its takes through here): copy only the
@@ -2475,20 +2481,22 @@ function registerIpc() {
         hookVideoGenToOutput(shot, "vid0");
       } else if (target?.kind === "editVideoNode") {
         // Legacy pending record (flat edit-video node): land it on the migrated
-        // ev0 entry.
+        // ev0 entry and bind it, like a direct edit-video generation.
         recordGraphVideoGen(shot, "ev0", rel, pending.prompt, pending.model);
-        const piped = shot.graphOutputSource === "editvideo"
-          || (shot.graphOutputSource === "videogen" && (shot.graphOutputVideoNodeId ?? "vid0") === "ev0");
-        if (piped) applyVideoOutput(shot, rel, target.sourcePath, "ev0");
+        hookVideoGenToOutput(shot, "ev0");
+        applyVideoOutput(shot, rel, target.sourcePath, "ev0");
       } else if (target?.kind === "tween") {
         syncTweenBlocks(p, shot);
         const block = (shot.graphTweenBlocks ?? []).find((b) => b.id === target.blockId);
         if (block) recordTweenBlockGen(block, rel, pending.prompt, pending.model);
       } else {
-        // Default to the video generation node (the node-graph video flow).
+        // Default to the video generation node (the node-graph video flow):
+        // bind the recovered take like a direct generation so it shows
+        // without an unplug/replug round-trip.
         const nodeId = target?.kind === "videoNode" ? (target.nodeId ?? "vid0") : "vid0";
         recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model);
-        if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
+        hookVideoGenToOutput(shot, nodeId);
+        applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
       }
       // The original submit never reached its generation recorder (the wait
       // timed out or the download failed), so the cost was unbilled. Bill it
@@ -3435,7 +3443,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const png = await gen(resolved, extras, shot, opts?.params);
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
-      syncBoardOutputToPipe(shot);
+      // A node-graph generation is an explicit user action on this node — bind
+      // its fresh take as the storyboard frame at once (like selectBoardFrame),
+      // so the result shows without an unplug/replug round-trip. The prior
+      // feed survives in its node's history.
+      selectBoardFrame(shot, jpegRel);
       emit(`Shot ${shot.number}: node frame ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -3487,7 +3499,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         throw e;
       }
       recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
-      if (shot.graphOutputSource === "videogen") applyVideoOutput(shot, rel, sourcePath, nodeId);
+      // A node-graph video generation is an explicit user action on this node —
+      // bind it as the output feed at once so the clip shows without an
+      // unplug/replug round-trip (a stale renderer save re-deriving the pipe
+      // from the old node reverted the new clip). The prior feed survives in
+      // its node's history.
+      hookVideoGenToOutput(shot, nodeId);
+      applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );
@@ -3659,9 +3677,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         throw e;
       }
       recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
-      const piped = shot.graphOutputSource === "editvideo"
-        || (shot.graphOutputSource === "videogen" && (shot.graphOutputVideoNodeId ?? "vid0") === nodeId);
-      if (piped) applyVideoOutput(shot, rel, sourcePath, nodeId);
+      // An explicit edit-video generation binds its fresh take as the output
+      // at once so the clip shows without an unplug/replug round-trip.
+      hookVideoGenToOutput(shot, nodeId);
+      applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: edited video ready.`, "done");
     })
   );
@@ -3898,8 +3917,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // Step 3 node graph: AI-edit one image for a specific edit-image node. The
   // source image is that node's source pipe — a parent edit node's selection,
   // the image node's selection, or a reference's artwork — falling back to the
-  // shot's current frame. The result is stored on the node; it becomes the
-  // shot's artwork only when the node is piped to the output.
+  // shot's current frame. A node-graph edit is an explicit user action on this
+  // node, so its fresh take binds as the storyboard frame at once (like
+  // selectBoardFrame) instead of waiting for a manual pipe.
   handle("production:generateEditNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; params?: Record<string, string | number | boolean | string[]> }) =>
     runProductionStep(id, 3, "editing an image (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -3922,16 +3942,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       node.prompt = text;
       recordGraphEditGen(shot, node.id, jpegRel, text, modelId ?? "auto");
-      syncBoardOutputToPipe(shot);
+      selectBoardFrame(shot, jpegRel);
       emit(`Shot ${shot.number}: node edit ready.`, "done");
     }, { needsApiKey: false })
   );
 
   // Step 3 node graph: upscale the upscale node's source image (its source
   // pipe, falling back to the shot's current frame) through an upscale-capable
-  // model. The source is the sole reference (upscalers reject a prompt), and
-  // the result is stored on the node — it becomes the shot's artwork only when
-  // the node is piped to the output.
+  // model. An explicit upscale binds its fresh take as the storyboard frame at
+  // once (like selectBoardFrame) instead of waiting for a manual pipe.
   handle("production:generateUpscaleNode", (_e, id: string, shotId: string, opts: { model?: string; resolution?: string; params?: Record<string, string | number | boolean | string[]> }) =>
     runProductionStep(id, 3, "upscaling an image (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -3949,7 +3968,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordGraphUpscaleGen(shot, jpegRel, modelId ?? "auto");
       shot.graphUpscale = { ...(shot.graphUpscale ?? {}), generation: { provider: providerId, model: modelId ?? "auto" } };
-      syncBoardOutputToPipe(shot);
+      selectBoardFrame(shot, jpegRel);
       emit(`Shot ${shot.number}: upscaled frame ready.`, "done");
     }, { needsApiKey: false })
   );

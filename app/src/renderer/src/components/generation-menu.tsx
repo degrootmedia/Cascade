@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useClampedMenuStyle } from "./menu-position.js";
 
 /** A generated take targeted by a right-click: viewport point + its
  *  workspace-relative path (the identity `findGeneration`/copy operations use).
@@ -47,6 +48,7 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onE
   extra?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const menuStyle = useClampedMenuStyle(menu, ref);
   useEffect(() => {
     if (!menu) return;
     const close = (e: MouseEvent) => {
@@ -69,7 +71,7 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onE
     <div
       ref={ref}
       className="session-context-menu"
-      style={{ position: "fixed", top: menu.y, left: menu.x, zIndex: 300 }}
+      style={{ ...menuStyle, zIndex: 300 }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >

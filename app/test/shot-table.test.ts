@@ -190,3 +190,103 @@ describe("ShotTable drag wiring", () => {
     expect(reorderCalls).toEqual([]);
   });
 });
+
+/**
+ * Draft resync (Issue 1): the audio/visual cells keep local drafts that commit
+ * on blur. An incoming save from elsewhere (AI refine, undo, a board-card
+ * edit) must resync into unfocused cells so a later blur can never write a
+ * stale draft back over the newer value; a focused cell defers and wins at blur.
+ */
+describe("ShotTable draft resync", () => {
+  const g = globalThis as Record<string, any>;
+  let container: HTMLElement;
+  let root: Root | null = null;
+  let updateCalls: unknown[][];
+
+  function prodWith(audio: string, visual = "v-old"): Production {
+    return {
+      meta: { id: "p1", name: "T" },
+      scenes: [{ number: 1, title: "Scene 1", shots: [{ id: "a", number: "0100", audio, visual }] }],
+    } as unknown as Production;
+  }
+
+  function renderProd(prod: Production) {
+    act(() => { root!.render(createElement(ShotTable, { prod, onMutation: () => {} })); });
+  }
+
+  function audioCell(): HTMLTextAreaElement {
+    return container.querySelector(".shot-cell.audio") as HTMLTextAreaElement;
+  }
+
+  /** Drive a controlled textarea the way the other renderer tests do. */
+  function typeInto(el: HTMLTextAreaElement, text: string) {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set
+      ?? Object.getOwnPropertyDescriptor(g.window.HTMLTextAreaElement.prototype, "value")?.set;
+    act(() => {
+      setter!.call(el, text);
+      el.dispatchEvent(new g.Event("input", { bubbles: true }));
+    });
+  }
+
+  function keyEnter(el: HTMLTextAreaElement, isComposing: boolean) {
+    const ev = new g.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "isComposing", { value: isComposing });
+    act(() => { el.dispatchEvent(ev); });
+    return ev;
+  }
+
+  beforeEach(() => {
+    updateCalls = [];
+    g.window.cascade = {
+      reorderShot: () => Promise.resolve(null),
+      insertShot: () => Promise.resolve(null),
+      addScene: () => Promise.resolve(null),
+      updateShot: (...args: unknown[]) => { updateCalls.push(args); return Promise.resolve(null); },
+      deleteShot: () => Promise.resolve(null),
+      setShotNumber: () => Promise.resolve(null),
+    };
+    container = g.document.createElement("div");
+    g.document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => { root?.unmount(); });
+    root = null;
+    container.remove();
+  });
+
+  it("adopts an incoming save while unfocused and commits nothing", () => {
+    renderProd(prodWith("old"));
+    expect(audioCell().value).toBe("old");
+    renderProd(prodWith("NEW-FROM-AI"));
+    expect(audioCell().value).toBe("NEW-FROM-AI");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("keeps the focused draft through an incoming save; the draft wins at blur", () => {
+    renderProd(prodWith("old"));
+    const cell = audioCell();
+    act(() => { cell.focus(); });
+    typeInto(cell, "draft");
+    expect(cell.value).toBe("draft");
+    // Same tree, newer props, cell still focused: the draft must survive.
+    renderProd(prodWith("NEW-FROM-AI"));
+    expect(cell.value).toBe("draft");
+    act(() => { cell.blur(); });
+    expect(updateCalls).toEqual([["p1", "a", { audio: "draft", visual: "v-old" }]]);
+  });
+
+  it("ignores Enter while an IME composition is active", () => {
+    renderProd(prodWith("old"));
+    const cell = audioCell();
+    act(() => { cell.focus(); });
+    typeInto(cell, "draft");
+    const composing = keyEnter(cell, true);
+    expect(updateCalls).toEqual([]);
+    expect(composing.defaultPrevented).toBe(false);
+    expect(g.document.activeElement).toBe(cell);
+    keyEnter(cell, false);
+    expect(updateCalls).toEqual([["p1", "a", { audio: "draft", visual: "v-old" }]]);
+  });
+});

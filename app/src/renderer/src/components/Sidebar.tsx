@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatBalance, SessionMeta } from "../../../shared/ipc.js";
 import { PlusIcon, SearchIcon, TokenIcon } from "./icons.js";
+import { useClampedMenuStyle } from "./menu-position.js";
 
 type BucketKey = "today" | "yesterday" | "week" | "month" | "older";
 
@@ -72,6 +73,7 @@ export function Sidebar({
   // Right-click context menu state (opened over a specific session).
   const [menu, setMenu] = useState<{ x: number; y: number; session: SessionMeta } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuStyle = useClampedMenuStyle(menu, menuRef);
   // Live search filter (title/preview) plus full-transcript hits from main.
   const [query, setQuery] = useState("");
   /** sessionId → matching snippet, for content that isn't in the title/preview. */
@@ -160,7 +162,7 @@ export function Sidebar({
         <PlusIcon size={15} />
         New chat
       </button>
-      {total > 3 && (
+      {total > 0 && (
         <div className="sidebar-search-wrap">
           <SearchIcon size={13} className="sidebar-search-icon" />
           <input
@@ -222,7 +224,7 @@ export function Sidebar({
         <div
           ref={menuRef}
           className="session-context-menu"
-          style={{ position: "fixed", top: menu.y, left: menu.x }}
+          style={{ ...menuStyle, zIndex: 60 }}
         >
           <button
             className="ctx-item"

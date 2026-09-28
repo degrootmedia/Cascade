@@ -48,8 +48,8 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
           )}
         </div>
       )}
-      {groupToolRuns(items).map((entry, i) => {
-        if (entry.kind === "toolRun") return <ToolGroup key={i} items={entry.items} />;
+      {groupToolRuns(items).map((entry) => {
+        if (entry.kind === "toolRun") return <ToolGroup key={toolRunKey(entry.items)} items={entry.items} />;
         const item = entry.item;
         switch (item.kind) {
           case "user": {
@@ -57,7 +57,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
               item.attachments ??
               (item.images?.map((src) => ({ dataUrl: src, name: "image", mime: "image/*" })) ?? []);
             return (
-              <div key={i} className="msg user">
+              <div key={itemKey(item)} className="msg user">
                 {atts.length > 0 && (
                   <div className="msg-attachments">
                     {atts.map((a, j) =>
@@ -74,10 +74,10 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
             );
           }
           case "assistant":
-            return <AssistantMessage key={i} text={item.text} streaming={item.streaming} />;
+            return <AssistantMessage key={itemKey(item)} text={item.text} streaming={item.streaming} />;
           case "mention":
             return (
-              <div key={i} className="msg mention">
+              <div key={itemKey(item)} className="msg mention">
                 <img src={item.image} alt={item.filename} />
                 <span className="mention-label">OpenArt reference: {item.filename}</span>
               </div>
@@ -86,7 +86,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
             const switchMeta = item.agentId ? { id: item.agentId, name: item.name, description: (item as { description?: string }).description ?? "", avatar: item.avatar, model: (item as { model?: string }).model ?? "", allowedTools: "all" as const, createdAt: "", updatedAt: "", hasPrompt: false } : null;
             const avatarNode = !item.avatar ? <span className="avatar default">○</span> : item.avatar.kind === "emoji" ? <span className="avatar emoji">{item.avatar.value}</span> : item.avatarDataUrl ? <img className="avatar img" src={item.avatarDataUrl} alt="" style={{ width: 24, height: 24, borderRadius: "50%" }} /> : <span className="avatar default">◐</span>;
             return (
-              <div key={i} className="agent-switch-frame">
+              <div key={itemKey(item)} className="agent-switch-frame">
                 <div className="agent-switch-avatar">
                   {switchMeta ? <AgentHoverCard meta={switchMeta} avatarDataUrl={item.avatarDataUrl ?? null}>{avatarNode}</AgentHoverCard> : avatarNode}
                 </div>
@@ -99,7 +99,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
           }
           case "notice":
             return (
-              <div key={i} className="msg notice">
+              <div key={itemKey(item)} className="msg notice">
                 {item.text}
               </div>
             );
@@ -112,6 +112,36 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
 
 type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
 type RenderEntry = { kind: "toolRun"; items: ToolItem[] } | { kind: "item"; item: DisplayItem };
+
+/**
+ * Stable React keys for transcript rows. Entries carry no message/run id (see
+ * `DisplayItem` in shared/ipc.ts), so keys derive from the entry's own content:
+ * a tool group's key is its calls' names+args (unchanged when results stream
+ * in), a message's key its kind+text. Deleting/undoing an earlier row keeps
+ * later rows' keys, so expanded/collapsed and "Copied" state follows the item,
+ * not the slot. Duplicate identical rows can still collide — strictly better
+ * than index keys, which misattribute state on every removal.
+ */
+function toolRunKey(items: ToolItem[]): string {
+  return `toolrun:${items.map((i) => `${i.name}:${i.args}`).join("||")}`;
+}
+
+function itemKey(item: DisplayItem): string {
+  switch (item.kind) {
+    case "user":
+      return `user:${item.text}:${(item.attachments ?? []).map((a) => a.name).join(",")}:${(item.images ?? []).join(",")}`;
+    case "assistant":
+      return `assistant:${item.text}`;
+    case "tool":
+      return `tool:${item.name}:${item.args}`;
+    case "mention":
+      return `mention:${item.filename}:${item.image}`;
+    case "agent-switch":
+      return `agentswitch:${item.agentId}:${item.at}:${item.name}`;
+    case "notice":
+      return `notice:${item.text}`;
+  }
+}
 
 /** Extract the copyable text for a fenced block, excluding the copy button itself. */
 export function codeBlockText(pre: HTMLElement): string {
@@ -235,9 +265,14 @@ function ToolGroup({ items }: { items: ToolItem[] }) {
       </button>
       {open && (
         <div className="tool-group-body">
-          {items.map((item, i) => (
-            <ToolCard key={`${item.name}-${i}`} item={item} />
-          ))}
+          {items.map((item, i) => {
+            // Disambiguate repeat identical calls (same name+args) so keys stay
+            // unique; the suffix counts only identical siblings, so removing a
+            // different call never renames a surviving card's key.
+            const base = `${item.name}:${item.args}`;
+            const occurrence = items.slice(0, i).filter((o) => o.name === item.name && o.args === item.args).length;
+            return <ToolCard key={occurrence ? `${base}#${occurrence}` : base} item={item} />;
+          })}
         </div>
       )}
     </div>
@@ -257,7 +292,7 @@ function ToolCard({ item }: { item: ToolItem }) {
       {item.images && item.images.length > 0 && (
         <div className="tool-images">
           {item.images.map((src, i) => (
-            <img key={i} src={src} alt={`tool result image ${i + 1}`} />
+            <img key={`${i}-${src}`} src={src} alt={`tool result image ${i + 1}`} />
           ))}
         </div>
       )}

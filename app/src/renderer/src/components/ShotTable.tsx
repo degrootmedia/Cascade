@@ -13,7 +13,7 @@
  * root): no popups, no push-apart slide, and the scene gaps go inert so the
  * boundary drop lines receive the drag.
  */
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { Production, ProductionScene, ProductionShot } from "../../../shared/ipc.js";
 import { shotHasContent } from "../../../shared/ipc.js";
 import { AutoTextarea } from "./AutoTextarea.js";
@@ -407,7 +407,7 @@ function ShotNumberField({ prodId, shot, occupied, onMutation }: {
         onChange={(e) => setDraft(e.target.value.replace(/\D/g, "").slice(0, 4))}
         onBlur={commit}
         onKeyDown={(e) => {
-          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); }
           else if (e.key === "Escape") { e.preventDefault(); setDraft(shot.number); setEditing(false); }
           else if (e.key === "ArrowUp") { e.preventDefault(); const n = stepNumber(draft || shot.number, 1); if (n) setDraft(n); }
           else if (e.key === "ArrowDown") { e.preventDefault(); const n = stepNumber(draft || shot.number, -1); if (n) setDraft(n); }
@@ -458,6 +458,15 @@ function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDow
   const shot = scene.shots[index];
   const [audio, setAudio] = useState(shot.audio);
   const [visual, setVisual] = useState(shot.visual);
+  // Local drafts commit on blur; in-flight saves from elsewhere (AI refine, undo,
+  // a board-card edit) resync into these cells while neither is focused, so a
+  // later blur can never write a stale draft back over a newer value.
+  const [textFocused, setTextFocused] = useState(false);
+  useEffect(() => {
+    if (textFocused) return;
+    setAudio(shot.audio);
+    setVisual(shot.visual);
+  }, [shot.audio, shot.visual, textFocused]);
   const dirty = audio !== shot.audio || visual !== shot.visual;
 
   function commit() {
@@ -503,14 +512,18 @@ function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDow
         value={audio}
         placeholder="Dialogue / VO / SFX"
         onChange={(e) => setAudio(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit(); } }}
+        onFocus={() => setTextFocused(true)}
+        onBlur={() => setTextFocused(false)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); } }}
       />
       <AutoTextarea
         className="shot-cell visual"
         value={visual}
         placeholder="What we see"
         onChange={(e) => setVisual(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit(); } }}
+        onFocus={() => setTextFocused(true)}
+        onBlur={() => setTextFocused(false)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); } }}
       />
       <span className="shot-actions">
         <button

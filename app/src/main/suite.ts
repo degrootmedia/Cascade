@@ -15,6 +15,7 @@ import {
   emptySuiteSession,
   normalizeSuiteSession,
   pruneSuiteSession,
+  type SuiteEntry,
   type SuiteSession,
 } from "../shared/ipc.js";
 import { createStore } from "./store.js";
@@ -59,6 +60,24 @@ export function removeSuiteEntry(productionId: string, entryId: string): SuiteSe
   };
   if (next.selectedId === entryId) next.selectedId = null;
   return saveSuiteSession(productionId, next);
+}
+
+/** Append a finished generation/edit entry to the session document and select
+ *  it. Idempotent on `entry.id`, so a renderer that also appends the returned
+ *  entry to its in-memory session can't duplicate it on its next save. This
+ *  is what makes a suite job survive the panel unmounting (tab switch) mid-
+ *  flight: the entry is durable on disk even when the submitter's `setSession`
+ *  lands on an unmounted component and is discarded. */
+export function appendSuiteEntry(productionId: string, entry: SuiteEntry): SuiteSession {
+  const session = loadSuiteSession(productionId);
+  if (session.entries.some((e) => e.id === entry.id)) {
+    return saveSuiteSession(productionId, { ...session, selectedId: entry.id });
+  }
+  return saveSuiteSession(productionId, {
+    ...session,
+    entries: [...session.entries, entry],
+    selectedId: entry.id,
+  });
 }
 
 /** Remove a production's whole suite document (production hard-delete hook). */

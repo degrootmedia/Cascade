@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
-import type { Production, ProductionShot } from "../../../../shared/ipc.js";
+import { applyShotSequences, type Production, type ProductionShot, type SequenceTimelineItem, type ShotSequence } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 import { mediaRev } from "./media-rev.js";
@@ -26,9 +26,12 @@ export interface LogLine {
 }
 
 const animaticThumbCache = new Map<string, string>();
-function AnimaticThumb({ prodId, shotId, artwork }: { prodId: string; shotId: string; artwork?: string }) {
+function AnimaticThumb({ prodId, shotId, artwork, explicitRel }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
+    // A sequence's held still renders directly (see the return below) — no
+    // board-thumbnail fetch for it.
+    if (explicitRel) return;
     let live = true;
     const key = `${prodId}:${shotId}:${artwork ?? ""}`;
     const cached = animaticThumbCache.get(key);
@@ -47,7 +50,8 @@ function AnimaticThumb({ prodId, shotId, artwork }: { prodId: string; shotId: st
       }).catch(() => {});
     }
     return () => { live = false; };
-  }, [prodId, shotId, artwork]);
+  }, [prodId, shotId, artwork, explicitRel]);
+  if (explicitRel) return <img className="prod-timeline-thumb" src={`cascade-media://${prodId}/${encodeURIComponent(explicitRel)}`} alt="Held still" title="The sequence output's held still" />;
   if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboard" />;
   return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title="Primary frame for this shot" />;
 }
@@ -55,12 +59,6 @@ function AnimaticThumb({ prodId, shotId, artwork }: { prodId: string; shotId: st
 /** Flatten scenes to a single ordered shot list with a global timeline cursor. */
 function flatShots(scenes: Production["scenes"]): ProductionShot[] {
   return scenes.flatMap((s) => s.shots);
-}
-
-/** Sum of all shot durations (clamped to >=0.1 so the strip always has a width). */
-function totalDuration(scenes: Production["scenes"]): number {
-  const t = flatShots(scenes).reduce((n, s) => n + (s.durationSec ?? 3), 0);
-  return t > 0 ? t : 0.1;
 }
 
 /** Convert a data URL into an ArrayBuffer for AudioContext decoding. The VO
@@ -231,11 +229,15 @@ export function VolumeSlider({ value, onCommit, audioRef, title }: {
  *  the semi-transparent shot blocks. */
 
 export function AnimaticTimeline({
-  prodId, scenes, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
-  onUpdateDurations, onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onSaveAsReference,
+  prodId, scenes, sequences, references, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
+  onUpdateDurations, onUpdateSequenceDuration, onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onToggleSequenceMute, onSaveAsReference,
 }: {
   prodId: string;
   scenes: Production["scenes"];
+  /** Enabled shot sequences collapse their span into one block (Spec 06). */
+  sequences?: ShotSequence[];
+  /** References a sequence's output node can be bound to. */
+  references?: Production["references"];
   voUrl: string | null;
   voDuration: number | null;
   onVoDurationKnown: (sec: number) => void;
@@ -243,18 +245,25 @@ export function AnimaticTimeline({
   musicVolume: number;
   voiceoverVolume: number;
   onUpdateDurations: (updates: { shotId: string; durationSec: number }[]) => void;
+  /** Set a shot sequence's own timeline window (roll edit on its block). */
+  onUpdateSequenceDuration?: (sequenceId: string, durationSec: number) => void;
   onFitToVo: () => void;
   onUpdateTotal: (sec: number) => void;
   /** Remove a shot's generated video (the preview falls back to the still). */
   onRemoveVideo: (shotId: string) => void;
   /** Toggle whether a shot's own embedded audio plays in the preview. */
   onToggleMute: (shotId: string) => void;
+  /** Mute a shot sequence's clip in the preview. */
+  onToggleSequenceMute?: (sequenceId: string) => void;
   /** Copy the previewed shot's generated clip/frame into the production as a
    *  new reference (right-click the preview). */
   onSaveAsReference?: (shotId: string, rel: string) => void;
 }) {
-  const shots = flatShots(scenes);
-  const sumDur = totalDuration(scenes);
+  // Timeline items: a shot each, with every enabled sequence's contiguous span
+  // collapsed into one block (the projection's slate fallback covers a
+  // sequence that hasn't rendered its clip yet).
+  const shots: SequenceTimelineItem[] = applyShotSequences(flatShots(scenes), sequences ?? [], references);
+  const sumDur = shots.reduce((n, s) => n + s.durationSec, 0) || 0.1;
   // Total is always the sum of shot durations — the user can edit it freely
   // (and "Fit to VO" rescales the shots to match the voiceover). The VO's
   // own length is overlaid on the strip as a waveform at its true scale.
@@ -823,7 +832,16 @@ export function AnimaticTimeline({
       updates[0].durationSec = next;
       updates.push({ shotId: d.nextShot.id, durationSec: nextDur });
     }
-    onUpdateDurations(updates.map((u) => ({ ...u, durationSec: Math.round(u.durationSec * 10) / 10 })));
+    const rounded = updates.map((u) => ({ ...u, durationSec: Math.round(u.durationSec * 10) / 10 }));
+    // Roll edits cross item kinds: a sequence block's edge trades time with the
+    // next item whether that's a shot or another sequence.
+    const shotUpdates: { shotId: string; durationSec: number }[] = [];
+    for (const u of rounded) {
+      const item = shots.find((q) => q.id === u.shotId);
+      if (item?.kind === "sequence" && item.sequenceId) onUpdateSequenceDuration?.(item.sequenceId, u.durationSec);
+      else shotUpdates.push({ shotId: u.shotId, durationSec: u.durationSec });
+    }
+    if (shotUpdates.length) onUpdateDurations(shotUpdates);
   };
   const onHandleUp = (e: React.PointerEvent) => {
     if (!dragRef.current) return;
@@ -904,6 +922,9 @@ export function AnimaticTimeline({
         style={{ height: `${previewHeight}px` }}
         title={activeShot?.videoPath || activeShot?.artwork ? "Right-click for save, copy, edit, reference, or delete options" : undefined}
         onContextMenu={(e) => {
+          // The shared take menu is shot-addressed (delete/save name a shot);
+          // a sequence's takes are managed on its own canvas instead.
+          if (activeShot?.kind === "sequence") return;
           const rel = activeShot?.videoPath ?? activeShot?.artwork;
           if (activeShot && rel) genMenu.open(e, rel, { src: cascadeMedia(prodId, rel), media: activeShot.videoPath ? "video" : "image" });
         }}
@@ -940,17 +961,22 @@ export function AnimaticTimeline({
             />
           );
         })}
-        {activeShot && activeShot.videoPath && (
+        {activeShot && activeShot.videoPath && activeShot.kind !== "sequence" && (
           <button
             className="prod-animatic-video-remove"
             title="Remove this shot's video (back to a still frame)"
             onClick={(e) => { e.stopPropagation(); onRemoveVideo(activeShot.id); }}
           >
-            ×
+            A-
           </button>
         )}
         {activeShot && !activeShot.videoPath && activeThumb ? (
-          <AnimaticThumb prodId={prodId} shotId={activeShot.id} artwork={activeThumb} />
+          <AnimaticThumb
+            prodId={prodId}
+            shotId={activeShot.shotIds[0] ?? activeShot.id}
+            artwork={activeThumb}
+            explicitRel={activeShot.kind === "sequence" ? activeThumb : undefined}
+          />
         ) : null}
         {activeShot && !activeThumb ? (
           <div className="prod-animatic-preview-slate">
@@ -1050,7 +1076,14 @@ export function AnimaticTimeline({
                   title={`${s.number} · ${dur.toFixed(1)}s`}
                 >
                   {s.artwork
-                    ? <AnimaticThumb prodId={prodId} shotId={s.id} artwork={s.artwork} />
+                    ? (
+                      <AnimaticThumb
+                        prodId={prodId}
+                        shotId={s.shotIds[0] ?? s.id}
+                        artwork={s.artwork}
+                        explicitRel={s.kind === "sequence" && !s.videoPath ? s.artwork : undefined}
+                      />
+                    )
                     : <div className="prod-animatic-block-slate">SLATE<br /><strong>{s.number}</strong></div>}
                   {s.videoPath && (
                     <button
@@ -1058,7 +1091,11 @@ export function AnimaticTimeline({
                       title={s.muted ? "Unmute this clip's audio" : "Mute this clip's audio"}
                       aria-label={s.muted ? "Unmute this clip's audio" : "Mute this clip's audio"}
                       onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => { e.stopPropagation(); onToggleMute(s.id); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (s.kind === "sequence" && s.sequenceId) onToggleSequenceMute?.(s.sequenceId);
+                        else onToggleMute(s.id);
+                      }}
                     >
                       <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
                         <path d="M2 6h3l4-3.5v11L5 10H2z" fill="currentColor" />

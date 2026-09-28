@@ -192,7 +192,7 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
 
 /** Fit the uploaded visual references into the video model's reference field.
  *
- *  Two shapes, chosen by `opts.frames`:
+ *  Two shapes, chosen by `opts.frames` — plus a references-only shape:
  *   - Normal image/text-to-video (default): the source frame fills the
  *     start-frame slot (image2video forms mark it required — a submission
  *     without it is rejected) and every reference — the frame, @[name]
@@ -203,6 +203,9 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
  *     model's dedicated startFrame/endFrame object slots (falling back to the
  *     array when a slot is absent), since a start→end interpolation is exactly
  *     what those slots are for.
+ *   - References-only (`refsOnly: true`, the shot-sequence canvas): no frame
+ *     slot is set — every input rides the array field, like OpenArt's
+ *     element/reference modes expect for peer-frame timelines.
  *
  *  Returns null when no reference field is found — the caller then falls back
  *  to `params.visualReferences`.
@@ -215,9 +218,14 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
 export function videoRefsAssign(
   refs: Record<string, unknown>[],
   props: Record<string, unknown>,
-  opts?: { frames?: boolean }
+  opts?: { frames?: boolean; refsOnly?: boolean }
 ): Record<string, unknown> | null {
   if (!refs.length) return null;
+  if (opts?.refsOnly === true) {
+    const refKey = referenceArrayKey(props);
+    if (refKey) return { [refKey]: refs };
+    return null;
+  }
   const keys = Object.keys(props);
   const fillObject = (ref: Record<string, unknown>, properties: Record<string, unknown>): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
@@ -678,8 +686,9 @@ export class OpenArtClient implements MediaProvider {
 
 /** Fit the uploaded visual references into the video model's reference field.
    *  Normal generation binds them as an array; the in-betweener passes
-   *  `frames: true` to reach the dedicated start/end slots. See the free
-   *  function for the exact rules. */
+   *  `frames: true` to reach the dedicated start/end slots; the sequence
+   *  canvas passes `refsOnly: true` (via opts) to skip the frame slots
+   *  entirely. See the free function for the exact rules. */
 private videoRefsAssign = videoRefsAssign;
 
   /** Build the OpenArt generate-tool arguments for one board.
@@ -757,7 +766,7 @@ private videoRefsAssign = videoRefsAssign;
     const dur = this.videoDurationAssign(opts.durationSec, props);
     if (dur) Object.assign(params, dur);
     if (refs.length) {
-      const refAssign = this.videoRefsAssign(refs, props, { frames });
+      const refAssign = this.videoRefsAssign(refs, props, { frames, ...(opts.refsOnly === true ? { refsOnly: true } : {}) });
       if (refAssign) Object.assign(params, refAssign);
       else params.visualReferences = refs; // last-resort fallback
     }
@@ -838,6 +847,23 @@ private videoRefsAssign = videoRefsAssign;
       if (bytes && bytes.length) hashes.add(createHash("sha1").update(bytes).digest("hex"));
     }
     return urls.size || hashes.size ? { urls, hashes } : undefined;
+  }
+
+  /** Rebuild the submit-time input exclusion from a persisted pending record,
+   *  so a recheck excludes the same echoed inputs the original wait did. */
+  private pendingExclusion(rec: PendingImageGen): InputExclusion | undefined {
+    const urls = new Set(rec.refUrls ?? []);
+    const hashes = new Set(rec.refHashes ?? []);
+    return urls.size || hashes.size ? { urls, hashes } : undefined;
+  }
+
+  /** Serialize an exclusion for persistence on the pending record. */
+  private static exclusionArrays(exclude?: InputExclusion): { refHashes?: string[]; refUrls?: string[] } {
+    if (!exclude) return {};
+    const out: { refHashes?: string[]; refUrls?: string[] } = {};
+    if (exclude.hashes.size) out.refHashes = [...exclude.hashes];
+    if (exclude.urls.size) out.refUrls = [...exclude.urls];
+    return out;
   }
 
   /** Whether a candidate buffer is one of the submission's uploaded inputs. */
@@ -946,7 +972,12 @@ private videoRefsAssign = videoRefsAssign;
   async recheckPendingImage(rec: PendingImageGen): Promise<Buffer | null> {
     if (rec.historyId) {
       if (!this.findTool(/^openart_creation_wait$/) && !this.findTool(/^openart_creation_get$/)) return null;
-      const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS);
+      // The original wait excluded the submitted references (style frame +
+      // content refs) by identity — without the same exclusion a recheck whose
+      // reply carries no result URL picks the echoed input attachment (usually
+      // the style frame) as the "finished" frame.
+      const exclude = this.pendingExclusion(rec);
+      const { buf, failed } = await this.pollOpenArtImage(rec.historyId, IMAGE_RECHECK_DEADLINE_MS, exclude);
       if (buf) return buf;
       if (failed) throw new OpenArtImageFailedError(rec.historyId, failed);
       return null;
@@ -1244,8 +1275,10 @@ private videoRefsAssign = videoRefsAssign;
           // transport error — leaves the job rendering server-side. Record it
           // as pending so the finished frame can be rechecked and downloaded
           // without paying twice. Only a dead (FAILED/CANCELLED) job is skipped.
+          // The input identity rides along so the recheck excludes the same
+          // echoed references (notably the style frame) the wait did.
           if (!(e instanceof OpenArtImageFailedError)) {
-            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
           }
           throw e;
         }
@@ -1266,8 +1299,10 @@ private videoRefsAssign = videoRefsAssign;
           downloaded = Buffer.from(await res.arrayBuffer());
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
-          // recheck can retry the download without regenerating.
-          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio });
+          // recheck can retry the download without regenerating. The input
+          // identity rides along so a later historyId recheck (or an echo
+          // check) can still tell input from output.
+          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
           throw e;
         }
         if (this.isExcludedInput(downloaded, exclude)) {

@@ -32,6 +32,7 @@ import { SuitePromptPanel } from "./SuitePromptPanel.js";
 import { resolveSuiteCompare, seedSourceFrame } from "./suite-compare.js";
 import { resolveSuiteModel, resolveSuiteSurfacePool } from "./suite-models.js";
 import { openImageSuite } from "./suite-handoff.js";
+import { genQueue, genKeys, useGenStatus } from "../../components/production/gen-queue.js";
 
 /** Debounce before persisting the session document to disk. */
 const SAVE_DEBOUNCE_MS = 400;
@@ -64,7 +65,8 @@ export function ImageSuite({
   const [schema, setSchema] = useState<CliModelSchema | null>(null);
   /** Upscale-capable model ids (provider probe ∪ `image:upscale` assignments). */
   const [upscaleModelIds, setUpscaleModelIds] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const gen = useGenStatus(genKeys.suite(prodId));
+  const busy = gen.running;
   const [error, setError] = useState<string | null>(null);
   const [branchParentId, setBranchParentId] = useState<string | null>(null);
   /** True once the on-disk session for the current production has loaded —
@@ -246,40 +248,46 @@ export function ImageSuite({
     if (upscaleUnavailable && session.draft.mode === "upscale") patchDraft({ mode: "generate" });
   }, [upscaleUnavailable, session.draft.mode, patchDraft]);
 
-  const submit = useCallback(async () => {
-    if (busy) return;
+  const submit = useCallback(() => {
     const d = sessionRef.current.draft;
     if (d.mode !== "upscale" && !d.prompt.trim()) { setError("Describe what to generate or edit first."); return; }
     if (d.mode !== "generate" && !d.sourceRefId && !d.sourcePath) { setError(`Pick a reference or frame to ${d.mode}.`); return; }
-    setBusy(true);
     setError(null);
-    try {
-      // Submit the model the dropdown shows, never a stale/empty draft: an
-      // empty value would let the provider fall back to the production's
-      // Step-3 model (a different surface, possibly a foreign vendor id).
-      const model = resolveSuiteModel(d.model, resolveSuiteSurfacePool(models, d.mode, upscaleModelIds));
-      const req: SuiteGenerateRequest = {
-        kind: d.mode,
-        parentId: branchParentId,
-        model,
-        resolution: d.resolution,
-        prompt: d.mode === "upscale" ? "" : d.prompt.trim(),
-        ...(d.aspectRatio ? { aspectRatio: d.aspectRatio } : {}),
-        ...(d.mode !== "generate" && d.sourceRefId ? { sourceRefId: d.sourceRefId } : {}),
-        ...(d.mode !== "generate" && !d.sourceRefId && d.sourcePath ? { sourcePath: d.sourcePath } : {}),
-        ...(d.mode !== "upscale" && d.refIds.length ? { refIds: d.refIds } : {}),
-        ...(d.params && Object.keys(d.params).length ? { params: d.params } : {}),
-        ...(quotedCredits != null ? { quotedCredits } : {}),
-      };
-      const entry = await window.cascade.generateSuiteImage(prodId, req);
-      setSession((s) => ({ ...s, entries: [...s.entries, entry], selectedId: entry.id }));
-      setBranchParentId(entry.id);
-    } catch (e) {
-      setError(String(e).replace(/^Error:\s*/, ""));
-    } finally {
-      setBusy(false);
-    }
-  }, [prodId, busy, branchParentId, quotedCredits, models, upscaleModelIds]);
+    // Submit the model the dropdown shows, never a stale/empty draft: an
+    // empty value would let the provider fall back to the production's
+    // Step-3 model (a different surface, possibly a foreign vendor id).
+    const model = resolveSuiteModel(d.model, resolveSuiteSurfacePool(models, d.mode, upscaleModelIds));
+    const req: SuiteGenerateRequest = {
+      kind: d.mode,
+      parentId: branchParentId,
+      model,
+      resolution: d.resolution,
+      prompt: d.mode === "upscale" ? "" : d.prompt.trim(),
+      ...(d.aspectRatio ? { aspectRatio: d.aspectRatio } : {}),
+      ...(d.mode !== "generate" && d.sourceRefId ? { sourceRefId: d.sourceRefId } : {}),
+      ...(d.mode !== "generate" && !d.sourceRefId && d.sourcePath ? { sourcePath: d.sourcePath } : {}),
+      ...(d.mode !== "upscale" && d.refIds.length ? { refIds: d.refIds } : {}),
+      ...(d.mode === "generate" && d.styleId ? { styleId: d.styleId } : {}),
+      ...(d.params && Object.keys(d.params).length ? { params: d.params } : {}),
+      ...(quotedCredits != null ? { quotedCredits } : {}),
+    };
+    // Queue (serial per production) so repeated submits wait their turn and the
+    // button shows the queued count. The draft is captured at click time.
+    genQueue.enqueue(genKeys.suite(prodId), async () => {
+      try {
+        const entry = await window.cascade.generateSuiteImage(prodId, req);
+        // Idempotent: main already appended this entry to the on-disk session
+        // (so a tab switch mid-flight doesn't lose it) — skip a second copy
+        // when the reload already picked it up.
+        setSession((s) => (s.entries.some((e) => e.id === entry.id)
+          ? { ...s, selectedId: entry.id }
+          : { ...s, entries: [...s.entries, entry], selectedId: entry.id }));
+        setBranchParentId(entry.id);
+      } catch (e) {
+        setError(String(e).replace(/^Error:\s*/, ""));
+      }
+    });
+  }, [prodId, branchParentId, quotedCredits, models, upscaleModelIds]);
 
   const selectEntry = useCallback((id: string) => {
     setSession((s) => ({ ...s, selectedId: id }));
@@ -294,6 +302,8 @@ export function ImageSuite({
         ...(entry.aspectRatio ? { aspectRatio: entry.aspectRatio } : {}),
         ...(entry.sourceRefId ? { sourceRefId: entry.sourceRefId } : {}),
         ...(!entry.sourceRefId && entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
+        // Replay is exact: an entry without a style clears any current pick.
+        styleId: entry.styleId,
         ...(entry.params ? { params: entry.params } : {}),
       });
     }
@@ -349,6 +359,7 @@ export function ImageSuite({
         promptRefs={promptRefs}
         schema={schema}
         submitting={busy}
+        queued={gen.pending}
         error={error}
         providerName={providerName}
         providerAvailable={providerAvailable}

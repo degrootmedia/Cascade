@@ -1,8 +1,7 @@
 /**
- * Suite history rail: the timeline of generations/edits, newest-first, with
- * branch indentation (an entry created from a selected parent indents under
- * it, Git-graph style). Selecting an entry loads it into the canvas + prompt
- * panel for replay; deleting removes it (and its files, main-side).
+ * Suite history rail: the timeline of generations/edits, newest-first, as a
+ * straight list. Selecting an entry loads it into the canvas + prompt panel
+ * for replay; deleting removes it (and its files, main-side).
  *
  * Thumbnails stream over `cascade-media://…?thumb=1` and `loading="lazy"`, so
  * a long history never decodes full-res images into renderer memory.
@@ -30,25 +29,12 @@ export function SuiteHistoryRail({
   onEditInSuite?: (rel: string) => void;
 }) {
   const genMenu = useGenerationMenu();
-  // Newest first, with a depth per entry (how many ancestors it has) so a
-  // branch renders indented under its root.
-  const rows = useMemo(() => {
-    const byId = new Map(entries.map((e) => [e.id, e]));
-    const depthOf = (e: SuiteEntry): number => {
-      let d = 0;
-      let cur = e.parentId;
-      const seen = new Set<string>([e.id]);
-      while (cur && byId.has(cur) && !seen.has(cur) && d < 32) {
-        seen.add(cur);
-        d++;
-        cur = byId.get(cur)!.parentId;
-      }
-      return d;
-    };
-    return [...entries]
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map((e) => ({ entry: e, depth: depthOf(e) }));
-  }, [entries]);
+  // Newest first — a flat timeline (branching is still persisted on `parentId`,
+  // it just isn't visualised as a tree here).
+  const rows = useMemo(
+    () => [...entries].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [entries]
+  );
 
   return (
     <aside className="suite-rail" aria-label="Generation history">
@@ -63,15 +49,13 @@ export function SuiteHistoryRail({
       )}
       {rows.length === 0 && !busy && <p className="hint suite-rail-empty">No generations yet — describe one and hit Generate.</p>}
       <div className="suite-rail-list">
-        {rows.map(({ entry, depth }) => {
+        {rows.map((entry) => {
           const selected = entry.id === selectedId;
           return (
             <div
               key={entry.id}
               className={"suite-rail-row" + (selected ? " selected" : "")}
-              style={{ paddingLeft: 6 + depth * 14 }}
             >
-              {depth > 0 && <span className="suite-rail-branch" aria-hidden="true">↳</span>}
               <button
                 className="suite-rail-thumb"
                 onClick={() => onSelect(entry.id)}

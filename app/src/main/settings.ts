@@ -25,6 +25,14 @@ interface SettingsFile {
    */
   helpers: Record<string, string>;
   workspace: string | null;
+  /**
+   * Default for new chats: when true, a new chat's folder mirrors the active
+   * Production Assistant project instead of `workspace`.
+   */
+  followProduction: boolean;
+  /** Id of the production currently open in the Production Assistant (null when
+   *  none has been opened); the folder chats bound to "Active Production" use. */
+  activeProductionId: string | null;
   /** Most recently used folders, most-recent first. */
   recentWorkspaces: string[];
   /** Most recently opened production folders, most-recent first (max 10). */
@@ -132,6 +140,8 @@ const DEFAULTS: SettingsFile = {
   models: {},
   helpers: {},
   workspace: null,
+  followProduction: false,
+  activeProductionId: null,
   recentWorkspaces: [],
   recentProductions: [],
   mcpOnDemand: ["openart"],
@@ -314,6 +324,26 @@ export function getWorkspace(): string | null {
 
 export function setWorkspace(dir: string | null): void {
   load().workspace = dir;
+  save();
+}
+
+/** Default for new chats: follow the active Production Assistant project. */
+export function getFollowProduction(): boolean {
+  return load().followProduction === true;
+}
+
+export function setFollowProduction(on: boolean): void {
+  load().followProduction = on;
+  save();
+}
+
+/** Id of the production open in the Production Assistant (null when none). */
+export function getActiveProductionId(): string | null {
+  return load().activeProductionId ?? null;
+}
+
+export function setActiveProductionId(id: string | null): void {
+  load().activeProductionId = id;
   save();
 }
 

@@ -29,9 +29,11 @@ export interface NodeDecl {
 }
 
 /** Reference sockets are positional (`in-ref-0…N` + always-open `in-ref-open`);
- *  tween keyframe sockets are `in-tween-0…4`. */
+ *  tween keyframe sockets are `in-tween-0…4`; a sequence prompt node's member
+ *  frame sockets are `in-frame-0…N` (one per timeline segment, structural). */
 export const REF_SOCKET_RE = /^in-ref-(\d+)$/;
 export const TWEEN_SOCKET_RE = /^in-tween-(\d+)$/;
+export const FRAME_SOCKET_RE = /^in-frame-(\d+)$/;
 export const MAX_TWEEN_SOCKETS = 5;
 
 const promptInputs: PortDecl[] = [
@@ -39,6 +41,10 @@ const promptInputs: PortDecl[] = [
   { id: "in-ref-open", label: "Reference (open)", media: "image", accepts: ["image", "video", "audio"] },
   { id: "in-brand", label: "Brand", media: "text", from: ["brand"] },
 ];
+
+/** The per-segment member-frame socket a sequence prompt node adds (one per
+ *  timeline segment, host-wired to that member's locked frame node). */
+const sequenceFrameInput: PortDecl = { id: "in-frame-open", label: "Shot frame", media: "image", from: ["ref"] };
 
 const TABLE: Record<GraphNodeKind, NodeDecl> = {
   composer: {
@@ -48,7 +54,7 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
   },
   videoprompt: {
     kind: "videoprompt",
-    inputs: promptInputs,
+    inputs: [...promptInputs, sequenceFrameInput],
     outputs: [{ id: "out", label: "Prompt", media: "text" }],
   },
   editprompt: {
@@ -96,7 +102,7 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
     kind: "editvideo",
     inputs: [
       { id: "in-prompt", label: "Prompt", media: "text", from: ["editvideoprompt"] },
-      { id: "in-video", label: "Source video", media: "video", from: ["videogen", "ref"] },
+      { id: "in-video", label: "Source video", media: "video", from: ["videogen", "editvideo", "ref"] },
     ],
     outputs: [{ id: "out", label: "Edit", media: "video" }],
   },
@@ -126,9 +132,11 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
     // A generator node: a source image plus reference sockets feed a 4x4 sheet
     // generation. It has no output (its panels are marqueed out as references).
     // The grid-image socket takes an already-made sheet to cut up (manual
-    // fallback), bypassing generation.
+    // fallback), bypassing generation. A style socket prepends the shot's
+    // effective style to the generated prompt, like every other prompt.
     kind: "cameraGrid",
     inputs: [
+      { id: "in-style", label: "Style", media: "text", from: ["style"] },
       { id: "in-image", label: "Source image", media: "image", from: ["imagegen", "editgen", "ref"] },
       { id: "in-grid", label: "Grid image", media: "image", from: ["imagegen", "editgen", "ref"] },
       { id: "in-ref-open", label: "Reference (open)", media: "image", accepts: ["image"] },
@@ -158,6 +166,9 @@ export function portDecl(kind: GraphNodeKind, dir: "in" | "out", portId: string)
   if (direct) return direct;
   if (dir === "in" && REF_SOCKET_RE.test(portId)) {
     return list.find((p) => p.id === "in-ref-open");
+  }
+  if (dir === "in" && FRAME_SOCKET_RE.test(portId)) {
+    return list.find((p) => p.id === "in-frame-open");
   }
   return undefined;
 }

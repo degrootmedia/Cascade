@@ -27,6 +27,7 @@ import { MoodboardFrameView } from "./MoodboardFrame.js";
 import { MoodboardToolbar } from "./MoodboardToolbar.js";
 import { MoodboardMinimap } from "./MoodboardMinimap.js";
 import { MoodboardShelf } from "./MoodboardShelf.js";
+import { SaveVideoStillButton } from "../../components/common/SaveVideoStillButton.js";
 import {
   MB_DEFAULT_H,
   MB_DEFAULT_W,
@@ -145,6 +146,7 @@ export function MoodboardCanvas({
   onAddFiles,
   onRename,
   onAttach,
+  onVideoStillSaved,
 }: {
   prod: Production;
   /** The production's persisted board, read once on mount. */
@@ -157,6 +159,8 @@ export function MoodboardCanvas({
   onAddFiles?: (files: File[]) => Promise<string[]>;
   onRename: (id: string, name: string) => void;
   onAttach: (id: string) => void;
+  /** A video viewer's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
 }) {
   const prodId = prod.meta.id;
   const refs = prod.references ?? [];
@@ -207,6 +211,8 @@ export function MoodboardCanvas({
   marqueeRef.current = marquee;
   const [guides, setGuides] = useState<MoodboardGuide[]>([]);
   const [viewer, setViewer] = useState<CustomRef | null>(null);
+  /** The viewer video's paused position — the still is extracted at exactly it. */
+  const viewerVideoRef = useRef<HTMLVideoElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; refId: string } | null>(null);
   const [frameMenu, setFrameMenu] = useState<{ x: number; y: number; frameId: string } | null>(null);
   const [editingNote, setEditingNote] = useState<string | null>(null);
@@ -950,11 +956,16 @@ export function MoodboardCanvas({
         <div className="prod-ref-lightbox" onClick={() => setViewer(null)}>
           <figure className="prod-ref-lightbox-card">
             {viewer.media === "video" && viewer.mediaPath ? (
-              <video className="prod-ref-lightbox-video" src={cascadeMedia(prodId, viewer.mediaPath)} controls autoPlay loop playsInline />
+              <video ref={viewerVideoRef} className="prod-ref-lightbox-video" src={cascadeMedia(prodId, viewer.mediaPath)} controls autoPlay loop playsInline />
             ) : (
               <img src={viewer.imagePath ? cascadeMedia(prodId, viewer.imagePath) : viewer.artwork} alt={viewer.name} />
             )}
-            <figcaption>{viewer.name} — click anywhere to close</figcaption>
+            <figcaption>
+              {viewer.name} — click anywhere to close
+              {viewer.media === "video" && viewer.mediaPath && onVideoStillSaved && (
+                <>{" · "}<SaveVideoStillButton productionId={prodId} videoRel={viewer.mediaPath} getTime={() => viewerVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setViewer(null); }} /></>
+              )}
+            </figcaption>
           </figure>
         </div>, document.body)}
     </div>

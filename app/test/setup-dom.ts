@@ -14,6 +14,8 @@ Object.defineProperty(g, "navigator", { value: dom.window.navigator, configurabl
 g.Node = dom.window.Node;
 g.NodeFilter = dom.window.NodeFilter;
 g.MouseEvent = dom.window.MouseEvent;
+g.KeyboardEvent = dom.window.KeyboardEvent;
+g.FocusEvent = dom.window.FocusEvent;
 g.Event = dom.window.Event;
 g.HTMLElement = dom.window.HTMLElement;
 g.getSelection = dom.window.getSelection.bind(dom.window);

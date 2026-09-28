@@ -42,6 +42,11 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("goals:changed", listener);
     return () => ipcRenderer.removeListener("goals:changed", listener);
   };
+  api.onWorkspaceChanged = (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("workspace:changed", listener);
+    return () => ipcRenderer.removeListener("workspace:changed", listener);
+  };
   api.onOpenSettings = (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on("menu:openSettings", listener);

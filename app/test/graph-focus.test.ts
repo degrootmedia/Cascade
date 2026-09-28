@@ -71,6 +71,7 @@ describe("focus survives rapid typing", () => {
     });
     for (let i = 0; i < 4; i++) {
       const ch = String.fromCharCode(97 + i); // a,b,c,d
+      let expectedCaret = -1;
       await act(async () => {
         const before = ed.textContent ?? "";
         const pos = caret(ed);
@@ -84,6 +85,7 @@ describe("focus survives rapid typing", () => {
           if (remain <= len) { const r = document.createRange(); r.setStart(node, remain); r.collapse(true); const s = window.getSelection(); s?.removeAllRanges(); s?.addRange(r); break; }
           remain -= len; node = walker.nextNode();
         }
+        expectedCaret = pos + 1;
         ed.dispatchEvent(new Event("input", { bubbles: true }));
       });
       await act(async () => { await new Promise(r => setTimeout(r, 0)); });
@@ -91,6 +93,9 @@ describe("focus survives rapid typing", () => {
       console.log(`keystroke ${i} (${ch}): text=${JSON.stringify(ed.textContent?.slice(0, 30))} caret=${caret(ed)} focused=${document.activeElement === ed} isFocused=${isFocused} activeTag=${(document.activeElement as HTMLElement)?.className}`);
       expect(document.activeElement === ed, `lost focus after keystroke ${i}`).toBe(true);
       expect(ed.textContent).toContain(ch);
+      // The caret must stay right after the character we typed — never jump to
+      // the end of the prompt.
+      expect(caret(ed), `caret jumped after keystroke ${i} (${ch})`).toBe(expectedCaret);
     }
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

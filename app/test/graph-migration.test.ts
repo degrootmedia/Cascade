@@ -90,6 +90,44 @@ describe("migrateShotGraph (load path)", () => {
   });
 });
 
+describe("migrateEditVideoNodes (load path)", () => {
+  it("folds the legacy flat edit-video fields into an ev0 edit-mode entry", () => {
+    const prod = legacyProduction();
+    prod.meta.id = "pedit";
+    prod.meta.name = "Edit";
+    prod.scenes[0].shots[0] = shot({
+      graphEditVideoGens: [{ path: "boards/0100/video/shot-0100-edit.mp4", prompt: "grade", model: "m", at: "" }],
+      graphEditVideoGenIndex: 0,
+      graphEditVideoPrompt: "grade",
+      graphEditVideoModel: "m",
+      graphEditVideoResolution: "720p",
+      graphEditVideoParams: { quality: "high" },
+      graphEditVideoRefIds: ["r1"],
+      graphVideoToEditVideo: true,
+      graphOutputSource: "editvideo",
+    });
+    saveProduction(prod as unknown as Production);
+    const s = loadProduction("pedit")!.scenes[0].shots[0];
+    const ev = (s.graphVideoNodes ?? []).find((n) => n.id === "ev0");
+    expect(ev?.mode).toBe("edit");
+    expect(ev?.prompt).toBe("grade");
+    expect(ev?.model).toBe("m");
+    expect(ev?.resolution).toBe("720p");
+    expect(ev?.params).toEqual({ quality: "high" });
+    expect(ev?.refIds).toEqual(["r1"]);
+    expect(ev?.source).toEqual({ kind: "video", nodeId: "vid0" });
+    expect(ev?.gens?.[0].path).toBe("boards/0100/video/shot-0100-edit.mp4");
+    // The output pipe is re-expressed as a video-node output.
+    expect(s.graphOutputSource).toBe("videogen");
+    expect(s.graphOutputVideoNodeId).toBe("ev0");
+    // Flat fields are read once and cleared (one-way migration).
+    expect(s.graphEditVideoGens).toBeUndefined();
+    expect(s.graphEditVideoPrompt).toBeUndefined();
+    expect(s.graphVideoToEditVideo).toBeUndefined();
+    expect(normalizeGraph(s.graph!).issues).toEqual([]);
+  });
+});
+
 describe("migrateShotGraph strips shared copies (step 04)", () => {
   const styledProd = (prompt: string): Production => ({
     ...legacyProduction(),

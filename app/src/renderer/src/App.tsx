@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, WorkspaceInstructionsInfo } from "../../shared/ipc.js";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
 import { Transcript } from "./components/Transcript.js";
 import { TodoPanel } from "./components/TodoPanel.js";
@@ -52,6 +52,9 @@ export function App() {
   const [transportMode, setTransportMode] = useState<ProviderTransportMode>(() => readTransportMode());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [workspace, setWorkspace] = useState<string | null>(null);
+  /** This chat mirrors the active Production Assistant project's folder. */
+  const [followProduction, setFollowProduction] = useState(false);
+  const [activeProduction, setActiveProduction] = useState<ActiveProductionInfo | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
   const [instructions, setInstructions] = useState<WorkspaceInstructionsInfo | null>(null);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
@@ -76,6 +79,18 @@ export function App() {
     setView(v);
     try { localStorage.setItem("cascade.view", v); } catch { /* ignore */ }
   }, []);
+  // Mount the production workspace lazily on first visit, then keep it mounted
+  // (see below) so background generations survive Chat ↔ Prod switches.
+  const [prodEverOpen, setProdEverOpen] = useState(() => {
+    try {
+      return localStorage.getItem("cascade.view") === "prod";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (view === "prod") setProdEverOpen(true);
+  }, [view]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -157,6 +172,15 @@ export function App() {
     } catch { setActiveAgentId(null); setActiveMeta(null); }
   }, []);
 
+  const refreshWorkspace = useCallback(async () => {
+    try {
+      const st = await window.cascade.getWorkspaceState();
+      setWorkspace(st.workspace);
+      setFollowProduction(st.followProduction);
+      setActiveProduction(st.production);
+    } catch { /* keep last-known values */ }
+  }, []);
+
   const refreshMeta = useCallback(async () => {
     const [s, list, c] = await Promise.all([
       window.cascade.getSettings(),
@@ -170,7 +194,7 @@ export function App() {
     try { setAgents(await window.cascade.listAgents()); } catch {}
     let sid: string | null = null;
     await Promise.all([
-      window.cascade.getCurrentWorkspace().then(setWorkspace),
+      refreshWorkspace(),
       window.cascade.getRecentWorkspaces().then(setRecents),
       window.cascade.getCurrentSessionId().then((id) => { sid = id; setCurrentId(id); }),
       window.cascade.getWorkspaceInstructions().then(setInstructions),
@@ -183,11 +207,22 @@ export function App() {
       void window.cascade.getSessionGoal(id).then((g) => setGoals((p) => ({ ...p, [id]: g }))).catch(() => {});
     }
     if (s.hasApiKey) void window.cascade.listModels().then((r) => { if (r.ok) setModels(r.models); }).catch(() => {});
-  }, [refreshActiveAgent]);
+  }, [refreshActiveAgent, refreshWorkspace]);
 
   useEffect(() => {
     void refreshMeta();
   }, [refreshMeta]);
+
+  // The active Production Assistant project changing (or the focused chat
+  // switching) can re-point a follower chat's folder — re-read the chip.
+  useEffect(() => {
+    const off = window.cascade.onWorkspaceChanged(() => {
+      void refreshWorkspace();
+      void window.cascade.getWorkspaceInstructions().then(setInstructions);
+      if (currentId) void refreshActiveAgent(currentId);
+    });
+    return off;
+  }, [refreshWorkspace, refreshActiveAgent, currentId]);
 
   /** Top-bar dial data: active vendor + per-vendor balances + availability. */
   const refreshMedia = useCallback(async () => {
@@ -438,7 +473,7 @@ export function App() {
       const display = await window.cascade.loadSession(id);
       setTranscript(id, clearStreaming(display));
     }
-    void window.cascade.getCurrentWorkspace().then(setWorkspace);
+    void refreshWorkspace();
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
     void window.cascade.getPlanMode(id).then(setPlanMode);
     void window.cascade.getSessionTodos(id).then((t) => setTodos((p) => ({ ...p, [id]: t }))).catch(() => {});
@@ -481,6 +516,13 @@ export function App() {
     await window.cascade.setSessionWorkspace(dir);
     setWorkspace(dir);
     void window.cascade.getRecentWorkspaces().then(setRecents);
+    void window.cascade.getWorkspaceInstructions().then(setInstructions);
+    void refreshActiveAgent(currentId);
+  }
+
+  async function selectActiveProduction() {
+    await window.cascade.setSessionWorkspaceProduction();
+    await refreshWorkspace();
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
     void refreshActiveAgent(currentId);
   }
@@ -555,8 +597,15 @@ export function App() {
           </>
         }
       />
-      {view === "home" ? (
-        <div className="app-home">
+      {/* Both views stay mounted across tab switches (display:none when
+        inactive) so in-flight production generations keep their local
+        busy sets (regenIds, node busy ids, …) and their async completions
+        still apply setProd/bust when they resolve. Unmounting the workspace
+        on the way to Chat discarded that state: the side-panel button lost
+        "Generating…" and the finished frame never reached the mounted
+        production (only the on-demand lightbox, which reads from disk,
+        showed it). */}
+      <div className="app-home" hidden={view !== "home"} style={view !== "home" ? { display: "none" } : undefined}>
           <Sidebar
             sessions={sessionList}
             onSelect={selectSession}
@@ -578,9 +627,12 @@ export function App() {
             recents={recents}
             instructions={instructions}
             pureChat={pureChat}
+            followProduction={followProduction}
+            production={activeProduction}
             onPick={() => void pickChatFolder()}
             onSelect={(dir) => void selectRecentFolder(dir)}
             onNone={() => void clearChatFolder()}
+            onSelectProduction={() => void selectActiveProduction()}
             onOpenInstructions={() => {
               void window.cascade.openWorkspaceInstructions();
               void window.cascade.getWorkspaceInstructions().then(setInstructions);
@@ -697,9 +749,16 @@ export function App() {
         </div>
           </main>
         </div>
-      ) : (
-        <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />
-      )}
+      <div
+        hidden={view !== "prod"}
+        style={
+          view !== "prod"
+            ? { display: "none" }
+            : { display: "flex", flex: 1, minHeight: 0, minWidth: 0, flexDirection: "column" }
+        }
+      >
+        {prodEverOpen && <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />}
+      </div>
       {approval && (
         <ApprovalModal
           request={approval}

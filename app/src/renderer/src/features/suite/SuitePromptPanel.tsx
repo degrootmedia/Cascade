@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CliModelSchema, CustomRef, OpenArtModelChoice, Production } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, UPSCALE_UNAVAILABLE_HINT, resolveAspectRatio } from "../../../../shared/ipc.js";
+import { withSuiteStyle } from "./suite-style.js";
 import { ImageGenForm } from "../../components/production/ImageGenForm.js";
 import type { PromptReference } from "../../components/production/references.js";
 import { rememberMediaDefault } from "../../components/production/media-defaults.js";
@@ -30,6 +31,7 @@ export function SuitePromptPanel({
   promptRefs,
   schema,
   submitting,
+  queued,
   error,
   providerName,
   providerAvailable,
@@ -50,6 +52,8 @@ export function SuitePromptPanel({
   promptRefs: PromptReference[];
   schema: CliModelSchema | null;
   submitting: boolean;
+  /** Extra submits queued behind the running one. */
+  queued?: number;
   error: string | null;
   providerName: string;
   providerAvailable: boolean;
@@ -66,6 +70,15 @@ export function SuitePromptPanel({
     () => (prod.references ?? []).filter((r) => r.imagePath || r.artwork),
     [prod.references]
   );
+  // The production's Design styles — the suite's generate flow applies one per
+  // submit (its prompt text as the Style paragraph; its look frame + LOOK
+  // clause at generation time). Picking a style mirrors it into the prompt so
+  // the read-only Style preview matches; None clears it.
+  const styles = prod.styles ?? [];
+  const onStyleChange = (styleId: string) => {
+    const style = styles.find((s) => s.id === styleId);
+    onDraftChange({ styleId: styleId || undefined, prompt: withSuiteStyle(draft.prompt, style) });
+  };
   /** Full-res viewer for an edit-source thumbnail's magnifier. */
   const [zoom, setZoom] = useState<{ url: string; name: string } | null>(null);
   const artworkUrl = (r: { imagePath?: string; artwork?: string }) =>
@@ -188,6 +201,22 @@ export function SuitePromptPanel({
         prompt={draft.prompt}
         onPromptChange={(p) => onDraftChange({ prompt: p })}
         promptRefs={promptRefs}
+        styleControl={
+          draft.mode === "generate" ? (
+            <select
+              className="prod-openart-select prod-prompt-style"
+              value={draft.styleId ?? ""}
+              onChange={(e) => onStyleChange(e.target.value)}
+              title="Apply a style from Design (Step 2) — its text plus its look frame"
+            >
+              <option value="">None</option>
+              {styles.map((s) => (
+                <option key={s.id} value={s.id}>{s.index}. {s.name || `Style ${s.index}`}</option>
+              ))}
+            </select>
+          ) : undefined
+        }
+        styleReadOnly={draft.mode === "generate"}
         render={draft.mode === "upscale" ? "controls" : "all"}
         promptLabel={draft.mode === "edit" ? "Edit prompt" : "Generation prompt"}
         promptPlaceholder={
@@ -206,8 +235,15 @@ export function SuitePromptPanel({
       )}
       {error && <p className="error-text">{error}</p>}
 
-      <button className="prod-btn prod-edit-go" disabled={!canSubmit || submitting} onClick={() => void onSubmit()}>
-        {submitting ? "Generating…" : <>{draft.mode === "edit" ? "Edit" : draft.mode === "upscale" ? "Upscale" : "Generate"}<GenerationCostSuffix req={costReq} /></>}
+      <button
+        className="prod-btn prod-edit-go"
+        disabled={!canSubmit}
+        title={submitting ? "Click to queue another generation" : undefined}
+        onClick={() => void onSubmit()}
+      >
+        {submitting
+          ? (queued ? `Generating… (${queued} queued)` : "Generating…")
+          : <>{draft.mode === "edit" ? "Edit" : draft.mode === "upscale" ? "Upscale" : "Generate"}<GenerationCostSuffix req={costReq} /></>}
       </button>
       {quotedCredits != null && <p className="hint">Last quote: {quotedCredits} credits</p>}
       <p className="hint">

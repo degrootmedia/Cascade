@@ -54,15 +54,13 @@ describe("deleteReference", () => {
       const shot = makeShot("0100", {
         artwork: "boards/0100/shot-0100-old.jpg",
         prompt: "@[Hero] standing in the valley",
-        graphVideoPrompt: "slow push in @[Hero]",
         graphEditPrompt: "next edit",
-        graphEditVideoPrompt: "grade @[Hero]",
         graphOutputSource: "ref",
         graphOutputRefId: "r1",
-        graphVideoSourceRefId: "r1",
-        graphVideoRefIds: ["r1", "r2"],
-        graphEditVideoSourceRefId: "r1",
-        graphEditVideoRefIds: ["r1"],
+        graphVideoNodes: [
+          { id: "vid0", prompt: "slow push in @[Hero]", source: { kind: "ref", refId: "r1" }, refIds: ["r1", "r2"] },
+          { id: "ev0", mode: "edit", prompt: "grade @[Hero]", source: { kind: "ref", refId: "r1" }, refIds: ["r1"] },
+        ],
         graphTweenRefIds: ["r1", "r2"],
         graphTweenBlocks: [
           { id: "tw0", startRefId: "r1", endRefId: "r2", prompt: "turn", startSec: 0, durationSec: 2 },
@@ -109,11 +107,13 @@ describe("deleteReference", () => {
       expect(other.graphOutputSource).toBeUndefined();
       expect(other.videoPath).toBe("boards/0200/video/shot-0200-x.mp4");
 
-      // Sources + extra inputs cleared/filtered.
-      expect(shot.graphVideoSourceRefId).toBeUndefined();
-      expect(shot.graphEditVideoSourceRefId).toBeUndefined();
-      expect(shot.graphVideoRefIds).toEqual(["r2"]);
-      expect(shot.graphEditVideoRefIds).toEqual([]);
+      // Sources + extra inputs cleared/filtered (both video nodes).
+      const vid0 = shot.graphVideoNodes?.find((n) => n.id === "vid0");
+      const ev0 = shot.graphVideoNodes?.find((n) => n.id === "ev0");
+      expect(vid0?.source).toBeUndefined();
+      expect(ev0?.source).toBeUndefined();
+      expect(vid0?.refIds).toEqual(["r2"]);
+      expect(ev0?.refIds).toEqual([]);
 
       // Tween keyframes re-derived (surviving pair histories preserved).
       expect(shot.graphTweenRefIds).toEqual(["r2"]);
@@ -130,8 +130,8 @@ describe("deleteReference", () => {
 
       // Prompt tags stripped everywhere.
       expect(shot.prompt).not.toContain("@[Hero]");
-      expect(shot.graphVideoPrompt).not.toContain("@[Hero]");
-      expect(shot.graphEditVideoPrompt).not.toContain("@[Hero]");
+      expect(vid0?.prompt).not.toContain("@[Hero]");
+      expect(ev0?.prompt).not.toContain("@[Hero]");
       expect((p as unknown as Record<string, { [k: string]: string }>).magicPrompts["shot-0100"]).not.toContain("@[Hero]");
 
       // Canvas placement forgotten, other nodes kept.

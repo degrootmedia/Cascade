@@ -28,6 +28,7 @@ import {
   buildManifest,
   buildMixArgs,
   buildNormalizeArgs,
+  edlReelFor,
   framesToTc,
   renderAnimatic,
   type AssemblyEmit,
@@ -436,5 +437,97 @@ describe("renderAnimatic", () => {
       renderAnimatic(p, undefined, emit, { bin: "ffmpeg", runFfmpeg, tempDir: path.join(fixtureRoot, "segments") })
     ).rejects.toThrow("Nothing to render");
     expect(runFfmpeg).not.toHaveBeenCalled();
+  });
+});
+
+describe("assemblyPlan with shot sequences", () => {
+  it("collapses an enabled sequence's span into one clip event (members skipped)", () => {
+    const a = makeShot({ id: "a", number: "0100", artwork: "boards/0100/shot-0100-a.jpg", durationSec: 2 });
+    const b = makeShot({ id: "b", number: "0200", artwork: "boards/0200/shot-0200-b.jpg", durationSec: 3 });
+    const c = makeShot({ id: "c", number: "0300", artwork: "boards/0300/shot-0300-c.jpg", durationSec: 4 });
+    const p = makeProduction({
+      scenes: [makeScene([a, b, c])],
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["b", "c"],
+        graph: {
+          id: "s1", number: "Sequence 01", audio: "", visual: "",
+          graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "out/sequences/s1/sequence-t.mp4", prompt: "p", model: "m", at: "" }] }],
+          graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0",
+        },
+      }],
+    });
+    const plan = assemblyPlan(p);
+    expect(plan.events.map((e) => e.number)).toEqual(["0100", "SQ0200"]);
+    expect(plan.events[1]).toMatchObject({ kind: "clip", srcRel: "out/sequences/s1/sequence-t.mp4", durationSec: 7, startSec: 2, endSec: 9 });
+    // The replaced members are reported as skipped, not as their own events.
+    expect(plan.blanks).toEqual(["0200", "0300"]);
+    expect(plan.totalSec).toBe(9);
+    expect(edlReelFor(plan.events[1].number)).toBe("SQ0200");
+  });
+
+  it("honours the sequence's own duration override", () => {
+    const a = makeShot({ id: "a", number: "0100", artwork: "boards/0100/shot-0100-a.jpg", durationSec: 2 });
+    const b = makeShot({ id: "b", number: "0200", artwork: "boards/0200/shot-0200-b.jpg", durationSec: 3 });
+    const p = makeProduction({
+      scenes: [makeScene([a, b])],
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["a", "b"], durationSec: 5.5,
+        graph: {
+          id: "s1", number: "Sequence 01", audio: "", visual: "",
+          graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "out/sequences/s1/sequence-t.mp4", prompt: "p", model: "m", at: "" }] }],
+          graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0",
+        },
+      }],
+    });
+    const plan = assemblyPlan(p);
+    expect(plan.events).toHaveLength(1);
+    expect(plan.events[0]).toMatchObject({ number: "SQ0100", durationSec: 5.5, startSec: 0, endSec: 5.5 });
+    expect(plan.totalSec).toBe(5.5);
+  });
+
+  it("turns a clip-less sequence into one blank slot (the animatic's slate)", () => {
+    const a = makeShot({ id: "a", number: "0100", artwork: "boards/0100/shot-0100-a.jpg", durationSec: 2 });
+    const b = makeShot({ id: "b", number: "0200", artwork: "boards/0200/shot-0200-b.jpg", durationSec: 3 });
+    const p = makeProduction({ scenes: [makeScene([a, b])], shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"] }] });
+    const plan = assemblyPlan(p);
+    expect(plan.events.map((e) => e.number)).toEqual(["SQ0100"]);
+    expect(plan.events[0].kind).toBe("blank");
+    expect(plan.blanks).toEqual(["0100", "0200"]);
+    expect(plan.totalSec).toBe(5);
+  });
+
+  it("holds the output's still over the span when the output node binds an image", () => {
+    const a = makeShot({ id: "a", number: "0100", artwork: "boards/0100/shot-0100-a.jpg", durationSec: 2 });
+    const b = makeShot({ id: "b", number: "0200", artwork: "boards/0200/shot-0200-b.jpg", durationSec: 3 });
+    const p = makeProduction({
+      scenes: [makeScene([a, b])],
+      references: [{ id: "r1", name: "Still", imagePath: "references/still.png" }],
+      shotSequences: [{ id: "s1", name: "Sequence 01", shotIds: ["a", "b"], graph: { id: "s1", number: "Sequence 01", audio: "", visual: "", graphOutputSource: "ref", graphOutputRefId: "r1" } }],
+    });
+    const plan = assemblyPlan(p);
+    expect(plan.events.map((e) => e.number)).toEqual(["SQ0100"]);
+    expect(plan.events[0]).toMatchObject({ kind: "still", srcRel: "references/still.png", durationSec: 5 });
+    expect(plan.blanks).toEqual(["0100", "0200"]);
+    expect(plan.totalSec).toBe(5);
+  });
+
+  it("exports the shots individually when the sequence is disabled", () => {
+    const a = makeShot({ id: "a", number: "0100", artwork: "boards/0100/shot-0100-a.jpg", durationSec: 2 });
+    const b = makeShot({ id: "b", number: "0200", artwork: "boards/0200/shot-0200-b.jpg", durationSec: 3 });
+    const p = makeProduction({
+      scenes: [makeScene([a, b])],
+      shotSequences: [{
+        id: "s1", name: "Sequence 01", shotIds: ["a", "b"], enabled: false,
+        graph: {
+          id: "s1", number: "Sequence 01", audio: "", visual: "",
+          graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "out/sequences/s1/sequence-t.mp4", prompt: "p", model: "m", at: "" }] }],
+          graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0",
+        },
+      }],
+    });
+    const plan = assemblyPlan(p);
+    expect(plan.events.map((e) => e.number)).toEqual(["0100", "0200"]);
+    expect(plan.blanks).toEqual([]);
+    expect(plan.totalSec).toBe(5);
   });
 });

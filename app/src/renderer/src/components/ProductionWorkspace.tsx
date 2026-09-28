@@ -3,8 +3,8 @@
  * then a 5-step pipeline view. Step 1 (script ingestion + shot table) is live;
  * later steps show their planned surface and keep persisted state (style).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource } from "../../../shared/ipc.js";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -17,6 +17,8 @@ import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allProm
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { OutdatedSection } from "./production/outdated.js";
+import { SequenceBarChrome, SequenceBarLayer, SequenceCreateStrip, type SequenceBarTarget } from "./production/sequence-bar.js";
+import { SequenceGraphModal, type SequenceVideoGenOpts, type SequenceEditVideoGenOpts } from "./production/sequence-graph.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
@@ -34,6 +36,7 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
+import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
@@ -44,6 +47,13 @@ const MAX_STYLES = 5;
 /** The one warning shown before any generation is deleted. */
 const DELETE_GENERATION_WARNING =
   "Are you sure you want to delete this generation? This permanently removes it from your disk, but you can always access it again on your Higgsfield/OpenArt account.";
+
+/** Shown before a shot sequence is deleted. The video clause is appended only
+ *  when the sequence actually has a generated clip to preserve. */
+const DELETE_SEQUENCE_WARNING =
+  "Are you sure you want to delete this shot sequence? This can't be undone.";
+const DELETE_SEQUENCE_VIDEO_WARNING =
+  "Are you sure you want to delete this shot sequence? Its generated video will be saved to your references under \"Shot Sequences\". This can't be undone.";
 
 /** localStorage key remembering the production that was open, so switching to
  *  Chat and back resumes it instead of dropping the user on the picker. */
@@ -59,16 +69,23 @@ function rememberProduction(id: string | null): void {
   } catch { /* ignore */ }
 }
 
-/** True while the user is typing in a board prompt editor (card or side
- *  panel). Tag-name based instead of `instanceof HTMLTextAreaElement` so a
- *  missing DOM global can never throw — a throw here would be swallowed by
+/** True while focus is inside a prompt editor (the classic side panel, the
+ *  node composer, the Style/Brand boxes, or any tag chip within them), so an
+ *  async prompt refresh must never overwrite what the user is typing. The
+ *  Content box is a `contentEditable` (not a `TEXTAREA`), so the check is
+ *  structural via `closest` as well as tag-name based — and defensively built
+ *  so a missing DOM global can never throw: a throw here would be swallowed by
  *  the surrounding `.catch` and silently discard a fetched prompt. */
 function isPromptTextarea(el: unknown): boolean {
-  if (!el || typeof (el as HTMLElement).tagName !== "string") return false;
-  if ((el as HTMLElement).tagName !== "TEXTAREA") return false;
-  const cls = (el as HTMLElement).classList;
-  return typeof cls?.contains === "function"
-    && (cls.contains("prod-board-prompt") || cls.contains("prod-prompt-drawer-text"));
+  const node = el as HTMLElement | null;
+  if (!node || typeof node.tagName !== "string") return false;
+  if (node.tagName === "TEXTAREA") {
+    const cls = node.classList;
+    return typeof cls?.contains === "function"
+      && (cls.contains("prod-board-prompt") || cls.contains("prod-prompt-drawer-text"));
+  }
+  return typeof node.closest === "function"
+    && !!node.closest(".prompt-content-editor, .prod-ref-prompt-editor, .prod-graph-composer");
 }
 
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
@@ -99,7 +116,7 @@ function ErrorNotice({ message, onClear }: { message: string; onClear: () => voi
     <div className="prod-error" role="alert">
       <span className="error-text">{message}</span>
       <button className="prod-error-clear" onClick={onClear} title="Dismiss error" aria-label="Dismiss error">
-        <XIcon size={12} />
+        Clear
       </button>
     </div>
   );
@@ -165,6 +182,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [styleZoom, setStyleZoom] = useState<string | null>(null);
   // step 2: set when the active chat model can't see images (shows a popup)
   const [visionWarnModel, setVisionWarnModel] = useState<string | null>(null);
+  // Re-render when any generation queue changes so surfaces that read
+  // `genQueue.status(key)` during render (the style frames) show live counts.
+  const [, bumpGenQueue] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => genQueue.subscribe(bumpGenQueue), []);
   // step 3: board generation
   const [frameZoom, setFrameZoom] = useState(250);
   const [boardsBusy, setBoardsBusy] = useState(false);
@@ -172,6 +193,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [showBoardText, setShowBoardText] = useState(true);
   /** Shot ids currently regenerating (a Set so several frames can run in parallel). */
   const [regenIds, setRegenIds] = useState<Set<string>>(new Set());
+  /** Per-shot count of regen clicks waiting behind the running batch. Reads as
+   *  "Generating… (N queued)" on the frame buttons. */
+  const [regenQueued, setRegenQueued] = useState<Record<string, number>>({});
   /** Shot ids whose pending generation job is being rechecked. */
   const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
   /** Shot ids whose pending video job is being fetched. */
@@ -179,7 +203,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
   // each load/save the whole production and clobber each other, so batches run
-  // strictly one at a time; clicks during a run join the next batch.
+  // strictly one at a time; every extra click during a run joins the next
+  // round (distinct shots stay parallel within one batch, repeats get their
+  // own round).
   const regenRunningRef = useRef(false);
   const regenPendingRef = useRef<string[]>([]);
   // Per-shot thumbnail cache-busters: bumping one shot reloads only that
@@ -270,12 +296,64 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setFocusedPrompt(text);
   }
 
+  // Shot-sequence range selection (UI-only, never persisted): plain click
+  // re-anchors, Shift-click extends the range over the flattened storyboard
+  // order, Esc clears it. The focused shot (`promptShotId`) stays on the
+  // anchor so the prompt panel doesn't jump while a range is being built —
+  // the references panel's `select` pattern, over scene order.
+  const [seqSelection, setSeqSelection] = useState<Set<string>>(() => new Set());
+  const seqAnchorRef = useRef<string | null>(null);
+  /** The board grid the sequence bar layer measures card rects against. */
+  const boardsGridRef = useRef<HTMLDivElement | null>(null);
+  const selectFrame = useCallback((id: string, mode: "single" | "range") => {
+    const order = (prodRef.current?.scenes ?? []).flatMap((sc) => sc.shots.map((s) => s.id));
+    setSeqSelection((prev) => {
+      if (mode === "range" && seqAnchorRef.current) {
+        const from = order.indexOf(seqAnchorRef.current);
+        const to = order.indexOf(id);
+        if (from >= 0 && to >= 0) {
+          const next = new Set(prev);
+          for (let i = Math.min(from, to); i <= Math.max(from, to); i++) next.add(order[i]);
+          return next;
+        }
+      }
+      seqAnchorRef.current = id;
+      return new Set([id]);
+    });
+  }, []);
+  const clearSeqSelection = useCallback(() => {
+    seqAnchorRef.current = null;
+    setSeqSelection((prev) => (prev.size ? new Set() : prev));
+  }, []);
+  // Drop vanished shots so a stale id can never widen a later Shift-click range.
+  useEffect(() => {
+    setSeqSelection((prev) => {
+      if (!prev.size) return prev;
+      const live = new Set((prodRef.current?.scenes ?? []).flatMap((sc) => sc.shots.map((s) => s.id)));
+      const next = new Set<string>();
+      for (const id of prev) if (live.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [prod?.scenes]);
+  useEffect(() => {
+    if (!seqSelection.size) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !isPromptTextarea(e.target)) clearSeqSelection();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [seqSelection.size, clearSeqSelection]);
+
   // The storyboard's enlarged-frame lightbox: which shot's full frame is on
   // screen (null = closed). Owned here, not per-card, so ← / → can step the
   // lightbox to a neighbouring shot (a card only knows its own shot).
   const [boardZoomId, setBoardZoomId] = useState<string | null>(null);
   // Step 3 node graph: opens for the focused shot; overlays the storyboard.
   const [graphShotId, setGraphShotId] = useState<string | null>(null);
+  // The shot sequence's own node canvas (Spec 06): one sequence open at a time.
+  const [seqCanvasId, setSeqCanvasId] = useState<string | null>(null);
+  /** `${sequenceId}:${nodeId}` with a clip generation in flight. */
+  const [seqBusyIds, setSeqBusyIds] = useState<Set<string>>(() => new Set());
   const promptSaveQueue = useRef(Promise.resolve());
   const latestPromptRef = useRef<Record<string, string>>({});
   const promptCacheRef = useRef<Record<string, string>>({});
@@ -321,16 +399,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     regenerate: (id: string) => void;
     recheck: (id: string) => void;
     recheckVideo: (id: string) => void;
+    clearPending: (id: string, kind: "image" | "video") => void;
     importFrame: (id: string) => void;
     edit: (id: string) => void;
     video: (id: string) => void;
     textChange: (id: string, patch: { audio: string; visual: string }) => void;
     promptFocus: (id: string, prompt: string) => void;
+    frameSelect: (id: string, mode: "single" | "range") => void;
     dropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => void;
     dropFiles: (id: string, files: FileList | File[]) => void;
     promoteHistory: (id: string, framePath: string) => void;
     deleteGeneration: (id: string, rel: string) => void;
     saveAsReference: (id: string, rel: string) => void;
+    videoStillSaved: (next: Production) => void;
     reorderDragStart: (id: string, e: React.DragEvent) => void;
     reorderDrop: (id: string, e: React.DragEvent) => void;
     reorderDragOver: (id: string) => void;
@@ -344,16 +425,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     regenerate: (id) => void regenBoard(id),
     recheck: (id) => void recheckBoard(id),
     recheckVideo: (id) => void recheckVideo(id),
+    clearPending: (id, kind) => void clearPending(id, kind),
     importFrame: (id) => void importFrames(id),
     edit: (id) => setEditShotId(id),
     video: (id) => setVideoShotId(id),
     textChange: (id, patch) => void saveShotText(id, patch),
     promptFocus: (id, prompt) => focusPrompt(id, prompt),
+    frameSelect: (id, mode) => selectFrame(id, mode),
     dropFrame: (id, source) => void dropFrameAsReference(id, source),
     dropFiles: (id, files) => void dropBoardFiles(id, files),
     promoteHistory: (id, framePath) => void promoteHistory(id, framePath),
     deleteGeneration: (id, rel) => deleteGeneration(id, rel),
     saveAsReference: (id, rel) => saveAsReference(id, rel),
+    videoStillSaved: (next) => { applySnapshot(next); void refreshList(); },
     reorderDragStart: (id, e) => {
       boardDragRef.current = id;
       setBoardDragId(id);
@@ -402,16 +486,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onRegenerate: (id: string) => boardHandlerRef.current.regenerate(id),
     onRecheck: (id: string) => boardHandlerRef.current.recheck(id),
     onRecheckVideo: (id: string) => boardHandlerRef.current.recheckVideo(id),
+    onClearPending: (id: string, kind: "image" | "video") => boardHandlerRef.current.clearPending(id, kind),
     onImport: (id: string) => boardHandlerRef.current.importFrame(id),
     onEdit: (id: string) => boardHandlerRef.current.edit(id),
     onVideo: (id: string) => boardHandlerRef.current.video(id),
     onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
     onPromptFocus: (id: string, prompt: string) => boardHandlerRef.current.promptFocus(id, prompt),
+    onFrameSelect: (id: string, mode: "single" | "range") => boardHandlerRef.current.frameSelect(id, mode),
     onDropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => boardHandlerRef.current.dropFrame(id, source),
     onDropFiles: (id: string, files: FileList | File[]) => boardHandlerRef.current.dropFiles(id, files),
     onPromoteHistory: (id: string, framePath: string) => boardHandlerRef.current.promoteHistory(id, framePath),
     onDeleteGeneration: (id: string, rel: string) => boardHandlerRef.current.deleteGeneration(id, rel),
     onSaveAsReference: (id: string, rel: string) => boardHandlerRef.current.saveAsReference(id, rel),
+    onVideoStillSaved: (next: Production) => boardHandlerRef.current.videoStillSaved(next),
     onReorderDragStart: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDragStart(id, e),
     onReorderDrop: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDrop(id, e),
     onReorderDragOver: (id: string) => boardHandlerRef.current.reorderDragOver(id),
@@ -421,6 +508,59 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onZoomChange: (id: string | null) => boardHandlerRef.current.zoomChange(id),
     onZoomNavigate: (id: string, dir: -1 | 1) => boardHandlerRef.current.zoomNavigate(id, dir),
   }), []);
+
+  // ---- Shot-sequence storyboard chrome (accent bars + create strip) ----
+  // While a range is being built the strip owns the slot space (the bars step
+  // aside, so the two never overlap); once created/cleared the bars return.
+  const showCreateStrip = seqSelection.size >= 2;
+  const seqMemberIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of prod?.shotSequences ?? []) for (const id of s.shotIds) set.add(id);
+    return set;
+  }, [prod?.shotSequences]);
+  const seqBarTargets = useMemo((): SequenceBarTarget[] => {
+    if (!prod) return [];
+    const flat = prod.scenes.flatMap((sc) => sc.shots);
+    const live = new Set(flat.map((s) => s.id));
+    if (showCreateStrip) {
+      const ids = flat.map((s) => s.id).filter((id) => seqSelection.has(id));
+      return [{
+        key: "__create__",
+        shotIds: ids,
+        render: (i, n) =>
+          i === n - 1 ? (
+            <SequenceCreateStrip
+              frameCount={ids.length}
+              reason={sequenceOverlapReason(ids, prod.shotSequences ?? [])}
+              onCreate={createSequenceFromSelection}
+              onCancel={clearSeqSelection}
+            />
+          ) : null,
+      }];
+    }
+    const bars: SequenceBarTarget[] = [];
+    for (const seq of prod.shotSequences ?? []) {
+      const ids = seq.shotIds.filter((id) => live.has(id));
+      if (!ids.length) continue;
+      bars.push({
+        key: seq.id,
+        shotIds: ids,
+        render: (i) => (
+          <SequenceBarChrome
+            seq={seq}
+            frameCount={ids.length}
+            outputMedia={sequenceOutputMedia(seq, { shots: flat, refs: prod.references })?.kind ?? null}
+            collapsed={i > 0}
+            onOpen={openSequence}
+            onToggle={toggleSequence}
+            onDelete={deleteSequence}
+            onAccent={setSequenceAccent}
+          />
+        ),
+      });
+    }
+    return bars;
+  }, [prod, seqSelection, showCreateStrip]);
 
   const refreshList = useCallback(async () => {
     try { setList(await window.cascade.listProductions()); } catch {}
@@ -850,12 +990,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       setShowExpenses(false);
       return;
     }
-    // The graph renders inside the Step-3 surface; force it there.
+    // The graph and the sequence canvas render inside the Step-3 surface;
+    // force it there.
     if (prod.currentStep !== 3) {
       const next: Production = { ...prod, currentStep: 3 };
       prodRef.current = next;
       setProd(next);
       void window.cascade.saveProduction(next).catch(() => {});
+    }
+    if (detached.target === "sequence") {
+      setSeqCanvasId(detached.sequenceId ?? null);
+      return;
     }
     const frameId = detached.frameId ?? null;
     setGraphShotId(frameId);
@@ -873,9 +1018,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   useEffect(() => {
     if (!detached || !onDetachedTitle) return;
     if (!prod || prod.meta.id !== detached.productionId) { onDetachedTitle("Canvas"); return; }
-    if (detached.target === "moodboard") { onDetachedTitle(`${prod.meta.name} · Moodboard`); return; }
+    if (detached.target === "moodboard") { onDetachedTitle(`${prod.meta.name} — Moodboard`); return; }
+    if (detached.target === "sequence") {
+      const seq = (prod.shotSequences ?? []).find((s) => s.id === detached.sequenceId);
+      onDetachedTitle(seq ? `${prod.meta.name} — ${seq.name}` : `${prod.meta.name} — Sequence`);
+      return;
+    }
     const shot = detached.frameId ? prod.scenes.flatMap((s) => s.shots).find((s) => s.id === detached.frameId) : undefined;
-    onDetachedTitle(shot ? `${prod.meta.name} · Shot ${shot.number}` : prod.meta.name);
+    onDetachedTitle(shot ? `${prod.meta.name} — Shot ${shot.number}` : prod.meta.name);
   }, [detached, prod, onDetachedTitle]);
 
   // Main window only: track the detached window so this window's graph can go
@@ -890,13 +1040,28 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     let live = true;
     void window.cascade.getDetachedCanvasState().then((s) => { if (live) setDetachedWindow(s); }).catch(() => {});
     const off = window.cascade.onDetachedClosed(() => {
-      setDetachedWindow({ open: false, productionId: null, target: null, frameId: null });
+      setDetachedWindow({ open: false, productionId: null, target: null, frameId: null, sequenceId: null });
       setRemoteCanvasBusy(null);
       const id = prodRef.current?.meta.id;
       if (id) void window.cascade.loadProduction(id).then((p) => { if (p) applySnapshot(p); }).catch(() => {});
     });
     return () => { live = false; off(); };
   }, [detached, applySnapshot]);
+
+  // Re-validate the detached lock whenever an embedded canvas opens. The
+  // close notification above is best-effort (a killed/crashed detached window
+  // never sends it), and the state above is otherwise fetched once on mount —
+  // so a missed close would leave every embedded graph permanently read-only
+  // ("Editing in separate window") until reload. Re-reading main's live state
+  // on open self-heals a stale lock; an accurate `open:true` still locks.
+  useEffect(() => {
+    if (detached) return;
+    if (!graphShotId && !seqCanvasId && !showMoodboard) return;
+    if (typeof window.cascade.getDetachedCanvasState !== "function") return;
+    let live = true;
+    void window.cascade.getDetachedCanvasState().then((s) => { if (live) setDetachedWindow(s); }).catch(() => {});
+    return () => { live = false; };
+  }, [detached, graphShotId, seqCanvasId, showMoodboard]);
 
   // ---- Cross-window in-flight canvas jobs (Spec 03) ----------------------
   // Both windows mirror each other's busy sets through main so "Generating…"
@@ -917,10 +1082,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       editNodes: [...nodeEditBusyIds],
       tween: { ...tweenBusyByShot },
       stitching: [...tweenStitchingIds],
+      sequences: [...seqBusyIds],
     });
-  }, [activeProdId, nodeImageBusyIds, nodeVideoBusyIds, nodeEditVideoBusyIds, nodeEditBusyIds, tweenBusyByShot, tweenStitchingIds]);
+  }, [activeProdId, nodeImageBusyIds, nodeVideoBusyIds, nodeEditVideoBusyIds, nodeEditBusyIds, tweenBusyByShot, tweenStitchingIds, seqBusyIds]);
   // The sibling's snapshot is only meaningful for the production on screen.
   const remoteBusy = remoteCanvasBusy && activeProdId && remoteCanvasBusy.productionId === activeProdId ? remoteCanvasBusy : null;
+  /** `${sequenceId}:${nodeId}` generating here OR in the sibling window. */
+  const seqBusyAll = useMemo(
+    () => (remoteBusy ? new Set([...seqBusyIds, ...(remoteBusy.sequences ?? [])]) : seqBusyIds),
+    [seqBusyIds, remoteBusy],
+  );
   const nodeImageBusyAll = useMemo(
     () => (remoteBusy ? new Set([...nodeImageBusyIds, ...remoteBusy.image]) : nodeImageBusyIds),
     [nodeImageBusyIds, remoteBusy],
@@ -1259,10 +1430,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 2: generate a style frame (look plate) for one style via IPC,
    *  forwarding its per-style model/resolution/params overrides ("auto"/
-   *  absent = inherit the production default). */
+   *  absent = inherit the production default). Queued per style so repeated
+   *  clicks wait their turn and the button shows the queued count. */
   function generateStyleFrame(styleId: string) {
-    if (!prod || styleFrameBusy) return;
-    const style = (prod.styles ?? []).find((s) => s.id === styleId);
+    const current = prodRef.current;
+    if (!current) return;
+    const style = (current.styles ?? []).find((s) => s.id === styleId);
     // A stored pick missing from the active vendor's list falls back to the
     // production default instead of billing (or failing on) a stale slug.
     const liveModel = style?.model && style.model !== "auto" && imageMasterModels.some((m) => m.id === style.model)
@@ -1271,9 +1444,15 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const model = styleFrameOverride(liveModel);
     const resolution = styleFrameOverride(style?.resolution);
     const params = style?.params && Object.keys(style.params).length ? { ...style.params } : undefined;
-    setStyleFrameBusy(styleId);
     setErr(null);
-    apply(window.cascade.generateStyleFrame(prod.meta.id, styleId, model, resolution, params).finally(() => setStyleFrameBusy(null)));
+    genQueue.enqueue(genKeys.styleFrame(styleId), () => {
+      // Keep the sibling style-frame controls disabled while this job runs.
+      setStyleFrameBusy(styleId);
+      return window.cascade.generateStyleFrame(current.meta.id, styleId, model, resolution, params)
+        .then((next) => { applySnapshot(next); void refreshList(); })
+        .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
+        .finally(() => setStyleFrameBusy(null));
+    });
   }
 
   /** Step 2: reclaim a style frame from a vendor job that outlived the
@@ -1560,7 +1739,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    * `regenerateBoards` runs — several frames generate in parallel inside one
    * shared production (so their artwork never clobbers each other on save),
    * while batches themselves never overlap. Each shot tracks its own in-flight
-   * state in `regenIds`. */
+   * state in `regenIds`; repeated clicks queue another round and are counted in
+   * `regenQueued` so the button reads "Generating… (N queued)". */
   async function runRegenBatch(batch: string[]) {
     if (!prod) return;
     regenRunningRef.current = true;
@@ -1573,29 +1753,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
+      const pending = regenPendingRef.current;
+      // Keep a frame spinning while it still has a queued round, so the button
+      // never flickers to idle between batches.
       setRegenIds((prev) => {
         const n = new Set(prev);
-        batch.forEach((id) => n.delete(id));
+        batch.forEach((id) => { if (!pending.includes(id)) n.delete(id); });
         return n;
       });
       regenRunningRef.current = false;
-      // Dispatch anything queued while this batch was running.
-      if (regenPendingRef.current.length) {
-        const next = regenPendingRef.current.splice(0);
-        void runRegenBatch(next);
-      }
+      // Dispatch the next round (distinct shots together, repeats next round).
+      const { batch: nextBatch, remaining } = nextRegenRound(pending);
+      regenPendingRef.current = remaining;
+      setRegenQueued(countByShot(remaining));
+      if (nextBatch.length) void runRegenBatch(nextBatch);
     }
   }
 
   async function regenBoard(shotId: string) {
     if (!prod) return;
     await promptSaveQueue.current;
-    // Already queued/running — ignore the duplicate click.
-    if (regenPendingRef.current.includes(shotId) || regenIds.has(shotId)) return;
     if (regenRunningRef.current) {
-      // A batch is in flight; queue this shot for the next one.
+      // A batch is in flight; queue another round for this shot.
       regenPendingRef.current.push(shotId);
-      setRegenIds((prev) => new Set(prev).add(shotId)); // show its spinner while queued
+      setRegenQueued(countByShot(regenPendingRef.current));
     } else {
       void runRegenBatch([shotId]);
     }
@@ -1646,6 +1827,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         n.delete(shotId);
         return n;
       });
+    }
+  }
+
+  /** Discard a shot's pending vendor job without reclaiming it (right-click
+   *  menu escape hatch). The job can't be rechecked afterwards — Regenerate
+   *  submits fresh. */
+  async function clearPending(shotId: string, kind: "image" | "video") {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.clearPending(prod.meta.id, shotId, kind);
+      setProd(next);
+      bustOne(shotId);
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -1830,11 +2027,24 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const shots = prod.scenes.flatMap((s) => s.shots);
     if (!shots.length) return;
-    const currentTotal = shots.reduce((n, s) => n + (s.durationSec ?? 3), 0);
+    // The runtime includes enabled shot sequences' windows (a sequence with an
+    // explicit duration owns its window; one without follows its members), so
+    // the projection — not the raw shot sum — is what "fit" has to match.
+    const items = applyShotSequences(shots, prod.shotSequences ?? [], prod.references);
+    const currentTotal = items.reduce((n, it) => n + it.durationSec, 0);
+    const scaleSequences = (scale: number) =>
+      (prod.shotSequences ?? []).map((seq) =>
+        typeof seq.durationSec === "number" && Number.isFinite(seq.durationSec) && seq.durationSec > 0
+          ? { ...seq, durationSec: Math.max(0.5, seq.durationSec * scale) }
+          : seq
+      );
     if (currentTotal <= 0) {
       // All zeros — distribute evenly.
       const each = Math.max(0.5, targetSec / shots.length);
-      saveField({ scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => ({ ...s, durationSec: each })) })) });
+      saveField({
+        scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => ({ ...s, durationSec: each })) })),
+        shotSequences: scaleSequences(1),
+      });
       return;
     }
     if (!Number.isFinite(targetSec) || targetSec <= 0) return;
@@ -1844,6 +2054,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ...sc,
         shots: sc.shots.map((s) => ({ ...s, durationSec: Math.max(0.5, (s.durationSec ?? 3) * scale) })),
       })),
+      shotSequences: scaleSequences(scale),
     });
   }
 
@@ -2122,6 +2333,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     void window.cascade
       .openDetachedCanvas({ productionId: prod.meta.id, target: "moodboard", frameId: null })
       .then((s) => { setDetachedWindow(s); setShowMoodboard(false); })
+      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")));
+  }
+
+  /** Pop the shot sequence's canvas out into the detached canvas window. The
+   *  integrated modal closes so the sequence only ever lives in one window. */
+  function detachSequence() {
+    if (!prod || !seqCanvasId) return;
+    void window.cascade
+      .openDetachedCanvas({ productionId: prod.meta.id, target: "sequence", frameId: null, sequenceId: seqCanvasId })
+      .then((s) => { setDetachedWindow(s); setSeqCanvasId(null); })
       .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")));
   }
 
@@ -2599,47 +2820,53 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 3 node graph: run the edit-video node (mandatory source clip +
-   *  prompt + references). `sourceKey` names the chosen source. */
-  async function runEditVideoNode(shotId: string, model: string, prompt: string, params?: Record<string, string>) {
-    if (!prod || nodeEditVideoBusyIds.has(shotId)) return;
-    setNodeEditVideoBusyIds((prev) => new Set(prev).add(shotId));
+  /** Step 3 node graph: run one edit-video node (mandatory source clip +
+   *  prompt + references). Its source comes from the node's wiring. */
+  async function runEditVideoNode(shotId: string, nodeId: string, model: string, prompt: string, params?: Record<string, string>) {
+    const key = `${shotId}:${nodeId}`;
+    if (!prod || nodeEditVideoBusyIds.has(key)) return;
+    setNodeEditVideoBusyIds((prev) => new Set(prev).add(key));
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-      // Source: the video node's selected clip, a wired video reference, or
+      const node = (cur?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
+      // Render the edit prompt from the node's plugged references at submit time.
+      const editVideoPrompt = cur
+        ? renderPromptText(node?.prompt ?? prompt, promptRefsFor(prod, cur, { editvideoprompt: nodeId }))
+        : prompt;
+      // Source: a wired video node's selected clip, a wired video reference, or
       // the shot's own video (the default when the source socket is empty).
       let sourcePath: string | undefined;
-      if (cur?.graphVideoToEditVideo) sourcePath = cur?.graphVideoGens?.[cur?.graphVideoGenIndex ?? 0]?.path;
-      else if (cur?.graphEditVideoSourceRefId) {
-        const ref = (prod.references ?? []).find((r) => r.id === cur.graphEditVideoSourceRefId);
+      let sourceRefId: string | undefined;
+      const src = node?.source;
+      if (src?.kind === "ref") {
+        const ref = (prod.references ?? []).find((r) => r.id === src.refId);
         sourcePath = ref?.mediaPath ?? ref?.imagePath;
-      } else sourcePath = cur?.videoPath;
+        sourceRefId = src.refId;
+      } else if (src?.kind === "video") {
+        const other = (cur?.graphVideoNodes ?? []).find((n) => n.id === src.nodeId);
+        sourcePath = other?.gens?.[other.genIndex ?? 0]?.path;
+      } else {
+        sourcePath = cur?.videoPath;
+      }
       if (!sourcePath) { setErr("The edit-video node needs a source video — wire a clip into its source socket or generate one first."); return; }
-      const editParams = params ?? cur?.graphEditVideoParams;
-      // Render the edit-video prompt from the plugged references at submit time.
-      const editVideoPrompt = cur ? renderShotPrompt(prod, cur, "editvideoprompt") : prompt;
+      const editParams = params ?? node?.params;
       const next = await window.cascade.generateEditVideoNode(prod.meta.id, shotId, {
+        nodeId,
         prompt: editVideoPrompt,
         model,
-        resolution: cur?.graphEditVideoResolution ?? "",
+        resolution: node?.resolution ?? "",
         sourcePath,
+        ...(sourceRefId ? { sourceRefId } : {}),
+        refIds: node?.refIds ?? [],
         ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}),
       });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
-      setNodeEditVideoBusyIds((prev) => { const n = new Set(prev); n.delete(shotId); return n; });
+      setNodeEditVideoBusyIds((prev) => { const n = new Set(prev); n.delete(key); return n; });
     }
-  }
-
-  /** Pipe the edit-video node's selected clip into the output. */
-  function pipeEditVideoToOutput(shotId: string) {
-    const cur = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-    const sel = cur?.graphEditVideoGens?.[cur?.graphEditVideoGenIndex ?? 0];
-    if (!sel) return;
-    saveGraphShotFields(shotId, { graphOutputSource: "editvideo", videoPath: sel.path });
   }
 
   /** Step 3 node graph: AI-edit an image for one edit node (prompt = that
@@ -2972,6 +3199,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
   }
 
+  /** Step 4: set a shot sequence's own timeline window (roll edit on its block). */
+  function updateSequenceDuration(sequenceId: string, durationSec: number) {
+    saveSequenceField(sequenceId, { durationSec: Math.max(0.5, Math.round(durationSec * 10) / 10) });
+  }
+
+  /** Step 4: mute/unmute a shot sequence's clip in the preview. */
+  function toggleSequenceMute(sequenceId: string) {
+    const current = prodRef.current;
+    const seq = (current?.shotSequences ?? []).find((s) => s.id === sequenceId);
+    if (!seq) return;
+    saveSequenceField(sequenceId, { muted: !seq.muted });
+  }
+
   function reorderShot(shotId: string, beforeShotId: string | null) {
     if (!prod || shotId === beforeShotId) return;
     apply(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId));
@@ -3010,6 +3250,136 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   function deleteBoardShot(shotId: string) {
     if (!prod) return;
     apply(window.cascade.deleteShot(prod.meta.id, shotId));
+  }
+
+  /** Step 3: turn the current shift-click range into a shot sequence. The
+   *  overlap guard lives in `sequenceOverlapReason` (a shot belongs to at
+   *  most one sequence); the strip shows its verdict inline. */
+  function createSequenceFromSelection() {
+    const current = prodRef.current;
+    if (!current) return;
+    const order = current.scenes.flatMap((sc) => sc.shots);
+    const ids = order.map((s) => s.id).filter((id) => seqSelection.has(id));
+    const reason = sequenceOverlapReason(ids, current.shotSequences ?? []);
+    if (reason) { setErr(reason); return; }
+    const frames = ids.map((id) => {
+      const shot = order.find((s) => s.id === id);
+      return { shotId: id, label: `Shot ${shot?.number ?? "?"}`, durationSec: shot?.durationSec };
+    });
+    saveField({ shotSequences: [...(current.shotSequences ?? []), createShotSequence(uid("seq"), frames, current.shotSequences ?? [])] });
+    clearSeqSelection();
+  }
+
+  /** Step 3: enable/disable a sequence (disabled plays its frames individually). */
+  function toggleSequence(sequenceId: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      shotSequences: (current.shotSequences ?? []).map((s) =>
+        s.id === sequenceId ? { ...s, enabled: s.enabled === false } : s
+      ),
+    });
+  }
+
+  /** Step 3: recolor a sequence's storyboard bar (right-click on the bar). */
+  function setSequenceAccent(sequenceId: string, accent: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      shotSequences: (current.shotSequences ?? []).map((s) =>
+        s.id === sequenceId ? { ...s, accent } : s
+      ),
+    });
+  }
+
+  /** Step 3: open the sequence's own node canvas (single instance). */
+  function openSequence(sequenceId: string) {
+    setSeqCanvasId(sequenceId);
+  }
+
+  /** Step 3: delete a sequence. The confirm warns that a generated video is
+   *  preserved as a "Shot Sequences" reference; the copy + drop is one
+   *  main-side op so the reference and the list can't drift apart. */
+  function deleteSequence(sequenceId: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const seq = (current.shotSequences ?? []).find((s) => s.id === sequenceId);
+    if (!seq) return;
+    const warn = sequenceSelectedTake(seq) ? DELETE_SEQUENCE_VIDEO_WARNING : DELETE_SEQUENCE_WARNING;
+    if (!window.confirm(warn)) return;
+    if (seqCanvasId === sequenceId) setSeqCanvasId(null);
+    apply(window.cascade.deleteShotSequence(current.meta.id, sequenceId));
+  }
+
+  /** Step 3: patch a shot sequence's canvas state (`seq.graph`, the same
+   *  shot-shaped document a shot's node graph uses). Accepts a value OR an
+   *  updater evaluated against the FRESHEST state on disk — so several writes
+   *  in one tick (adding a node, then saving its layout) can't clobber each
+   *  other with stale copies, exactly like `saveGraphShotFields` for shots. */
+  function updateSequenceGraph(
+    sequenceId: string,
+    patch: Partial<ProductionShot> | ((graph: ProductionShot) => Partial<ProductionShot>)
+  ) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      shotSequences: (current.shotSequences ?? []).map((s) => {
+        if (s.id !== sequenceId) return s;
+        const g = s.graph ?? { id: s.id, number: s.name, audio: "", visual: "" };
+        const p = typeof patch === "function" ? patch(g) : patch;
+        return { ...s, graph: { ...g, ...p, id: s.id, number: s.name } };
+      }),
+    });
+  }
+
+  /** Step 3: persist renderer-owned sequence fields (accent, enable, name…) —
+   *  not the canvas state, which rides `updateSequenceGraph`. */
+  function saveSequenceField(sequenceId: string, patch: Partial<ShotSequence>) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      shotSequences: (current.shotSequences ?? []).map((s) =>
+        s.id === sequenceId ? { ...s, ...patch } : s
+      ),
+    });
+  }
+
+  /** Step 3: generate one of the sequence's video nodes (its canvas's
+   *  Generate). Main writes the take under `out/sequences/<id>/` and records
+   *  it on that node; the returned snapshot is authoritative. */
+  function runSequenceVideoGen(sequenceId: string, opts: SequenceVideoGenOpts) {
+    const current = prodRef.current;
+    const key = `${sequenceId}:${opts.nodeId}`;
+    if (!current || seqBusyIds.has(key)) return;
+    setSeqBusyIds((prev) => new Set(prev).add(key));
+    window.cascade.generateSequenceVideo(current.meta.id, sequenceId, opts)
+      .then((next) => { applySnapshot(next); void refreshList(); })
+      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
+      .finally(() => {
+        setSeqBusyIds((prev) => {
+          const n = new Set(prev);
+          n.delete(key);
+          return n;
+        });
+      });
+  }
+
+  /** Shot sequence canvas: edit one video on one of its edit-video nodes. */
+  function runSequenceEditVideoGen(sequenceId: string, opts: SequenceEditVideoGenOpts) {
+    const current = prodRef.current;
+    const key = `${sequenceId}:${opts.nodeId}`;
+    if (!current || seqBusyIds.has(key)) return;
+    setSeqBusyIds((prev) => new Set(prev).add(key));
+    window.cascade.generateSequenceEditVideo(current.meta.id, sequenceId, opts)
+      .then((next) => { applySnapshot(next); void refreshList(); })
+      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
+      .finally(() => {
+        setSeqBusyIds((prev) => {
+          const n = new Set(prev);
+          n.delete(key);
+          return n;
+        });
+      });
   }
 
   /** Step 3: permanently delete one stored generation (right-click on a board
@@ -3063,6 +3433,40 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
+  /** Sequence canvas: save one of a sequence's stored takes as a reference
+   *  (drag-to-socket and right-click Save as reference). Mirrors the shot path
+   *  with a `sequenceId` so main validates the sequence instead of a shot. */
+  async function saveSequenceGenerationAsReference(sequenceId: string, rel: string): Promise<GraphRef | null> {
+    const current = prodRef.current;
+    if (!current || !rel) return null;
+    try {
+      const next = await window.cascade.saveGenerationAsReference(current.meta.id, "", rel, sequenceId);
+      applySnapshot(next);
+      void refreshList();
+      const refs = next.references ?? [];
+      const ref = refs[refs.length - 1];
+      if (!ref) return null;
+      return {
+        id: ref.id,
+        name: ref.name,
+        artwork: ref.imagePath ? cascadeMedia(next.meta.id, ref.imagePath) : ref.artwork ?? "",
+        media: ref.media,
+        mediaPath: ref.mediaPath,
+      };
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      return null;
+    }
+  }
+
+  /** Sequence canvas: permanently delete one of a sequence's stored takes
+   *  (right-click a take → Delete generation). Main unlinks the file and drops
+   *  the history entry. */
+  function deleteSequenceTake(sequenceId: string, rel: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    apply(window.cascade.deleteSequenceTake(current.meta.id, sequenceId, rel));
+  }
   /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
    *  preview (speaker button on its timeline block). Affects only the shot's
    *  video track — the production-wide VO and music keep their sliders. */
@@ -3274,7 +3678,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
-  const totalRuntime = prod.scenes.flatMap((s) => s.shots).reduce((n, s) => n + (s.durationSec ?? 3), 0);
+  const totalRuntime = applyShotSequences(prod.scenes.flatMap((s) => s.shots), prod.shotSequences ?? [], prod.references).reduce((n, item) => n + item.durationSec, 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
   // version's pad-to-5 bug) are hidden but stay addressable for edits.
   const brandColors = (() => {
@@ -3356,6 +3760,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               onAddFiles={addMoodboardFiles}
               onRename={(id, name) => void updateRef(id, name)}
               onAttach={(id) => void attachRefArtwork(id)}
+              onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
             />
           </>
         ) : showSuite ? (
@@ -3472,11 +3877,15 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                         <div className="prod-style-frame-row">
                           <button
                             className="prod-btn"
-                            disabled={styleFrameBusy !== null || !s.prompt.trim()}
-                            onClick={() => void generateStyleFrame(s.id)}
-                            title="Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"
+                            disabled={!s.prompt.trim()}
+                            onClick={() => generateStyleFrame(s.id)}
+                            title={genQueue.status(genKeys.styleFrame(s.id)).running
+                              ? "Generating… click to queue another"
+                              : "Generate a neutral look plate from this style's prompt (16:9) — reused on every shot"}
                           >
-                            {styleFrameBusy === s.id ? "Working…" : <>{s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}<GenerationCostSuffix req={(() => {
+                            {genQueue.status(genKeys.styleFrame(s.id)).running
+                              ? genButtonLabel({ running: true, pending: genQueue.status(genKeys.styleFrame(s.id)).pending }, "Generate frame")
+                              : <>{s.imagePath && s.frameSource === "generated" ? "Regenerate frame" : "Generate frame"}<GenerationCostSuffix req={(() => {
                               const liveModel = s.model && s.model !== "auto" && imageMasterModels.some((m) => m.id === s.model)
                                 ? s.model
                                 : prod.openArt?.model ?? "auto";
@@ -3688,6 +4097,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
                 onRescan={rescanRefFolder}
+                onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
             </DesignSection>
 
@@ -3847,6 +4257,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
               <div
                 className="prod-boards-grid"
+                ref={boardsGridRef}
                 onDragOver={(e) => {
                   if (boardDragRef.current && e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
                     e.preventDefault();
@@ -3875,7 +4286,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     prod={prod}
                     shot={shot}
                     bust={boardBustFor(shot.id)}
-                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
+                    regenerating={regenIds.has(shot.id) || (regenQueued[shot.id] ?? 0) > 0 || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
+                    regenQueued={regenQueued[shot.id] ?? 0}
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyShots.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
@@ -3884,18 +4296,23 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onRegenerate={boardActions.onRegenerate}
                     onRecheck={boardActions.onRecheck}
                     onRecheckVideo={boardActions.onRecheckVideo}
+                    onClearPending={boardActions.onClearPending}
                     onImport={boardActions.onImport}
                     onEdit={boardActions.onEdit}
                     onVideo={boardActions.onVideo}
                     onTextChange={boardActions.onTextChange}
                     showScript={showBoardText}
                     onPromptFocus={boardActions.onPromptFocus}
+                    onFrameSelect={boardActions.onFrameSelect}
+                    inRange={seqSelection.size >= 2 && seqSelection.has(shot.id)}
+                    seqSlot={seqMemberIds.has(shot.id) || (showCreateStrip && seqSelection.has(shot.id))}
                     selected={promptShotId === shot.id}
                     onDropFrame={boardActions.onDropFrame}
                     onDropFiles={boardActions.onDropFiles}
                     onPromoteHistory={boardActions.onPromoteHistory}
                     onDeleteGeneration={boardActions.onDeleteGeneration}
                     onSaveAsReference={boardActions.onSaveAsReference}
+                    onVideoStillSaved={boardActions.onVideoStillSaved}
                     draggable
                     isDragging={boardDragId === shot.id}
                     isReorderTarget={boardDropTarget === shot.id}
@@ -3947,6 +4364,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     <span className="prod-board-end-label">Drop at end</span>
                   </div>
                 )}
+                <SequenceBarLayer gridRef={boardsGridRef} targets={seqBarTargets} />
               </div>
               <PromptSidePanel
                 key={promptShotId ?? "none"}
@@ -3960,13 +4378,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                   onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
-                  submitting={!!promptShotId && regenIds.has(promptShotId)}
+                  submitting={!!promptShotId && (regenIds.has(promptShotId) || (regenQueued[promptShotId] ?? 0) > 0)}
+                  queued={promptShotId ? regenQueued[promptShotId] ?? 0 : 0}
                   submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
                   onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}
                   onOpenSuite={() => {
                     if (!promptShotId) return;
                     const shot = prod.scenes.flatMap((s) => s.shots).find((s) => s.id === promptShotId);
-                    openImageSuite(prod.meta.id, { mode: "generate", prompt: liveFocusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}) });
+                    openImageSuite(prod.meta.id, { mode: "generate", prompt: liveFocusedPrompt, ...(shot?.refIds?.length ? { refIds: shot.refIds } : {}), ...(shot ? { styleId: shotStyleSelectValue(shot, prod) || undefined } : {}) });
                   }}
                   magicActive={!!prod.magicEnabled}
                   onRegenMagic={promptShotId ? () => regenMagicPrompt(promptShotId) : undefined}
@@ -4015,12 +4434,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onRunImageGen={(model, resolution, params) => graphShotId ? runImageGenNode(graphShotId, model, resolution, params) : Promise.resolve()}
                   onRunVideoGen={(nodeId, model, resolution, durationSec, params) => graphShotId ? runVideoGenNode(graphShotId, nodeId, model, resolution, durationSec, params) : Promise.resolve()}
                   onRunEditGen={(nodeId, model, resolution, params) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution, params) : Promise.resolve()}
-                  onRunEditVideo={(model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, model, editPrompt, params) : Promise.resolve()}
+                  onRunEditVideo={(nodeId, model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, nodeId, model, editPrompt, params) : Promise.resolve()}
                   onRunCameraGrid={(opts) => graphShotId ? runCameraGridGen(graphShotId, opts) : Promise.resolve()}
                   onImportCameraGridImage={(source) => graphShotId ? importCameraGridImage(graphShotId, source) : Promise.resolve(null)}
                   onExportCameraGrid={(req) => exportCameraGrid(req)}
                   onRunUpscale={(model, resolution, params) => graphShotId ? runUpscaleGen(graphShotId, model, resolution, params) : Promise.resolve()}
-                  onPipeEditVideoToOutput={() => { if (graphShotId) pipeEditVideoToOutput(graphShotId); }}
                   onPipeUpscaleToOutput={() => { if (graphShotId) pipeUpscaleToOutput(graphShotId); }}
                   onRunTweenBlock={(blockId, durationSec, model, params) => graphShotId ? runTweenBlock(graphShotId, blockId, durationSec, model, params) : Promise.resolve()}
                   onStitchTween={() => graphShotId ? stitchTweenShot(graphShotId) : Promise.resolve()}
@@ -4028,7 +4446,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onFetchVideo={() => graphShotId ? recheckVideo(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyAll.has(graphShotId) : false}
                   videoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => nodeVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
-                  editVideoBusy={graphShotId ? nodeEditVideoBusyAll.has(graphShotId) : false}
+                  editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => n.mode === "edit" && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   busyTweenBlock={graphShotId ? tweenBusyAll[graphShotId] ?? null : null}
                   tweenStitching={graphShotId ? tweenStitchingAll.has(graphShotId) : false}
@@ -4037,6 +4455,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
                   onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
+                  onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
@@ -4060,6 +4479,34 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                    onDetach={detached ? undefined : detachGraph}
                    onClose={() => { if (detached) { void window.cascade.closeDetachedCanvas(); } else { setGraphShotId(null); } }}
                  />
+              ) : null;
+            })()}
+            {seqCanvasId && (() => {
+              const seq = (prod.shotSequences ?? []).find((s) => s.id === seqCanvasId);
+              return seq ? (
+                <SequenceGraphModal
+                  key={seqCanvasId}
+                  prod={prod}
+                  seq={seq}
+                  imageModels={imageModels}
+                  videoModels={videoModels}
+                  endFrameModelIds={endFrameModelIds}
+                  videoEditUnavailable={videoEditUnavailable}
+                  busyNodeIds={(seq.graph?.graphVideoNodes ?? [{ id: "vid0", prompt: "" }]).map((n) => n.id).filter((id) => seqBusyAll.has(`${seq.id}:${id}`))}
+                  readOnly={!detached && detachedWindow?.open === true && detachedWindow.target === "sequence"}
+                  framePromptFor={(shotId) => window.cascade.getBoardPrompt(prod.meta.id, shotId).then((t) => t ?? "")}
+                  onClose={() => { setSeqCanvasId(null); }}
+                  onGraphField={(patch) => updateSequenceGraph(seqCanvasId, patch)}
+                  onGenerate={(opts) => runSequenceVideoGen(seqCanvasId, opts)}
+                  onGenerateEditVideo={(opts) => runSequenceEditVideoGen(seqCanvasId, opts)}
+                  onDropFile={(file) => addFileReference(seq.shotIds[0] ?? seq.id, file)}
+                  onPasteFiles={(files) => addPastedReferences(seq.shotIds[0] ?? seq.id, files)}
+                  onRenameRef={(refId, name) => { void updateRef(refId, name); }}
+                  onSaveGenerationAsReference={(rel) => saveSequenceGenerationAsReference(seqCanvasId, rel)}
+                  onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
+                  onDeleteGeneration={(rel) => deleteSequenceTake(seqCanvasId, rel)}
+                  onDetach={detached ? undefined : detachSequence}
+                />
               ) : null;
             })()}
             {editShotId && (() => {
@@ -4215,6 +4662,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   <AnimaticTimeline
                     prodId={prod.meta.id}
                     scenes={prod.scenes}
+                    sequences={prod.shotSequences ?? []}
+                    references={prod.references}
                     voUrl={voObjectUrl ?? voUrl}
                     voDuration={voDuration}
                     onVoDurationKnown={setVoDuration}
@@ -4222,10 +4671,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     musicVolume={prod.musicVolume ?? 0.5}
                     voiceoverVolume={prod.voiceoverVolume ?? 1}
                     onUpdateDurations={(updates) => updateDurations(updates)}
+                    onUpdateSequenceDuration={updateSequenceDuration}
                     onFitToVo={() => fitShotsToTotal(voDuration ?? totalRuntime)}
                     onUpdateTotal={(sec) => fitShotsToTotal(sec)}
                     onRemoveVideo={(shotId) => void removeShotVideo(shotId)}
                     onToggleMute={toggleShotMuted}
+                    onToggleSequenceMute={toggleSequenceMute}
                     onSaveAsReference={(shotId, rel) => saveAsReference(shotId, rel)}
                   />
                 </section>

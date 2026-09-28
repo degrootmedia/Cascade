@@ -976,6 +976,41 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     }
     expect(seen[0]).toContain("--video-references");
   });
+
+  it("submits every frame as a reference with refsOnly (no start/end slots — the sequence canvas)", async () => {
+    const seen: string[][] = [];
+    const jobId = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/clip.mp4" }])),
+      })
+    );
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7, 7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoClip(prodDir("prod-refsonly"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 8, prompt: "animate",
+        refsOnly: true,
+      }, () => {}, undefined, [{ name: "Extra", dataUrl: "data:image/png;base64,RXh0cmE=" }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    // No frame slot — both the source frame and the extra ride the array.
+    expect(args).not.toContain("--start-image");
+    expect(args).not.toContain("--end-image");
+    expect(args).not.toContain("--image");
+    const imgRefs = args.filter((a) => a === "--image-references").length;
+    expect(imgRefs).toBe(2);
+  });
 });
 
 describe("HiggsfieldCliProvider.modelOptions (schema normalization)", () => {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { WorkspaceInstructionsInfo } from "../../../shared/ipc.js";
+import type { ActiveProductionInfo, WorkspaceInstructionsInfo } from "../../../shared/ipc.js";
 
 /** Header dropdown for choosing the current chat's working folder. */
 export function FolderPicker({
@@ -7,9 +7,12 @@ export function FolderPicker({
   recents,
   instructions,
   pureChat,
+  followProduction,
+  production,
   onPick,
   onSelect,
   onNone,
+  onSelectProduction,
   onOpenInstructions,
 }: {
   current: string | null;
@@ -17,9 +20,14 @@ export function FolderPicker({
   instructions: WorkspaceInstructionsInfo | null;
   /** Pure chat (no folder) — shows the "None" chip and a chat-only option. */
   pureChat: boolean;
+  /** This chat mirrors the active Production Assistant project's folder. */
+  followProduction: boolean;
+  /** The active production, when one has been opened. */
+  production: ActiveProductionInfo | null;
   onPick: () => void;
   onSelect: (dir: string) => void;
   onNone: () => void;
+  onSelectProduction: () => void;
   onOpenInstructions: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -44,15 +52,23 @@ export function FolderPicker({
   const currentName = current ? (current.split(/[\\/]/).pop() ?? current) : null;
   // Show the current folder at the top, but don't repeat it in the recent list.
   const recentList = recents.filter((r) => r !== current);
+  const chipLabel = followProduction
+    ? `🎬 ${production?.name ?? "Active Production"}`
+    : pureChat
+      ? "💬 Chat only"
+      : `📁 ${currentName ?? "Choose folder…"}`;
+  const chipTitle = followProduction
+    ? production
+      ? `Following the active production — ${production.folder}`
+      : "Following the active production — open one in the Production Assistant to give the agent files"
+    : pureChat
+      ? "Chat only — no file access. Pick a folder to enable the agent."
+      : (current ?? "Choose a working folder for this chat");
 
   return (
     <div className="folder-picker" ref={ref}>
-      <button
-        className="folder-chip"
-        title={pureChat ? "Chat only — no file access. Pick a folder to enable the agent." : (current ?? "Choose a working folder for this chat")}
-        onClick={() => setOpen(!open)}
-      >
-        {pureChat ? "💬 Chat only" : `📁 ${currentName ?? "Choose folder…"}`}
+      <button className="folder-chip" title={chipTitle} onClick={() => setOpen(!open)}>
+        {chipLabel}
         <span className="folder-caret">▾</span>
       </button>
       {!pureChat && instructions?.active && (
@@ -67,7 +83,7 @@ export function FolderPicker({
       {open && (
         <div className="folder-menu">
           <button
-            className={`folder-option${pureChat ? " current" : ""}`}
+            className={`folder-option${pureChat && !followProduction ? " current" : ""}`}
             onClick={() => {
               onNone();
               setOpen(false);
@@ -77,9 +93,28 @@ export function FolderPicker({
             <span className="folder-label">None — chat only</span>
             <span className="folder-path">No file access; replies like a plain chat</span>
           </button>
+          <button
+            className={`folder-option${followProduction ? " current" : ""}`}
+            disabled={!production}
+            onClick={() => {
+              if (!production) return;
+              onSelectProduction();
+              setOpen(false);
+            }}
+            title={
+              production
+                ? `Mirror the open production's folder: ${production.folder}`
+                : "Open a production in the Production Assistant first"
+            }
+          >
+            <span className="folder-label">Active Production</span>
+            <span className="folder-path">
+              {production ? `${production.name} — ${production.folder}` : "No production open"}
+            </span>
+          </button>
           {
             // Only show the current folder row if it's selected but not in recents.
-            current && (
+            current && !followProduction && (
               <button className="folder-option current" onClick={() => setOpen(false)} title={current}>
                 <span className="folder-label">Current</span>
                 <span className="folder-path">{current}</span>

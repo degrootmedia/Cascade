@@ -177,6 +177,27 @@ describe("BoardCard history", () => {
     await act(async () => { element.click(); });
   }
 
+  it("shows 'Generating (N)' on the regen button and keeps it clickable to queue more", async () => {
+    const shot = makeShot();
+    currentPath = shot.artwork ?? "";
+    shotArtwork[shot.id] = shot.artwork ?? "";
+    const onRegenerate = vi.fn();
+    await act(async () => {
+      root.render(createElement(ControlledBoard, {
+        prod: makeProduction(shot), shot, bust: 0, regenerating: true, regenQueued: 2, videoBusy: false,
+        onRegenerate, onImport: vi.fn(), onEdit: vi.fn(), onVideo: vi.fn(),
+        onTextChange: vi.fn(), showScript: false, selected: false,
+        onDropFrame: vi.fn(), onPromoteHistory, onPromptFocus,
+      }));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    const regen = button(".prod-board-regen");
+    expect(regen.textContent).toContain("Generating (2)");
+    expect(regen.disabled).toBe(false);
+    await act(async () => { regen.click(); });
+    expect(onRegenerate).toHaveBeenCalledWith("shot1");
+  });
+
   function expectFrame(path: string) {
     expect(host.querySelector(".prod-board-frame-img")?.getAttribute("src")).toBe(thumbnail(path));
     expect(host.querySelector(".prod-board-frame-video")).toBeNull();

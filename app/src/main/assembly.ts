@@ -16,7 +16,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Production, ProductionAssembly } from "../shared/ipc.js";
+import type { Production, ProductionAssembly, ProductionShot } from "../shared/ipc.js";
+import { applyShotSequences } from "../shared/ipc.js";
 import { assetPath, formatRuntime, originalForJpegRel, tweenSelectedClips } from "./pipeline.js";
 
 export type AssemblyEmit = (message: string, level?: "info" | "error" | "done") => void;
@@ -134,8 +135,40 @@ export function assemblyPlan(p: Production): AssemblyPlan {
   };
 
   let t = 0;
-  for (const scene of p.scenes) {
-    for (const shot of scene.shots) {
+  // Timeline projection (Spec 06): an enabled shot sequence's contiguous span
+  // collapses into ONE event — its clip when it has one, a blank slot when it
+  // doesn't (the animatic's slate). The member shots are replaced, so their
+  // numbers land in `blanks` (the skipped-shots bookkeeping) and no per-shot
+  // event is emitted for them.
+  const shotById = new Map<string, ProductionShot>();
+  for (const scene of p.scenes) for (const shot of scene.shots) shotById.set(shot.id, shot);
+  for (const item of applyShotSequences([...shotById.values()], p.shotSequences ?? [], p.references)) {
+    if (item.kind === "sequence") {
+      const number = `SQ${(item.shotIds.map((id) => shotById.get(id)?.number).find(Boolean) ?? "0000")}`;
+      const dur = item.durationSec;
+      const clipRel = item.videoPath;
+      // An output bound to a still holds that image over the span (the
+      // animatic's held frame); an unbound output is a blank slot (its slate).
+      const stillRel = !clipRel && item.artwork ? (originalForJpegRel(p, item.artwork) ?? item.artwork) : undefined;
+      if (clipRel) {
+        const mediaRel = addMedia(clipRel, `clips/${number}${extOf(clipRel, ".mp4")}`);
+        events.push({ shotId: item.id, number, kind: "clip", srcRel: clipRel, mediaRel, durationSec: dur, muted: !!item.muted, startSec: t, endSec: t + dur });
+      } else if (stillRel) {
+        const mediaRel = addMedia(stillRel, `shots/${number}${extOf(stillRel, ".png")}`);
+        events.push({ shotId: item.id, number, kind: "still", srcRel: stillRel, mediaRel, durationSec: dur, muted: false, startSec: t, endSec: t + dur });
+      } else {
+        events.push({ shotId: item.id, number, kind: "blank", durationSec: dur, muted: false, startSec: t, endSec: t + dur });
+      }
+      for (const id of item.shotIds) {
+        const member = shotById.get(id);
+        if (member) blanks.push(member.number);
+      }
+      t += dur;
+      continue;
+    }
+    const shot = shotById.get(item.id);
+    if (!shot) continue;
+    {
       const dur = Math.max(0.1, shot.durationSec ?? 3);
       const clipRel = shot.videoPath || undefined;
       const stillRel = shot.artwork ? originalForJpegRel(p, shot.artwork) ?? shot.artwork : undefined;
@@ -192,11 +225,15 @@ export function assemblyPlan(p: Production): AssemblyPlan {
 // ---- buildEdl --------------------------------------------------------------
 
 /** EDL reel for an event: normal shots ride `SHOT<NNNN>`; in-betweener block
- *  sub-events (number `NNNNx`) ride `TW<NNNN><X>` so every reel stays within
- *  the 8-char CMX3600 field while remaining distinct per original clip. */
+ *  sub-events (number `NNNNx`) ride `TW<NNNN><X>`; shot-sequence events
+ *  (number `SQ<NNNN>`, named after their first member) ride `SQ<NNNN>` — so
+ *  every reel stays within the 8-char CMX3600 field while remaining distinct
+ *  per original clip. */
 export function edlReelFor(number: string): string {
   const m = /^(\d{4})([a-z])$/.exec(number);
   if (m) return `TW${m[1]}${m[2].toUpperCase()}`;
+  const sq = /^SQ(\d{4})$/.exec(number);
+  if (sq) return `SQ${sq[1]}`;
   return `SHOT${number}`;
 }
 

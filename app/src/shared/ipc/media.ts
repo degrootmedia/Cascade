@@ -246,6 +246,16 @@ export interface VideoGenOptions {
    * `OpenArtBoardConfig.params` for the video path.
    */
   params?: Record<string, string | number | boolean | string[]>;
+  /**
+   * Submit every input through the model's reference arrays, never the
+   * dedicated start/end frame slots. The shot-sequence canvas sets this:
+   * its member frames are peer references (a multi-shot timeline), not
+   * one animated still — and some Higgsfield models (e.g. minimax_h3_max)
+   * reject mixing reference media with start_image/end_image outright.
+   * Normal single-frame video keeps the start slot (image2video forms
+   * require it); the in-betweener keeps the start/end pair.
+   */
+  refsOnly?: boolean;
 }
 
 /** Per-config credit quote for one generation (Higgsfield CLI `generate

@@ -18,6 +18,9 @@ export interface SessionFile {
   workspace: string | null;
   /** Pure chat: no workspace, no tools. When true, `workspace` is ignored. */
   pureChat: boolean;
+  /** Follow the active Production Assistant project: the chat's folder mirrors
+   *  whatever production is currently open, overriding `workspace`. */
+  followProduction: boolean;
   /** Agent bound to this chat; null = Default (no agent). */
   agentId: string | null;
   /** The model-facing conversation history (for resuming the agent). */
@@ -68,13 +71,36 @@ export function saveSession(s: SessionFile): void {
     // Back-fill legacy sessions: pure chat unless a workspace was bound.
     (s as SessionFile).pureChat = !s.workspace;
   }
+  if (typeof (s as { followProduction?: unknown }).followProduction !== "boolean") {
+    // Legacy sessions never followed the Production Assistant project.
+    (s as SessionFile).followProduction = false;
+  }
   if (typeof (s as { planMode?: unknown }).planMode !== "boolean") {
     (s as SessionFile).planMode = false;
   }
   store.save(s);
 }
 
-export function newSessionFile(workspace: string | null = null, agentId: string | null = null): SessionFile {
+/**
+ * The effective folder a chat's agent may touch: following the active
+ * Production Assistant project wins, then pure chat, then the per-chat folder,
+ * then the default for new chats. Pure so the resolution is unit-testable.
+ */
+export function resolveWorkspace(
+  s: Pick<SessionFile, "followProduction" | "pureChat" | "workspace">,
+  activeProductionFolder: string | null,
+  defaultWorkspace: string | null
+): string | null {
+  if (s.followProduction) return activeProductionFolder;
+  if (s.pureChat) return null;
+  return s.workspace ?? defaultWorkspace;
+}
+
+export function newSessionFile(
+  workspace: string | null = null,
+  agentId: string | null = null,
+  followProduction = false
+): SessionFile {
   const now = new Date().toISOString();
   return {
     id: store.newId(),
@@ -82,7 +108,8 @@ export function newSessionFile(workspace: string | null = null, agentId: string 
     createdAt: now,
     updatedAt: now,
     workspace,
-    pureChat: !workspace, // None by default unless a default folder is configured
+    pureChat: !workspace && !followProduction, // None by default unless a default folder is configured
+    followProduction,
     agentId: agentId ?? null,
     history: [],
     display: [],

@@ -216,6 +216,7 @@ export function normalizeCameraGridData(raw: unknown): CameraGridData | undefine
     const refIds = r.refIds.filter((id): id is string => typeof id === "string" && !!id.trim());
     if (refIds.length) data.refIds = refIds;
   }
+  if (r.styleConnected === true) data.styleConnected = true;
   if (typeof r.model === "string" && r.model.trim()) data.model = r.model;
   if (typeof r.resolution === "string" && r.resolution.trim()) data.resolution = r.resolution;
   const params = normalizeGenParams(r.params);

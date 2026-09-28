@@ -159,6 +159,46 @@ describe("TriplePrompt caret preservation (node-graph lag)", () => {
     document.body.removeChild(host);
   });
 
+  it("inserts a literal newline on Enter and preserves it through the parent echo", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const seen: string[] = [];
+    function EchoHarness(): ReactElement {
+      const [value, setValue] = useState(INITIAL);
+      return createElement(TriplePrompt, {
+        value,
+        includeBrand: true,
+        className: "test-box",
+        sideRows: 3,
+        deferExternalWhileFocused: true,
+        onChange: (v: string) => { seen.push(v); setValue(v); },
+      });
+    }
+    act(() => { root.render(createElement(EchoHarness)); });
+    const box = host.querySelector(".prompt-content-editor") as HTMLElement;
+    const CONTENT = "A hero walks through the valley.";
+    act(() => { box.focus(); });
+    act(() => {
+      const range = document.createRange();
+      range.setStart(box.firstChild as Node, "A hero walks".length);
+      range.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      box.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    // A literal newline text node — NOT a <br>/block element, which
+    // `textContent` (and therefore the saved prompt) would drop.
+    expect(box.querySelector("br")).toBeNull();
+    expect(box.textContent).toBe("A hero walks\n through the valley.");
+    // The composed value — what gets persisted and re-parsed on return — keeps
+    // the paragraph break, so leaving the frame and coming back doesn't merge.
+    expect(seen.at(-1)).toBe("Style: Heroic 3D render style\n\nA hero walks\n through the valley.\n\nBrand identity: Color palette: #123456, #789abc. Font: Helvetica.");
+    act(() => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
   it("preserves the caret across a rebuild of the Content box while focused", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);

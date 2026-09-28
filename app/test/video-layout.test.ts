@@ -64,7 +64,7 @@ describe("relocateVideoLayout", () => {
       const shot = makeShot("0100", {
         videoPath: "videos/shot-0100-clip.mp4",
         graphVideoGens: [{ path: "videos/shot-0100-clip.mp4", prompt: "p", model: "m", at: "" }],
-        graphEditVideoGens: [{ path: "videos/shot-0100-edit-x.mp4", prompt: "e", model: "m", at: "" }],
+        graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "", gens: [{ path: "videos/shot-0100-edit-x.mp4", prompt: "e", model: "m", at: "" }] }],
         graphTweenOutput: "videos/shot-0100-tween-t.mp4",
         graphTweenBlocks: [
           { id: "tw0", startRefId: "a", endRefId: "b", prompt: "turn", startSec: 0, durationSec: 2, gens: [{ path: "videos/shot-0100-b0.mp4", prompt: "", model: "", at: "" }], genIndex: 0 },
@@ -79,7 +79,7 @@ describe("relocateVideoLayout", () => {
 
       expect(shot.videoPath).toBe("boards/0100/video/shot-0100-clip.mp4");
       expect(shot.graphVideoGens![0].path).toBe("boards/0100/video/shot-0100-clip.mp4");
-      expect(shot.graphEditVideoGens![0].path).toBe("boards/0100/video/shot-0100-edit-x.mp4");
+      expect(shot.graphVideoNodes![0].gens![0].path).toBe("boards/0100/video/shot-0100-edit-x.mp4");
       expect(shot.graphTweenOutput).toBe("boards/0100/video/shot-0100-tween-t.mp4");
       expect(shot.graphTweenBlocks![0].gens![0].path).toBe("boards/0100/video/shot-0100-b0.mp4");
       for (const f of legacy) {
@@ -123,7 +123,7 @@ describe("relocateBoardsForRenumber (video clips)", () => {
       const shot = makeShot("0100", {
         videoPath: "boards/0100/video/shot-0100-clip.mp4",
         graphVideoGens: [{ path: "boards/0100/video/shot-0100-clip.mp4", prompt: "", model: "", at: "" }],
-        graphEditVideoGens: [{ path: "boards/0100/video/shot-0100-edit.mp4", prompt: "", model: "", at: "" }],
+        graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "", gens: [{ path: "boards/0100/video/shot-0100-edit.mp4", prompt: "", model: "", at: "" }] }],
         graphTweenOutput: "boards/0100/video/shot-0100-tween.mp4",
         graphTweenBlocks: [
           { id: "tw0", startRefId: "a", endRefId: "b", prompt: "", startSec: 0, durationSec: 2, gens: [{ path: "boards/0100/video/shot-0100-b0.mp4", prompt: "", model: "", at: "" }], genIndex: 0 },
@@ -141,7 +141,7 @@ describe("relocateBoardsForRenumber (video clips)", () => {
 
       expect(shot.videoPath).toBe("boards/0200/video/shot-0200-clip.mp4");
       expect(shot.graphVideoGens![0].path).toBe("boards/0200/video/shot-0200-clip.mp4");
-      expect(shot.graphEditVideoGens![0].path).toBe("boards/0200/video/shot-0200-edit.mp4");
+      expect(shot.graphVideoNodes![0].gens![0].path).toBe("boards/0200/video/shot-0200-edit.mp4");
       expect(shot.graphTweenOutput).toBe("boards/0200/video/shot-0200-tween.mp4");
       expect(shot.graphTweenBlocks![0].gens![0].path).toBe("boards/0200/video/shot-0200-b0.mp4");
       for (const f of ["clip.mp4", "edit.mp4", "tween.mp4", "b0.mp4"]) {

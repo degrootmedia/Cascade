@@ -60,7 +60,7 @@ export interface DetachedCanvasDeps {
   ensureVisible?(win: DetachedWindow): void;
 }
 
-export const DETACHED_TARGETS: readonly DetachedCanvasTarget[] = ["graph", "moodboard"];
+export const DETACHED_TARGETS: readonly DetachedCanvasTarget[] = ["graph", "moodboard", "sequence"];
 
 /** Validate an untrusted context payload. Throws on a malformed target/id. */
 export function validateDetachedContext(ctx: unknown): DetachedCanvasContext {
@@ -69,14 +69,21 @@ export function validateDetachedContext(ctx: unknown): DetachedCanvasContext {
   if (typeof c.productionId !== "string" || c.productionId.length === 0) {
     throw new Error("Detached canvas: productionId is required");
   }
-  if (c.target !== "graph" && c.target !== "moodboard") {
-    throw new Error(`Detached canvas: target must be "graph" or "moodboard" (got ${String(c.target)})`);
+  if (c.target !== "graph" && c.target !== "moodboard" && c.target !== "sequence") {
+    throw new Error(`Detached canvas: target must be "graph", "moodboard", or "sequence" (got ${String(c.target)})`);
   }
   const frameId = c.frameId === undefined || c.frameId === null ? null : c.frameId;
   if (frameId !== null && typeof frameId !== "string") {
     throw new Error("Detached canvas: frameId must be a string or null");
   }
-  return { productionId: c.productionId, target: c.target, frameId };
+  const sequenceId = c.sequenceId === undefined || c.sequenceId === null ? null : c.sequenceId;
+  if (sequenceId !== null && typeof sequenceId !== "string") {
+    throw new Error("Detached canvas: sequenceId must be a string or null");
+  }
+  if (c.target === "sequence" && !sequenceId) {
+    throw new Error("Detached canvas: sequenceId is required for the sequence target");
+  }
+  return { productionId: c.productionId, target: c.target, frameId, sequenceId };
 }
 
 /** Owns the single detached window + the current context. */
@@ -160,13 +167,14 @@ export class DetachedCanvasController {
   state(): DetachedCanvasState {
     const win = this.win;
     if (!win || win.isDestroyed()) {
-      return { open: false, productionId: null, target: null, frameId: null };
+      return { open: false, productionId: null, target: null, frameId: null, sequenceId: null };
     }
     return {
       open: true,
       productionId: this.ctx?.productionId ?? null,
       target: this.ctx?.target ?? null,
       frameId: this.ctx?.frameId ?? null,
+      sequenceId: this.ctx?.sequenceId ?? null,
     };
   }
 }

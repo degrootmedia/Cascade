@@ -29,14 +29,17 @@ import {
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
-import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe } from "../shared/ipc.js";
+import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe, sequenceSelectedTake } from "../shared/ipc.js";
 import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
 import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
 import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
-import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen } from "../shared/ipc.js";
+import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
+GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
+import { extractVideoStillFrame, videoStillName } from "./video-still.js";
+import type { VideoStillDeps } from "./video-still.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -866,6 +869,17 @@ export function characterSheetPrompt(
   return renderPromptTemplate(template, { description: desc, views });
 }
 
+/** Find (or create, by name) a reference category. Pure production mutation —
+ *  file IO is the caller's job. Returns the category id used. */
+export function ensureReferenceCategory(p: Production, categoryName: string): string {
+  let categoryId = (p.referenceCategories ?? []).find((c) => c.name.trim().toLowerCase() === categoryName.toLowerCase())?.id;
+  if (!categoryId) {
+    categoryId = `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    p.referenceCategories = [...(p.referenceCategories ?? []), { id: categoryId, name: categoryName }];
+  }
+  return categoryId;
+}
+
 /** Mirror a generated character sheet into the references panel: ensure a
  *  "Characters" category exists and upsert a CustomRef named after the
  *  character into it, pointing at the same on-disk file as the CharacterSheet
@@ -873,11 +887,7 @@ export function characterSheetPrompt(
  *  Pure production mutation — file IO is the caller's job. Returns the
  *  category id used. */
 export function upsertCharacterSheetRef(p: Production, name: string, rel: string, categoryName = "Characters"): string {
-  let categoryId = (p.referenceCategories ?? []).find((c) => c.name.trim().toLowerCase() === categoryName.toLowerCase())?.id;
-  if (!categoryId) {
-    categoryId = `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    p.referenceCategories = [...(p.referenceCategories ?? []), { id: categoryId, name: categoryName }];
-  }
+  const categoryId = ensureReferenceCategory(p, categoryName);
   const ref = (p.references ?? []).find((r) => r.name.toLowerCase() === name.toLowerCase());
   if (ref) {
     ref.imagePath = rel;
@@ -1179,6 +1189,48 @@ export function writeShotVideo(
   return rel;
 }
 
+/** Directory holding a shot sequence's generated clips: `<outDir>/sequences/<id>`.
+ *  Sequences own no board folder (their span covers several shots), so their
+ *  takes live under `out/` like the other derived outputs. */
+export function sequenceVideoDir(p: Production, seq: { id: string }): string {
+  return `${p.assets.outDir}/sequences/${seq.id}`;
+}
+
+/** Relative path for a freshly generated clip in a sequence's folder. A random
+ *  tag keeps every take. */
+export function sequenceVideoRelPath(p: Production, seq: { id: string }, ext = "mp4"): string {
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  return `${sequenceVideoDir(p, seq)}/sequence-${tag}.${ext}`;
+}
+
+/** Write generated clip bytes into the sequence's folder and return the
+ *  workspace-relative path (the sequence counterpart of `writeShotVideo`). */
+export function writeSequenceVideo(
+  p: Production,
+  seq: { id: string },
+  bytes: Buffer,
+  ext = "mp4"
+): string {
+  const rel = sequenceVideoRelPath(p, seq, ext);
+  fs.mkdirSync(assetPath(p, sequenceVideoDir(p, seq)), { recursive: true });
+  fs.writeFileSync(assetPath(p, rel), bytes);
+  return rel;
+}
+
+/** Move a freshly generated clip from wherever the provider landed it (a
+ *  board folder) into the sequence's own folder, returning the new relative
+ *  path. Providers are shot-parameterized, so a sequence generation borrows
+ *  the first member shot for the vendor call — this detaches the result from
+ *  that shot so a later board renumber can never orphan the sequence's takes.
+ */
+export function relocateClipToSequence(p: Production, seq: { id: string }, rel: string): string {
+  const ext = path.extname(rel).toLowerCase().replace(/^\./, "") || "mp4";
+  const dest = sequenceVideoRelPath(p, seq, ext);
+  fs.mkdirSync(assetPath(p, sequenceVideoDir(p, seq)), { recursive: true });
+  fs.renameSync(assetPath(p, rel), assetPath(p, dest));
+  return dest;
+}
+
 /** Derive the expected JPEG path for an original, or null when it isn't a
  *  board original (`boards/<shot>/originals/shot-<shot>-<tag>.<ext>`). */
 export function jpegForOriginalRel(p: Production, originalRel: string): string | null {
@@ -1378,9 +1430,6 @@ export function relocateVideoLayout(p: Production, shot: ProductionShot): boolea
   if (shot.graphVideoGens?.length) shot.graphVideoGens = shot.graphVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
   for (const node of shot.graphVideoNodes ?? []) {
     if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: move(g.path)! }));
-  }
-  if (shot.graphEditVideoGens?.length) {
-    shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: move(g.path)! }));
   }
   if (shot.graphTweenOutput) shot.graphTweenOutput = move(shot.graphTweenOutput);
   if (shot.graphTweenBlocks?.length) {
@@ -1679,9 +1728,168 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
   return ref;
 }
 
+/**
+ * Save the frame a video is paused on as a new image reference: extract the
+ * exact `timeSec` frame via ffmpeg and store it in referencesDir as
+ * `Video still_00.jpg` (then _01, …), appended as a `CustomRef`. The reference
+ * is NOT tagged into any prompt — attaching it is an explicit action. Returns
+ * the created reference. Callers save the production.
+ */
+export async function saveVideoStillAsReference(
+  p: Production,
+  videoRel: string,
+  timeSec: number,
+  deps: VideoStillDeps,
+): Promise<CustomRef> {
+  const src = assetPath(p, videoRel);
+  if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+    throw new Error(`That video isn't on disk, so no frame can be saved from it: ${videoRel}`);
+  }
+  const jpeg = await extractVideoStillFrame(src, timeSec, deps);
+  const name = videoStillName((p.references ?? []).map((r) => r.name));
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let destRel = `${dir}/${name}.jpg`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, destRel))) {
+    destRel = `${dir}/${name} (${i}).jpg`;
+    i++;
+  }
+  fs.writeFileSync(assetPath(p, destRel), jpeg);
+  const ref: CustomRef = { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+  p.references = [...(p.references ?? []), ref];
+  return ref;
+}
+
+/**
+ * Delete one stored take from a shot sequence's video nodes (the file is
+ * unlinked). The selected index clamps; an emptied take list leaves the
+ * sequence's output unbound (the animatic's slate). Pure production mutation —
+ * callers save.
+ */
+export function deleteSequenceTake(p: Production, sequenceId: string, rel: string): void {
+  const seq = (p.shotSequences ?? []).find((s) => s.id === sequenceId);
+  if (!seq?.graph) throw new Error("That shot sequence has no canvas takes.");
+  if (!rel) return;
+  let removed = false;
+  for (const node of seq.graph.graphVideoNodes ?? []) {
+    const gens = node.gens ?? [];
+    if (!gens.some((g) => g.path === rel)) continue;
+    node.gens = gens.filter((g) => g.path !== rel);
+    node.genIndex = Math.min(node.genIndex ?? 0, Math.max(0, node.gens.length - 1));
+    removed = true;
+  }
+  if (!removed) throw new Error("That take no longer exists.");
+  // Only files under the sequence's own folder are ours to unlink.
+  if (rel.startsWith(sequenceVideoDir(p, seq))) {
+    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* already gone */ }
+  }
+}
+
 /** A fresh reference id (same shape the other reference-creation paths use). */
 export function newRefId(): string {
   return `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** The category every dissolved shot sequence's clip lands in. */
+export const SHOT_SEQUENCE_CATEGORY = "Shot Sequences";
+
+/**
+ * Preserve a shot sequence's generated video as a reference before the
+ * sequence goes away (explicit delete, or its last member removed for good):
+ * the clip is copied into referencesDir under the "Shot Sequences" category,
+ * named after the sequence, so nothing the user generated is lost with the
+ * span. Returns null when the sequence never produced a clip (nothing to
+ * preserve). Callers save the production.
+ */
+export function saveSequenceVideoAsReference(p: Production, seq: ShotSequence): CustomRef | null {
+  const rel = sequenceSelectedTake(seq);
+  if (!rel) return null;
+  const src = assetPath(p, rel);
+  if (!fs.existsSync(src) || !fs.statSync(src).isFile()) return null;
+  const ext = path.extname(rel).toLowerCase() || ".mp4";
+  const base = (seq.name || "Shot Sequence").trim().slice(0, 80) || "Shot Sequence";
+  const taken = new Set((p.references ?? []).map((r) => r.name.trim().toLowerCase()));
+  let name = base;
+  for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${base} (${i})`;
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  const safe = name.replace(/[\\/:*?"<>|]/g, "_");
+  let destRel = `${dir}/${safe}${ext}`;
+  for (let i = 2; fs.existsSync(assetPath(p, destRel)); i++) destRel = `${dir}/${safe} (${i})${ext}`;
+  fs.copyFileSync(src, assetPath(p, destRel));
+  const ref: CustomRef = {
+    id: newRefId(),
+    name,
+    media: "video",
+    mediaPath: destRel,
+    categoryId: ensureReferenceCategory(p, SHOT_SEQUENCE_CATEGORY),
+    shotIds: [...seq.shotIds],
+  };
+  p.references = [...(p.references ?? []), ref];
+  return ref;
+}
+
+/**
+ * Remove one shot sequence (the storyboard bar's delete). Its generated video
+ * (if any) is preserved as a "Shot Sequences" reference first — the confirm
+ * dialog warns about this. Returns the removed sequence and the saved
+ * reference (null when there was no clip). Callers save the production.
+ */
+export function removeShotSequence(p: Production, sequenceId: string): { seq: ShotSequence; saved: CustomRef | null } {
+  const seq = (p.shotSequences ?? []).find((s) => s.id === sequenceId);
+  if (!seq) throw new Error("That shot sequence no longer exists.");
+  const saved = saveSequenceVideoAsReference(p, seq);
+  p.shotSequences = (p.shotSequences ?? []).filter((s) => s.id !== sequenceId);
+  return { seq, saved };
+}
+
+/**
+ * Drop permanently-removed shots from every sequence's span, dissolving any
+ * sequence whose span is gone (its clip is preserved exactly like an explicit
+ * delete). Returns the dissolved sequences for logging. Shots merely archived
+ * to the outdated panel do NOT come through here — they stay sequence members
+ * (read-side `normalizeShotSequences` counts outdated ids as live), so a
+ * restore brings the sequence back whole. Callers save the production.
+ */
+export function removeShotsFromSequences(p: Production, shotIds: Iterable<string>): ShotSequence[] {
+  const gone = new Set(shotIds);
+  if (!gone.size || !(p.shotSequences ?? []).length) return [];
+  const dissolved: ShotSequence[] = [];
+  const kept: ShotSequence[] = [];
+  for (const seq of p.shotSequences ?? []) {
+    const members = seq.shotIds.filter((id) => !gone.has(id));
+    if (!members.length) {
+      saveSequenceVideoAsReference(p, seq);
+      dissolved.push(seq);
+      continue;
+    }
+    if (members.length === seq.shotIds.length) {
+      kept.push(seq);
+      continue;
+    }
+    kept.push({
+      ...seq,
+      shotIds: members,
+      // Wired inputs live on the graph's video nodes; drop the removed shots.
+      // The timed timeline drops a removed member's segment too.
+      ...(seq.graph
+        ? {
+            graph: {
+              ...seq.graph,
+              ...(seq.graph.graphVideoNodes
+                ? { graphVideoNodes: seq.graph.graphVideoNodes.map((n) => (Array.isArray(n.refIds) ? { ...n, refIds: n.refIds.filter((id) => !gone.has(id)) } : n)) }
+                : {}),
+              ...(seq.graph.graphSequence?.segments
+                ? { graphSequence: { segments: seq.graph.graphSequence.segments.filter((s) => !gone.has(s.shotId)) } }
+                : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  p.shotSequences = kept;
+  return dissolved;
 }
 
 /**
@@ -1701,7 +1909,6 @@ function shotMediaRefs(shot: ProductionShot): string[] {
   for (const g of shot.graphEditGens ?? []) push(g.path);
   for (const node of shot.graphEditNodes ?? []) for (const g of node.gens ?? []) push(g.path);
   push(shot.videoPath);
-  for (const g of shot.graphEditVideoGens ?? []) push(g.path);
   push(shot.graphTweenOutput);
   for (const b of shot.graphTweenBlocks ?? []) for (const g of b.gens ?? []) push(g.path);
   return [...new Set(refs)];
@@ -1728,7 +1935,6 @@ function mapShotMediaPaths(shot: ProductionShot, remap: (rel: string) => string)
     if (node.gens?.length) node.gens = node.gens.map((g) => ({ ...g, path: one(g.path)! }));
   }
   shot.videoPath = one(shot.videoPath);
-  if (shot.graphEditVideoGens?.length) shot.graphEditVideoGens = shot.graphEditVideoGens.map((g) => ({ ...g, path: one(g.path)! }));
   shot.graphTweenOutput = one(shot.graphTweenOutput);
   if (shot.graphTweenBlocks?.length) {
     shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) =>
@@ -2214,13 +2420,6 @@ export function recordGraphUpscaleGen(shot: ProductionShot, rel: string, model: 
   const item: GraphGenItem = { path: rel, prompt: "", model, at: new Date().toISOString() };
   node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
   node.genIndex = 0;
-}
-
-/** Store an AI-edited video clip on the edit-video node (newest first). */
-export function recordGraphEditVideoGen(shot: ProductionShot, rel: string, prompt: string, model: string): void {
-  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
-  shot.graphEditVideoGens = [item, ...(shot.graphEditVideoGens ?? [])].slice(0, GRAPH_HISTORY_CAP);
-  shot.graphEditVideoGenIndex = 0;
 }
 
 /** Store an AI-edited frame on the named edit node (newest first). */
@@ -2753,6 +2952,56 @@ export function migrateVideoNodes(shot: ProductionShot): boolean {
   return changed;
 }
 
+/** One-time migration: fold the legacy single edit-video node's flat fields
+ *  into `graphVideoNodes` as an `ev0` edit-mode entry, and re-express an
+ *  edit-video output pipe as a video-node output (`videogen` + `ev0`).
+ *  Idempotent — a list that already holds an edit-mode entry is left alone;
+ *  the flat fields are then always stripped (a stale renderer save can re-add
+ *  them). */
+export function migrateEditVideoNodes(shot: ProductionShot): boolean {
+  const hasLegacy = !!(
+    shot.graphEditVideoGens?.length ||
+    (shot.graphEditVideoPrompt ?? "").trim() ||
+    shot.graphEditVideoSourceRefId ||
+    shot.graphVideoToEditVideo ||
+    shot.graphEditVideoParams ||
+    shot.graphEditVideoModel ||
+    shot.graphEditVideoResolution ||
+    shot.graphEditVideoRefIds?.length ||
+    shot.graphEditVideoGenIndex !== undefined ||
+    shot.graphOutputSource === "editvideo"
+  );
+  let changed = false;
+  const nodes = shot.graphVideoNodes ?? [];
+  if (hasLegacy && !nodes.some((n) => n.mode === "edit")) {
+    const node: GraphVideoNode = { id: "ev0", mode: "edit", prompt: shot.graphEditVideoPrompt ?? "" };
+    if (shot.graphEditVideoGens?.length) node.gens = shot.graphEditVideoGens;
+    if (shot.graphEditVideoGenIndex !== undefined) node.genIndex = shot.graphEditVideoGenIndex;
+    if (shot.graphEditVideoModel) node.model = shot.graphEditVideoModel;
+    if (shot.graphEditVideoResolution) node.resolution = shot.graphEditVideoResolution;
+    if (shot.graphEditVideoParams) node.params = shot.graphEditVideoParams;
+    if (shot.graphEditVideoRefIds?.length) node.refIds = shot.graphEditVideoRefIds;
+    if (shot.graphVideoToEditVideo) node.source = { kind: "video", nodeId: "vid0" };
+    else if (shot.graphEditVideoSourceRefId) node.source = { kind: "ref", refId: shot.graphEditVideoSourceRefId };
+    shot.graphVideoNodes = [...nodes, node];
+    changed = true;
+  }
+  if (shot.graphOutputSource === "editvideo") {
+    shot.graphOutputSource = "videogen";
+    shot.graphOutputVideoNodeId = "ev0";
+    changed = true;
+  }
+  const legacyKeys = [
+    "graphEditVideoGens", "graphEditVideoGenIndex", "graphEditVideoPrompt", "graphEditVideoModel",
+    "graphEditVideoResolution", "graphEditVideoParams", "graphEditVideoRefIds",
+    "graphEditVideoSourceRefId", "graphVideoToEditVideo",
+  ] as const;
+  for (const k of legacyKeys) {
+    if (k in shot) { delete (shot as unknown as Record<string, unknown>)[k]; changed = true; }
+  }
+  return changed;
+}
+
 /** Image generator injected by the caller (OpenArt MCP in production).
  *  `refs` carries the shot's reference artwork (if any) for image-input models.
  *  `shot` (when given) lets the generator record a pending async job on the
@@ -3152,12 +3401,8 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
       shot.videoPath = undefined;
     }
     if (shot.graphVideoSourceRefId === refId) shot.graphVideoSourceRefId = undefined;
-    if (shot.graphEditVideoSourceRefId === refId) shot.graphEditVideoSourceRefId = undefined;
     if (shot.graphVideoRefIds?.includes(refId)) {
       shot.graphVideoRefIds = shot.graphVideoRefIds.filter((id) => id !== refId);
-    }
-    if (shot.graphEditVideoRefIds?.includes(refId)) {
-      shot.graphEditVideoRefIds = shot.graphEditVideoRefIds.filter((id) => id !== refId);
     }
     if (shot.graphTweenRefIds?.includes(refId)) {
       const ids = shot.graphTweenRefIds.filter((id) => id !== refId);
@@ -3189,7 +3434,6 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
     if (typeof shot.prompt === "string") shot.prompt = strip(shot.prompt);
     if (typeof shot.graphVideoPrompt === "string") shot.graphVideoPrompt = strip(shot.graphVideoPrompt);
     if (typeof shot.graphEditPrompt === "string") shot.graphEditPrompt = strip(shot.graphEditPrompt);
-    if (typeof shot.graphEditVideoPrompt === "string") shot.graphEditVideoPrompt = strip(shot.graphEditVideoPrompt);
     const posKey = `ref:${refId}`;
     if (shot.graphLayout?.positions?.[posKey]) {
       const { [posKey]: _dropPos, ...rest } = shot.graphLayout.positions;
@@ -3267,7 +3511,6 @@ export function renameReference(p: Production, refId: string, newName: string, e
     if (typeof shot.prompt === "string") shot.prompt = rename(shot.prompt);
     if (typeof shot.graphVideoPrompt === "string") shot.graphVideoPrompt = rename(shot.graphVideoPrompt);
     if (typeof shot.graphEditPrompt === "string") shot.graphEditPrompt = rename(shot.graphEditPrompt);
-    if (typeof shot.graphEditVideoPrompt === "string") shot.graphEditVideoPrompt = rename(shot.graphEditVideoPrompt);
     if (Array.isArray(shot.graphTweenBlocks)) {
       shot.graphTweenBlocks = shot.graphTweenBlocks.map((b) => {
         if (typeof b.prompt === "string" && b.prompt.includes("@[")) {

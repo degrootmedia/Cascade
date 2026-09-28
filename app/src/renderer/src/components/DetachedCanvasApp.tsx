@@ -27,7 +27,7 @@ export function DetachedCanvasApp() {
       .getDetachedCanvasState()
       .then((s) => {
         if (s.open && s.productionId && s.target) {
-          setCtx((prev) => prev ?? { productionId: s.productionId!, target: s.target!, frameId: s.frameId });
+          setCtx((prev) => prev ?? { productionId: s.productionId!, target: s.target!, frameId: s.frameId, sequenceId: s.sequenceId });
         }
       })
       .catch(() => {});

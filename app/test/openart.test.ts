@@ -472,6 +472,19 @@ describe("videoRefsAssign", () => {
       visualReferences: refs,
     });
   });
+
+  it("refsOnly skips the frame slots entirely (the sequence canvas)", () => {
+    const refs = [
+      { type: "image", label: "Shot 0100", url: "https://example.invalid/a.png", id: "vr-1" },
+      { type: "image", label: "Shot 0101", url: "https://example.invalid/b.png", id: "vr-2" },
+    ];
+    const props = {
+      startFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      visualReferences: { type: "array", items: { type: "object" } },
+    };
+    expect(videoRefsAssign(refs, props, { refsOnly: true })).toEqual({ visualReferences: refs });
+  });
 });
 
 describe("video-ref 720p ceiling", () => {
@@ -950,6 +963,51 @@ describe("OpenArtClient pending-image contingency", () => {
 
     await expect(gen("any", [], undefined, undefined, (rec) => seen.push(rec))).rejects.toThrow(/failed/i);
     expect(seen).toHaveLength(0);
+  });
+
+  it("recheck excludes the echoed style-frame attachment instead of downloading it", async () => {
+    // The reported bug: a board pending on a style-framed job rechecked into
+    // the style frame itself. The submit-time wait excluded inputs by identity,
+    // but the recheck polled without that exclusion — so a DONE reply carrying
+    // only image attachments ([style frame echo, real output]) handed back the
+    // echo. The pending record now carries the input identity and the recheck
+    // must skip it.
+    const source = Buffer.from("STYLE-FRAME-BYTES");
+    const output = Buffer.from("GENERATED-OUTPUT");
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-style","pollAfterSeconds":0}',
+      openart_creation_get: () => ({ text: '{"status":"STILL_RUNNING","pollAfterSeconds":0}', images: [], uris: [] }),
+      openart_creation_wait: () => ({ text: '{"status":"STILL_RUNNING","pollAfterSeconds":0}', images: [], uris: [] }),
+    });
+    const client = new OpenArtClient(mcp);
+    const gen = client.imageGenFn(makeProduction())!;
+    const s = shot();
+
+    vi.useFakeTimers();
+    try {
+      const first = gen("Draw a castle", [{ name: "Look — Heroic", dataUrl: `data:image/png;base64,${source.toString("base64")}` }], s);
+      const assertion = expect(first).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(151_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The orphaned job kept the input identity for the recheck.
+    expect(s.pendingImageGen).toMatchObject({ historyId: "h-style" });
+    expect(s.pendingImageGen?.refHashes).toBeDefined();
+    expect(s.pendingImageGen?.refHashes?.length).toBeGreaterThan(0);
+
+    // Once the job finishes, the reply echoes the style frame first — the
+    // recheck must skip it and return the real generation.
+    const mcpDone = fakeMcp({
+      openart_creation_get: () => ({ text: '{"status":"SUCCEEDED"}', images: [source, output], uris: [] }),
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [source, output], uris: [] }),
+    });
+    const doneClient = new OpenArtClient(mcpDone);
+    await expect(doneClient.recheckPendingImage(s.pendingImageGen!)).resolves.toEqual(output);
   });
 });
 

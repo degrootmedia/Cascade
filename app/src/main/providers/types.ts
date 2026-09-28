@@ -75,7 +75,9 @@ export interface MediaProvider {
    * Generate one video clip for a shot. The shot's current frame (full
    * resolution) is always the first visual reference unless a node-graph
    * pipe or explicit frameRefs supply other frames; @[name] tags and
-   * extraRefs add more. Writes the finished clip into the shot's board folder
+   * extraRefs add more. With `opts.refsOnly` (the shot-sequence canvas)
+   * every input rides the reference arrays and no start/end frame slot is
+   * set. Writes the finished clip into the shot's board folder
    * under `video/` and returns its workspace-relative path.
    */
   generateVideoClip(

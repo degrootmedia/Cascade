@@ -74,13 +74,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
             );
           }
           case "assistant":
-            return (
-              <div
-                key={i}
-                className={`msg assistant${item.streaming ? " streaming" : ""}`}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }}
-              />
-            );
+            return <AssistantMessage key={i} text={item.text} streaming={item.streaming} />;
           case "mention":
             return (
               <div key={i} className="msg mention">
@@ -118,6 +112,82 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
 
 type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
 type RenderEntry = { kind: "toolRun"; items: ToolItem[] } | { kind: "item"; item: DisplayItem };
+
+/** Extract the copyable text for a fenced block, excluding the copy button itself. */
+export function codeBlockText(pre: HTMLElement): string {
+  const code = pre.querySelector("code");
+  return (code ?? pre).textContent ?? "";
+}
+
+async function copyCodeBlockText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Clipboard API unavailable (permissions, insecure context) — fall back to execCommand.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * Assistant bubble. Fenced code blocks (the "inset panels") each get a Copy
+ * button that writes the block's text — paragraph breaks intact — to the clipboard.
+ * Buttons are injected post-render so sanitized markdown HTML stays untouched.
+ */
+function AssistantMessage({ text, streaming }: { text: string; streaming?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const html = renderMarkdown(text);
+
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const pres = root.querySelectorAll("pre");
+    pres.forEach((pre) => {
+      const el = pre as HTMLElement;
+      // Already enhanced on a previous streaming tick.
+      if (el.parentElement?.classList.contains("code-block-wrap")) return;
+      const wrap = document.createElement("div");
+      wrap.className = "code-block-wrap";
+      el.replaceWith(wrap);
+      wrap.appendChild(el);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "code-copy-btn";
+      btn.textContent = "Copy";
+      btn.setAttribute("aria-label", "Copy code to clipboard");
+      btn.addEventListener("click", () => {
+        void copyCodeBlockText(codeBlockText(el)).then((ok) => {
+          btn.textContent = ok ? "Copied" : "Failed";
+          setTimeout(() => {
+            btn.textContent = "Copy";
+          }, 1500);
+        });
+      });
+      wrap.appendChild(btn);
+    });
+  }, [html]);
+
+  return (
+    <div
+      ref={ref}
+      className={`msg assistant${streaming ? " streaming" : ""}`}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
 
 /** Fold consecutive tool cards between messages into one collapsible run. */
 function groupToolRuns(items: DisplayItem[]): RenderEntry[] {

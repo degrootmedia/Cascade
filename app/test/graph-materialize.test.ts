@@ -90,6 +90,20 @@ describe("materializeGraph basics", () => {
     expect(edgeIds(g)).not.toContain("e-ref-camgrid");
   });
 
+  it("camera-grid style plug materializes from the styleConnected flag", () => {
+    const g = stable(
+      materializeGraph(
+        shot({ graphCameraGrid: { cols: 4, rows: 4, styleConnected: true } }),
+        REFS,
+      )
+    );
+    expect(edgeIds(g)).toContain("e-style-camgrid");
+    const unplugged = stable(
+      materializeGraph(shot({ graphCameraGrid: { cols: 4, rows: 4 } }), REFS)
+    );
+    expect(edgeIds(unplugged)).not.toContain("e-style-camgrid");
+  });
+
   it("upscale node materializes its source + output feed from domain state", () => {
     const g = stable(
       materializeGraph(
@@ -191,15 +205,16 @@ describe("video / edit / tween / edit-video wires", () => {
     expect(e0.to).toEqual({ node: "tween", port: "in-tween-0" });
   });
 
-  it("edit-video source wires and output (fills the canvas gap)", () => {
+  it("edit-video source wires and output (multi-instance graphVideoNodes)", () => {
     const g = stable(
       materializeGraph(
         shot({
-          graphVideoPrompt: "x",
-          graphImageToVideo: true,
-          graphVideoToEditVideo: true,
-          graphEditVideoPrompt: "Cut",
-          graphOutputSource: "editvideo",
+          graphVideoNodes: [
+            { id: "vid0", prompt: "x", source: { kind: "imagegen" } },
+            { id: "ev0", mode: "edit", prompt: "Cut", source: { kind: "video", nodeId: "vid0" } },
+          ],
+          graphOutputSource: "videogen",
+          graphOutputVideoNodeId: "ev0",
         }),
         REFS
       )
@@ -281,6 +296,43 @@ describe("video nodes (multi-instance)", () => {
     expect(fromLegacy[0].id).toBe("vid0");
     expect(fromLegacy[0].source).toEqual({ kind: "imagegen" });
     expect(fromLegacy[0].gens?.[0].path).toBe("c.mp4");
+  });
+});
+
+describe("shot-sequence timeline wiring", () => {
+  const SEQ_REFS: GraphRefView[] = [
+    ...REFS,
+    { id: "seqframe:s1", name: "Shot 0100", artwork: "f1.png" },
+    { id: "seqframe:s2", name: "Shot 0200", artwork: "f2.png" },
+  ];
+
+  it("emits one member-frame edge per timeline segment, wired to its frame node", () => {
+    const g = stable(materializeGraph(shot({
+      graphVideoNodes: [{ id: "vid0", prompt: "Visuals @[Gondola]" }],
+      graphSequence: { segments: [
+        { shotId: "s1", durationSec: 3, prompt: "" },
+        { shotId: "s2", durationSec: 3, prompt: "" },
+      ] },
+    }), SEQ_REFS));
+    // The frame nodes the locked refs resolve to are on the canvas.
+    expect(nodeIds(g)).toContain("ref:seqframe:s1");
+    expect(nodeIds(g)).toContain("ref:seqframe:s2");
+    // One structural socket per segment on the video prompt node.
+    const frameEdges = g.edges.filter((e) => e.to.node === "videoprompt" && /^in-frame-/.test(e.to.port));
+    expect(frameEdges.map((e) => [e.id, e.from.node, e.to.port])).toEqual([
+      ["e-seqframe-0", "ref:seqframe:s1", "in-frame-0"],
+      ["e-seqframe-1", "ref:seqframe:s2", "in-frame-1"],
+    ]);
+  });
+
+  it("is deterministic and normalize-stable (so a reopen never strips it)", () => {
+    const s = shot({
+      graphVideoNodes: [{ id: "vid0", prompt: "Visuals" }],
+      graphSequence: { segments: [{ shotId: "s1", durationSec: 3, prompt: "slow push" }] },
+    });
+    const a = materializeGraph(s, SEQ_REFS);
+    expect(materializeGraph(s, SEQ_REFS)).toEqual(a);
+    expect(stable(a)).toEqual(a);
   });
 });
 

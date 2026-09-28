@@ -14,7 +14,7 @@
 import type { Edge } from "@xyflow/react";
 import type { Graph } from "../../../shared/ipc.js";
 import { nodeKindForId } from "../../../shared/graph/connect.js";
-import { portDecl, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
+import { portDecl, TWEEN_SOCKET_RE, FRAME_SOCKET_RE } from "../../../shared/graph/ports.js";
 
 export interface SocketColors {
   ref: string;
@@ -34,7 +34,7 @@ export function edgeStroke(fromNode: string, toPort: string, colors: SocketColor
   if (fromKind === "style") return colors.style;
   if (fromKind === "brand") return colors.brand;
   if (fromKind === "ref") return colors.ref;
-  if (toPort === "in-image" || toPort === "in-video" || TWEEN_SOCKET_RE.test(toPort)) return colors.ref;
+  if (toPort === "in-image" || toPort === "in-video" || TWEEN_SOCKET_RE.test(toPort) || FRAME_SOCKET_RE.test(toPort)) return colors.ref;
   return undefined;
 }
 

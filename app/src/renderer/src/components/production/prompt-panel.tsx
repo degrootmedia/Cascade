@@ -37,9 +37,14 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
+  // Live mirrors for the deferred blur cleanup — a stale closure there once
+  // re-composed from an old value and stripped a just-inserted reference block.
+  const valueRef = useRef(value);
+  useEffect(() => { valueRef.current = value; }, [value]);
+  const queryRef = useRef(query);
+  useEffect(() => { queryRef.current = query; }, [query]);
   const matches = query === null ? [] : references.filter((r) => r.name.toLowerCase().includes(query.toLowerCase()));
   const tags = refTagNames(value);
-  const content = parsePromptBoxes(value).content;
 
   /** Autocomplete tracking lives on the content box only. */
   function updateQuery(next: string, caret = contentRef.current?.selectionStart ?? next.length) {
@@ -61,15 +66,12 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   function choose(ref: PromptReference) {
     const el = contentRef.current;
     if (!el) return;
-    const caret = el.selectionStart;
-    const before = content.slice(0, caret);
-    const open = before.lastIndexOf("@");
-    if (open < 0) return;
-    const next = `${content.slice(0, open)}@[${ref.name}]${content.slice(caret)}`;
-    const nextCaret = open + ref.name.length + 3;
-    onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: next }));
+    // Route the insertion THROUGH the editor so it rides its own commit path
+    // (and caret placement) instead of arriving as an external rebuild — which
+    // is what lets the editor safely defer external changes while focused.
+    el.insertRefTag(ref.name);
     setQuery(null);
-    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(nextCaret, nextCaret); });
+    requestAnimationFrame(() => el.focus());
   }
   function keyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (query !== null && matches.length) {
@@ -96,6 +98,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         afterContent={afterContent}
         styleReadOnly={styleReadOnly}
         brandReadOnly={brandReadOnly}
+        deferExternalWhileFocused
         onChange={onChange}
         onContentChange={updateQuery}
         onContentKeyDown={keyDown}
@@ -103,13 +106,15 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         onBlur={() => {
           onBlur?.();
           window.setTimeout(() => {
-            if (contentRef.current?.isActive() || query === null) return;
-            const caret = contentRef.current?.selectionStart ?? content.length;
-            const before = content.slice(0, caret);
+            if (contentRef.current?.isActive() || queryRef.current === null) return;
+            const live = valueRef.current;
+            const liveContent = parsePromptBoxes(live).content;
+            const caret = contentRef.current?.selectionStart ?? liveContent.length;
+            const before = liveContent.slice(0, caret);
             const open = before.lastIndexOf("@");
             const tail = open >= 0 ? before.slice(open + 1) : "";
             if (open >= 0 && !/[\s\[\]]/.test(tail)) {
-              onChange(composePromptBoxes({ ...parsePromptBoxes(value), content: content.slice(0, open) + content.slice(caret) }));
+              onChange(composePromptBoxes({ ...parsePromptBoxes(live), content: liveContent.slice(0, open) + liveContent.slice(caret) }));
             }
             setQuery(null);
           }, 120);
@@ -140,7 +145,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
  *  (references are stored as files on disk now, so thumbnails + previews load
  *  through the streaming protocol rather than inline data URLs). */
 
-export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
+export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, queued, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; /** Extra regen clicks queued behind the running one for this shot. */ queued?: number; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
   return (
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
@@ -188,7 +193,15 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
             </label>
           }
         />
-        <button className="prod-btn prod-prompt-submit" disabled={submitting} onClick={onSubmit}>{submitting ? "Generating…" : <>Submit frame{submitSuffix}</>}</button>
+        <button
+          className="prod-btn prod-prompt-submit"
+          title={submitting ? "Click to queue another generation for this frame" : undefined}
+          onClick={onSubmit}
+        >
+          {submitting
+            ? (queued ? `Generating… (${queued} queued)` : "Generating…")
+            : <>Submit frame{submitSuffix}</>}
+        </button>
         {onOpenSuite && (
           <button className="prod-btn ghost" title="Open this prompt in the Image Suite" onClick={onOpenSuite}>Open in Suite</button>
         )}

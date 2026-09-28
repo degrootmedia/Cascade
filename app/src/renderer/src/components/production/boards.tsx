@@ -17,12 +17,15 @@ import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
+import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
   regenerating: boolean;
+  /** Extra regen clicks queued behind the running one for this shot. */
+  regenQueued?: number;
   videoBusy: boolean;
   /** A frame job outlived its wait — show a pending badge + recheck. */
   pending?: boolean;
@@ -37,6 +40,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   onRecheck?: (shotId: string) => void;
   /** Fetch the shot's pending video job and download the clip when ready. */
   onRecheckVideo?: (shotId: string) => void;
+  /** Discard the shot's pending frame/video job (right-click escape hatch for
+   *  a job stuck past recovery — it can't be rechecked afterwards). */
+  onClearPending?: (shotId: string, kind: "image" | "video") => void;
   onImport: (shotId: string) => void;
   /** Open the AI edit dialog for this frame. */
   onEdit: (shotId: string) => void;
@@ -47,6 +53,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   /** Whether the Audio/Visual direction boxes render under the frame. */
   showScript: boolean;
   onPromptFocus: (shotId: string, prompt: string) => void;
+  /** Frame-click selection: "single" anchors (and clears) the shot-sequence
+   *  range, "range" extends it from the anchor (Shift-click). Plain clicks
+   *  still focus the prompt afterwards; Shift-clicks only select. */
+  onFrameSelect?: (shotId: string, mode: "single" | "range") => void;
+  /** This card sits inside the current shot-sequence range (highlight). */
+  inRange?: boolean;
+  /** Room for the sequence bar under this card (animated bottom slot). */
+  seqSlot?: boolean;
   selected: boolean;
   /** Attach a frame dragged from another card as a reference on this shot. */
   onDropFrame: (shotId: string, source: { prodId: string; shotId: string; number: number }) => void;
@@ -59,6 +73,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   onDeleteGeneration?: (shotId: string, rel: string) => void;
   /** Copy the displayed frame/clip into the production as a new reference. */
   onSaveAsReference?: (shotId: string, rel: string) => void;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
   draggable?: boolean;
   onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
   onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
@@ -83,6 +99,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   const [img, setImg] = useState<string | null>(null);
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
+  // The lightbox video's paused position — the still is extracted at exactly it.
+  const expandedVideoRef = useRef<HTMLVideoElement | null>(null);
   // The lightbox is workspace-owned (see the prop docs): this card only renders
   // it while `zoomOpen`, which lets the arrows hand it to a neighbouring card.
   const expanded = !!zoomOpen;
@@ -252,6 +270,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
     setMenu(null);
     if (histPath && onDeleteGeneration) onDeleteGeneration(shot.id, histPath);
   }
+  function clearMenuPending(kind: "image" | "video") {
+    setMenu(null);
+    const label = kind === "video" ? "video" : "frame";
+    if (!window.confirm(`Clear the pending ${label} job for Shot ${shot.number}? The vendor job can't be reclaimed afterwards — regenerate to try again.`)) return;
+    onClearPending?.(shot.id, kind);
+  }
   function saveMenuImage() {
     if (!nativeSrc) return;
     const src = nativeSrc;
@@ -287,10 +311,19 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
   // focused-shot effect) only when a card is clicked — see onPromptFocus.
 
+  // Frame clicks drive BOTH focus (the prompt panel follows) and the shot-
+  // sequence range selection. Shift-click extends the range from the anchor
+  // and leaves the prompt panel where it is; a plain click re-anchors.
+  function frameClick(e: React.MouseEvent) {
+    if (onFrameSelect) onFrameSelect(shot.id, e.shiftKey ? "range" : "single");
+    if (!e.shiftKey) onPromptFocus(shot.id, "");
+  }
+
   return (
     <figure
       ref={cardRef}
-      className={"prod-board" + (selected ? " selected" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
+      data-shot-id={shot.id}
+      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
       onContextMenu={onDelete ? openPanelMenu : undefined}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
@@ -337,8 +370,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         </button>
       )}
       <div
-        className="prod-board-frame"
-        onClick={() => onPromptFocus(shot.id, "")}
+        className={"prod-board-frame" + (regenerating ? " regenerating" : "")}
+        onClick={frameClick}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-cascade-frame")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
           else if (onDropFiles && Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; e.currentTarget.classList.add("dragover"); }
@@ -410,7 +443,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             onMouseEnter={() => { try { boardVideoRef.current?.play(); } catch {} }}
             onMouseLeave={() => { try { boardVideoRef.current?.pause(); } catch {} }}
             onError={() => setVideoFailed(true)}
-            onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+            onClick={(e) => { e.stopPropagation(); frameClick(e); }}
             onContextMenu={onDelete ? openPanelMenu : undefined}
             onDragStart={(e) => {
               // Carry this frame's identity so another frame can accept it as a reference.
@@ -432,7 +465,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
               // already waited for first paint + viewport + queue slot.
               loading="lazy"
               decoding="async"
-              onClick={(e) => { e.stopPropagation(); onPromptFocus(shot.id, ""); }}
+              onClick={(e) => { e.stopPropagation(); frameClick(e); }}
               onContextMenu={onDelete ? openPanelMenu : undefined}
               onDragStart={(e) => {
                 // Carry this frame's identity so another frame can accept it as a reference.
@@ -481,11 +514,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
         <div className="prod-board-actions">
           <button
             className="prod-board-regen"
-            title="Regenerate this frame"
-            disabled={regenerating}
+            title={regenerating
+              ? `Generating…${regenQueued ? ` (${regenQueued} queued)` : ""} — click to queue another`
+              : "Regenerate this frame"}
             onClick={() => onRegenerate(shot.id)}
           >
-            {regenerating ? "…" : <RegenerateIcon size={12} />}
+            {regenerating ? (regenQueued ? `Generating (${regenQueued})` : "Generating") : <RegenerateIcon size={12} />}
           </button>
           <button
             className="prod-board-edit"
@@ -562,6 +596,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
           <figure className="prod-ref-lightbox-card">
             {expandedVideo ? (
               <video
+                ref={expandedVideoRef}
                 className="prod-ref-lightbox-video"
                 src={expandedVideo}
                 controls
@@ -571,7 +606,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
             ) : expandedImg ? (
               <img src={expandedImg} alt={`Shot ${shot.number}`} />
             ) : null}
-            <figcaption>Shot {shot.number} — use ← → to move between shots · click anywhere to close</figcaption>
+            <figcaption>
+              Shot {shot.number} — use ← → to move between shots · click anywhere to close
+              {expandedVideo && shot.videoPath && onVideoStillSaved && (
+                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={shot.videoPath} getTime={() => expandedVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); onZoomChange?.(null); }} /></>
+              )}
+            </figcaption>
           </figure>
         </div>
       )}
@@ -640,6 +680,22 @@ function BoardCardInner({ prod, shot, bust, regenerating, videoBusy, pending, re
               onClick={deleteMenuGeneration}
             >
               Delete generation…
+            </button>
+          )}
+          {pending && onClearPending && (
+            <button
+              className="ctx-item"
+              onClick={() => clearMenuPending("image")}
+            >
+              Clear pending frame…
+            </button>
+          )}
+          {videoPending && onClearPending && (
+            <button
+              className="ctx-item"
+              onClick={() => clearMenuPending("video")}
+            >
+              Clear pending video…
             </button>
           )}
           <button

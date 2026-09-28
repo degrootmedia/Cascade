@@ -4286,7 +4286,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     prod={prod}
                     shot={shot}
                     bust={boardBustFor(shot.id)}
-                    regenerating={regenIds.has(shot.id) || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
+                    regenerating={regenIds.has(shot.id) || (regenQueued[shot.id] ?? 0) > 0 || editBusyIds.includes(shot.id) || nodeImageBusyAll.has(shot.id) || nodeEditBusyAll.has(shot.id)}
                     regenQueued={regenQueued[shot.id] ?? 0}
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyShots.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
@@ -4378,7 +4378,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                   onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
-                  submitting={!!promptShotId && regenIds.has(promptShotId)}
+                  submitting={!!promptShotId && (regenIds.has(promptShotId) || (regenQueued[promptShotId] ?? 0) > 0)}
                   queued={promptShotId ? regenQueued[promptShotId] ?? 0 : 0}
                   submitSuffix={<GenerationCostSuffix req={boardCostReq} />}
                   onOpenGraph={() => { if (promptShotId) setGraphShotId(promptShotId); }}

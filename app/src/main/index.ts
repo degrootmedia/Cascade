@@ -45,7 +45,7 @@ import { pathToFileURL } from "node:url";
 import { dataUrlToBytes, parsePromptBoxes, refTagNames, stripReferenceClause, addStyleParagraph } from "../shared/prompt-grammar.js";
 import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
+import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
@@ -3033,7 +3033,7 @@ function registerIpc() {
     fs.writeFileSync(assetPath(p, rel), buf);
     productionEmit(id, `Suite ${kind === "edit" ? "edit" : kind === "upscale" ? "upscale" : "generation"} → ${rel}.`, "done");
 
-    return {
+    const entry: SuiteEntry = {
       id: `suite-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
       parentId: typeof req?.parentId === "string" && req.parentId ? req.parentId : null,
       kind,
@@ -3051,6 +3051,17 @@ function registerIpc() {
       ...(params ? { params: params as GenParams } : {}),
       ...(typeof req?.quotedCredits === "number" && Number.isFinite(req.quotedCredits) ? { quotedCredits: req.quotedCredits } : {}),
     };
+    // Persist the finished entry main-side so the job survives the suite panel
+    // unmounting (tab switch) mid-flight: the file is already on disk, and the
+    // timeline entry is now durable too — reopening the suite loads it. A
+    // persistence failure must not fail the generation itself (the renderer
+    // still appends the returned entry to its in-memory session).
+    try {
+      appendSuiteEntry(id, entry);
+    } catch {
+      /* the renderer-side append is the fallback */
+    }
+    return entry;
   });
 
   // Settings → Models & expenses: probe both vendors and bake every model's

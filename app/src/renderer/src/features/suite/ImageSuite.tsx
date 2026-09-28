@@ -276,7 +276,12 @@ export function ImageSuite({
     genQueue.enqueue(genKeys.suite(prodId), async () => {
       try {
         const entry = await window.cascade.generateSuiteImage(prodId, req);
-        setSession((s) => ({ ...s, entries: [...s.entries, entry], selectedId: entry.id }));
+        // Idempotent: main already appended this entry to the on-disk session
+        // (so a tab switch mid-flight doesn't lose it) — skip a second copy
+        // when the reload already picked it up.
+        setSession((s) => (s.entries.some((e) => e.id === entry.id)
+          ? { ...s, selectedId: entry.id }
+          : { ...s, entries: [...s.entries, entry], selectedId: entry.id }));
         setBranchParentId(entry.id);
       } catch (e) {
         setError(String(e).replace(/^Error:\s*/, ""));

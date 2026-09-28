@@ -100,7 +100,7 @@ export interface SequenceEditVideoGenOpts {
 }
 
 /** Statement of what the sequence's graph can host. */
-export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onDeleteGeneration, onDetach }: {
+export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
   prod: Production;
   seq: ShotSequence;
   imageModels: OpenArtModelChoice[];
@@ -127,6 +127,8 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
   onPasteFiles?: (files: File[]) => Promise<GraphRef[]>;
   onRenameRef?: (refId: string, name: string) => void;
   onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null>;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
   onDeleteGeneration?: (rel: string) => void;
   onDetach?: () => void;
 }) {
@@ -362,6 +364,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onCycleGraphGen={(kind, dir, nodeId) => cycleGen(kind, dir, nodeId)}
       onDeleteGeneration={onDeleteGeneration ?? (() => {})}
       onSaveGenerationAsReference={onSaveGenerationAsReference ?? (async () => null)}
+      onVideoStillSaved={onVideoStillSaved}
       onSaveAsReference={(rel) => { void onSaveGenerationAsReference?.(rel); }}
       // ---- Pipes: the output binding is what replaces the span in the
       // animatic/export, so it is persisted on the sequence's graph state.

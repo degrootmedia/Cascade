@@ -65,6 +65,9 @@ export interface RefData extends Record<string, unknown> {
   artwork: string;
   /** Playable cascade-media URL for video references. */
   mediaUrl?: string;
+  /** Workspace-relative media path (video refs) — the lightbox hands it to
+   *  main for a paused-frame still (a URL can't be resolved back reliably). */
+  mediaPath?: string;
   /** false = tag present in the prompt but no matching reference (dangling). */
   missing?: boolean;
   tagged: boolean;
@@ -127,7 +130,7 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
   }, [id, collapsed, updateNodeInternals]);
   const zoomable = !!(data.artwork || data.mediaUrl);
   const openZoom = useCallback(() => {
-    if (data.media === "video" && data.mediaUrl) data.onZoom(data.name, data.mediaUrl, "video");
+    if (data.media === "video" && data.mediaUrl) data.onZoom(data.name, data.mediaUrl, "video", data.mediaPath);
     else if (data.artwork) data.onZoom(data.name, data.artwork);
   }, [data]);
   const zoom = useCallback((e: { stopPropagation: () => void }) => {

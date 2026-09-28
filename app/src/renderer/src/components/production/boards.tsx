@@ -17,8 +17,9 @@ import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
+import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -72,6 +73,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   onDeleteGeneration?: (shotId: string, rel: string) => void;
   /** Copy the displayed frame/clip into the production as a new reference. */
   onSaveAsReference?: (shotId: string, rel: string) => void;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
   draggable?: boolean;
   onReorderDragStart?: (shotId: string, e: React.DragEvent) => void;
   onReorderDrop?: (targetShotId: string, e: React.DragEvent) => void;
@@ -96,6 +99,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   const [img, setImg] = useState<string | null>(null);
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
+  // The lightbox video's paused position — the still is extracted at exactly it.
+  const expandedVideoRef = useRef<HTMLVideoElement | null>(null);
   // The lightbox is workspace-owned (see the prop docs): this card only renders
   // it while `zoomOpen`, which lets the arrows hand it to a neighbouring card.
   const expanded = !!zoomOpen;
@@ -591,6 +596,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
           <figure className="prod-ref-lightbox-card">
             {expandedVideo ? (
               <video
+                ref={expandedVideoRef}
                 className="prod-ref-lightbox-video"
                 src={expandedVideo}
                 controls
@@ -600,7 +606,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             ) : expandedImg ? (
               <img src={expandedImg} alt={`Shot ${shot.number}`} />
             ) : null}
-            <figcaption>Shot {shot.number} — use ← → to move between shots · click anywhere to close</figcaption>
+            <figcaption>
+              Shot {shot.number} — use ← → to move between shots · click anywhere to close
+              {expandedVideo && shot.videoPath && onVideoStillSaved && (
+                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={shot.videoPath} getTime={() => expandedVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); onZoomChange?.(null); }} /></>
+              )}
+            </figcaption>
           </figure>
         </div>
       )}

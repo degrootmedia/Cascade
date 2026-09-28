@@ -38,6 +38,8 @@ import { videoNodesFor } from "../shared/graph/materialize.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
+import { extractVideoStillFrame, videoStillName } from "./video-still.js";
+import type { VideoStillDeps } from "./video-still.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1722,6 +1724,39 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
   const ref: CustomRef = media === "video"
     ? { id: newRefId(), name, media, mediaPath: destRel, shotIds: [] }
     : { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+  p.references = [...(p.references ?? []), ref];
+  return ref;
+}
+
+/**
+ * Save the frame a video is paused on as a new image reference: extract the
+ * exact `timeSec` frame via ffmpeg and store it in referencesDir as
+ * `Video still_00.jpg` (then _01, …), appended as a `CustomRef`. The reference
+ * is NOT tagged into any prompt — attaching it is an explicit action. Returns
+ * the created reference. Callers save the production.
+ */
+export async function saveVideoStillAsReference(
+  p: Production,
+  videoRel: string,
+  timeSec: number,
+  deps: VideoStillDeps,
+): Promise<CustomRef> {
+  const src = assetPath(p, videoRel);
+  if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+    throw new Error(`That video isn't on disk, so no frame can be saved from it: ${videoRel}`);
+  }
+  const jpeg = await extractVideoStillFrame(src, timeSec, deps);
+  const name = videoStillName((p.references ?? []).map((r) => r.name));
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let destRel = `${dir}/${name}.jpg`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, destRel))) {
+    destRel = `${dir}/${name} (${i}).jpg`;
+    i++;
+  }
+  fs.writeFileSync(assetPath(p, destRel), jpeg);
+  const ref: CustomRef = { id: newRefId(), name, imagePath: destRel, shotIds: [] };
   p.references = [...(p.references ?? []), ref];
   return ref;
 }

@@ -2729,6 +2729,22 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .msg.assistant code { background: var(--bg-panel); padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
 .msg.assistant pre code { background: none; padding: 0; }
+/* Fenced code blocks (prompt inset panels) get a Copy button via Transcript.tsx. */
+.code-block-wrap { position: relative; }
+.code-block-wrap pre { margin: 0; padding-right: 76px; }
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.code-copy-btn:hover { border-color: var(--accent); color: var(--text); }
 .msg.assistant img {
   max-width: min(100%, 440px);
   max-height: 360px;

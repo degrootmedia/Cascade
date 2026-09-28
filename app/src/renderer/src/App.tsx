@@ -79,6 +79,18 @@ export function App() {
     setView(v);
     try { localStorage.setItem("cascade.view", v); } catch { /* ignore */ }
   }, []);
+  // Mount the production workspace lazily on first visit, then keep it mounted
+  // (see below) so background generations survive Chat ↔ Prod switches.
+  const [prodEverOpen, setProdEverOpen] = useState(() => {
+    try {
+      return localStorage.getItem("cascade.view") === "prod";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (view === "prod") setProdEverOpen(true);
+  }, [view]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -585,8 +597,15 @@ export function App() {
           </>
         }
       />
-      {view === "home" ? (
-        <div className="app-home">
+      {/* Both views stay mounted across tab switches (display:none when
+        inactive) so in-flight production generations keep their local
+        busy sets (regenIds, node busy ids, …) and their async completions
+        still apply setProd/bust when they resolve. Unmounting the workspace
+        on the way to Chat discarded that state: the side-panel button lost
+        "Generating…" and the finished frame never reached the mounted
+        production (only the on-demand lightbox, which reads from disk,
+        showed it). */}
+      <div className="app-home" hidden={view !== "home"} style={view !== "home" ? { display: "none" } : undefined}>
           <Sidebar
             sessions={sessionList}
             onSelect={selectSession}
@@ -730,9 +749,16 @@ export function App() {
         </div>
           </main>
         </div>
-      ) : (
-        <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />
-      )}
+      <div
+        hidden={view !== "prod"}
+        style={
+          view !== "prod"
+            ? { display: "none" }
+            : { display: "flex", flex: 1, minHeight: 0, minWidth: 0, flexDirection: "column" }
+        }
+      >
+        {prodEverOpen && <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />}
+      </div>
       {approval && (
         <ApprovalModal
           request={approval}

@@ -735,6 +735,14 @@ export interface CascadeApi {
    * production.
    */
   saveGenerationAsReference(productionId: string, shotId: string, rel: string, sequenceId?: string): Promise<Production>;
+  /**
+   * Any video lightbox: save the frame the video is paused on as a new image
+   * reference — main extracts the exact `timeSec` frame via ffmpeg and stores
+   * it as `Video still_00` (then _01, _02, …), without tagging any prompt.
+   * `videoRel` is the clip's workspace-relative path. Returns the updated
+   * production.
+   */
+  saveVideoStill(productionId: string, videoRel: string, timeSec: number): Promise<Production>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */

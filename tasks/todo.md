@@ -2716,3 +2716,82 @@ upscale ignore it (their source owns reference 0). Tests:
 presence/mirror/hidden outside generate) + a normalization case in
 `suite.test.ts`. Verified: `app` typecheck clean; `app` tests **1263 passed / 1
 skipped** (108 files); `app` build clean.
+
+---
+
+# Video stills: save the paused frame as a reference (all video lightboxes)
+
+User: when zoomed in on a video, save the frame the video is paused on as a
+reference image, named `Video still_00`, `_01`, … Confirmed scope: every video
+lightbox, ffmpeg exact-frame capture, `_00`-based naming (matches `Saved Ref`).
+
+## Design (deep module + seams)
+
+- New deep module `app/src/main/video-still.ts`: pure `videoStillName`
+  (first-free `Video still_NN`, case-insensitive, starts at 00 — mirrors
+  `savedRefName`) + `extractVideoStillFrame(absVideo, timeSec, deps)` behind
+  the ffmpeg seam (`{ resolveBin, run }`, same shape as the thumbnail poster's
+  deps). Accurate seek (`-i … -ss t`, not the poster's fast input-seek) so the
+  still is the paused frame, full resolution (no 720p cap), `-q:v 2` JPEG.
+- `pipeline.ts` owns reference creation (locality): async
+  `saveVideoStillAsReference(p, videoRel, timeSec, deps)` validates the file is
+  on disk, clamps `timeSec >= 0`, extracts, writes
+  `referencesDir/<name>.jpg` (collision-suffixed), appends an image
+  `CustomRef`. Imports the extractor — no cycle (video-still never imports
+  pipeline).
+- IPC: `saveVideoStill(productionId, videoRel, timeSec)` on `CascadeApi` +
+  `production:saveVideoStill` channel (one contract entry; preload follows
+  mechanically). Main handler wires the real `{ resolveFfmpeg, runFfmpeg }`
+  deps, saves, emits.
+- Renderer: one shared `SaveVideoStillButton` (productionId + videoRel +
+  videoRef for `currentTime` + onSaved) so the five lightboxes don't duplicate
+  capture logic. Each lightbox carries its video's rel in zoom state (graph
+  already has `rel`; refs/boards/moodboard/outdated add it) and threads
+  `onSaved → applySnapshot` through existing mutate paths (workspace `apply`
+  for boards/graph/moodboard/references; `onMutate` for outdated).
+
+## Plan
+
+- [ ] `video-still.ts` + `pipeline.saveVideoStillAsReference` + unit test
+      (`video-still.test.ts`: naming, still saved as image ref, missing file
+      throws, negative time clamps — faked ffmpeg seam).
+- [ ] IPC contract + channel + main handler.
+- [ ] `SaveVideoStillButton` + wire into all five video lightboxes
+      (references, boards, node graph, moodboard, outdated).
+- [ ] `npm run typecheck`, `npm test`, `npm run build` (app); `CONTEXT.md`
+      glossary touch-up if warranted.
+
+## Review
+
+Done. Pause any video lightbox and **Save this frame** captures exactly that
+timestamp as a new `Video still_00` (`_01`, …) image reference.
+
+What shipped:
+- `main/video-still.ts` (new deep module): pure `videoStillName`
+  (first-free suffix, case-insensitive, starts at 00 — mirrors `savedRefName`)
+  + `extractVideoStillFrame` behind the ffmpeg seam (`{ resolveBin, run }`,
+  same shape as the thumbnail poster). Accurate output-seek (`-i … -ss t`, not
+  the poster's fast input-seek) at full resolution, `-q:v 2` JPEG, temp-file
+  cleanup per the `video-ref.ts` convention.
+- `pipeline.saveVideoStillAsReference` (async): validates the clip is on disk,
+  extracts, writes `referencesDir/<name>.jpg` (collision-suffixed), appends an
+  image `CustomRef` — no prompt tag, like Save-as-reference.
+- IPC: `saveVideoStill(productionId, videoRel, timeSec)` + channel
+  `production:saveVideoStill`; main handler wires the real
+  `{ resolveFfmpeg, runFfmpeg }` deps. No schema entry needed (same as
+  `saveGenerationAsReference`).
+- Renderer: one shared `SaveVideoStillButton` (reads `currentTime` from the
+  lightbox video, owns IPC + busy/error, stops propagation so the lightbox
+  doesn't close) in all five video lightboxes — Design references, storyboard,
+  node graph (incl. sequence canvas), moodboard, outdated panels. Each zoom
+  state carries the clip's rel (graph ref nodes gained `mediaPath` + the
+  `ref` reconciliation equality case, per the stale-node-data lesson).
+- Tests: `video-still.test.ts` (6) pins naming, accurate-seek argv, negative
+  clamp, no-binary rejection, the saved image ref + suffix increment, and the
+  missing-file throw (faked seam, no binary needed).
+
+Verify: `npm run typecheck` clean; `npm test` 1308 passed + 1 skipped (115
+files, incl. the 6 new); `npm run build` clean with the handler in
+`out/main/index.js`. Note: the running Electron main process keeps the build
+it started with — a full dev restart is needed before the new IPC responds
+(the known main-restart lesson).

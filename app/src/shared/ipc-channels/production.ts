@@ -64,6 +64,7 @@ export const productionChannels = {
   "production:promoteBoardHistory": { method: "promoteBoardHistory", kind: "invoke" },
   "production:deleteGeneration": { method: "deleteGeneration", kind: "invoke" },
   "production:saveGenerationAsReference": { method: "saveGenerationAsReference", kind: "invoke" },
+  "production:saveVideoStill": { method: "saveVideoStill", kind: "invoke" },
   "production:planAnimatic": { method: "planAnimatic", kind: "invoke" },
   "production:importVoiceover": { method: "importVoiceover", kind: "invoke" },
   "production:voiceoverFile": { method: "voiceoverFile", kind: "invoke" },

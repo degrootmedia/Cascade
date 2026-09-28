@@ -18,6 +18,7 @@ import { refThumbUrl } from "./thumb-url.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
+import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
@@ -223,7 +224,7 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan }: {
+export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
@@ -244,6 +245,8 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   onEditRef?: (ref: CustomRef) => void;
   /** Rescan the production's references folder: adopt images added externally. */
   onRescan: () => Promise<void> | void;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
 }) {
   const [categoryName, setCategoryName] = useState("");
   const [name, setName] = useState("");
@@ -329,7 +332,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -354,7 +357,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
@@ -370,6 +373,8 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
   /** Open the reference-image generation modal targeting this category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
@@ -399,7 +404,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -455,7 +460,7 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, variant = "row" }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, variant = "row" }: {
   prodId: string;
   refItem: CustomRef;
   /** This tile is part of the section's multi-selection. */
@@ -469,6 +474,8 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   onRename: (id: string, name: string) => void;
   onReorder: (draggedIds: string[], targetId: string, after: boolean) => void;
   onEditRef?: (ref: CustomRef) => void;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
   /** "row" (default) is the sidebar tile — byte-identical to before. "node"
    *  fills its parent (the moodboard canvas) and drops the HTML5 reorder
    *  drag. The artwork is served at full resolution — the board is a working
@@ -488,7 +495,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   // the context menu also use the full-res `imgUrl` below.
   const displayUrl = isNode ? imgUrl : refThumbUrl(imgUrl ?? "");
   const videoUrl = isVideo ? cascadeMedia(prodId, r.mediaPath!) : undefined;
-  const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean } | null>(null);
+  const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean; rel?: string } | null>(null);
   // Which edge a dragged tile currently hovers — drives the insert marker.
   const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
   // Perf 2.4: video element mounts only on first hover/expand; before that a
@@ -513,9 +520,11 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   });
   const handleZoom = useCallback(() => {
     const url = isVideo ? videoUrl : imgUrl;
-    if (url) setZoom({ name: r.name, url, video: isVideo });
-  }, [r.name, imgUrl, isVideo, videoUrl]);
+    if (url) setZoom({ name: r.name, url, video: isVideo, rel: isVideo ? r.mediaPath : undefined });
+  }, [r.name, r.mediaPath, imgUrl, isVideo, videoUrl]);
   const handleCloseZoom = useCallback(() => setZoom(null), []);
+  // The lightbox video's paused position — the still is extracted at exactly it.
+  const zoomVideoRef = useRef<HTMLVideoElement | null>(null);
   const handleAttach = useCallback(() => void onAttach(r.id), [onAttach, r.id]);
   const handleRemove = useCallback(() => onRemove(r.id), [onRemove, r.id]);
   // Rename commits once (on blur/Enter), not per keystroke: main rewrites the
@@ -617,9 +626,14 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
         <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
           <figure className="prod-ref-lightbox-card">
             {zoom.video
-              ? <video className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay loop playsInline />
+              ? <video ref={zoomVideoRef} className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay loop playsInline />
               : <img src={zoom.url} alt={zoom.name} />}
-            <figcaption>{zoom.name} — click anywhere to close</figcaption>
+            <figcaption>
+              {zoom.name} — click anywhere to close
+              {zoom.video && zoom.rel && onVideoStillSaved && (
+                <>{" · "}<SaveVideoStillButton productionId={prodId} videoRel={zoom.rel} getTime={() => zoomVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setZoom(null); }} /></>
+              )}
+            </figcaption>
           </figure>
         </div>, document.body)}
     </figure>
@@ -631,7 +645,8 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   prev.selected === next.selected &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
-  (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0));
+  (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0) &&
+  (prev.onVideoStillSaved ? 1 : 0) === (next.onVideoStillSaved ? 1 : 0));
 
 export interface PromptReference {
   id: string;

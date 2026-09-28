@@ -50,6 +50,7 @@ import { getMediaDefault, rememberMediaDefault } from "./production/media-defaul
 import { getPromptTemplate } from "./production/prompt-templates.js";
 import { openSettings } from "./settings/open-settings.js";
 import { OpenInSuiteButton } from "./common/OpenInSuiteButton.js";
+import { SaveVideoStillButton } from "./common/SaveVideoStillButton.js";
 import { openImageSuite } from "../features/suite/suite-handoff.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./production/gen-queue.js";
 import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
@@ -2416,7 +2417,8 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* Modal                                                               */
 /* ------------------------------------------------------------------ */
 
-export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagicShot, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, videoEditUnavailable = false, hiddenTools, hidePalette = false, subjectLabel, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, videoBusyNodeIds = [], editVideoBusyNodeIds = [], editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {}, onSaveGenerationAsReference = async () => null, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
+export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagicShot, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, videoEditUnavailable = false, hiddenTools, hidePalette = false, subjectLabel, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, videoBusyNodeIds = [], editVideoBusyNodeIds = [], editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {},
+  onSaveGenerationAsReference = async () => null, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -2532,6 +2534,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  created reference, so dragging a generation output onto a prompt's
    *  reference socket can wire the new node in place. */
   onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null>;
+  /** A video lightbox's saved still comes back here (the workspace applies it). */
+  onVideoStillSaved?: (next: Production) => void;
   /** Update one edit node's prompt text. */
   onEditNodePrompt?: (nodeId: string, text: string) => void;
   /** Replace a sequence canvas's timeline segments (prompt/end edits). */
@@ -2615,6 +2619,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ name: string; artwork: string; kind?: "image" | "video"; rel?: string } | null>(null);
+  /** The lightbox video's paused position — the still is extracted at exactly it. */
+  const lightboxVideoRef = useRef<HTMLVideoElement | null>(null);
   /** Right-click menu for the enlarged generation in the lightbox. */
   const lightboxMenu = useGenerationMenu();
   /** In-betweener timeline window (stacked above the graph). */
@@ -3719,6 +3725,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             artwork: t.ref?.artwork ?? "",
             media: t.ref?.media,
             mediaUrl: t.ref?.media === "video" && t.ref?.mediaPath ? graphMediaUrl(prod.meta.id, t.ref.mediaPath) : undefined,
+            mediaPath: t.ref?.mediaPath,
             missing: !t.ref,
             tagged: true,
             refId: t.ref?.id,
@@ -3742,7 +3749,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           type: "ref" as const,
           position: ORIGIN,
           style: refSizeStyle(initialLayout, nodeId, collapsed),
-          data: { name: r.name, artwork: r.artwork, media: r.media, mediaUrl: r.media === "video" && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, tagged: false, sourced: sourcedRefIds.has(r.id), refId: r.id, plainName: locked, collapsed, onToggleCollapse: stable.onToggleRefCollapsed, onRename: locked ? undefined : stable.onRenameRef, onZoom: stable.onZoom },
+          data: { name: r.name, artwork: r.artwork, media: r.media, mediaUrl: r.media === "video" && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, mediaPath: r.mediaPath, tagged: false, sourced: sourcedRefIds.has(r.id), refId: r.id, plainName: locked, collapsed, onToggleCollapse: stable.onToggleRefCollapsed, onRename: locked ? undefined : stable.onRenameRef, onZoom: stable.onZoom },
           deletable: !locked,
         });
       }),
@@ -3930,7 +3937,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       else if (d.type === "editvideoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
       else if (d.type === "style") equal = (a.value as string) === (b.value as string);
       else if (d.type === "brand") equal = (a.include as boolean) === (b.include as boolean);
-      else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.sourced as boolean) === (b.sourced as boolean) && (a.missing as boolean) === (b.missing as boolean) && (a.collapsed as boolean) === (b.collapsed as boolean);
+      else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.sourced as boolean) === (b.sourced as boolean) && (a.missing as boolean) === (b.missing as boolean) && (a.collapsed as boolean) === (b.collapsed as boolean) && (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined);
       else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
       else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
       else if (d.type === "editvideo") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean) && (a.piped as boolean) === (b.piped as boolean) && (a.sourceLabel as string | null) === (b.sourceLabel as string | null);
@@ -5128,11 +5135,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             >
               <figure className="prod-ref-lightbox-card">
                 {lightbox.kind === "video" ? (
-                  <video className="prod-ref-lightbox-video" src={lightbox.artwork} controls autoPlay playsInline />
+                  <video ref={lightboxVideoRef} className="prod-ref-lightbox-video" src={lightbox.artwork} controls autoPlay playsInline />
                 ) : (
                   <img src={lightbox.artwork} alt={lightbox.name} />
                 )}
-                <figcaption>{lightbox.name} — click anywhere to close{lightbox.rel ? " — right-click for options" : ""}</figcaption>
+                <figcaption>
+                  {lightbox.name} — click anywhere to close{lightbox.rel ? " — right-click for options" : ""}
+                  {lightbox.kind === "video" && lightbox.rel && onVideoStillSaved && (
+                    <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={lightbox.rel} getTime={() => lightboxVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setLightbox(null); }} /></>
+                  )}
+                </figcaption>
               </figure>
             </div>
           )}

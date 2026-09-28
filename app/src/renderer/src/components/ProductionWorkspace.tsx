@@ -411,6 +411,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     promoteHistory: (id: string, framePath: string) => void;
     deleteGeneration: (id: string, rel: string) => void;
     saveAsReference: (id: string, rel: string) => void;
+    videoStillSaved: (next: Production) => void;
     reorderDragStart: (id: string, e: React.DragEvent) => void;
     reorderDrop: (id: string, e: React.DragEvent) => void;
     reorderDragOver: (id: string) => void;
@@ -436,6 +437,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     promoteHistory: (id, framePath) => void promoteHistory(id, framePath),
     deleteGeneration: (id, rel) => deleteGeneration(id, rel),
     saveAsReference: (id, rel) => saveAsReference(id, rel),
+    videoStillSaved: (next) => { applySnapshot(next); void refreshList(); },
     reorderDragStart: (id, e) => {
       boardDragRef.current = id;
       setBoardDragId(id);
@@ -496,6 +498,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onPromoteHistory: (id: string, framePath: string) => boardHandlerRef.current.promoteHistory(id, framePath),
     onDeleteGeneration: (id: string, rel: string) => boardHandlerRef.current.deleteGeneration(id, rel),
     onSaveAsReference: (id: string, rel: string) => boardHandlerRef.current.saveAsReference(id, rel),
+    onVideoStillSaved: (next: Production) => boardHandlerRef.current.videoStillSaved(next),
     onReorderDragStart: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDragStart(id, e),
     onReorderDrop: (id: string, e: React.DragEvent) => boardHandlerRef.current.reorderDrop(id, e),
     onReorderDragOver: (id: string) => boardHandlerRef.current.reorderDragOver(id),
@@ -3757,6 +3760,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               onAddFiles={addMoodboardFiles}
               onRename={(id, name) => void updateRef(id, name)}
               onAttach={(id) => void attachRefArtwork(id)}
+              onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
             />
           </>
         ) : showSuite ? (
@@ -4093,6 +4097,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
                 onRescan={rescanRefFolder}
+                onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
             </DesignSection>
 
@@ -4307,6 +4312,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onPromoteHistory={boardActions.onPromoteHistory}
                     onDeleteGeneration={boardActions.onDeleteGeneration}
                     onSaveAsReference={boardActions.onSaveAsReference}
+                    onVideoStillSaved={boardActions.onVideoStillSaved}
                     draggable
                     isDragging={boardDragId === shot.id}
                     isReorderTarget={boardDropTarget === shot.id}
@@ -4449,6 +4455,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
                   onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
+                  onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
@@ -4496,6 +4503,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onPasteFiles={(files) => addPastedReferences(seq.shotIds[0] ?? seq.id, files)}
                   onRenameRef={(refId, name) => { void updateRef(refId, name); }}
                   onSaveGenerationAsReference={(rel) => saveSequenceGenerationAsReference(seqCanvasId, rel)}
+                  onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onDeleteGeneration={(rel) => deleteSequenceTake(seqCanvasId, rel)}
                   onDetach={detached ? undefined : detachSequence}
                 />

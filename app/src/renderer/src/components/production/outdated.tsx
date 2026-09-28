@@ -8,10 +8,11 @@
  * full-res in an overlay, and every panel can be Restored (back into the active
  * storyboard with a fresh number) or Deleted.
  */
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
 import { refThumbUrl } from "./thumb-url.js";
+import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 
 interface Props {
   prod: Production;
@@ -32,13 +33,13 @@ function thumbUrl(prod: Production, shot: ProductionShot): string | null {
 }
 
 /** Full-resolution media for the overlay: the frame, else the clip. */
-function fullMedia(prod: Production, shot: ProductionShot): { url: string; kind: "image" | "video" } | null {
+function fullMedia(prod: Production, shot: ProductionShot): { url: string; kind: "image" | "video"; rel: string } | null {
   const rel = shot.artwork ?? shot.videoPath;
   if (!rel) return null;
   const url = rel.startsWith("data:") || rel.startsWith("cascade-media://")
     ? rel
     : cascadeMedia(prod.meta.id, rel);
-  return { url, kind: shot.artwork ? "image" : "video" };
+  return { url, kind: shot.artwork ? "image" : "video", rel };
 }
 
 const OutdatedCard = memo(function OutdatedCard({
@@ -50,7 +51,7 @@ const OutdatedCard = memo(function OutdatedCard({
   prod: Production;
   shot: ProductionShot;
   onMutate: Props["onMutate"];
-  onZoom: (media: { url: string; kind: "image" | "video"; label: string }) => void;
+  onZoom: (media: { url: string; kind: "image" | "video"; rel: string; label: string }) => void;
 }) {
   const src = thumbUrl(prod, shot);
   return (
@@ -93,7 +94,9 @@ const OutdatedCard = memo(function OutdatedCard({
 
 export function OutdatedSection({ prod, onMutate }: Props) {
   const shots = prod.outdatedShots ?? [];
-  const [zoom, setZoom] = useState<{ url: string; kind: "image" | "video"; label: string } | null>(null);
+  const [zoom, setZoom] = useState<{ url: string; kind: "image" | "video"; rel: string; label: string } | null>(null);
+  // The zoomed video's paused position — the still is extracted at exactly it.
+  const zoomVideoRef = useRef<HTMLVideoElement | null>(null);
   if (!shots.length) return null;
   return (
     <section className="prod-outdated">
@@ -113,9 +116,14 @@ export function OutdatedSection({ prod, onMutate }: Props) {
         <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
           <figure className="prod-ref-lightbox-card">
             {zoom.kind === "video"
-              ? <video className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay playsInline />
+              ? <video ref={zoomVideoRef} className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay playsInline />
               : <img src={zoom.url} alt={zoom.label} />}
-            <figcaption>{zoom.label} — click anywhere to close</figcaption>
+            <figcaption>
+              {zoom.label} — click anywhere to close
+              {zoom.kind === "video" && (
+                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={zoom.rel} getTime={() => zoomVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onMutate(Promise.resolve(next)); setZoom(null); }} /></>
+              )}
+            </figcaption>
           </figure>
         </div>
       )}

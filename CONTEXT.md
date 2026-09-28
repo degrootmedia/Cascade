@@ -506,7 +506,7 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   output is piped, that output replaces the encompassed frames in
   the animatic and the Step 5 export; deleting the sequence preserves its clip as
   a "Shot Sequences" reference first. See the Shot sequences module row.
-- **Animatic** — Step 4 playback: timing, voiceover, music, per-shot video clips.
+- **Animatic** — Step 4 playback: timing, voiceover, music, per-shot video clips. A clip block can carry a `videoOffsetSec` slip offset (right-drag the block): the timeline window stays put while the source frame it opens on shifts — honoured by the preview, the export render, the EDL source window, and the AE in-point alike. The block also shows an end-of-video marker (source remainder past the slip) that the trim edge snaps to.
 - **3D model** — a Step 2 design-page asset generated via 3D AI Studio's Tencent
   Hunyuan Pro (text-to-3D, single-image-to-3D, or multi-view image-to-3D, GLB,
   optional PBR). GLBs always land in the production's `modelsDir` (`models/`),

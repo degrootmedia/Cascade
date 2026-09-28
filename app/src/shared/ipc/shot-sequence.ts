@@ -38,6 +38,9 @@ export interface ShotSequence {
   accent?: string;
   /** Animatic window in seconds; absent = the members' durations summed. */
   durationSec?: number;
+  /** Slip offset into the output clip in seconds (mirrors the shot's
+   *  `videoOffsetSec` — the window stays put while the source shifts). */
+  videoOffsetSec?: number;
   createdAt?: string;
   /** The sequence canvas's graph state, in the SAME shape a shot uses — the
    *  node graph is not a special canvas, it is simply hosted here (`id` = the
@@ -325,6 +328,8 @@ export interface SequenceTimelineItem {
   /** The output clip (video outputs only). */
   videoPath?: string;
   muted?: boolean;
+  /** Slip offset into the clip in seconds (absent = 0). */
+  videoOffsetSec?: number;
   /** Set for `kind: "sequence"`. */
   sequenceId?: string;
   /** Member shot ids (the shot itself for `kind: "shot"`). */
@@ -340,6 +345,17 @@ export interface SequenceShotView {
   artwork?: string;
   videoPath?: string;
   muted?: boolean;
+  videoOffsetSec?: number;
+}
+
+/**
+ * Repair a persisted slip offset: a finite, non-negative source position, or
+ * undefined when absent/unusable (absent = play from the top). Pure so the
+ * projection, the read repair, and the renderer's drag clamp share it.
+ */
+export function sanitizeVideoOffset(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.round(raw * 10) / 10;
 }
 
 export function sequenceTimelineId(sequenceId: string): string {
@@ -407,6 +423,7 @@ export function applyShotSequences(
       artwork: media ? (media.kind === "image" ? media.rel : members[0].artwork) : undefined,
       videoPath: media?.kind === "video" ? media.rel : undefined,
       muted: seq.muted,
+      videoOffsetSec: sanitizeVideoOffset(seq.videoOffsetSec),
       sequenceId: seq.id,
       shotIds: members.map((s) => s.id),
     });
@@ -428,6 +445,7 @@ export function applyShotSequences(
       artwork: s.artwork,
       videoPath: s.videoPath,
       muted: s.muted,
+      videoOffsetSec: sanitizeVideoOffset(s.videoOffsetSec),
       shotIds: [s.id],
     });
   });
@@ -469,6 +487,8 @@ export function normalizeShotSequences(
     if (e.enabled !== undefined) seq.enabled = e.enabled !== false;
     if (e.muted !== undefined) seq.muted = !!e.muted;
     if (typeof e.durationSec === "number" && Number.isFinite(e.durationSec) && e.durationSec > 0) seq.durationSec = e.durationSec;
+    const offset = sanitizeVideoOffset(e.videoOffsetSec);
+    if (offset != null) seq.videoOffsetSec = offset;
     if (typeof e.createdAt === "string") seq.createdAt = e.createdAt;
     // The graph state (the sequence canvas). A stored one is kept as-is
     // (main-owned generation history must survive); the legacy flat model

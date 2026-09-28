@@ -3204,6 +3204,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     saveSequenceField(sequenceId, { durationSec: Math.max(0.5, Math.round(durationSec * 10) / 10) });
   }
 
+  /** Step 4: slip a shot block's clip (right-drag) — the window stays put
+   *  while the source frame it opens on shifts. Zero clears back to the top
+   *  (stored as absent, like other additive fields). */
+  function updateVideoOffsets(updates: { shotId: string; videoOffsetSec: number }[]) {
+    if (!prod) return;
+    const byId = new Map(updates.map((u) => [u.shotId, u.videoOffsetSec]));
+    saveField({
+      scenes: prod.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => {
+          if (!byId.has(s.id)) return s;
+          const rounded = Math.round((byId.get(s.id) ?? 0) * 10) / 10;
+          return { ...s, videoOffsetSec: rounded > 0 ? rounded : undefined };
+        }),
+      })),
+    });
+  }
+
+  /** Step 4: slip a shot sequence's clip (same gesture on its block). */
+  function updateSequenceVideoOffset(sequenceId: string, videoOffsetSec: number) {
+    const rounded = Math.round(videoOffsetSec * 10) / 10;
+    saveSequenceField(sequenceId, { videoOffsetSec: rounded > 0 ? rounded : undefined });
+  }
+
   /** Step 4: mute/unmute a shot sequence's clip in the preview. */
   function toggleSequenceMute(sequenceId: string) {
     const current = prodRef.current;
@@ -4672,6 +4696,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     voiceoverVolume={prod.voiceoverVolume ?? 1}
                     onUpdateDurations={(updates) => updateDurations(updates)}
                     onUpdateSequenceDuration={updateSequenceDuration}
+                    onUpdateVideoOffsets={(updates) => updateVideoOffsets(updates)}
+                    onUpdateSequenceVideoOffset={updateSequenceVideoOffset}
                     onFitToVo={() => fitShotsToTotal(voDuration ?? totalRuntime)}
                     onUpdateTotal={(sec) => fitShotsToTotal(sec)}
                     onRemoveVideo={(shotId) => void removeShotVideo(shotId)}

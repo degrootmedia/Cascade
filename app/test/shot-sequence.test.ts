@@ -24,6 +24,7 @@ import {
   sequenceAccentHex,
   sequenceBarSpans,
   sequenceGraphShot,
+  sanitizeVideoOffset,
   sequenceOutputMedia,
   sequenceOverlapReason,
   sequenceSelectedTake,
@@ -413,5 +414,36 @@ describe("sequenceBarSpans", () => {
   it("ignores degenerate rects", () => {
     expect(sequenceBarSpans([{ id: "a", left: 10, top: 10, right: 10, bottom: 50 }])).toEqual([]);
     expect(sequenceBarSpans([])).toEqual([]);
+  });
+});
+
+describe("slip offset (Step 4 right-drag)", () => {
+  it("sanitizes offsets to the 0.1s grid, dropping absent/unusable ones", () => {
+    expect(sanitizeVideoOffset(undefined)).toBeUndefined();
+    expect(sanitizeVideoOffset(0)).toBeUndefined();
+    expect(sanitizeVideoOffset(-1)).toBeUndefined();
+    expect(sanitizeVideoOffset(Number.NaN)).toBeUndefined();
+    expect(sanitizeVideoOffset(1.54)).toBe(1.5);
+  });
+
+  it("projects a shot's slip offset onto its timeline item", () => {
+    const out = applyShotSequences([shot("a", "0100", { durationSec: 2, videoOffsetSec: 1.5 })], []);
+    expect(out[0].videoOffsetSec).toBe(1.5);
+    const plain = applyShotSequences([shot("a", "0100", { durationSec: 2 })], []);
+    expect(plain[0].videoOffsetSec).toBeUndefined();
+  });
+
+  it("keeps a repaired sequence slip offset through read repair", () => {
+    const live = new Set(["a"]);
+    const out = normalizeShotSequences(
+      [{ id: "s1", name: "Sequence 01", shotIds: ["a"], videoOffsetSec: 2.34 }],
+      live
+    );
+    expect(out[0].videoOffsetSec).toBe(2.3);
+    const dropped = normalizeShotSequences(
+      [{ id: "s1", name: "Sequence 01", shotIds: ["a"], videoOffsetSec: -2 }],
+      live
+    );
+    expect(dropped[0].videoOffsetSec).toBeUndefined();
   });
 });

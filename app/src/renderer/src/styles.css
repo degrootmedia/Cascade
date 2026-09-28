@@ -2127,6 +2127,41 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   z-index: 3;
 }
 .prod-animatic-block-handle:hover { background: var(--accent); opacity: 0.5; }
+/* End-of-video marker: a dashed white line at the clip's true length inside
+   its timeline block. Dashed (not the playhead's solid accent) so the two
+   never read as the same thing; pointer-events none so seeking still works
+   through it. When the block is shorter than the video the marker sits past
+   the clipped edge and appears as the block is extended. */
+.prod-animatic-video-end {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.95) 0 5px, transparent 5px 9px);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+/* Slipped-clip badge: bottom-right offset readout on blocks playing mid-source
+   (Step 4 slip-edit). Click resets to the top; the readout mirrors the live
+   gesture while right-dragging. */
+.prod-animatic-slip-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 6px;
+  z-index: 3;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 3px;
+  padding: 1px 4px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.prod-animatic-slip-badge:hover { border-color: var(--accent); }
 /* Per-clip audio mute. Only shown on clips that have a video (their own
    embedded track); VO and music keep their global volume sliders. */
 .prod-animatic-block-mute {

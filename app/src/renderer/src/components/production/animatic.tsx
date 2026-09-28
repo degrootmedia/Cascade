@@ -4,11 +4,29 @@ import { applyShotSequences, type Production, type ProductionShot, type Sequence
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 import { mediaRev } from "./media-rev.js";
+import { snapDurationToVideoEnd } from "./animatic-snap.js";
+import {
+  clampSlipOffsetSec,
+  effectiveVideoEndSec,
+  slipOffsetFromDx,
+  videoTimeForPlayback,
+} from "./animatic-slip.js";
 
 /** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
 /** Animatic timeline: max wheel-zoom multiplier over the fit-to-width scale. */
 export const ANIMATIC_MAX_ZOOM = 24;
+
+/** True video lengths probed from `<video preload="metadata">`, keyed by
+ *  `${prodId}:${videoPath}`. Module-level so a duration probed once survives
+ *  re-renders and timeline rebuilds; bounded like the thumbnail cache. Unknown
+ *  or failed probes simply stay absent (no marker, no snap). */
+const videoDurationCache = new Map<string, number>();
+function cacheVideoDuration(key: string, sec: number) {
+  if (!Number.isFinite(sec) || sec <= 0) return;
+  if (videoDurationCache.size > 200) videoDurationCache.clear();
+  videoDurationCache.set(key, sec);
+}
 
 export const STEPS: { n: 1 | 2 | 3 | 4 | 5; title: string; desc: string }[] = [
   { n: 1, title: "Script", desc: "PDF / DOCX / Google Doc → two-column shot breakdown" },
@@ -26,7 +44,7 @@ export interface LogLine {
 }
 
 const animaticThumbCache = new Map<string, string>();
-function AnimaticThumb({ prodId, shotId, artwork, explicitRel }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string }) {
+function AnimaticThumb({ prodId, shotId, artwork, explicitRel, title }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string; /** Hover text override (timeline blocks pass the block's status line so the full-bleed artwork doesn't bury it). */ title?: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     // A sequence's held still renders directly (see the return below) — no
@@ -51,9 +69,9 @@ function AnimaticThumb({ prodId, shotId, artwork, explicitRel }: { prodId: strin
     }
     return () => { live = false; };
   }, [prodId, shotId, artwork, explicitRel]);
-  if (explicitRel) return <img className="prod-timeline-thumb" src={`cascade-media://${prodId}/${encodeURIComponent(explicitRel)}`} alt="Held still" title="The sequence output's held still" />;
+  if (explicitRel) return <img className="prod-timeline-thumb" src={`cascade-media://${prodId}/${encodeURIComponent(explicitRel)}`} alt="Held still" title={title ?? "The sequence output's held still"} />;
   if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboard" />;
-  return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title="Primary frame for this shot" />;
+  return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title={title ?? "Primary frame for this shot"} />;
 }
 
 /** Flatten scenes to a single ordered shot list with a global timeline cursor. */
@@ -230,7 +248,8 @@ export function VolumeSlider({ value, onCommit, audioRef, title }: {
 
 export function AnimaticTimeline({
   prodId, scenes, sequences, references, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
-  onUpdateDurations, onUpdateSequenceDuration, onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onToggleSequenceMute, onSaveAsReference,
+  onUpdateDurations, onUpdateSequenceDuration, onUpdateVideoOffsets, onUpdateSequenceVideoOffset,
+  onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onToggleSequenceMute, onSaveAsReference,
 }: {
   prodId: string;
   scenes: Production["scenes"];
@@ -247,6 +266,11 @@ export function AnimaticTimeline({
   onUpdateDurations: (updates: { shotId: string; durationSec: number }[]) => void;
   /** Set a shot sequence's own timeline window (roll edit on its block). */
   onUpdateSequenceDuration?: (sequenceId: string, durationSec: number) => void;
+  /** Slip a shot block's clip (right-drag): the window stays put while the
+   *  source frame it opens on shifts. Committed once per gesture, on release. */
+  onUpdateVideoOffsets: (updates: { shotId: string; videoOffsetSec: number }[]) => void;
+  /** Slip a shot sequence's clip (same gesture on its block). */
+  onUpdateSequenceVideoOffset?: (sequenceId: string, videoOffsetSec: number) => void;
   onFitToVo: () => void;
   onUpdateTotal: (sec: number) => void;
   /** Remove a shot's generated video (the preview falls back to the still). */
@@ -298,6 +322,60 @@ export function AnimaticTimeline({
   const poolLruRef = useRef<Map<string, number>>(new Map());
   const poolTickRef = useRef(0);
   const [mountedVideos, setMountedVideos] = useState<string[]>([]);
+
+  // ---- Video-end markers (state) --------------------------------------
+  // True clip lengths for the end-of-video markers, keyed by videoPath (the
+  // same file can back more than one block). Probed with metadata-only
+  // <video> elements — no playback, no main-process changes — so a missing
+  // or undecodable file just means no marker for that block.
+  const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
+  const videoDurationsRef = useRef<Record<string, number>>({});
+  useEffect(() => { videoDurationsRef.current = videoDurations; }, [videoDurations]);
+  // Stable probe list: unique videoPaths currently on the strip.
+  const videoProbeKey = useMemo(() => {
+    const rels = new Set<string>();
+    for (const s of shots) if (s.videoPath) rels.add(s.videoPath);
+    return [...rels].sort().join("|");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shots.map((s) => s.videoPath ?? "").join("|")]);
+  useEffect(() => {
+    if (!videoProbeKey) return;
+    const rels = videoProbeKey.split("|").filter(Boolean);
+    let cancelled = false;
+    const pending: HTMLVideoElement[] = [];
+    for (const rel of rels) {
+      const cacheKey = `${prodId}:${rel}`;
+      if (videoDurationCache.has(cacheKey) || videoDurationsRef.current[rel] != null) continue;
+      const v = document.createElement("video");
+      v.preload = "metadata";
+      v.muted = true;
+      (v as unknown as { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
+      pending.push(v);
+      v.onloadedmetadata = () => {
+        const sec = v.duration;
+        try { v.removeAttribute("src"); v.load(); } catch {}
+        if (cancelled) return;
+        if (!Number.isFinite(sec) || sec <= 0) return;
+        cacheVideoDuration(cacheKey, sec);
+        setVideoDurations((prev) => (prev[rel] != null ? prev : { ...prev, [rel]: sec }));
+      };
+      v.onerror = () => {
+        try { v.removeAttribute("src"); v.load(); } catch {}
+      };
+      v.src = `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
+    }
+    return () => {
+      cancelled = true;
+      for (const v of pending) {
+        v.onloadedmetadata = null;
+        v.onerror = null;
+        try { v.removeAttribute("src"); v.load(); } catch {}
+      }
+    };
+    // prodId + the flattened probe list drive re-probes; shots themselves
+    // change identity every render (projection rebuild), so they stay out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prodId, videoProbeKey]);
 
   /** Parse a user-entered total: "1:30", "0:42", "90", "1m30s", "45s". */
   function parseTotalInput(s: string): number | null {
@@ -542,6 +620,34 @@ export function AnimaticTimeline({
   /** Playhead's local time within the shot it sits in. */
   const offsetInShot = activeIdx >= 0 ? Math.max(0, playhead - (starts[activeIdx] ?? 0)) : 0;
 
+  // ---- Slip-edit (transient gesture state) ------------------------------
+  // A right-drag on a video block shifts the source window without moving the
+  // window itself. `slip` overlays the persisted offset mid-gesture (marker,
+  // badge, and preview all read through it) and commits once on release, so
+  // a drag costs one production save instead of one per pointermove.
+  const [slip, setSlip] = useState<{ itemId: string; offset: number } | null>(null);
+  const slipRef = useRef<{
+    itemId: string;
+    idx: number;
+    startX: number;
+    startOffset: number;
+    pxPerSec: number;
+    videoRel: string;
+    windowSec: number;
+    offset: number;
+  } | null>(null);
+  /** Persisted slip offset for an item, with the live gesture overlaid. */
+  const effectiveOffsetOf = useCallback((item: SequenceTimelineItem) => (
+    slip && slip.itemId === item.id ? slip.offset : item.videoOffsetSec ?? 0
+  ), [slip]);
+  /** Source timestamp for the playhead inside the active block's window. */
+  const activeItem = activeIdx >= 0 ? shots[activeIdx] : null;
+  const activeOffsetSec = activeItem ? effectiveOffsetOf(activeItem) : 0;
+  const activeVideoLenSec = activeItem?.videoPath
+    ? (videoDurations[activeItem.videoPath] ?? videoDurationCache.get(`${prodId}:${activeItem.videoPath}`))
+    : undefined;
+  const activeVideoTime = videoTimeForPlayback(activeOffsetSec, offsetInShot, activeVideoLenSec);
+
   playheadRef.current = playhead;
   ppsRef.current = pps;
   zoomRef.current = zoom;
@@ -645,12 +751,13 @@ export function AnimaticTimeline({
     if (!v) return;
     try {
       if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0)
-        v.currentTime = Math.min(offsetInShot, v.duration);
+        v.currentTime = Math.min(activeVideoTime, v.duration);
     } catch {}
     if (playing) void v.play().catch(() => {});
     else { try { v.pause(); } catch {} }
-    // offsetInShot intentionally omitted: mid-playback offsets advance every
-    // frame while the video free-runs against the wall clock between cuts.
+    // activeVideoTime intentionally omitted: mid-playback offsets advance
+    // every frame while the video free-runs against the wall clock between
+    // cuts (it only re-pins here on cuts and play/pause toggles).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, activeIdx, activeId]);
 
@@ -661,9 +768,9 @@ export function AnimaticTimeline({
     if (!v) return;
     try {
       if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0)
-        v.currentTime = Math.min(Math.max(0, offsetInShot), v.duration);
+        v.currentTime = Math.min(Math.max(0, activeVideoTime), v.duration);
     } catch {}
-  }, [playhead, playing, activeIdx, activeId]);
+  }, [playhead, playing, activeIdx, activeId, activeVideoTime]);
 
   // ---- Waveform ----------------------------------------------------------
   // The canvas covers the visible window only: time t maps to x = t*pps −
@@ -800,7 +907,7 @@ export function AnimaticTimeline({
     nextShot: { id: string; dur: number } | null;
   } | null>(null);
   const onHandleDown = (e: React.PointerEvent, shotId: string) => {
-    if (pps <= 0) return;
+    if (e.button !== 0 || pps <= 0) return;
     const idx = shots.findIndex((s) => s.id === shotId);
     if (idx < 0) return;
     dragRef.current = {
@@ -822,6 +929,16 @@ export function AnimaticTimeline({
     if (!d) return;
     const dx = e.clientX - d.startX;
     let next = Math.max(0.5, Math.min(20, d.startDur + dx / d.pxPerSec));
+    // Snap the dragged edge to the clip's own video end when close. The
+    // marker stays freely overshootable — this only eases landing on it.
+    // A slipped clip snaps to its remaining source (length minus offset).
+    const dragged = shots.find((q) => q.id === d.shotId);
+    const draggedRel = dragged?.videoPath;
+    const draggedVideoSec = draggedRel
+      ? (videoDurationsRef.current[draggedRel] ?? videoDurationCache.get(`${prodId}:${draggedRel}`))
+      : undefined;
+    const draggedEnd = effectiveVideoEndSec(draggedVideoSec, dragged?.videoOffsetSec);
+    if (draggedEnd != null) next = snapDurationToVideoEnd(next, draggedEnd, d.pxPerSec);
     const updates: { shotId: string; durationSec: number }[] = [{ shotId: d.shotId, durationSec: next }];
     if (d.nextShot) {
       // Keep the boundary after the next shot fixed: shot i+1 absorbs the delta.
@@ -847,6 +964,74 @@ export function AnimaticTimeline({
     if (!dragRef.current) return;
     (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     dragRef.current = null;
+  };
+
+  /** Slip a video block with the right mouse button: the block's window stays
+   *  put while the source frame it opens on shifts (content follows the
+   *  cursor — drag left to start further into the source). Commits once on
+   *  release; a no-op drag (offset unchanged) saves nothing. */
+  const onSlipDown = (e: React.PointerEvent, item: SequenceTimelineItem) => {
+    if (e.button !== 2 || !item.videoPath || pps <= 0) return;
+    if ((e.target as HTMLElement).closest(".prod-animatic-block-handle, .prod-animatic-block-mute, .prod-animatic-slip-badge")) return;
+    const idx = shots.findIndex((s) => s.id === item.id);
+    if (idx < 0) return;
+    slipRef.current = {
+      itemId: item.id,
+      idx,
+      startX: e.clientX,
+      startOffset: item.videoOffsetSec ?? 0,
+      pxPerSec: pps,
+      videoRel: item.videoPath,
+      windowSec: item.durationSec ?? 3,
+      offset: item.videoOffsetSec ?? 0,
+    };
+    setSlip({ itemId: item.id, offset: item.videoOffsetSec ?? 0 });
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    stop();
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const onSlipMove = (e: React.PointerEvent) => {
+    const sl = slipRef.current;
+    if (!sl || e.buttons === 0) return;
+    const raw = slipOffsetFromDx(sl.startOffset, e.clientX - sl.startX, sl.pxPerSec);
+    const len = videoDurationsRef.current[sl.videoRel] ?? videoDurationCache.get(`${prodId}:${sl.videoRel}`);
+    const offset = clampSlipOffsetSec(raw, len, sl.windowSec);
+    sl.offset = offset;
+    setSlip({ itemId: sl.itemId, offset });
+    // Live preview: pin the slipped clip to the frame under the playhead.
+    const start = starts[sl.idx] ?? 0;
+    const local = Math.max(0, Math.min(sl.windowSec, playhead - start));
+    const v = videoElsRef.current.get(sl.itemId);
+    if (v) {
+      try {
+        if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0)
+          v.currentTime = Math.min(videoTimeForPlayback(offset, local, len), v.duration);
+      } catch {}
+    }
+  };
+  const endSlip = (commit: boolean) => {
+    const sl = slipRef.current;
+    slipRef.current = null;
+    setSlip(null);
+    if (!sl || !commit) return;
+    const rounded = Math.round(sl.offset * 10) / 10;
+    if (rounded === Math.round(sl.startOffset * 10) / 10) return; // no-op drag
+    const item = shots.find((q) => q.id === sl.itemId);
+    if (item?.kind === "sequence" && item.sequenceId) {
+      onUpdateSequenceVideoOffset?.(item.sequenceId, rounded);
+    } else {
+      onUpdateVideoOffsets([{ shotId: sl.itemId, videoOffsetSec: rounded }]);
+    }
+  };
+  /** Reset a slipped block to play from the top (the slip badge). */
+  const onSlipReset = (e: React.MouseEvent, item: SequenceTimelineItem) => {
+    e.stopPropagation();
+    if (item.kind === "sequence" && item.sequenceId) {
+      onUpdateSequenceVideoOffset?.(item.sequenceId, 0);
+    } else {
+      onUpdateVideoOffsets([{ shotId: item.id, videoOffsetSec: 0 }]);
+    }
   };
 
   /** Drag the preview's bottom border to resize. */
@@ -889,6 +1074,9 @@ export function AnimaticTimeline({
   };
   const headDragRef = useRef<{ ref: React.RefObject<HTMLElement> } | null>(null);
   const onSeekDown = (ref: React.RefObject<HTMLElement>) => (e: React.PointerEvent) => {
+    // Left button only: right-drags on blocks slip the clip (onSlipDown) and
+    // must never move the playhead.
+    if (e.button !== 0) return;
     headDragRef.current = { ref };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     stop();
@@ -955,7 +1143,7 @@ export function AnimaticTimeline({
                 if (!isActive) return; // it will be aligned when promoted
                 const v = videoElsRef.current.get(vidId);
                 if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
-                try { v.currentTime = Math.min(offsetInShot, v.duration); } catch {}
+                try { v.currentTime = Math.min(activeVideoTime, v.duration); } catch {}
                 if (playing) void v.play().catch(() => {});
               }}
             />
@@ -1068,13 +1256,57 @@ export function AnimaticTimeline({
           >
             {shots.map((s, i) => {
               const dur = s.durationSec ?? 3;
+              // True clip length for the end-of-video marker (undefined until
+              // the metadata probe resolves; absent when there is no video).
+              // A slipped clip's marker sits at its remaining source length.
+              const videoSec = s.videoPath
+                ? (videoDurations[s.videoPath] ?? videoDurationCache.get(`${prodId}:${s.videoPath}`))
+                : undefined;
+              const effOffset = slip && slip.itemId === s.id ? slip.offset : s.videoOffsetSec ?? 0;
+              const remainSec = effectiveVideoEndSec(videoSec, effOffset);
+              const showVideoEnd = pps > 0 && remainSec != null;
+              // Only invite the slip drag when it can do something: an
+              // already-slipped clip can always slip back, an unprobed one
+              // gets the benefit of the doubt, and a measured source needs
+              // room past the window — otherwise say why the drag won't move.
+              const slipRoom = videoSec != null && Number.isFinite(videoSec) && videoSec > 0 ? videoSec - dur : null;
+              const canSlip = effOffset > 0 || slipRoom == null || slipRoom > 0.05;
+              const blockTitle = s.videoPath
+                ? `${s.number} · ${dur.toFixed(1)}s`
+                  + (showVideoEnd ? ` · video ends ${(remainSec as number).toFixed(1)}s` : "")
+                  + (effOffset > 0 ? ` · slipped +${effOffset.toFixed(1)}s` : "")
+                  + (canSlip ? " · right-drag to slip" : " · video fits the block — no room to slip")
+                : `${s.number} · ${dur.toFixed(1)}s`;
               return (
                 <div
                   key={s.id}
-                  className={"prod-animatic-block" + (i === activeIdx ? " active" : "")}
+                  className={"prod-animatic-block" + (i === activeIdx ? " active" : "") + (s.videoPath ? " has-video" : "") + (effOffset > 0 ? " slipped" : "")}
                   style={{ left: `${starts[i] * pps}px`, width: `${dur * pps}px` }}
-                  title={`${s.number} · ${dur.toFixed(1)}s`}
+                  title={blockTitle}
+                  onPointerDown={(e) => onSlipDown(e, s)}
+                  onPointerMove={onSlipMove}
+                  onPointerUp={() => endSlip(true)}
+                  onPointerCancel={() => endSlip(false)}
+                  onContextMenu={(e) => { if (s.videoPath) e.preventDefault(); }}
                 >
+                  {showVideoEnd && (
+                    <div
+                      className="prod-animatic-video-end"
+                      style={{ left: `${(remainSec as number) * pps}px` }}
+                      title={`Video ends at ${(remainSec as number).toFixed(1)}s — drag the clip edge to snap`}
+                    />
+                  )}
+                  {effOffset > 0 && (
+                    <button
+                      className="prod-animatic-slip-badge"
+                      title={`Slipped +${effOffset.toFixed(1)}s into the source — click to play from the top again`}
+                      aria-label={`Slipped ${effOffset.toFixed(1)} seconds into the source. Activate to reset.`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => onSlipReset(e, s)}
+                    >
+                      +{effOffset.toFixed(1)}s
+                    </button>
+                  )}
                   {s.artwork
                     ? (
                       <AnimaticThumb
@@ -1082,6 +1314,7 @@ export function AnimaticTimeline({
                         shotId={s.shotIds[0] ?? s.id}
                         artwork={s.artwork}
                         explicitRel={s.kind === "sequence" && !s.videoPath ? s.artwork : undefined}
+                        title={blockTitle}
                       />
                     )
                     : <div className="prod-animatic-block-slate">SLATE<br /><strong>{s.number}</strong></div>}

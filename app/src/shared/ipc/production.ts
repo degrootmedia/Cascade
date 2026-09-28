@@ -52,6 +52,10 @@ export interface ProductionShot {
   /** Step 4: mute the clip's own embedded audio in the animatic preview
    *  (speaker button on its timeline block). VO and music are unaffected. */
   muted?: boolean;
+  /** Step 4: slip offset into the clip in seconds — the timeline window
+   *  stays put while the source frame it opens on shifts (right-drag a
+   *  timeline block). Clamped to what the source length allows; absent = 0. */
+  videoOffsetSec?: number;
   /** Step 4: planned screen time in seconds (animatic). */
   durationSec?: number;
   /** Optional per-shot render-style override: the id of a ProductionStyle

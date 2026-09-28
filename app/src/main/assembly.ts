@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionAssembly, ProductionShot } from "../shared/ipc.js";
-import { applyShotSequences } from "../shared/ipc.js";
+import { applyShotSequences, sanitizeVideoOffset } from "../shared/ipc.js";
 import { assetPath, formatRuntime, originalForJpegRel, tweenSelectedClips } from "./pipeline.js";
 
 export type AssemblyEmit = (message: string, level?: "info" | "error" | "done") => void;
@@ -43,6 +43,9 @@ export interface AssemblyEvent {
   /** Cumulative timeline position (computed over included events only). */
   startSec: number;
   endSec: number;
+  /** Slip offset into a clip's source in seconds (Step 4 right-drag): the
+   *  event plays its window from `offsetSec`, not from the top. Absent = 0. */
+  offsetSec?: number;
   /** Actual clip length when probed (used for EDL source-out + render padding). */
   probedSec?: number;
   hasAudio?: boolean;
@@ -152,7 +155,8 @@ export function assemblyPlan(p: Production): AssemblyPlan {
       const stillRel = !clipRel && item.artwork ? (originalForJpegRel(p, item.artwork) ?? item.artwork) : undefined;
       if (clipRel) {
         const mediaRel = addMedia(clipRel, `clips/${number}${extOf(clipRel, ".mp4")}`);
-        events.push({ shotId: item.id, number, kind: "clip", srcRel: clipRel, mediaRel, durationSec: dur, muted: !!item.muted, startSec: t, endSec: t + dur });
+        const offsetSec = sanitizeVideoOffset(item.videoOffsetSec);
+        events.push({ shotId: item.id, number, kind: "clip", srcRel: clipRel, mediaRel, durationSec: dur, muted: !!item.muted, startSec: t, endSec: t + dur, ...(offsetSec != null ? { offsetSec } : {}) });
       } else if (stillRel) {
         const mediaRel = addMedia(stillRel, `shots/${number}${extOf(stillRel, ".png")}`);
         events.push({ shotId: item.id, number, kind: "still", srcRel: stillRel, mediaRel, durationSec: dur, muted: false, startSec: t, endSec: t + dur });
@@ -200,7 +204,8 @@ export function assemblyPlan(p: Production): AssemblyPlan {
       if (stillRel) addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
       if (clipRel) {
         const mediaRel = addMedia(clipRel, `clips/${shot.number}${extOf(clipRel, ".mp4")}`);
-        events.push({ shotId: shot.id, number: shot.number, kind: "clip", srcRel: clipRel, mediaRel, durationSec: dur, muted: !!shot.muted, startSec: t, endSec: t + dur });
+        const offsetSec = sanitizeVideoOffset(shot.videoOffsetSec);
+        events.push({ shotId: shot.id, number: shot.number, kind: "clip", srcRel: clipRel, mediaRel, durationSec: dur, muted: !!shot.muted, startSec: t, endSec: t + dur, ...(offsetSec != null ? { offsetSec } : {}) });
       } else if (stillRel) {
         const mediaRel = addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
         events.push({ shotId: shot.id, number: shot.number, kind: "still", srcRel: stillRel, mediaRel, durationSec: dur, muted: false, startSec: t, endSec: t + dur });
@@ -267,12 +272,17 @@ export function buildEdl(plan: AssemblyPlan, fps: number, title: string): string
       );
       continue;
     }
-    const srcFrames =
-      ev.kind === "clip" ? Math.round(Math.min(ev.probedSec ?? ev.durationSec, ev.durationSec) * fps) : 0;
+    // A slipped clip's source window opens at its offset, not at zero.
+    const srcInSec = ev.kind === "clip" && ev.offsetSec != null && ev.offsetSec > 0 ? ev.offsetSec : 0;
+    const srcAvailSec = ev.kind === "clip"
+      ? Math.max(0, Math.min(ev.probedSec != null ? ev.probedSec - srcInSec : ev.durationSec, ev.durationSec))
+      : 0;
+    const srcInFrames = Math.round(srcInSec * fps);
+    const srcFrames = ev.kind === "clip" ? srcInFrames + Math.round(srcAvailSec * fps) : 0;
     event(
       edlReelFor(ev.number),
       "V",
-      "00:00:00:00",
+      framesToTc(srcInFrames, fps),
       framesToTc(srcFrames, fps),
       framesToTc(ev.startSec * fps, fps),
       framesToTc(ev.endSec * fps, fps),
@@ -343,6 +353,7 @@ export function buildAeScript(plan: AssemblyPlan, cfg: AssemblyConfig, exportRoo
     lines.push(`lay${i}.name = ${aeStr(ev.number)};`);
     lines.push(`lay${i}.startTime = ${round3(ev.startSec)};`);
     lines.push(`lay${i}.outPoint = ${round3(ev.endSec)};`);
+    if (ev.kind === "clip" && ev.offsetSec != null && ev.offsetSec > 0) lines.push(`lay${i}.inPoint = ${round3(ev.offsetSec)};`);
     if (ev.kind === "clip" && ev.muted) lines.push(`lay${i}.audioEnabled = false;`);
     lines.push("");
   });
@@ -369,7 +380,13 @@ export function buildManifest(
   opts: { title: string; builtAt: string; edlName: string; jsxName: string; renderName?: string }
 ): string {
   const rows = plan.events
-    .map((ev) => `| ${ev.number} | ${ev.kind} | ${ev.mediaRel ?? "-"} | ${ev.durationSec.toFixed(1)}s | ${ev.muted ? "muted" : ""} |`)
+    .map((ev) => {
+      const flags = [
+        ev.muted ? "muted" : "",
+        ev.kind === "clip" && ev.offsetSec != null && ev.offsetSec > 0 ? `slip +${ev.offsetSec.toFixed(1)}s` : "",
+      ].filter(Boolean).join(", ");
+      return `| ${ev.number} | ${ev.kind} | ${ev.mediaRel ?? "-"} | ${ev.durationSec.toFixed(1)}s | ${flags} |`;
+    })
     .join("\n");
   const lines: string[] = [
     `# ${opts.title || "Assembly"} — Manifest`,
@@ -404,19 +421,25 @@ export function buildManifest(
  *  and clips without embedded audio) so Pass B can concat with `-c copy`.
  *  Blank slots are generated directly from a black lavfi `color` source. */
 export function buildNormalizeArgs(
-  ev: { kind: "still" | "clip" | "blank"; durationSec: number; muted: boolean; probedSec?: number; hasAudio?: boolean },
+  ev: { kind: "still" | "clip" | "blank"; durationSec: number; muted: boolean; probedSec?: number; hasAudio?: boolean; offsetSec?: number },
   cfg: AssemblyConfig,
   srcAbs: string,
   outAbs: string
 ): string[] {
   const { fps, width, height } = cfg;
   const dur = Math.max(0.1, ev.durationSec);
+  // Slip offset into a clip's source (Step 4 right-drag): seek before decode
+  // so the window opens on the slipped frame. Anything else stays identical.
+  const offset = ev.kind === "clip" && ev.offsetSec != null && Number.isFinite(ev.offsetSec) && ev.offsetSec > 0
+    ? ev.offsetSec
+    : 0;
   let video: string;
   if (ev.kind === "blank") {
     video = `fps=${fps},format=yuv420p`;
   } else {
     video = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`;
-    const padSec = ev.kind === "clip" && ev.probedSec != null && ev.probedSec < dur ? dur - ev.probedSec : 0;
+    const remaining = ev.kind === "clip" && ev.probedSec != null ? ev.probedSec - offset : dur;
+    const padSec = remaining < dur ? dur - Math.max(0, remaining) : 0;
     if (padSec > 0) video = `${video},tpad=stop_mode=clone:stop_duration=${padSec.toFixed(3)}`;
   }
   const silent = ev.kind !== "clip" || ev.muted || ev.hasAudio === false;
@@ -426,6 +449,7 @@ export function buildNormalizeArgs(
   } else if (ev.kind === "still") {
     args.push("-loop", "1", "-framerate", String(fps), "-i", srcAbs);
   } else {
+    if (offset > 0) args.push("-ss", offset.toFixed(3));
     args.push("-i", srcAbs);
   }
   if (silent) {

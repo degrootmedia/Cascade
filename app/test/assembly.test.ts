@@ -276,6 +276,61 @@ describe("buildManifest", () => {
   });
 });
 
+// ---- slip offset (Step 4 right-drag) -----------------------------------------
+
+describe("slip offset", () => {
+  function slippedProduction(): Production {
+    return makeProduction({
+      scenes: [
+        makeScene([
+          makeShot({ number: "0100", artwork: "boards/0100/shot-0100-abc.jpg", videoPath: "videos/shot-0200-x.mp4", durationSec: 4, videoOffsetSec: 1.5 }),
+        ]),
+      ],
+    });
+  }
+
+  it("carries the shot's slip offset onto the clip event, and omits it otherwise", () => {
+    const plan = assemblyPlan(slippedProduction());
+    expect(plan.events[0]).toMatchObject({ kind: "clip", offsetSec: 1.5 });
+    const plain = assemblyPlan(sampleProduction());
+    expect(plain.events[1].offsetSec).toBeUndefined();
+  });
+
+  it("seeks the render input past the slipped frames", () => {
+    const cfg = { fps: 24, width: 1920, height: 1080 };
+    const args = buildNormalizeArgs({ kind: "clip", durationSec: 4, muted: true, offsetSec: 1.5 }, cfg, "C:/src/b.mp4", "C:/out/0002.mp4");
+    expect(args.slice(0, args.indexOf("-i"))).toEqual(["-y", "-ss", "1.500"]);
+  });
+
+  it("pads against the source remaining past the offset", () => {
+    const cfg = { fps: 24, width: 1920, height: 1080 };
+    // 5s source slipped 1.5s into a 4s window: 3.5s remain → 0.5s of padding.
+    const args = buildNormalizeArgs({ kind: "clip", durationSec: 4, muted: true, probedSec: 5, offsetSec: 1.5 }, cfg, "C:/src/b.mp4", "C:/out/0002.mp4");
+    const vf = args[args.indexOf("-vf") + 1];
+    expect(vf).toContain("tpad=stop_mode=clone:stop_duration=0.500");
+  });
+
+  it("opens the EDL source window at the offset", () => {
+    const plan = assemblyPlan(slippedProduction());
+    plan.events[0].probedSec = 10;
+    const edl = buildEdl(plan, 24, "Test Production");
+    // srcIn 1.5s (36 frames) → srcOut 5.5s (132 frames) at 24fps.
+    expect(edl).toContain("001  SHOT0100  V     C        00:00:01:12 00:00:05:12 00:00:00:00 00:00:04:00");
+  });
+
+  it("sets the AE layer in-point to the offset", () => {
+    const plan = assemblyPlan(slippedProduction());
+    const script = buildAeScript(plan, { fps: 24, width: 1920, height: 1080 }, "C:/prod/out/assembly");
+    expect(script).toContain("lay0.inPoint = 1.500;");
+  });
+
+  it("notes the slip in the manifest", () => {
+    const plan = assemblyPlan(slippedProduction());
+    const md = buildManifest(plan, { fps: 24, width: 1920, height: 1080 }, { title: "T", builtAt: "2026-01-01T00:00:00Z", edlName: "Assembly.edl", jsxName: "Assembly.jsx" });
+    expect(md).toContain("| 0100 | clip | clips/0100.mp4 | 4.0s | slip +1.5s |");
+  });
+});
+
 // ---- ffmpeg argv builders --------------------------------------------------
 
 describe("buildNormalizeArgs", () => {

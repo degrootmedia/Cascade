@@ -346,6 +346,8 @@ export interface SequenceShotView {
   videoPath?: string;
   muted?: boolean;
   videoOffsetSec?: number;
+  /** Disabled shots are dropped from the projection (animatic + export). */
+  disabled?: boolean;
 }
 
 /**
@@ -384,8 +386,12 @@ export function applyShotSequences(
   sequences: ShotSequence[],
   refs?: readonly SequenceOutputRefView[]
 ): SequenceTimelineItem[] {
+  // Disabled shots are removed from the animatic/export entirely — they never
+  // occupy a slot, and sequences prune them like dead members (collapsing
+  // over the survivors).
+  const live = shots.filter((s) => !s.disabled);
   const index = new Map<string, number>();
-  shots.forEach((s, i) => {
+  live.forEach((s, i) => {
     if (!index.has(s.id)) index.set(s.id, i);
   });
   const consumed = new Set<string>();
@@ -397,7 +403,7 @@ export function applyShotSequences(
       .filter((i): i is number => i !== undefined)
       .sort((a, b) => a - b);
     if (!idxs.length) continue;
-    if (idxs.some((i) => consumed.has(shots[i].id))) continue;
+    if (idxs.some((i) => consumed.has(live[i].id))) continue;
     let contiguous = true;
     for (let k = 1; k < idxs.length; k++) {
       if (idxs[k] !== idxs[k - 1] + 1) {
@@ -406,12 +412,12 @@ export function applyShotSequences(
       }
     }
     if (!contiguous) continue;
-    const members = idxs.map((i) => shots[i]);
+    const members = idxs.map((i) => live[i]);
     const durationSec =
       typeof seq.durationSec === "number" && Number.isFinite(seq.durationSec) && seq.durationSec > 0
         ? seq.durationSec
         : members.reduce((n, s) => n + (s.durationSec ?? 3), 0);
-    const media = sequenceOutputMedia(seq, { shots, refs });
+    const media = sequenceOutputMedia(seq, { shots: live, refs });
     at.set(idxs[0], {
       kind: "sequence",
       id: sequenceTimelineId(seq.id),
@@ -430,7 +436,7 @@ export function applyShotSequences(
     for (const s of members) consumed.add(s.id);
   }
   const out: SequenceTimelineItem[] = [];
-  shots.forEach((s, i) => {
+  live.forEach((s, i) => {
     const seqItem = at.get(i);
     if (seqItem) {
       out.push(seqItem);

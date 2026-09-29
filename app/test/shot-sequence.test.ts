@@ -133,6 +133,46 @@ describe("applyShotSequences", () => {
     expect(out[0].muted).toBe(true);
   });
 
+  it("drops disabled shots from the projection entirely", () => {
+    const withDisabled = [
+      shots[0],
+      { ...shots[1], disabled: true },
+      shots[2],
+      shots[3],
+      shots[4],
+    ];
+    const out = applyShotSequences(withDisabled, []);
+    expect(out.map((i) => i.id)).toEqual(["a", "c", "d", "e"]);
+  });
+
+  it("prunes disabled members from a sequence, like dead members", () => {
+    const withDisabled = [
+      shots[0],
+      { ...shots[1], disabled: true },
+      shots[2],
+      shots[3],
+      shots[4],
+    ];
+    // b is gone from the live list, so the sequence collapses over its
+    // surviving member c (the same rule as pruned dead members).
+    const out = applyShotSequences(withDisabled, [seq("s1", ["b", "c"])]);
+    expect(out.map((i) => i.id)).toEqual(["a", "seq:s1", "d", "e"]);
+    expect(out[1].shotIds).toEqual(["c"]);
+  });
+
+  it("collapses a sequence over the live list when members stay contiguous", () => {
+    const withDisabled = [
+      shots[0],
+      shots[1],
+      shots[2],
+      { ...shots[3], disabled: true },
+      shots[4],
+    ];
+    const out = applyShotSequences(withDisabled, [seq("s1", ["a", "b"])]);
+    expect(out.map((i) => i.id)).toEqual(["seq:s1", "c", "e"]);
+    expect(out[0].shotIds).toEqual(["a", "b"]);
+  });
+
   it("round-trips the timeline id", () => {
     expect(sequenceTimelineId("s1")).toBe("seq:s1");
     expect(parseSequenceTimelineId("seq:s1")).toBe("s1");

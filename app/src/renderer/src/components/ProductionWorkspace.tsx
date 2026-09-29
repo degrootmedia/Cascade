@@ -418,6 +418,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     reorderDragEnd: () => void;
     insertAfter: (id: string) => void;
     remove: (id: string) => void;
+    toggleDisabled: (id: string) => void;
     zoomChange: (id: string | null) => void;
     zoomNavigate: (id: string, dir: -1 | 1) => void;
   }>(null as never);
@@ -467,6 +468,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       if (i >= 0) insertBlankShot(flat, i);
     },
     remove: (id) => deleteBoardShot(id),
+    toggleDisabled: (id) => toggleShotDisabled(id),
     zoomChange: (id) => setBoardZoomId(id),
     zoomNavigate: (id, dir) => {
       const current = prodRef.current;
@@ -505,6 +507,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onReorderDragEnd: () => boardHandlerRef.current.reorderDragEnd(),
     onInsertAfter: (id: string) => boardHandlerRef.current.insertAfter(id),
     onDelete: (id: string) => boardHandlerRef.current.remove(id),
+    onToggleDisabled: (id: string) => boardHandlerRef.current.toggleDisabled(id),
     onZoomChange: (id: string | null) => boardHandlerRef.current.zoomChange(id),
     onZoomNavigate: (id: string, dir: -1 | 1) => boardHandlerRef.current.zoomNavigate(id, dir),
   }), []);
@@ -3276,6 +3279,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     apply(window.cascade.deleteShot(prod.meta.id, shotId));
   }
 
+  /** Storyboard + script table: exclude a shot from the animatic/export
+   *  without deleting it (right-click menu, reversible). The flag rides the
+   *  normal whole-document save so `mergeRendererShot` keeps it. */
+  function toggleShotDisabled(shotId: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      scenes: current.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, disabled: !s.disabled ? true : undefined } : s)),
+      })),
+    });
+  }
+
   /** Step 3: turn the current shift-click range into a shot sequence. The
    *  overlap guard lives in `sequenceOverlapReason` (a shot belongs to at
    *  most one sequence); the strip shows its verdict inline. */
@@ -3832,7 +3849,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               {source && <span className="hint">Source: {source.split(/[\\/]/).pop()}</span>}
             </div>
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
-            <ShotTable prod={prod} onMutation={apply} />
+            <ShotTable prod={prod} onMutation={apply} onToggleDisabled={toggleShotDisabled} />
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
           </section>
         )}
@@ -4346,6 +4363,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onReorderDrop={boardActions.onReorderDrop}
                     onInsertAfter={boardActions.onInsertAfter}
                     onDelete={boardActions.onDelete}
+                    onToggleDisabled={boardActions.onToggleDisabled}
                     zoomOpen={boardZoomId === shot.id}
                     onZoomChange={boardActions.onZoomChange}
                     onZoomNavigate={boardActions.onZoomNavigate}

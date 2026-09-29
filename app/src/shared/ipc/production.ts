@@ -261,6 +261,11 @@ graphImageGenIndex?: number;
    *  field a reclaimed clip belongs to. Cleared when a fresh generation
    *  supersedes it or the fetch recovers it. */
   pendingVideoGen?: PendingVideoGen;
+  /** True when the shot is disabled in the storyboard (right-click menu):
+   *  it stays visible but faded, and is excluded from the animatic timeline
+   *  and the Step 5 export. Generation, numbering, and media are untouched,
+   *  so re-enabling restores it exactly. */
+  disabled?: boolean;
   /** True once a re-ingest moved this shot out of the active storyboard into
    *  `Production.outdatedShots`. Its media was relocated to
    *  `boards/outdated/<id>/` so a fresh shot re-using its number can't

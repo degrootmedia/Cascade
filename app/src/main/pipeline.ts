@@ -3582,7 +3582,7 @@ export async function planAnimatic(
   emit: EmitFn,
   baseUrl?: string
 ): Promise<Production> {
-  const shots = p.scenes.flatMap((s) => s.shots);
+  const shots = p.scenes.flatMap((s) => s.shots).filter((s) => !s.disabled);
   if (!shots.length) throw new Error("No shots yet — run Step 1 first.");
   emit(`Timing ${shots.length} shot(s) (model: ${model})…`);
   const gab = new ChatClient(apiKey, baseUrl);
@@ -3634,7 +3634,8 @@ export function formatRuntime(totalSec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** Step 4 artifact: the timing plan as markdown. */
+/** Step 4 artifact: the timing plan as markdown. Disabled shots are omitted
+ *  (they play nowhere in the animatic). */
 export function animaticMarkdown(p: Production): string {
   const lines: string[] = [`# ${p.meta.name} — Animatic Plan`, ""];
   let total = 0;
@@ -3642,6 +3643,7 @@ export function animaticMarkdown(p: Production): string {
     lines.push(`## Scene ${scene.number} — ${scene.title}`, "");
     lines.push("| Shot | Duration | Audio | Visual |", "|------|----------|-------|--------|");
     for (const shot of scene.shots) {
+      if (shot.disabled) continue;
       const d = shot.durationSec ?? 3;
       total += d;
       const a = shot.audio.replace(/\|/g, "\\|").replace(/\n/g, " ");

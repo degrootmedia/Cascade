@@ -20,7 +20,7 @@ import { openImageSuite } from "../../features/suite/suite-handoff.js";
 import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 import { useClampedMenuStyle } from "../menu-position.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, onToggleDisabled, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -88,6 +88,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   /** Delete this shot (right-click menu). Confirmation is handled here when
    *  the shot has content; blank shots delete immediately. */
   onDelete?: (shotId: string) => void;
+  /** Toggle whether this shot is excluded from the animatic (right-click menu). */
+  onToggleDisabled?: (shotId: string) => void;
   /** The workspace owns the enlarged-frame lightbox: true when THIS card's
    *  frame is the one on screen, so left/right arrows can step the lightbox
    *  between shots (a card cannot know its neighbours). */
@@ -233,6 +235,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
+  const hasPanelMenu = !!onDelete || !!onToggleDisabled;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuStyle = useClampedMenuStyle(menu, menuRef);
@@ -252,7 +255,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     };
   }, [menu]);
   function openPanelMenu(e: React.MouseEvent) {
-    if (!onDelete) return;
+    if (!onDelete && !onToggleDisabled) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest("input, textarea")) return;
     e.preventDefault();
@@ -267,6 +270,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
       if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
     }
     onDelete?.(shot.id);
+  }
+  function toggleDisabledShot() {
+    setMenu(null);
+    onToggleDisabled?.(shot.id);
   }
   function deleteMenuGeneration() {
     setMenu(null);
@@ -325,8 +332,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     <figure
       ref={cardRef}
       data-shot-id={shot.id}
-      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "")}
-      onContextMenu={onDelete ? openPanelMenu : undefined}
+      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "") + (shot.disabled ? " disabled" : "")}
+      onContextMenu={hasPanelMenu ? openPanelMenu : undefined}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
           e.preventDefault();
@@ -446,7 +453,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             onMouseLeave={() => { try { boardVideoRef.current?.pause(); } catch {} }}
             onError={() => setVideoFailed(true)}
             onClick={(e) => { e.stopPropagation(); frameClick(e); }}
-            onContextMenu={onDelete ? openPanelMenu : undefined}
+            onContextMenu={hasPanelMenu ? openPanelMenu : undefined}
             onDragStart={(e) => {
               // Carry this frame's identity so another frame can accept it as a reference.
               e.dataTransfer.setData(
@@ -468,7 +475,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               loading="lazy"
               decoding="async"
               onClick={(e) => { e.stopPropagation(); frameClick(e); }}
-              onContextMenu={onDelete ? openPanelMenu : undefined}
+              onContextMenu={hasPanelMenu ? openPanelMenu : undefined}
               onDragStart={(e) => {
                 // Carry this frame's identity so another frame can accept it as a reference.
                 e.dataTransfer.setData(
@@ -497,6 +504,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             title="This frame is still rendering — recheck to download it when ready"
           >
             pending
+          </span>
+        )}
+        {shot.disabled && (
+          <span
+            className="prod-board-disabled"
+            title="This shot is disabled — right-click and choose Enable shot to include it in the animatic again"
+          >
+            disabled
           </span>
         )}
         {videoPending && (
@@ -617,7 +632,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
           </figure>
         </div>
       )}
-      {menu && onDelete && (
+      {menu && hasPanelMenu && (
         <div
           ref={menuRef}
           className="session-context-menu"
@@ -700,12 +715,22 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               Clear pending video…
             </button>
           )}
-          <button
-            className="ctx-item danger"
-            onClick={confirmDeleteShot}
-          >
-            Delete shot…
-          </button>
+          {onToggleDisabled && (
+            <button
+              className="ctx-item"
+              onClick={toggleDisabledShot}
+            >
+              {shot.disabled ? "Enable shot" : "Disable shot"}
+            </button>
+          )}
+          {onDelete && (
+            <button
+              className="ctx-item danger"
+              onClick={confirmDeleteShot}
+            >
+              Delete shot…
+            </button>
+          )}
         </div>
       )}
     </figure>

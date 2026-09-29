@@ -2308,7 +2308,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-rows { padding: 4px 8px 10px; display: flex; flex-direction: column; gap: 4px; }
 .shot-row {
   display: grid;
-  grid-template-columns: 22px 52px minmax(180px, 1fr) minmax(240px, 1.4fr) 58px;
+  grid-template-columns: 22px 52px minmax(180px, 1fr) minmax(240px, 1.4fr) 112px;
   gap: 8px;
   align-items: start;
   border-radius: 8px;
@@ -2336,6 +2336,24 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-drag-handle { touch-action: none; }
 .shot-row:hover .shot-drag-handle { opacity: 1; color: var(--accent); border-color: var(--border); background: var(--bg-raised); }
 .shot-row.dragging { opacity: 0.4; }
+/* Disabled shot: faded in the script table, excluded from the animatic/export. */
+.shot-row.disabled .shot-cell,
+.shot-row.disabled .shot-number-value { opacity: 0.38; }
+.shot-disable {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.68rem;
+  padding: 2px 6px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.shot-disable:hover { color: var(--text); border-color: var(--accent); }
+.shot-disable.active { color: var(--accent); border-color: var(--accent); }
 .shot-row.empty-drop { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); font-size: 0.78rem; }
 /* Hover "+" in the gaps between rows and scenes â€” inserts a blank shot / adds
    a scene (hidden while dragging). On hover the gap blooms into a faded green
@@ -2480,7 +2498,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-cell.visual:focus { color: var(--text); }
 .shot-actions { display: inline-flex; gap: 4px; padding-top: 4px; opacity: 0; transition: opacity 0.12s; }
 .shot-row:hover .shot-actions { opacity: 1; }
-.shot-actions button {
+/* A disabled row keeps its actions visible — the Enable button is the way back. */
+.shot-row.disabled .shot-actions { opacity: 1; }
+.shot-actions .shot-delete {
   width: 26px;
   height: 26px;
   border-radius: 6px;
@@ -3820,6 +3840,26 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
    both still anchored upper-right. */
 .prod-board-pending-video { top: 38px; left: auto; right: 38px; }
 .prod-board-recheck-video { top: 38px; right: 6px; }
+
+/* Disabled shot: faded in the storyboard, excluded from the animatic/export.
+   The badge anchors upper-left (the zoom button owns the upper right). */
+.prod-board.disabled .prod-board-frame,
+.prod-board.disabled .prod-board-number,
+.prod-board.disabled .prod-board-script { opacity: 0.38; filter: saturate(0.5); }
+.prod-board-disabled {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--text-dim);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 2;
+}
 
 /* ---------- EditBoardModal (AI frame edit) ---------- */
 .prod-edit-overlay {

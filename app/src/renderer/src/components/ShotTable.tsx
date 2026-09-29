@@ -23,12 +23,14 @@ import { usePersistedCollapsed } from "./production/persisted-state.js";
 interface Props {
   prod: Production;
   onMutation: (p: Promise<Production>) => void;
+  /** Toggle whether a shot is excluded from the animatic (storyboard toggle). */
+  onToggleDisabled?: (shotId: string) => void;
 }
 
 /** Pointer travel (px) before a handle press becomes a drag. */
 const DRAG_SLOP = 4;
 
-export function ShotTable({ prod, onMutation }: Props) {
+export function ShotTable({ prod, onMutation, onToggleDisabled }: Props) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [activeZone, setActiveZone] = useState<string | null>(null);
   const dragIdRef = useRef<string | null>(null);
@@ -126,6 +128,7 @@ export function ShotTable({ prod, onMutation }: Props) {
             prod={prod}
             occupied={occupied}
             onMutation={onMutation}
+            onToggleDisabled={onToggleDisabled}
             dragId={dragId}
             activeZone={activeZone}
             onHandleDown={onHandleDown}
@@ -145,6 +148,7 @@ interface SceneProps {
   prod: Production;
   occupied: Set<string>;
   onMutation: Props["onMutation"];
+  onToggleDisabled?: (shotId: string) => void;
   dragId: string | null;
   activeZone: string | null;
   onHandleDown: (shotId: string, x: number, y: number) => void;
@@ -197,7 +201,7 @@ export function resolveShotDrop(
   return { beforeShotId: zone.before };
 }
 
-function SceneBlock({ scene, prod, occupied, onMutation, dragId, activeZone, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: SceneProps) {
+function SceneBlock({ scene, prod, occupied, onMutation, onToggleDisabled, dragId, activeZone, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: SceneProps) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prod.meta.id}.scene.${scene.number}`);
   const open = !collapsed;
   const dragging = dragId !== null;
@@ -245,6 +249,7 @@ function SceneBlock({ scene, prod, occupied, onMutation, dragId, activeZone, onH
                 index={i}
                 occupied={occupied}
                 onMutation={onMutation}
+                onToggleDisabled={onToggleDisabled}
                 dragId={dragId}
                 onHandleDown={onHandleDown}
                 onHandleMove={onHandleMove}
@@ -447,8 +452,9 @@ function ShotNumberField({ prodId, shot, occupied, onMutation }: {
   );
 }
 
-function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: {
+function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, dragId, onHandleDown, onHandleMove, onHandleUp, onHandleCancel }: {
   prod: Production; scene: ProductionScene; index: number; occupied: Set<string>; onMutation: Props["onMutation"];
+  onToggleDisabled?: (shotId: string) => void;
   dragId: string | null;
   onHandleDown: (shotId: string, x: number, y: number) => void;
   onHandleMove: (x: number, y: number) => void;
@@ -486,7 +492,7 @@ function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDow
   }
 
   return (
-    <div className={"shot-row" + (dirty ? " dirty" : "") + (isDragging ? " dragging" : "")} onBlur={commit}>
+    <div className={"shot-row" + (dirty ? " dirty" : "") + (isDragging ? " dragging" : "") + (shot.disabled ? " disabled" : "")} onBlur={commit} title={shot.disabled ? `Shot ${shot.number} is disabled — excluded from the animatic` : undefined}>
       <button
         className="shot-drag-handle"
         title="Drag to reorder — drop between shots"
@@ -526,6 +532,17 @@ function ShotRow({ prod, scene, index, occupied, onMutation, dragId, onHandleDow
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); } }}
       />
       <span className="shot-actions">
+        {onToggleDisabled && (
+          <button
+            className={"shot-disable" + (shot.disabled ? " active" : "")}
+            title={shot.disabled ? `Enable Shot ${shot.number} (include in the animatic)` : `Disable Shot ${shot.number} (exclude from the animatic)`}
+            aria-label={shot.disabled ? `Enable Shot ${shot.number}` : `Disable Shot ${shot.number}`}
+            aria-pressed={!!shot.disabled}
+            onClick={() => onToggleDisabled(shot.id)}
+          >
+            {shot.disabled ? "Enable" : "Disable"}
+          </button>
+        )}
         <button
           className="shot-delete"
           title="Delete this shot (numbers keep their gaps)"

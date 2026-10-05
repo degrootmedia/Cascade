@@ -34,13 +34,20 @@ export function edgeStroke(fromNode: string, toPort: string, colors: SocketColor
   if (fromKind === "style") return colors.style;
   if (fromKind === "brand") return colors.brand;
   if (fromKind === "ref") return colors.ref;
+  // Direct generation→video-prompt reference wires carry images like refs.
+  if ((fromKind === "imagegen" || fromKind === "editgen") && /^in-ref-(\d+|open)$/.test(toPort)) return colors.ref;
   if (toPort === "in-image" || toPort === "in-video" || TWEEN_SOCKET_RE.test(toPort) || FRAME_SOCKET_RE.test(toPort)) return colors.ref;
   return undefined;
 }
 
 /** Only reference→prompt edges are keyboard-deletable; every other wire is fixed. */
 export function edgeDeletable(fromNode: string, toNode: string): boolean {
-  return nodeKindForId(fromNode) === "ref" && isPromptKind(nodeKindForId(toNode));
+  const fromKind = nodeKindForId(fromNode);
+  const toKind = nodeKindForId(toNode);
+  if (fromKind === "ref" && isPromptKind(toKind)) return true;
+  // Direct generation→video-prompt reference wires are user wires too.
+  if ((fromKind === "imagegen" || fromKind === "editgen") && toKind === "videoprompt") return true;
+  return false;
 }
 
 /** Render stored edges as ReactFlow edges (reconnectable is always false —

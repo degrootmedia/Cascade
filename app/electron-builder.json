@@ -34,6 +34,10 @@
       "to": "skills/code"
     },
     {
+      "from": "skills/production",
+      "to": "skills/production"
+    },
+    {
       "from": "src/main/magic-prompt.md",
       "to": "magic-prompt.md"
     }

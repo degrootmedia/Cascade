@@ -25,6 +25,8 @@ function installCascade() {
     getWorkspaceState: async () => ({ workspace: null, followProduction: false, production: null }),
     getRecentWorkspaces: async () => [],
     getCurrentSessionId: async () => "s1",
+    getPlanMode: async () => false,
+    getAutonomousMode: async () => false,
     getWorkspaceInstructions: async () => null,
     getSessionTodos: async () => ({ sessionId: "s1", updatedAt: "", items: [] }),
     getSessionGoal: async () => ({ sessionId: "s1", goal: "", status: "active", updatedAt: "" }),

@@ -56,7 +56,7 @@ export function WorkspaceSection() {
       </SettingField>
 
       <SettingField
-        label="Agents"
+        label="Personas"
         help={
           <>
             Custom personas with their own prompt, model, avatar, and tools.
@@ -64,7 +64,7 @@ export function WorkspaceSection() {
               <>
                 {" "}
                 <button className="link" onClick={onOpenAgents}>
-                  Manage agents
+                  Manage personas
                 </button>
               </>
             )}

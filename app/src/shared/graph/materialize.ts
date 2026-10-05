@@ -18,7 +18,7 @@
  * time), so there is no wire to migrate.
  */
 import type { Graph, GraphEdge, GraphNode, GraphVideoNode, ProductionShot } from "../ipc.js";
-import { videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
+import { TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
 import { hasBrandParagraph, refTagNames } from "../prompt-grammar.js";
 import { editVideoEdgeId, videoEdgeId, videoNodeCanvasId, tweenKeyToNode } from "./connect.js";
 
@@ -262,6 +262,25 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   for (const n of drawVideoNodes) refEdges(refTagNames(n.prompt ?? ""), videoPromptNodeId(n.id));
   for (const n of editNodes) refEdges(refTagNames(n.prompt ?? ""), editPromptId(n.id));
   for (const n of drawEditVidNodes) refEdges(refTagNames(n.prompt ?? ""), editVideoPromptNodeId(n.id));
+
+  // Direct generation → video-prompt reference wires (no saved reference):
+  // rebuilt from the video node's gen-ref sentinels in `refIds`, continuing
+  // the socket indices past the tag edges so the two never collide.
+  for (const n of drawVideoNodes) {
+    const target = videoPromptNodeId(n.id);
+    const base = refTagNames(n.prompt ?? "").length;
+    (n.refIds ?? []).filter((id) => isVideoGenRef(id)).forEach((genId, g) => {
+      const idx = base + g;
+      if (genId === TWEEN_KEY_IMGGEN) {
+        edge(`e-imagegen-${target}-${idx}`, "imagegen", "out", target, `in-ref-${idx}`);
+      } else {
+        const editId = parseEditNodeKeyframe(genId);
+        if (editId && editNodes.some((e) => e.id === editId)) {
+          edge(`e-editgen:${editId}-${target}-${idx}`, `editgen:${editId}`, "out", target, `in-ref-${idx}`);
+        }
+      }
+    });
+  }
 
   // Sequence timeline: one member-frame socket per segment on the first video
   // prompt node (`in-frame-<i>`), wired to the member's locked frame node.

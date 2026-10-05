@@ -25,20 +25,9 @@ import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { McpOAuthProvider, waitForAuthorizationCode } from "./mcp-auth.js";
 import type { AgentTool } from "@core";
 import { IMAGE_URL_RX } from "../shared/prompt-grammar.js";
+import type { McpConfigFile, McpServerConfig } from "../shared/mcp-config.js";
 
-export interface McpServerConfig {
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  /** Opt-in passthrough of parent env vars by name (e.g. GITHUB_TOKEN). */
-  envPassthrough?: string[];
-  url?: string;
-  disabled?: boolean;
-}
-
-export interface McpConfigFile {
-  mcpServers: Record<string, McpServerConfig>;
-}
+export type { McpConfigFile, McpServerConfig } from "../shared/mcp-config.js";
 
 export interface McpServerStatus {
   name: string;

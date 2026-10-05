@@ -5,6 +5,8 @@ export const chatChannels = {
   "chat:undo": { method: "undoLast", kind: "invoke" },
   "chat:setPlanMode": { method: "setPlanMode", kind: "invoke" },
   "chat:getPlanMode": { method: "getPlanMode", kind: "invoke" },
+  "chat:setAutonomousMode": { method: "setAutonomousMode", kind: "invoke" },
+  "chat:getAutonomousMode": { method: "getAutonomousMode", kind: "invoke" },
   "approval:response": { method: "respondApproval", kind: "send" },
   "display:sync": { method: "syncDisplay", kind: "send" },
 } as const;

@@ -15,7 +15,8 @@ import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
 import { contentText, attachmentParts, type AgentConfig, type AgentTool, type Attachment, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
 
-const DEFAULT_MAX_ITERATIONS = 50;
+/** Fallback turn cap for long agentic tasks; the host may override it. */
+const DEFAULT_MAX_ITERATIONS = 250;
 
 /** Synthetic lazy group for first-party helper tools that lack an MCP `__` prefix. */
 const FIRST_PARTY_GROUP = "firstparty";
@@ -46,6 +47,10 @@ export class Agent {
     this.tools = pureChat ? {} : { ...TOOLS, ...config.extraTools };
     this.lazyTools = pureChat ? {} : (config.lazyTools ?? {});
     this.toolDefinitions = Object.values(this.tools).map((t) => t.definition);
+    // Session grants are persisted by the host, so a rebuilt agent re-seeds the
+    // "always allow" decisions instead of asking again.
+    for (const t of config.initialAllowedTools ?? []) this.sessionAllowed.add(t);
+    for (const g of config.initialAllowedGroups ?? []) this.sessionAllowedGroups.add(g);
     const lazyNote =
       !pureChat && config.lazyGroupNotes?.length && Object.keys(this.lazyTools).length
         ? `\n\nOptional tools — kept out of the normal request to stay lean. You can use them only after the user explicitly asks by name (for example, "use ${config.lazyGroupNotes[0].name}" or "with ${config.lazyGroupNotes[0].name}"). Available on request:\n` +
@@ -55,14 +60,16 @@ export class Agent {
       role: "system",
       content: pureChat
         ? pureChatSystemPrompt()
-        : systemPrompt(
-            config.workspaceRoot ?? "",
-            config.skills,
-            config.workspaceRoot ? loadWorkspaceInstructions(config.workspaceRoot) : "",
-            lazyNote,
-            config.agentPrompt,
-            config.planMode
-          ),
+        : systemPrompt({
+            workspaceRoot: config.workspaceRoot ?? "",
+            skills: config.skills,
+            instructions: config.workspaceRoot ? loadWorkspaceInstructions(config.workspaceRoot) : "",
+            lazyToolsNote: lazyNote,
+            agentPrompt: config.agentPrompt,
+            planMode: config.planMode,
+            autonomousMode: config.autonomousMode,
+            hasTodoTools: !pureChat && !!this.tools["todo_write"],
+          }),
     });
   }
 
@@ -187,7 +194,7 @@ export class Agent {
           this.messages.push({ role: "tool", tool_call_id: call.id, content: result });
         }
       }
-      const msg = `Stopped after ${maxIter} iterations without a final answer. This usually means the model kept calling tools instead of answering. Try again, or ask Cascade to break the task into smaller steps.`;
+      const msg = `Stopped after ${maxIter} turns without a final answer. This usually means the model kept calling tools instead of answering. Send "continue" to keep going, or raise the turn limit in Settings → Advanced → Agent.`;
       onEvent({ type: "error", message: msg });
     } catch (e: unknown) {
       if (this.abort.signal.aborted) {
@@ -252,7 +259,7 @@ export class Agent {
     const preApproved =
       this.sessionAllowed.has(call.function.name) || (group !== null && this.sessionAllowedGroups.has(group));
 
-    if (spec.requiresApproval && !preApproved) {
+    if (spec.requiresApproval && !preApproved && !this.config.autonomousMode) {
       let req;
       try {
         req = spec.describe
@@ -271,10 +278,18 @@ export class Agent {
         onEvent({ type: "tool-result", name: call.function.name, result, isError: true });
         return result;
       }
-      if (decision === "allow-session") this.sessionAllowed.add(call.function.name);
+      if (decision === "allow-session") {
+        this.sessionAllowed.add(call.function.name);
+        this.config.onApprovalGrant?.({ kind: "tool", value: call.function.name });
+      }
       if (decision === "allow-group-session") {
-        if (group) this.sessionAllowedGroups.add(group);
-        else this.sessionAllowed.add(call.function.name); // no group → same as allow-session
+        if (group) {
+          this.sessionAllowedGroups.add(group);
+          this.config.onApprovalGrant?.({ kind: "group", value: group });
+        } else {
+          this.sessionAllowed.add(call.function.name); // no group → same as allow-session
+          this.config.onApprovalGrant?.({ kind: "tool", value: call.function.name });
+        }
       }
     }
 

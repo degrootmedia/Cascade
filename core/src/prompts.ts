@@ -62,14 +62,40 @@ export function planModePrompt(): string {
   );
 }
 
-export function systemPrompt(
-  workspaceRoot: string,
-  skills?: SkillMeta[],
-  instructions?: string,
-  lazyToolsNote?: string,
-  agentPrompt?: string,
-  planMode?: boolean
-): string {
+/** The autonomous-mode directive: no approval prompts, proceed end to end. */
+export function autonomousPrompt(): string {
+  return (
+    `\n\nAUTONOMOUS MODE is ON. The user has granted full permission for this chat — do NOT ask for confirmation before acting, and never pause to say "shall I proceed". ` +
+    `Take every step of the task yourself, narrating briefly as you go, and only stop to ask if the request is genuinely ambiguous or a choice is irreversible and outside the stated task.`
+  );
+}
+
+/** The todo-discipline directive, shown only when the todo tools are present. */
+export function todoPrompt(): string {
+  return (
+    `\n\nTask list — for any task with 3 or more steps, call todo_write first to lay out the complete plan (one item per step, all "todo"). ` +
+    `Then keep it current as you work: mark exactly ONE item "running" when you start it, and call todo_write to mark that item "done" the moment it succeeds — before starting the next step. ` +
+    `todo_write is a full replace, so always send the ENTIRE list and reuse each item's existing id. Never leave finished work marked "todo"; finish with every step done or explicitly "blocked".`
+  );
+}
+
+export interface SystemPromptOptions {
+  workspaceRoot: string;
+  skills?: SkillMeta[];
+  /** Folder instructions (CASCADE.md), always followed. */
+  instructions?: string;
+  /** The on-demand-tools note built by the Agent. */
+  lazyToolsNote?: string;
+  /** Agent persona prepended before the Cascade base prompt. */
+  agentPrompt?: string;
+  planMode?: boolean;
+  autonomousMode?: boolean;
+  /** True when todo_read/todo_write are available — adds the task-list directive. */
+  hasTodoTools?: boolean;
+}
+
+export function systemPrompt(opts: SystemPromptOptions): string {
+  const { workspaceRoot, skills, instructions, lazyToolsNote, agentPrompt, planMode, autonomousMode, hasTodoTools } = opts;
   const agentSection = agentPrompt?.trim()
     ? `${agentPrompt.trim()}\n\n---\n\n`
     : "";
@@ -79,6 +105,11 @@ export function systemPrompt(
     : "";
   const lazySection = lazyToolsNote?.trim() ? lazyToolsNote : "";
   const planSection = planMode ? planModePrompt() : "";
+  const autonomousSection = autonomousMode ? autonomousPrompt() : "";
+  const todoSection = hasTodoTools ? todoPrompt() : "";
+  const approvalGuideline = autonomousMode
+    ? `- You have full permission to act in this chat — make changes directly without asking for confirmation.`
+    : `- Mutating actions require user approval; if the user denies an action, respect that and ask how they'd like to proceed.`;
   return `${agentSection}You are Cascade, a desktop AI assistant that helps the user work with files on their computer.
 
 You have tools to read, write, edit, and search files, and to run shell commands. All paths are relative to the user's workspace folder: ${workspaceRoot}
@@ -89,7 +120,7 @@ Guidelines:
 - Prefer edit_file for small changes; write_file for new files or full rewrites.
 - Keep responses concise. After completing a task, summarize what you did in a sentence or two.
 - If a task is ambiguous, ask a clarifying question before acting.
-- Mutating actions require user approval; if the user denies an action, respect that and ask how they'd like to proceed.
+${approvalGuideline}
 - When a tool result contains an image URL, show it to the user with a markdown image: ![description](url). When it reports a saved file path, state that exact path — never invent placeholders like "[image shown]".
-- The operating system is ${process.platform === "win32" ? "Windows (shell commands run in cmd.exe)" : process.platform}.${skillsSection}${planSection}${instructionsSection}${lazySection}`;
+- The operating system is ${process.platform === "win32" ? "Windows (shell commands run in cmd.exe)" : process.platform}.${skillsSection}${todoSection}${planSection}${autonomousSection}${instructionsSection}${lazySection}`;
 }

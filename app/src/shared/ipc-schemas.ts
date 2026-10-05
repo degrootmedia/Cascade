@@ -62,6 +62,11 @@ const validators: Record<string, (args: unknown[]) => void> = {
       }
     }
   },
+  "settings:setMaxIterations": (args) => {
+    if (typeof args[0] !== "number" || !Number.isFinite(args[0])) {
+      throw new Error("IPC validation: maxIterations must be a finite number");
+    }
+  },
   "production:create": (args) => {
     if (!isString(args[0]) || args[0].length === 0 || args[0].length > 256) {
       throw new Error("IPC validation: production name must be 1..256 chars");

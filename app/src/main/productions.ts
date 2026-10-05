@@ -7,6 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, ShotSequence, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
 import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
@@ -911,6 +912,33 @@ export function importProduction(folder: string): ProductionFile {
     }
   }
   saveProduction(p);
+  return p;
+}
+
+/**
+ * Step 2: create or update a production style. `styleId` targets a specific
+ * style; otherwise the master (styles[0]) is updated, and a new style is
+ * appended (position = length + 1) when the production has none yet. The
+ * caller persists the returned document (main owns the write) — used by the
+ * chat agent's `cascade_set_style` tool.
+ */
+export function upsertProductionStyle(
+  p: ProductionFile,
+  input: { name: string; prompt: string; styleId?: string }
+): ProductionFile {
+  p.styles ??= [];
+  const target = input.styleId ? p.styles.find((s) => s.id === input.styleId) : p.styles[0];
+  if (target) {
+    target.name = input.name;
+    target.prompt = input.prompt;
+    return p;
+  }
+  p.styles.push({
+    id: randomUUID(),
+    index: p.styles.length + 1,
+    name: input.name,
+    prompt: input.prompt,
+  });
   return p;
 }
 

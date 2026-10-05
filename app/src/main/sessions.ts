@@ -31,6 +31,14 @@ export interface SessionFile {
   mentionImages: string[];
   /** Plan mode: research + written plan first, mutations gated until approval. */
   planMode: boolean;
+  /** Autonomous mode: full permission for this chat — the approval gate is
+   *  skipped. Mutually exclusive with plan mode. */
+  autonomousMode: boolean;
+  /** Tool names the user granted "always allow" this session. Persisted so a
+   *  rebuilt agent (production rebind, settings change) doesn't ask again. */
+  allowedTools: string[];
+  /** MCP server prefixes (e.g. "openart") granted "allow all" this session. */
+  allowedToolGroups: string[];
 }
 
 const store = createStore<SessionFile>({
@@ -38,6 +46,22 @@ const store = createStore<SessionFile>({
   idOf: (s) => s.id,
   sortKey: (s) => s.updatedAt,
 });
+
+/** Clean a persisted grant list: strings only, trimmed, deduped, capped. */
+function normalizeGrantList(v: unknown, max: number, maxLen: number): string[] {
+  if (!Array.isArray(v)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of v) {
+    if (typeof raw !== "string") continue;
+    const s = raw.trim();
+    if (!s || s.length > maxLen || seen.has(s)) continue;
+    seen.add(s);
+    if (out.length >= max) break;
+    out.push(s);
+  }
+  return out;
+}
 
 /** Last user/assistant text snippet from a session's display items, for the sidebar. */
 function previewOf(s: SessionFile): string {
@@ -78,6 +102,11 @@ export function saveSession(s: SessionFile): void {
   if (typeof (s as { planMode?: unknown }).planMode !== "boolean") {
     (s as SessionFile).planMode = false;
   }
+  if (typeof (s as { autonomousMode?: unknown }).autonomousMode !== "boolean") {
+    (s as SessionFile).autonomousMode = false;
+  }
+  s.allowedTools = normalizeGrantList((s as { allowedTools?: unknown }).allowedTools, 256, 128);
+  s.allowedToolGroups = normalizeGrantList((s as { allowedToolGroups?: unknown }).allowedToolGroups, 64, 64);
   store.save(s);
 }
 
@@ -99,7 +128,8 @@ export function resolveWorkspace(
 export function newSessionFile(
   workspace: string | null = null,
   agentId: string | null = null,
-  followProduction = false
+  followProduction = false,
+  autonomousMode = false
 ): SessionFile {
   const now = new Date().toISOString();
   return {
@@ -115,6 +145,9 @@ export function newSessionFile(
     display: [],
     mentionImages: [],
     planMode: false,
+    autonomousMode,
+    allowedTools: [],
+    allowedToolGroups: [],
   };
 }
 

@@ -15,6 +15,7 @@ import { CliToolsSection } from "./sections/CliToolsSection.js";
 import { ExternalEditorSection, resetExternalEditor } from "./sections/ExternalEditorSection.js";
 import { ThreeDSection, resetThreeD } from "./sections/ThreeDSection.js";
 import { McpServersSection } from "./sections/McpServersSection.js";
+import { AgentSection, resetAgent } from "./sections/AgentSection.js";
 import { PromptsSection } from "./sections/PromptsSection.js";
 import { DataSection } from "./sections/DataSection.js";
 import { DeveloperSection } from "./sections/DeveloperSection.js";
@@ -40,8 +41,8 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           id: "workspace",
           title: "Workspace",
           category: "general",
-          description: "Default folders, agents, and skills.",
-          keywords: ["workspace", "folder", "directory", "chat", "agents", "personas", "skills", "default", "path", "production"],
+          description: "Default folders, personas, and skills.",
+          keywords: ["workspace", "folder", "directory", "chat", "personas", "skills", "default", "path", "production"],
           owns: ["workspace", "followProduction"],
           render: () => <WorkspaceSection />,
           onReset: resetWorkspace,
@@ -139,6 +140,16 @@ export function buildSettingsRegistry(): SettingsCategory[] {
       id: "advanced",
       title: "Advanced",
       sections: [
+        {
+          id: "agent",
+          title: "Agent",
+          category: "advanced",
+          description: "Autonomous mode and the per-message turn cap.",
+          keywords: ["agent", "autonomous", "auto", "approval", "permission", "iterations", "turns", "cap", "limit", "long task", "runaway"],
+          owns: [],
+          render: () => <AgentSection />,
+          onReset: resetAgent,
+        },
         {
           id: "prompts",
           title: "Prompts",

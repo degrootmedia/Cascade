@@ -18,6 +18,7 @@ import { AgentsPanel } from "./components/AgentsPanel.js";
 import { ViewTabs, type AppView } from "./components/ViewTabs.js";
 import { ProductionWorkspace } from "./components/ProductionWorkspace.js";
 import { AutoTextarea } from "./components/AutoTextarea.js";
+import { clipboardText } from "./clipboard.js";
 import { AttachFileIcon, XIcon } from "./components/icons.js";
 import { expandCommand } from "../../shared/commands.js";
 
@@ -63,6 +64,8 @@ export function App() {
   const [showAgents, setShowAgents] = useState(false);
   /** Plan mode for the current chat (research + plan first, mutations gated). */
   const [planMode, setPlanMode] = useState(false);
+  /** Autonomous mode for the current chat (full permission, no approval prompts). */
+  const [autonomousMode, setAutonomousMode] = useState(false);
   /** Durable per-chat task lists, keyed by session (file is the truth in main). */
   const [todos, setTodos] = useState<Record<string, SessionTasks>>({});
   /** Durable per-chat goals, keyed by session (the objective; todos are steps). */
@@ -211,6 +214,8 @@ export function App() {
       void refreshActiveAgent(sid);
       // Restore the durable task list for the reopened chat (restart path).
       const id: string = sid;
+      void window.cascade.getPlanMode(id).then(setPlanMode);
+      void window.cascade.getAutonomousMode(id).then(setAutonomousMode);
       void window.cascade.getSessionTodos(id).then((t) => setTodos((p) => ({ ...p, [id]: t }))).catch(() => {});
       void window.cascade.getSessionGoal(id).then((g) => setGoals((p) => ({ ...p, [id]: g }))).catch(() => {});
     }
@@ -409,12 +414,14 @@ export function App() {
     const cmd = expandCommand(raw);
     let text = raw;
     let togglePlan: boolean | undefined;
+    let toggleAuto: boolean | undefined;
     if (cmd) {
       if (cmd.planMode !== undefined) togglePlan = cmd.planMode;
+      if (cmd.autonomousMode !== undefined) toggleAuto = cmd.autonomousMode;
       if (cmd.instruction) text = cmd.instruction;
-      else if (cmd.name === "plan-mode") text = "";
+      else if (cmd.name === "plan-mode" || cmd.name === "autonomous") text = "";
     }
-    if (!text && !togglePlan && attachments.length === 0) return;
+    if (!text && togglePlan === undefined && toggleAuto === undefined && attachments.length === 0) return;
     const sendAttachments = attachments;
     setInput("");
     setAttachments([]);
@@ -429,6 +436,16 @@ export function App() {
         try {
           await window.cascade.setPlanMode(id, togglePlan);
           setPlanMode(togglePlan);
+          if (togglePlan) setAutonomousMode(false);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (toggleAuto !== undefined) {
+        try {
+          await window.cascade.setAutonomousMode(id, toggleAuto);
+          setAutonomousMode(toggleAuto);
+          if (toggleAuto) setPlanMode(false);
         } catch {
           /* ignore */
         }
@@ -485,6 +502,7 @@ export function App() {
     void refreshWorkspace();
     void window.cascade.getWorkspaceInstructions().then(setInstructions);
     void window.cascade.getPlanMode(id).then(setPlanMode);
+    void window.cascade.getAutonomousMode(id).then(setAutonomousMode);
     void window.cascade.getSessionTodos(id).then((t) => setTodos((p) => ({ ...p, [id]: t }))).catch(() => {});
     void window.cascade.getSessionGoal(id).then((g) => setGoals((p) => ({ ...p, [id]: g }))).catch(() => {});
     void refreshActiveAgent(id);
@@ -703,6 +721,20 @@ export function App() {
             placeholder={busy ? "Working…" : pureChat ? "Ask Cascade anything…" : "Ask Cascade to do something in your workspace…"}
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => {
+              // Rebuild the paste from the clipboard's HTML flavor when present
+              // so paragraph/line breaks the plain flavor drops survive. Falls
+              // through untouched for text-free (file) pastes.
+              const text = clipboardText(e.clipboardData);
+              if (!text) return;
+              e.preventDefault();
+              const el = e.currentTarget;
+              const start = el.selectionStart ?? input.length;
+              const end = el.selectionEnd ?? start;
+              setInput(input.slice(0, start) + text + input.slice(end));
+              const caret = start + text.length;
+              requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = caret; });
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -743,6 +775,27 @@ export function App() {
               }}
             >
               {planMode ? "✓ Plan mode" : "Plan mode"}
+            </button>
+          )}
+          {!pureChat && (
+            <button
+              className={`plan-mode autonomous-mode${autonomousMode ? " on" : ""}`}
+              title={
+                autonomousMode
+                  ? "Autonomous mode is on — Cascade acts without asking for approval. Click to turn off."
+                  : "Autonomous mode: let Cascade run tools (including OpenArt) without asking for approval each time."
+              }
+              disabled={busy}
+              onClick={() => {
+                const id = currentId;
+                if (!id) return;
+                const next = !autonomousMode;
+                setAutonomousMode(next);
+                if (next) setPlanMode(false);
+                void window.cascade.setAutonomousMode(id, next);
+              }}
+            >
+              {autonomousMode ? "✓ Autonomous" : "Autonomous"}
             </button>
           )}
           {!pureChat && (

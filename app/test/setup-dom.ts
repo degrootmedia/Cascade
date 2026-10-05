@@ -18,6 +18,7 @@ g.KeyboardEvent = dom.window.KeyboardEvent;
 g.FocusEvent = dom.window.FocusEvent;
 g.Event = dom.window.Event;
 g.HTMLElement = dom.window.HTMLElement;
+g.DOMParser = dom.window.DOMParser;
 g.getSelection = dom.window.getSelection.bind(dom.window);
 // jsdom doesn't implement the animation-frame API — a no-op stub is enough for
 // React Flow's layout pass (no real timers, so no pending-timeout leaks).

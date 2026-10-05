@@ -32,6 +32,21 @@ describe("expandCommand", () => {
     expect(bare?.planMode).toBeUndefined();
   });
 
+  it("handles /autonomous on/off (and the /auto alias) as a gate toggle", () => {
+    const on = expandCommand("/autonomous on");
+    expect(on?.name).toBe("autonomous");
+    expect(on?.autonomousMode).toBe(true);
+    expect(on?.instruction).toBe("");
+
+    const off = expandCommand("/auto off");
+    expect(off?.name).toBe("autonomous");
+    expect(off?.autonomousMode).toBe(false);
+
+    const bare = expandCommand("/autonomous");
+    expect(bare?.autonomousMode).toBeUndefined();
+    expect(expandCommand("/autonomous dim the lights")?.autonomousMode).toBeUndefined();
+  });
+
   it("keeps /commit and /review as utility commands", () => {
     expect(expandCommand("/commit")?.name).toBe("commit");
     expect(expandCommand("/review")?.name).toBe("review");

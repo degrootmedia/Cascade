@@ -111,7 +111,7 @@ export function createAgent(data: {
   prompt?: string;
 }): string {
   const name = data.name?.trim();
-  if (!name) throw new Error("Agent name is required");
+  if (!name) throw new Error("Persona name is required");
   const id = store.newId();
   const now = new Date().toISOString();
   const meta: AgentFile = {
@@ -135,10 +135,10 @@ export function updateAgent(
   patch: Partial<Omit<AgentFile, "id" | "createdAt">> & { prompt?: string }
 ): void {
   const meta = store.load(id);
-  if (!meta) throw new Error("Agent not found");
+  if (!meta) throw new Error("Persona not found");
   if (patch.name !== undefined) {
     const n = patch.name.trim();
-    if (!n) throw new Error("Agent name is required");
+    if (!n) throw new Error("Persona name is required");
     meta.name = n;
   }
   if (patch.description !== undefined) meta.description = patch.description.trim();
@@ -185,7 +185,7 @@ export function getAvatarDataUrl(id: string, avatar: AvatarKind): string | null 
 
 export function duplicateAgent(id: string): string {
   const src = getAgent(id);
-  if (!src) throw new Error("Agent not found");
+  if (!src) throw new Error("Persona not found");
   const newId = store.newId();
   const now = new Date().toISOString();
   const meta: AgentFile = {
@@ -225,10 +225,10 @@ export function importAgent(jsonText: string, mdText: string): string {
   try {
     parsed = JSON.parse(jsonText);
   } catch {
-    throw new Error("Invalid agent JSON");
+    throw new Error("Invalid persona JSON");
   }
   const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
-  if (!name) throw new Error("Imported agent is missing a name");
+  if (!name) throw new Error("Imported persona is missing a name");
   return createAgent({
     name,
     description: typeof parsed.description === "string" ? parsed.description : "",

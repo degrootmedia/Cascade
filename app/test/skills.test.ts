@@ -81,6 +81,16 @@ describe("readSkillContent + read_skill tool", () => {
   });
 });
 
+describe("bundled production:film skill", () => {
+  it("is discoverable and sequential", () => {
+    const skills = loadSkills(path.resolve(__dirname, "../skills"));
+    const film = skills.find((s) => `${s.namespace}:${s.name}` === "production:film");
+    expect(film).toBeTruthy();
+    expect(film?.kind).toBe("sequential");
+    expect(film?.description).toMatch(/production folder/i);
+  });
+});
+
 describe("seedSkills", () => {
   it("copies namespaced bundled skills only when missing (idempotent), and skips root-level files", () => {
     ensureSkillsDir(root);

@@ -230,6 +230,32 @@ describe("connectionToEdge: references", () => {
   });
 });
 
+describe("connectionToEdge: generation→video-prompt direct wires (no saved reference)", () => {
+  it("imagegen→videoprompt open socket appends past tag edges", () => {
+    const g = baseGraph();
+    const op = connectionToEdge(conn("imagegen", "videoprompt", "in-ref-open"), g)!;
+    // baseGraph's videoprompt has no tags, so the first socket is in-ref-0.
+    expect(op.edge.to.port).toBe("in-ref-0");
+    expect(op.edge.id).toBe("e-imagegen-videoprompt-0");
+    const next = applyConnection(g, op);
+    expect(normalizeGraph(next).issues).toEqual([]);
+  });
+
+  it("editgen→videoprompt open socket appends; occupied slot replaces", () => {
+    let g = connect(baseGraph(), conn("imagegen", "videoprompt", "in-ref-open"));
+    expect(keysOf(g)).toContain("e-imagegen-videoprompt-0");
+    const g2 = connect(g, conn("editgen:edit0", "videoprompt", "in-ref-0"));
+    expect(keysOf(g2)).toContain("e-editgen:edit0-videoprompt-0");
+    expect(keysOf(g2)).not.toContain("e-imagegen-videoprompt-0");
+  });
+
+  it("generation→composer/editprompt carries no direct wire (still saved as reference)", () => {
+    const g = baseGraph();
+    expect(connectionToEdge(conn("imagegen", "composer", "in-ref-open"), g)).toBeNull();
+    expect(connectionToEdge(conn("editgen:edit0", "editprompt:edit0", "in-ref-open"), g)).toBeNull();
+  });
+});
+
 describe("connectionToEdge: style / brand plugs", () => {
   it("style→composer / videoprompt / editprompt", () => {
     expect(keysOf(connect(baseGraph(), conn("style", "composer", "in-style")))).toContain("e-style");

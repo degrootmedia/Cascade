@@ -149,6 +149,25 @@ describe("parsePromptBoxes / composePromptBoxes", () => {
     expect(composePromptBoxes(boxes)).toBe("Style: Photoreal\n\n@[Gandalf] rides.\n\nBrand identity: #123456");
     expect(parsePromptBoxes(composePromptBoxes(boxes))).toEqual(boxes);
   });
+
+  it("preserves the content box's paragraph structure verbatim", () => {
+    const content = "Line one\nLine two\n\nParagraph two\n\n\n\nParagraph three";
+    const roundTripped = parsePromptBoxes(composePromptBoxes({ style: "Photoreal", content, brand: "#123456" }));
+    expect(roundTripped.content).toBe(content);
+    expect(roundTripped.style).toBe("Photoreal");
+    expect(roundTripped.brand).toBe("#123456");
+  });
+
+  it("preserves leading indentation in the content box", () => {
+    const content = "  indented first line\nplain second line";
+    expect(parsePromptBoxes(composePromptBoxes({ style: "", content, brand: "" })).content).toBe(content);
+  });
+
+  it("still extracts a multi-line Brand identity paragraph without leaking it into content", () => {
+    const boxes = parsePromptBoxes("Action.\n\nBrand identity: palette #123456\nfont: Inter");
+    expect(boxes.content).toBe("Action.");
+    expect(boxes.brand).toBe("palette #123456\nfont: Inter");
+  });
 });
 
 describe("isTagOnlyDiff", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { systemPrompt, pureChatSystemPrompt, skillsPrompt, planModePrompt } from "../src/prompts.js";
+import { systemPrompt, pureChatSystemPrompt, skillsPrompt, planModePrompt, autonomousPrompt, todoPrompt } from "../src/prompts.js";
 import type { SkillMeta } from "../src/types.js";
 
 describe("skillsPrompt", () => {
@@ -32,12 +32,42 @@ describe("planModePrompt", () => {
   });
 });
 
+describe("autonomousPrompt", () => {
+  it("tells the model not to ask for confirmation", () => {
+    expect(autonomousPrompt()).toMatch(/AUTONOMOUS MODE is ON/);
+    expect(autonomousPrompt()).toMatch(/do NOT ask for confirmation/);
+  });
+});
+
+describe("todoPrompt", () => {
+  it("directs the model to keep the list current and mark items done", () => {
+    expect(todoPrompt()).toMatch(/todo_write/);
+    expect(todoPrompt()).toMatch(/mark that item "done"/);
+    expect(todoPrompt()).toMatch(/full replace/);
+  });
+});
+
 describe("systemPrompt", () => {
   it("includes the plan-mode directive when enabled and omits it when disabled", () => {
-    const withPlan = systemPrompt("/ws", undefined, undefined, undefined, undefined, true);
+    const withPlan = systemPrompt({ workspaceRoot: "/ws", planMode: true });
     expect(withPlan).toMatch(/PLAN MODE is ON/);
-    const withoutPlan = systemPrompt("/ws", undefined, undefined, undefined, undefined, false);
+    const withoutPlan = systemPrompt({ workspaceRoot: "/ws", planMode: false });
     expect(withoutPlan).not.toMatch(/PLAN MODE is ON/);
+  });
+
+  it("adds the autonomous directive and drops the approval guideline when autonomous", () => {
+    const auto = systemPrompt({ workspaceRoot: "/ws", autonomousMode: true });
+    expect(auto).toMatch(/AUTONOMOUS MODE is ON/);
+    expect(auto).toMatch(/full permission/);
+    expect(auto).not.toMatch(/require user approval/);
+    const normal = systemPrompt({ workspaceRoot: "/ws" });
+    expect(normal).not.toMatch(/AUTONOMOUS MODE is ON/);
+    expect(normal).toMatch(/require user approval/);
+  });
+
+  it("adds the todo directive only when the todo tools are present", () => {
+    expect(systemPrompt({ workspaceRoot: "/ws", hasTodoTools: true })).toMatch(/call todo_write first/);
+    expect(systemPrompt({ workspaceRoot: "/ws" })).not.toMatch(/call todo_write first/);
   });
 
   it("keeps pure-chat prompt free of plan mode and skills", () => {

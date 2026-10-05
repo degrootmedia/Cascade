@@ -75,14 +75,14 @@ describe("attachmentParts", () => {
 
 describe("skills in system prompt", () => {
   it("lists skills with descriptions", () => {
-    const p = systemPrompt("/ws", [{ name: "weekly-report", description: "Formats weekly reports" }]);
+    const p = systemPrompt({ workspaceRoot: "/ws", skills: [{ name: "weekly-report", description: "Formats weekly reports" }] });
     expect(p).toContain("weekly-report: Formats weekly reports");
     expect(p).toContain("read_skill");
   });
 
   it("omits section when no skills", () => {
-    expect(systemPrompt("/ws")).not.toContain("read_skill");
-    expect(systemPrompt("/ws", [])).not.toContain("read_skill");
+    expect(systemPrompt({ workspaceRoot: "/ws" })).not.toContain("read_skill");
+    expect(systemPrompt({ workspaceRoot: "/ws", skills: [] })).not.toContain("read_skill");
   });
 });
 
@@ -115,12 +115,12 @@ describe("per-directory instructions (CASCADE.md)", () => {
   });
 
   it("injects instructions into the system prompt", () => {
-    const p = systemPrompt("/ws", [], "Always use TypeScript.\nNever use any()).trim()");
+    const p = systemPrompt({ workspaceRoot: "/ws", skills: [], instructions: "Always use TypeScript.\nNever use any()).trim()" });
     expect(p).toContain("Folder instructions");
     expect(p).toContain("Always use TypeScript.");
   });
 
   it("omits the instructions section when there are none", () => {
-    expect(systemPrompt("/ws")).not.toContain("Folder instructions");
+    expect(systemPrompt({ workspaceRoot: "/ws" })).not.toContain("Folder instructions");
   });
 });

@@ -65,6 +65,11 @@ export interface AssemblyPlan {
   totalSec: number;
   /** Shot numbers rendered as black slots because they had no frame and no clip. */
   blanks: string[];
+  /** Shot numbers rendered as a still even though the production shows a video
+   *  generation for them (a pending job, a `videogen` output pipe, or stored
+   *  clip takes) — the "clip exists but isn't registered" symptom. A loud
+   *  warning so a wrong deliverable can't be produced silently. */
+  suspiciousStills: string[];
   /** Every media file that must land in the export folder (events + audio), deduped. */
   media: { srcRel: string; mediaRel: string }[];
 }
@@ -126,6 +131,7 @@ export function framesToTc(frames: number, fps: number): string {
 export function assemblyPlan(p: Production): AssemblyPlan {
   const events: AssemblyEvent[] = [];
   const blanks: AssemblyPlan["blanks"] = [];
+  const suspiciousStills: AssemblyPlan["suspiciousStills"] = [];
   const media: AssemblyPlan["media"] = [];
   const seen = new Map<string, string>();
 
@@ -201,6 +207,16 @@ export function assemblyPlan(p: Production): AssemblyPlan {
         // path below (stitched preview or blank) so the timeline never shifts.
       }
 
+      // A still is legitimate (a shot may be still-only) — but if the
+      // production shows a video generation for this shot, the still means the
+      // clip was generated yet never registered. Flag it loudly rather than
+      // silently shipping a frozen frame.
+      const expectedClip =
+        !!shot.pendingVideoGen ||
+        shot.graphOutputSource === "videogen" ||
+        (shot.graphVideoNodes ?? []).some((n) => (n.gens?.length ?? 0) > 0);
+      if (!clipRel && stillRel && expectedClip) suspiciousStills.push(shot.number);
+
       if (stillRel) addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
       if (clipRel) {
         const mediaRel = addMedia(clipRel, `clips/${shot.number}${extOf(clipRel, ".mp4")}`);
@@ -224,7 +240,7 @@ export function assemblyPlan(p: Production): AssemblyPlan {
     ? { srcRel: p.musicPath, mediaRel: addMedia(p.musicPath, `audio/music${extOf(p.musicPath, ".mp3")}`), volume: clampVolume(p.musicVolume ?? 0.5) }
     : undefined;
 
-  return { events, voiceover, music, totalSec: t, blanks, media };
+  return { events, voiceover, music, totalSec: t, blanks, suspiciousStills, media };
 }
 
 // ---- buildEdl --------------------------------------------------------------
@@ -395,11 +411,17 @@ export function buildManifest(
     "",
     `## Timeline (${plan.events.length} shots)`,
     "",
-    "| Shot | Kind | Media | Duration |",
-    "|------|------|-------|----------|",
+    "| Shot | Kind | Media | Duration | Notes |",
+    "|------|------|-------|----------|-------|",
     rows,
     "",
   ];
+  if (plan.suspiciousStills.length) {
+    lines.push(
+      `> WARNING: shot(s) ${plan.suspiciousStills.join(", ")} had a video generation but no registered clip — they render as frozen stills. Reclaim them (Fetch/recheck) and reassemble before delivering.`,
+      ""
+    );
+  }
   if (plan.voiceover) lines.push(`- Voiceover: ${plan.voiceover.mediaRel} (volume ${plan.voiceover.volume})`);
   if (plan.music) lines.push(`- Music: ${plan.music.mediaRel} (volume ${plan.music.volume})`);
   lines.push("");
@@ -613,6 +635,12 @@ export async function assemble(
     "done"
   );
   if (plan.blanks.length) emit(`Blank slot(s) with no frame/clip: ${plan.blanks.join(", ")}.`, "info");
+  if (plan.suspiciousStills.length) {
+    emit(
+      `WARNING: shot(s) ${plan.suspiciousStills.join(", ")} have a video generation but no registered clip — they will render as frozen stills. Reclaim the clip (Fetch) before delivering.`,
+      "error"
+    );
+  }
 
   return { plan, exportAbs, edlRel, scriptRel, manifestRel, copied, bytes };
 }

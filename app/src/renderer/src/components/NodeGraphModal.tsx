@@ -26,7 +26,7 @@ import {
   type FinalConnectionState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, modelOnSurface, UPSCALE_UNAVAILABLE_HINT, 
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isVideoGenRef, modelOnSurface, UPSCALE_UNAVAILABLE_HINT, 
 VIDEO_EDIT_UNAVAILABLE_HINT, videoGenNodeId, videoPromptNodeId, parseVideoGenNode, parseVideoPromptNode, nextVideoNodeId, 
 editVideoGenNodeId, editVideoPromptNodeId, parseEditVideoGenNode, parseEditVideoPromptNode, nextEditVideoNodeId, 
 CAMERA_GRID_COLS, CAMERA_GRID_ROWS, CAMERA_GRID_SIZES, cameraGridSizeKey, resolveCameraGridPanels, resolvePanelLabels, 
@@ -3444,10 +3444,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const videoPromptNodeFor = useCallback((node: GraphVideoNode, promptPos: { x: number; y: number }): GraphNode => {
     const value = videoPromptValues.get(node.id) ?? node.prompt ?? "";
     const tagged = taggedVideoByNode.get(node.id) ?? [];
+    // Sockets for tag edges plus direct generation wires (which carry no
+    // tag): gen edges continue the indices past the tags (see materializer).
+    const genWires = (node.refIds ?? []).filter((id) => isVideoGenRef(id)).length;
+    const refHandles = Array.from({ length: tagged.length + genWires }, (_, i) => `in-ref-${i}`);
     const base = {
       id: videoPromptNodeId(node.id),
       position: promptPos,
-      data: { nodeId: node.id, value, refHandles: tagged.map((_, i) => `in-ref-${i}`), openHandleId: "in-ref-open", includeBrand: isBrandAttached(shot, { videoprompt: node.id }, value), onChange: stable.onVideoPromptChange, registerApplier: (a: PromptDraftApplier | undefined) => stable.registerApplier(videoApplierKey(node.id), a) },
+      data: { nodeId: node.id, value, refHandles, openHandleId: "in-ref-open", includeBrand: isBrandAttached(shot, { videoprompt: node.id }, value), onChange: stable.onVideoPromptChange, registerApplier: (a: PromptDraftApplier | undefined) => stable.registerApplier(videoApplierKey(node.id), a) },
       deletable: true,
     };
     if (shot.graphSequence && node.mode !== "edit" && node.id === "vid0") {
@@ -4370,7 +4374,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         // ids are `e-<refId>-<target>-<idx>` for the prompt nodes.
         const m = /^e-(.+)-(composer|videoprompt(?::[^:]+)?|editvideoprompt(?::[^:]+)?|editprompt(?::[^:]+)?)-(\d+)$/.exec(c.id);
         if (m) {
-          const [, , targetKind, idxStr] = m;
+          const [, genSource, targetKind, idxStr] = m;
           const idx = Number(idxStr);
           const vpId = parseVideoPromptNode(targetKind);
           const evpId = parseEditVideoPromptNode(targetKind);
@@ -4378,12 +4382,22 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             const entry = tagged[idx];
             if (entry) { if (!applyDraftEdit("composer", (t) => removeRefTag(t, entry.name))) onPromptChange(removeRefTag(prompt, entry.name)); }
           } else if (vpId) {
-            const key = videoApplierKey(vpId);
-            const curVal = cb.current.videoPromptValues?.get(vpId) ?? "";
-            const fresh = appliers.current[key]?.get() ?? curVal;
-            const name = refTagNames(fresh)[idx] ?? (cb.current.taggedVideoByNode?.get(vpId) ?? [])[idx]?.name;
-            if (name) {
-              if (!applyDraftEdit(key, (t) => removeRefTag(t, name))) patchVideoNode(vpId, { prompt: stripSharedSections(removeRefTag(curVal, name)) });
+            // A direct generation wire carries no tag: drop its sentinel and
+            // leave the prompt text alone.
+            if (genSource && isVideoGenRef(genSource)) {
+              const nodes = cb.current.graphVideoNodes ?? [];
+              const node = nodes.find((n) => n.id === vpId);
+              if (node && (node.refIds ?? []).includes(genSource)) {
+                patchVideoNode(vpId, { refIds: (node.refIds ?? []).filter((id) => id !== genSource) });
+              }
+            } else {
+              const key = videoApplierKey(vpId);
+              const curVal = cb.current.videoPromptValues?.get(vpId) ?? "";
+              const fresh = appliers.current[key]?.get() ?? curVal;
+              const name = refTagNames(fresh)[idx] ?? (cb.current.taggedVideoByNode?.get(vpId) ?? [])[idx]?.name;
+              if (name) {
+                if (!applyDraftEdit(key, (t) => removeRefTag(t, name))) patchVideoNode(vpId, { prompt: stripSharedSections(removeRefTag(curVal, name)) });
+              }
             }
           } else if (evpId) {
             const key = editVideoApplierKey(evpId);
@@ -4423,6 +4437,59 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     if (gg) saveGraph(gg);
   }, [tagged, taggedVideo, taggedEditByNode, prompt, onPromptChange]);
+
+  /**
+   * Complete a generation-output → video-prompt-reference-socket connection
+   * WITHOUT saving a reference: wire the generation node directly into the
+   * socket and record its sentinel on the video node's `refIds` (resolved to
+   * the selected take at submit time). No `CustomRef`, no prompt tag, no
+   * shelf tile — the frame rides as an extra visual reference.
+   * Reads everything mutable through refs (synchronous, no await).
+   */
+  const attachGenerationDirect = (target: string, handle: string, source: string) => {
+    const vpId = parseVideoPromptNode(target);
+    if (!vpId) return;
+    const sentinel = source === "imagegen" ? TWEEN_KEY_IMGGEN : source;
+    if (!isVideoGenRef(sentinel)) return;
+    // If a numbered socket already holds a wire, clear its substance first:
+    // a ref loses its prompt tag, a generation loses its sentinel.
+    const slot = /^in-ref-(\d+)$/.exec(handle);
+    if (slot) {
+      const cur = cb.current.graph;
+      const prev = cur?.edges.find((e) => e.to.node === target && e.to.port === `in-ref-${slot[1]}`);
+      const prevFrom = prev?.from.node ?? "";
+      if (prevFrom.startsWith("ref:")) {
+        const ref = cb.current.references.find((r) => r.id === prevFrom.slice(4));
+        if (ref) {
+          const key = videoApplierKey(vpId);
+          const curVal = cb.current.videoPromptValues?.get(vpId) ?? "";
+          const strip = (t: string) => removeRefTag(t, ref.name);
+          if (!applyDraftEdit(key, strip)) patchVideoNode(vpId, { prompt: stripSharedSections(strip(curVal)) });
+        }
+      } else if (isVideoGenRef(prevFrom)) {
+        const nodes = cb.current.graphVideoNodes ?? [];
+        const node = nodes.find((n) => n.id === vpId);
+        const nextIds = (node?.refIds ?? []).filter((id) => id !== prevFrom);
+        patchVideoNode(vpId, { refIds: nextIds });
+      }
+    }
+    // Stored wire (same positional scheme as ref→prompt).
+    {
+      const cur = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+      const op = connectionToEdge({ source, target, targetHandle: handle }, cur);
+      if (op) saveGraph(applyConnection(cur, op));
+    }
+    // Record the sentinel (deduped — one wire per generation per prompt).
+    {
+      const nodes = cb.current.graphVideoNodes ?? [];
+      const node = nodes.find((n) => n.id === vpId);
+      if (node && !(node.refIds ?? []).includes(sentinel)) {
+        patchVideoNode(vpId, { refIds: [...(node.refIds ?? []), sentinel] });
+      }
+    }
+    const label = source === "imagegen" ? "Image node frame" : `Edit node ${source.slice("editgen:".length)}`;
+    showHint(`Wired ${label} directly into the video prompt — no reference saved.`);
+  };
 
   /**
    * Complete a generation-output → prompt-reference-socket connection: save
@@ -4470,13 +4537,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   const onConnect = useCallback((conn: Connection) => {
     if (!conn.source || !conn.target) return;
-    // Dragging a generation node's output onto a prompt's reference socket:
-    // copy the selected take into the production as a new reference, then wire
-    // it in. Main does the file copy asynchronously, so the rest of the
-    // connection is completed in a promise (the wire + tag land once it lands).
+    // Dragging a generation node's output onto a prompt's reference socket.
+    // Video prompts wire directly (no saved reference — the take resolves at
+    // submit time); every other prompt saves the take as a reference first
+    // (main copies the file asynchronously, then the wire + tag land).
     const genRel = selectedGenerationRel(shot, canonicalNodeId(conn.source));
     if (genRel && isPromptNodeId(canonicalNodeId(conn.target)) && isRefSocketHandle(conn.targetHandle)) {
-      void attachGenerationAsReference(canonicalNodeId(conn.target), conn.targetHandle ?? "", genRel);
+      const target = canonicalNodeId(conn.target);
+      if (parseVideoPromptNode(target)) {
+        attachGenerationDirect(target, conn.targetHandle ?? "", canonicalNodeId(conn.source));
+        return;
+      }
+      void attachGenerationAsReference(target, conn.targetHandle ?? "", genRel);
       return;
     }
     // Stored-graph write first (see header note): the port table gates types
@@ -4718,7 +4790,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const isValidConnection = useCallback((c: Connection | Edge) => {
     const source = c.source ?? "";
     // A generation node's output may be dropped onto any prompt reference
-    // socket: the selected take is saved as a reference, then wired in.
+    // socket: video prompts wire directly (no saved reference), every other
+    // prompt saves the selected take as a reference, then wires it in.
     if (source && selectedGenerationRel(shot, canonicalNodeId(source))
       && isPromptNodeId(canonicalNodeId(c.target ?? "")) && isRefSocketHandle(c.targetHandle)) return true;
     /** Shared tween keyframe-socket rule: a valid socket index (0–4) and room
@@ -4848,6 +4921,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const from = state.fromHandle;
     if (!from) return;
     if (from.type !== "target") return;
+    // Remember the wire being dragged off (before the stored-graph removal
+    // below) so a direct generation→video-prompt wire can drop its sentinel
+    // instead of stripping an unrelated prompt tag by index.
+    const detachedEdge = cb.current.graph?.edges.find(
+      (e) => e.to.node === canonicalNodeId(String(from.nodeId ?? "")) && e.to.port === String((from as { id?: unknown }).id ?? "")
+    );
     // Stored-graph removal first (see header note): mirrors the legacy strip
     // below handle-for-handle. Null = no mapped wire; the legacy path still runs.
     {
@@ -4881,6 +4960,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (handleId === "in-brand") return true;
         const m = /^in-ref-(\d+)$/.exec(handleId);
         if (m) {
+          // A direct generation wire carries no tag: drop its sentinel and
+          // leave the prompt text alone (otherwise an unrelated tag at this
+          // index would be stripped).
+          const genFrom = detachedEdge && parseVideoPromptNode(detachedEdge.to.node) ? detachedEdge.from.node : "";
+          if (genFrom && isVideoGenRef(genFrom)) {
+            const nodes = cb.current.graphVideoNodes ?? [];
+            const node = nodes.find((n) => n.id === vpId);
+            if (node && (node.refIds ?? []).includes(genFrom)) {
+              patchVideoNode(vpId, { refIds: (node.refIds ?? []).filter((id) => id !== genFrom) });
+            }
+            return true;
+          }
           const idx = Number(m[1]);
           const fresh = appliers.current[key]?.get() ?? curVal;
           const freshName = refTagNames(fresh)[idx];

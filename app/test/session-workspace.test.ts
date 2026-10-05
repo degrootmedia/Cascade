@@ -11,7 +11,7 @@ const { dataDir } = vi.hoisted(() => {
 
 vi.mock("electron", () => ({ app: { getPath: () => dataDir } }));
 
-import { newSessionFile, resolveWorkspace, type SessionFile } from "../src/main/sessions.js";
+import { newSessionFile, resolveWorkspace, loadSession, saveSession, type SessionFile } from "../src/main/sessions.js";
 
 type Binding = Pick<SessionFile, "followProduction" | "pureChat" | "workspace">;
 const base: Binding = { followProduction: false, pureChat: false, workspace: null };
@@ -46,5 +46,27 @@ describe("newSessionFile followProduction", () => {
     const s = newSessionFile(null);
     expect(s.followProduction).toBe(false);
     expect(s.pureChat).toBe(true);
+  });
+});
+
+describe("newSessionFile autonomous default", () => {
+  it("applies the autonomous default and starts with no grants", () => {
+    const s = newSessionFile(null, null, false, true);
+    expect(s.autonomousMode).toBe(true);
+    expect(s.planMode).toBe(false);
+    expect(s.allowedTools).toEqual([]);
+    expect(s.allowedToolGroups).toEqual([]);
+  });
+});
+
+describe("session approval grants persist", () => {
+  it("round-trips grants, dropping blank/non-string/oversized/duplicate entries", () => {
+    const s = newSessionFile("/ws");
+    s.allowedTools = ["openart__gen", "", 123 as unknown as string, "openart__gen", "a".repeat(200)];
+    s.allowedToolGroups = ["openart", "openart", "x".repeat(100)];
+    saveSession(s);
+    const loaded = loadSession(s.id)!;
+    expect(loaded.allowedTools).toEqual(["openart__gen"]);
+    expect(loaded.allowedToolGroups).toEqual(["openart"]);
   });
 });

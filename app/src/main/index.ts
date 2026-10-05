@@ -15,7 +15,7 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -28,14 +28,15 @@ import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
 import * as ledger from "./ledger.js";
-import { assemble, renderAnimatic } from "./assembly.js";
+import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
 import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
+import { makeProductionAgentTools, type ProductionOp } from "./production-tools.js";
+import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
 styleFrameOverride, normalizeCanvasBusy, normalizeCameraGridData, recordSequenceVideoGen, sequenceSelectedTake, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, 
 CAMERA_GRID_COLS, CAMERA_GRID_ROWS, type DisplayItem, type GraphSource, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
@@ -52,6 +53,12 @@ import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, R
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
+/**
+ * Production Assistant tools exposed to the chat agent. Built in `registerIpc`
+ * (they wrap the same production handlers the UI calls) and merged into every
+ * workspace-bound agent in `ensureAgent`. See `production-tools.ts`.
+ */
+let agentProductionTools: Record<string, AgentTool> = {};
 /** The single detached canvas window (Spec 03) — created in `whenReady`. */
 let detached: DetachedCanvasController | null = null;
 
@@ -441,6 +448,9 @@ interface LiveChat {
   sendToken: number;
 }
 const chats = new Map<string, LiveChat>();
+/** Follower chats whose agent rebuild was deferred because a turn was running
+ *  when the active production changed (see `rebindFollowChats`). */
+const deferredProductionRebind = new Set<string>();
 /** The currently-focused chat id (what the transcript sidebar shows). */
 let curId: string | null = null;
 
@@ -448,7 +458,7 @@ let curId: string | null = null;
 function live(id: string): LiveChat {
   let e = chats.get(id);
   if (!e) {
-    const loaded = sessions.loadSession(id) ?? sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
+    const loaded = sessions.loadSession(id) ?? sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction(), settings.getAutonomousByDefault());
     e = { session: loaded, agent: null, running: false, sendToken: 0 };
     chats.set(id, e);
   }
@@ -482,13 +492,19 @@ function activeProductionFolder(): string | null {
   return activeProduction()?.folder ?? null;
 }
 
-/** Rebuild the agents of chats whose folder mirrors the active production. */
+/** Rebuild the agents of chats whose folder mirrors the active production.
+ *  A chat mid-turn is NOT stopped here (that would abort the running agent —
+ *  e.g. the `cascade_create_production` tool switching the active production
+ *  while the agent is executing); it is deferred until its turn ends. */
 function rebindFollowChats(): void {
   for (const e of chats.values()) {
-    if (e.session.followProduction) {
-      e.agent?.stop();
-      e.agent = null;
+    if (!e.session.followProduction) continue;
+    if (e.running) {
+      deferredProductionRebind.add(e.session.id);
+      continue;
     }
+    e.agent?.stop();
+    e.agent = null;
   }
 }
 
@@ -605,6 +621,9 @@ function ensureAgent(entry: LiveChat): Agent {
     }
     lazyTools["openart_upload_reference"] = openArtUpload;
     if (skillsList.length) extraTools["read_skill"] = makeReadSkillTool(skillsDir);
+    // Production Assistant tools (built in registerIpc): let the chat agent
+    // create and drive a Cascade production so assets land in its folder.
+    for (const [name, tool] of Object.entries(agentProductionTools)) extraTools[name] = tool;
     // Session todo list (step 02): same tool names as core's workspace-backed
     // defaults, so these session-scoped versions shadow them for app chats.
     // Reads the entry's session id live; emits todos:changed after persisting.
@@ -666,6 +685,23 @@ function ensureAgent(entry: LiveChat): Agent {
       agentPrompt: agentPrompt || undefined,
       skills: skillsList,
       planMode: !!entry.session.planMode,
+      autonomousMode: !!entry.session.autonomousMode,
+      maxIterations: settings.getMaxIterations(),
+      // Session grants persisted on the chat file survive this rebuild, so an
+      // "always allow" decision doesn't get asked for again after a production
+      // switch or settings change.
+      initialAllowedTools: entry.session.allowedTools ?? [],
+      initialAllowedGroups: entry.session.allowedToolGroups ?? [],
+      onApprovalGrant: (grant) => {
+        entry.session.allowedTools ??= [];
+        entry.session.allowedToolGroups ??= [];
+        if (grant.kind === "tool") {
+          if (!entry.session.allowedTools.includes(grant.value)) entry.session.allowedTools.push(grant.value);
+        } else if (!entry.session.allowedToolGroups.includes(grant.value)) {
+          entry.session.allowedToolGroups.push(grant.value);
+        }
+        sessions.saveSession(entry.session);
+      },
       extraTools,
       lazyTools,
       lazyGroupNotes,
@@ -781,9 +817,14 @@ function registerIpc() {
   // undeclared channel (or a declared channel with no handler) fails loudly
   // instead of silently breaking the renderer.
   const ipcHandlers = new Set<string>();
+  // The raw handlers, kept so first-party host code (the Production Assistant
+  // agent tools) can invoke a production operation directly without a renderer
+  // round-trip or the sender/schema gate. Only mapped channels are reachable.
+  const ipcListeners = new Map<string, (event: any, ...args: any[]) => unknown>();
   function handle(channel: string, listener: (event: import("electron").IpcMainInvokeEvent, ...args: any[]) => unknown): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
     ipcHandlers.add(channel);
+    ipcListeners.set(channel, listener);
     ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
       if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
       validateIpcArgs(channel, args);
@@ -854,7 +895,15 @@ function registerIpc() {
       sessions.saveSession(entry.session);
       broadcastSessions();
     } finally {
-      if (token === entry.sendToken) entry.running = false;
+      if (token === entry.sendToken) {
+        entry.running = false;
+        // A production switch during this turn deferred the follower rebuild so
+        // it couldn't abort the running agent; do it now that the turn is over.
+        if (deferredProductionRebind.delete(entry.session.id)) {
+          entry.agent?.stop();
+          entry.agent = null;
+        }
+      }
     }
   }
 
@@ -920,6 +969,9 @@ function registerIpc() {
     const entry = chats.get(sessionId);
     if (!entry) return;
     entry.session.planMode = !!on;
+    // Plan mode and autonomous mode are opposites (gate everything vs. gate
+    // nothing), so enabling one clears the other.
+    if (entry.session.planMode) entry.session.autonomousMode = false;
     sessions.saveSession(entry.session);
     entry.agent?.stop();
     entry.agent = null; // rebuild with the new plan-mode flag next message
@@ -936,6 +988,32 @@ function registerIpc() {
 
   handle("chat:getPlanMode", (_e, sessionId: string) => {
     return chats.get(sessionId)?.session.planMode ?? false;
+  });
+
+  // Turn autonomous mode on/off for a chat: the approval gate is skipped
+  // entirely. Persists per session and rebuilds the agent so the system-prompt
+  // directive takes effect immediately.
+  handle("chat:setAutonomousMode", (_e, sessionId: string, on: boolean) => {
+    const entry = chats.get(sessionId);
+    if (!entry) return;
+    entry.session.autonomousMode = !!on;
+    if (entry.session.autonomousMode) entry.session.planMode = false;
+    sessions.saveSession(entry.session);
+    entry.agent?.stop();
+    entry.agent = null;
+    win?.webContents.send("agent:event", {
+      sessionId,
+      event: {
+        type: "notice",
+        text: entry.session.autonomousMode
+          ? "Autonomous mode ON — Cascade will act without asking for approval. Turn it off any time."
+          : "Autonomous mode OFF.",
+      },
+    });
+  });
+
+  handle("chat:getAutonomousMode", (_e, sessionId: string) => {
+    return chats.get(sessionId)?.session.autonomousMode ?? false;
   });
 
   // Undo the file changes made by a chat's most recent agent turn.
@@ -1157,6 +1235,20 @@ function registerIpc() {
     settings.setDevMode(v === true);
   });
 
+  handle("settings:getMaxIterations", () => settings.getMaxIterations());
+
+  handle("settings:setMaxIterations", (_e, v: number) => {
+    const next = settings.setMaxIterations(v);
+    resetAllAgents(); // rebuilt agents pick up the new cap next message
+    return next;
+  });
+
+  handle("settings:getAutonomousByDefault", () => settings.getAutonomousByDefault());
+
+  handle("settings:setAutonomousByDefault", (_e, v: boolean) => {
+    settings.setAutonomousByDefault(v === true);
+  });
+
   handle("settings:getSubmissionDryRun", () => settings.getSubmissionDryRun());
 
   handle("settings:setSubmissionDryRun", (_e, v: boolean) => {
@@ -1344,7 +1436,7 @@ function registerIpc() {
   });
 
   handle("sessions:new", () => {
-    const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
+    const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction(), settings.getAutonomousByDefault());
     sessions.saveSession(s); // persist so it's visible in the sidebar immediately
     const entry: LiveChat = { session: s, agent: null, running: false, sendToken: 0 };
     chats.set(s.id, entry);
@@ -1373,7 +1465,7 @@ function registerIpc() {
     // If the removed chat was the one open, start a fresh one so the live
     // session object doesn't point at a deleted/dead file.
     if (ok && id === curId) {
-      const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
+      const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction(), settings.getAutonomousByDefault());
       chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
       curId = s.id;
     }
@@ -3471,6 +3563,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       // Additional references plugged into the video node's open sockets. Both
       // image artwork and dropped video clips upload as visual references.
+      // Direct generation wires (no saved reference) resolve to the wired
+      // node's selected take.
       const extraRefs: { name: string; dataUrl: string }[] = [];
       if (Array.isArray(opts?.refIds)) {
         const pool = [
@@ -3483,6 +3577,21 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
           })),
         ];
         for (const rid of opts.refIds) {
+          if (typeof rid === "string" && isVideoGenRef(rid)) {
+            const genPath = rid === TWEEN_KEY_IMGGEN
+              ? shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path
+              : (() => {
+                const editId = parseEditNodeKeyframe(rid);
+                const node = editId ? (shot.graphEditNodes ?? []).find((n) => n.id === editId) : undefined;
+                return node?.gens?.[node.genIndex ?? 0]?.path;
+              })();
+            const dataUrl = genPath ? fileDataUrl(p, genPath) : null;
+            if (dataUrl) {
+              const name = rid === TWEEN_KEY_IMGGEN ? "Image node frame" : "Edit node frame";
+              if (!extraRefs.some((e) => e.name === name && e.dataUrl === dataUrl)) extraRefs.push({ name, dataUrl });
+            }
+            continue;
+          }
           const ref = pool.find((r) => r.id === rid && r.data);
           if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
         }
@@ -4902,6 +5011,85 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     void shell.openPath(assetPath(p, p.assembly?.exportDir ?? `${p.assets.outDir}/${p.assets.assemblyDir}`));
   });
 
+  // Chat-agent door into the Production Assistant (see production-tools.ts):
+  // the `cascade_*` tools call the very same handlers the UI calls, so every
+  // asset is written into the production folder by the app (never ad hoc).
+  // Two ops have no plain channel: `setStyle` (the renderer persists styles via
+  // a document save) writes the productions module directly, and
+  // `generateVideo` composes the styled video prompt main-side before
+  // dispatching (the UI renders Style/Brand at submit time too).
+  const PRODUCTION_OP_CHANNEL: Record<Exclude<ProductionOp, "setStyle" | "generateVideo" | "generateMagicPrompts">, string> = {
+    create: "production:create",
+    import: "production:import",
+    ingest: "production:ingest",
+    setShotPrompt: "production:updateBoardPrompt",
+    generateStyleFrame: "production:generateStyleFrame",
+    generateCharacterSheet: "production:generateCharacterSheet",
+    generateBoards: "production:generateBoards",
+    regenerateBoards: "production:regenerateBoards",
+    recheckVideo: "production:recheckVideo",
+    listModels: "production:openArtModels",
+    modelOptions: "production:modelOptions",
+    videoModelOptions: "production:videoModelOptions",
+    imageModelOptions: "production:imageModelOptions",
+    planAnimatic: "production:planAnimatic",
+    assemble: "production:assemblyBuild",
+    render: "production:assemblyRender",
+  };
+  agentProductionTools = makeProductionAgentTools({
+    run: async (op, ...args) => {
+      if (op === "setStyle") {
+        const [id, input] = args as [string, { name: string; prompt: string; styleId?: string }];
+        const p = productions.loadProduction(id);
+        if (!p) throw new Error("Production not found.");
+        productions.saveProduction(productions.upsertProductionStyle(p, input));
+        return productions.loadProduction(id) ?? p;
+      }
+      if (op === "generateMagicPrompts") {
+        const [id] = args as [string];
+        const gen = ipcListeners.get("production:generateMagicPrompts");
+        const setEnabled = ipcListeners.get("production:setMagicEnabled");
+        if (!gen || !setEnabled) throw new Error(`Production operation "generateMagicPrompts" is unavailable.`);
+        await gen(undefined, id);
+        // Magic prompts only take effect while Magic mode is on — mirror the
+        // UI's toggle so the fresh prompts (and their @[Name] citations) are
+        // what the next storyboard run renders and attaches.
+        await setEnabled(undefined, id, true);
+        return productions.loadProduction(id);
+      }
+      if (op === "generateVideo") {
+        const [id, shotId, opts] = args as [string, string, VideoGenOptions];
+        const p = productions.loadProduction(id);
+        const shot = p?.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+        if (!p || !shot) throw new Error("Shot not found.");
+        const listener = ipcListeners.get("production:generateVideo");
+        if (!listener) throw new Error(`Production operation "generateVideo" is unavailable.`);
+        // Style/Brand are rendered from the shot's style system here, mirroring
+        // the renderer's submit-time render; content (@[Name] tags included)
+        // stays as the agent authored it.
+        return await listener(undefined, id, shotId, { ...opts, prompt: composeVideoPrompt(p, shot, opts.prompt) });
+      }
+      const listener = ipcListeners.get(PRODUCTION_OP_CHANNEL[op]);
+      if (!listener) throw new Error(`Production operation "${op}" is unavailable.`);
+      return await listener(undefined, ...args);
+    },
+    list: () => productions.listProductions(),
+    load: (id) => productions.loadProduction(id),
+    activeId: () => settings.getActiveProductionId(),
+    defaultParentFolder: () => app.getPath("documents"),
+    assemblyReport: (id) => {
+      const p = productions.loadProduction(id);
+      if (!p) return { totalSec: 0, stills: [], blanks: [], suspiciousStills: [] };
+      const plan = assemblyPlan(p);
+      return {
+        totalSec: plan.totalSec,
+        stills: plan.events.filter((e) => e.kind === "still").map((e) => e.number),
+        blanks: plan.blanks,
+        suspiciousStills: plan.suspiciousStills,
+      };
+    },
+  });
+
   // Expenses: per-production AI-generation ledgers (and manual purchased-asset
   // rows), plus the global pricing rules edited from Settings. Higgsfield
   // rows track credits, converted at the credit rate for the $ total.
@@ -5249,7 +5437,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   // First chat inherits the default folder.
-  const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction());
+  const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction(), settings.getAutonomousByDefault());
   sessions.saveSession(s); // persist so the active chat shows in the sidebar
   chats.set(s.id, { session: s, agent: null, running: false, sendToken: 0 });
   curId = s.id;

@@ -67,7 +67,7 @@ export function AgentPicker({
           >
             <span className="avatar default" style={{ width: 20, height: 20 }}>○</span>
             <span className="agent-option-name">Default</span>
-            <span className="agent-option-desc">No agent — standard Cascade</span>
+            <span className="agent-option-desc">No persona — standard Cascade</span>
           </button>
           {agents.map((a) => (
             <button
@@ -85,7 +85,7 @@ export function AgentPicker({
           ))}
           <div className="agent-menu-sep" />
           <button className="agent-option manage" onClick={() => { onManage(); setOpen(false); }}>
-            Manage agents…
+            Manage personas…
           </button>
         </div>
       )}

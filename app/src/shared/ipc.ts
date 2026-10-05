@@ -290,6 +290,11 @@ export interface CascadeApi {
   setPlanMode(sessionId: string, on: boolean): Promise<void>;
   /** Whether plan mode is currently on for the given chat. */
   getPlanMode(sessionId: string): Promise<boolean>;
+  /** Turn autonomous mode on/off for the current chat (persisted per session).
+   *  Autonomous mode skips the approval gate entirely. */
+  setAutonomousMode(sessionId: string, on: boolean): Promise<void>;
+  /** Whether autonomous mode is currently on for the given chat. */
+  getAutonomousMode(sessionId: string): Promise<boolean>;
   respondApproval(id: number, decision: ApprovalDecisionIpc): void;
   onAgentEvent(cb: (e: ChatEvent) => void): () => void;
   onApprovalRequest(cb: (req: ApprovalRequestIpc) => void): () => void;
@@ -367,6 +372,12 @@ export interface CascadeApi {
   /** Dev Mode: verbose human-readable submission logging. */
   getDevMode(): Promise<boolean>;
   setDevMode(v: boolean): Promise<void>;
+  /** Max model turns per agent send (long agentic tasks); clamped to a range. */
+  getMaxIterations(): Promise<number>;
+  setMaxIterations(v: number): Promise<number>;
+  /** Default for new chats: start in autonomous mode (no approval prompts). */
+  getAutonomousByDefault(): Promise<boolean>;
+  setAutonomousByDefault(v: boolean): Promise<void>;
   /** Credit-free dry run: build + log the request, throw before vendor call. */
   getSubmissionDryRun(): Promise<boolean>;
   setSubmissionDryRun(v: boolean): Promise<void>;

@@ -99,7 +99,7 @@ export function makeSessionTodoTools(
       function: {
         name: "todo_write",
         description:
-          "Replace this chat's durable task list (full replace — send the complete list each time). Items: {id? (omit for new items), text, status: todo|running|done|blocked, note?}. Max 50 items. Safe: no approval needed, usable in plan mode.",
+          "Replace this chat's durable task list (full replace — send the complete list every time, reusing each item's id). Items: {id? (omit for new items), text, status: todo|running|done|blocked, note?}. Max 50 items. For any task with 3+ steps, call this first to lay out the plan, then update it as you go: keep exactly ONE item \"running\" and mark each item \"done\" the moment it succeeds (before starting the next step). Never leave finished work marked todo. Safe: no approval needed, usable in plan mode.",
         parameters: {
           type: "object",
           properties: {

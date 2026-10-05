@@ -179,6 +179,23 @@ describe("assemblyPlan", () => {
     expect(plan.events).toHaveLength(1);
     expect(plan.events[0].kind).toBe("clip");
   });
+
+  it("flags a still as suspicious when the production shows a video generation", () => {
+    const p = makeProduction({
+      scenes: [
+        makeScene([
+          makeShot({ number: "0200", artwork: "boards/0200/shot-0200-def.jpg", graphOutputSource: "videogen" }),
+        ]),
+      ],
+    });
+    const plan = assemblyPlan(p);
+    expect(plan.events[0].kind).toBe("still");
+    expect(plan.suspiciousStills).toEqual(["0200"]);
+  });
+
+  it("does not flag a legitimate still-only shot", () => {
+    expect(assemblyPlan(sampleProduction()).suspiciousStills).toEqual([]);
+  });
 });
 
 // ---- buildEdl --------------------------------------------------------------
@@ -273,6 +290,27 @@ describe("buildManifest", () => {
     expect(md).toContain("- 0300");
     expect(md).toContain("- Assembly.edl");
     expect(md).toContain("- render.mp4 (after Render MP4)");
+  });
+
+  it("declares every column the timeline rows emit (no stray empty column)", () => {
+    const plan = assemblyPlan(sampleProduction());
+    const md = buildManifest(plan, { fps: 24, width: 1920, height: 1080 }, { title: "T", builtAt: "2026-01-01T00:00:00Z", edlName: "Assembly.edl", jsxName: "Assembly.jsx" });
+    const header = md.split("\n").find((l) => l.startsWith("| Shot |"))!;
+    const row = md.split("\n").find((l) => l.startsWith("| 0100 |"))!;
+    expect(header).toBe("| Shot | Kind | Media | Duration | Notes |");
+    expect(row.split("|").length).toBe(header.split("|").length);
+  });
+
+  it("warns in the manifest when a clip is expected but missing", () => {
+    const p = makeProduction({
+      scenes: [
+        makeScene([
+          makeShot({ number: "0200", artwork: "boards/0200/shot-0200-def.jpg", graphOutputSource: "videogen" }),
+        ]),
+      ],
+    });
+    const md = buildManifest(assemblyPlan(p), { fps: 24, width: 1920, height: 1080 }, { title: "T", builtAt: "2026-01-01T00:00:00Z", edlName: "Assembly.edl", jsxName: "Assembly.jsx" });
+    expect(md).toMatch(/WARNING.*0200/);
   });
 });
 

@@ -385,5 +385,19 @@ control chars ï¿½ only a byte-level scan found them.
   the Edit tool.
 - Rule (strengthened): the Edit tool is the ONLY way to modify file text. If
   a tabular/renaming edit feels too big for one Edit call, split it into
-  several Edit calls — never reach for a shell rewrite, regardless of file
+  several Edit calls - never reach for a shell rewrite, regardless of file
   encoding.
+
+## 2026-10-02 - Settings checkbox inherited the full-width input rule
+
+- Symptom: the new MCP "On demand" toggle ran off the right edge of the
+  Settings window. `.settings input, .settings select { flex: 1; width: 100% }`
+  matches EVERY input, including `type="checkbox"`, so the checkbox claimed
+  the whole row and pushed its label text past the clip.
+- Rule: inside Settings, any checkbox/toggle must be reset - scope a rule like
+  `.settings .my-control input[type="checkbox"] { flex: none; width: auto;
+  padding: 0; margin: 0; }`. When a control lives in a flex column, also add
+  `flex: none` to its inputs/textareas so the inherited `flex: 1` can't stretch
+  them vertically. And because `.settings label { display: block; margin: ... }`
+  is more specific than a bare `.my-label`, scope label overrides as
+  `.settings .my-label { ... }`.

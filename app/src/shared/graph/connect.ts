@@ -262,6 +262,19 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     // Keyframe sockets route through connectTweenKey (positional edge ids
     // need the full ordered key list, not a single edge).
     if (target === "tween" && tweenSlot) return null;
+    // Generation outputs can wire directly into a video prompt's reference
+    // sockets (no saved reference): the take resolves at submit time from the
+    // video node's gen-ref sentinels. Same positional scheme as ref→prompt.
+    if (parseVideoPromptNode(target) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
+      const slot = /^in-ref-(\d+)$/.exec(handle);
+      if (slot) {
+        const idx = Number(slot[1]);
+        const drop = graph.edges.find((e) => e.to.node === target && e.to.port === `in-ref-${idx}`);
+        return { edge: mkEdge(`e-${source}-${target}-${idx}`, source, "out", target, `in-ref-${idx}`), dropIds: drop ? [drop.id] : [] };
+      }
+      const idx = refEdgeCount(graph, target);
+      return { edge: mkEdge(`e-${source}-${target}-${idx}`, source, "out", target, `in-ref-${idx}`), dropIds: [] };
+    }
     return null;
   }
   const srcVidId = parseVideoGenNode(source);
@@ -290,6 +303,19 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     }
     if (nodeKindForId(target) === "editgen" && handle === "in-image") {
       return { edge: mkEdge(`e-edit-edit:${target.slice(EDITGEN_PREFIX.length)}`, source, "out", target, "in-image"), dropIds: edgesInto(graph, target, "in-image").map((e) => e.id) };
+    }
+    // Generation outputs can wire directly into a video prompt's reference
+    // sockets (no saved reference): the take resolves at submit time from the
+    // video node's gen-ref sentinels. Same positional scheme as ref→prompt.
+    if (parseVideoPromptNode(target) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
+      const slot = /^in-ref-(\d+)$/.exec(handle);
+      if (slot) {
+        const idx = Number(slot[1]);
+        const drop = graph.edges.find((e) => e.to.node === target && e.to.port === `in-ref-${idx}`);
+        return { edge: mkEdge(`e-${source}-${target}-${idx}`, source, "out", target, `in-ref-${idx}`), dropIds: drop ? [drop.id] : [] };
+      }
+      const idx = refEdgeCount(graph, target);
+      return { edge: mkEdge(`e-${source}-${target}-${idx}`, source, "out", target, `in-ref-${idx}`), dropIds: [] };
     }
     // Keyframe sockets route through connectTweenKey (see above).
     return null;

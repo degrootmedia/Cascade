@@ -2775,7 +2775,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: pre-wrap;
 }
 .msg.assistant { align-self: stretch; }
-.msg.assistant.streaming::after { content: "â–Œ"; animation: blink 1s infinite; color: var(--accent); }
+.msg.assistant.streaming::after { content: "\258C"; animation: blink 1s infinite; color: var(--accent); }
 @keyframes blink { 50% { opacity: 0; } }
 .msg.assistant pre {
   background: var(--bg-panel);
@@ -3408,8 +3408,66 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .mcp-status li.connected .mcp-dot { background: var(--ok); }
 .mcp-status li.error .mcp-dot { background: var(--danger); }
 .mcp-status li.error { color: var(--danger); }
-.mcp-on-demand { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
-.mcp-on-demand input { accent-color: var(--accent); cursor: pointer; }
+.mcp-toolbar { margin: 4px 0 10px; }
+.settings .mcp-toolbar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mcp-empty { color: var(--text-dim); font-size: 0.85rem; margin: 4px 0 0; }
+.mcp-list { display: flex; flex-direction: column; gap: 8px; }
+.mcp-server { border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; background: var(--bg-panel); }
+.mcp-server.disabled { opacity: 0.65; }
+.mcp-server-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.88rem; }
+.mcp-server-name { color: var(--text); font-weight: 600; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-server.connected .mcp-dot { background: var(--ok); }
+.mcp-server.error .mcp-dot { background: var(--danger); }
+.mcp-badge { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
+.mcp-server-status { color: var(--text-dim); font-size: 0.8rem; min-width: 0; overflow-wrap: anywhere; }
+.mcp-server.error .mcp-server-status { color: var(--danger); }
+.mcp-server-actions { margin-left: auto; display: inline-flex; gap: 10px; flex-shrink: 0; }
+.mcp-server-detail { margin-top: 6px; font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem;
+  color: var(--text-dim); overflow-wrap: anywhere; }
+.mcp-server-foot { display: flex; justify-content: flex-end; margin-top: 8px; padding-top: 8px;
+  border-top: 1px solid var(--border); }
+.settings .mcp-on-demand { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-weight: 400;
+  font-size: 0.82rem; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
+.settings .mcp-on-demand:hover { color: var(--text); }
+.settings .mcp-on-demand input[type="checkbox"],
+.settings .mcp-enabled input[type="checkbox"] { flex: none; width: auto; padding: 0; margin: 0;
+  accent-color: var(--accent); cursor: pointer; }
+.mcp-form { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; margin-top: 10px; background: var(--bg-panel); }
+.mcp-form > strong { font-size: 0.9rem; }
+.mcp-form-field { display: flex; flex-direction: column; gap: 4px; }
+.settings .mcp-form-field > label { margin: 0; font-size: 0.82rem; font-weight: 600; color: var(--text); }
+.mcp-form-field input, .mcp-form-field textarea {
+  flex: none; width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 8px 10px; font: inherit;
+}
+.mcp-form-field textarea { resize: vertical; min-height: 62px; }
+.mcp-form-field input:focus, .mcp-form-field textarea:focus { outline: none; border-color: var(--accent); }
+.mcp-optional { color: var(--text-dim); font-weight: 400; font-size: 0.75rem; }
+.mcp-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  align-self: flex-start; }
+.mcp-seg button { border: none; border-radius: 0; background: transparent; padding: 6px 14px;
+  color: var(--text-dim); cursor: pointer; font-size: 0.85rem; }
+.mcp-seg button:hover { color: var(--text); }
+.mcp-seg button.active { background: var(--accent); color: #fff; }
+.settings .mcp-enabled { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-weight: 400;
+  font-size: 0.85rem; color: var(--text); cursor: pointer; }
+.mcp-form-actions { display: flex; gap: 8px; }
+.settings .mcp-form-actions button {
+  padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-raised); color: var(--text); cursor: pointer;
+}
+.settings .mcp-form-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mcp-advanced summary { cursor: pointer; color: var(--text-dim); font-size: 0.82rem; }
+.mcp-advanced[open] summary { margin-bottom: 8px; }
+.mcp-advanced .mcp-form-field + .mcp-form-field { margin-top: 8px; }
+.mcp-raw { margin-top: 14px; }
+.mcp-advanced-toggle { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0;
+  font-size: 0.82rem; text-align: left; }
+.mcp-advanced-toggle:hover { text-decoration: underline; }
+.mcp-raw .mcp-config { margin-top: 8px; }
 
 /* ---------- model picker ---------- */
 .composer-footer { display: flex; align-items: center; padding: 0 10% 12px; }
@@ -3429,6 +3487,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .undo:disabled,
 .plan-mode:disabled { opacity: 0.4; cursor: default; }
 .plan-mode.on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.plan-mode.autonomous-mode.on { color: #e0a23a; border-color: #e0a23a; background: color-mix(in srgb, #e0a23a 14%, transparent); }
 .model-picker { position: relative; }
 .model-button {
   display: flex;
@@ -3565,7 +3624,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: nowrap;
 }
 .attach-file::before {
-  content: "ðŸ“„ ";
+  content: "\1F4C4  ";
 }
 .attachment button {
   position: absolute;
@@ -3635,7 +3694,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: nowrap;
 }
 .msg-file::before {
-  content: "ðŸ“„ ";
+  content: "\1F4C4  ";
 }
 
 /* ---------- agents ---------- */

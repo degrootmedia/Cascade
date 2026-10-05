@@ -1,4 +1,119 @@
-﻿# Prompt text editing polish (caret/focus/backspace) — across all surfaces
+﻿# Long agentic tasks: autonomous mode, sticky approvals, todo discipline, higher cap
+
+User report (three linked issues from one long video-production run):
+1. Approval friction — had to approve OpenArt tool calls repeatedly; "always
+   allow this session" didn't stick; want an **autonomous mode** that omits
+   permission checks.
+2. Todo tracking drifted — the model finished the task but only marked half the
+   steps done.
+3. The agent stopped after 50 iterations (too small for long tasks).
+
+## Findings (verified)
+
+- **Approvals** (`core/src/agent.ts:255`): grants (`sessionAllowed` /
+  `sessionAllowedGroups`) live only on the in-memory `Agent`; they are lost on
+  every rebuild (follower-chat rebind on a production switch, `resetAllAgents`,
+  plan-mode toggle). All MCP tools incl. OpenArt are `requiresApproval: true`
+  (`app/src/main/mcp.ts:275`). No autonomous mode exists.
+- **Todos**: `core/src/todo.ts` + `app/src/main/session-tasks.ts` provide the
+  list, but `core/src/prompts.ts` never tells the model to *use* it, and
+  `todo_write` is full-replace, so statuses drift.
+- **Cap**: `core/src/agent.ts:18` `DEFAULT_MAX_ITERATIONS = 50`; the app never
+  overrides it. Each iteration is one model turn (which can batch many calls).
+
+## Decisions (user-confirmed)
+
+- Autonomous mode: **per-chat toggle + global default for new chats**.
+- **Make session approval grants persistent** on the session file.
+- Iteration cap: **raise default to 250 + make it configurable** in Settings.
+- Todo: **system-prompt directive + better tool docs** (no new incremental tool).
+- Autonomous and plan mode are **mutually exclusive** (turning one on turns the
+  other off); the plan gate still wins in code if both are ever set.
+
+## Plan
+
+### Phase 1 — core agent (`core/src/`)
+- [ ] `types.ts`: `AgentConfig` += `autonomousMode?`, `initialAllowedTools?`,
+      `initialAllowedGroups?`, `onApprovalGrant?`.
+- [ ] `agent.ts`: `DEFAULT_MAX_ITERATIONS = 250`; seed `sessionAllowed` /
+      `sessionAllowedGroups` from config; skip the approval prompt when
+      `autonomousMode`; report grants via `onApprovalGrant`.
+- [ ] `prompts.ts`: refactor `systemPrompt` to an options object; add
+      `autonomousPrompt()` and a todo-discipline directive (only when todo tools
+      are present); thread from `Agent`.
+- [ ] `todo.ts`: tighten the `todo_write` description (mark items done
+      immediately; one `running` at a time).
+
+### Phase 2 — app persistence + wiring (`app/src/main/`)
+- [ ] `sessions.ts`: `SessionFile` += `autonomousMode`, `allowedTools`,
+      `allowedToolGroups`; back-fill + defaults; `newSessionFile` takes the
+      autonomous default.
+- [ ] `settings.ts`: `autonomousByDefault` + `maxIterations` getters/setters
+      (defaults `false` / `250`).
+- [ ] `ipc-channels/chat.ts` + `workspace.ts` + `ipc.ts` (`CascadeApi`) +
+      `ipc-schemas.ts`: `chat:set/getAutonomousMode`,
+      `settings:get/setMaxIterations`, `settings:get/setAutonomousByDefault`.
+- [ ] `index.ts`: `ensureAgent` passes autonomous flag, cap, seeded grants, and
+      the grant-persist callback; handlers for the new channels; new-session
+      call sites pass the default; mutual exclusion in the two mode handlers.
+- [ ] `session-tasks.ts`: mirror the tightened `todo_write` description.
+
+### Phase 3 — renderer (`app/src/renderer/src/`)
+- [ ] `App.tsx`: `autonomousMode` state, read on session focus, composer chip,
+      mutual exclusion with plan mode.
+- [ ] `shared/commands.ts`: `/autonomous on|off` (alias `/auto`).
+- [ ] New `settings/sections/AgentSection.tsx` (Advanced): autonomous-by-default
+      toggle + max-iterations input; register in `registry.tsx`.
+
+### Phase 4 — tests + verify
+- [ ] core: `prompts.test.ts` (autonomous + todo directives; options object),
+      `multimodal.test.ts` call updates; a sessions/todo unit test for the new
+      fields/descriptions.
+- [ ] app: `commands.test.ts` for `/autonomous`.
+- [ ] `npm run typecheck`, `npm test` (app), `npm run build`; `npm test` (core).
+- [ ] `CONTEXT.md`: autonomous mode + configurable cap + sticky grants.
+
+## Review
+
+Done. Three fixes, sharing one theme: the agent loop's long-task affordances
+were hard-coded for short runs.
+
+**1. Approvals / autonomous mode.** `core/src/agent.ts` now skips the approval
+prompt entirely when `AgentConfig.autonomousMode` is set (plan gate still runs
+first — it's structural, not a permission), and every tool still emits its
+events + journals file mutations for undo. Session grants
+(`initialAllowedTools`/`initialAllowedGroups`) are seeded from the chat file on
+rebuild and new grants are reported back via `onApprovalGrant` and persisted —
+so "always allow openart this session" survives a production rebind instead of
+being re-asked. Exposed as a per-chat composer chip + `/autonomous on|off`
+(alias `/auto`), persisted on the session, with a Settings → Advanced → Agent
+default for new chats. Autonomous and plan mode are mutually exclusive in both
+the UI and the handlers. `systemPrompt` was refactored to an options object and
+gained the autonomous directive (which also drops the "ask for approval"
+guideline).
+
+**2. Todo tracking.** The tools existed but nothing told the model to use them.
+Added a task-list directive to the system prompt (only when `todo_write` is
+present): lay out the plan first, keep exactly one item `running`, and mark each
+item `done` the moment it succeeds before starting the next. Tightened the
+`todo_write` tool description (core + session variants) to match.
+
+**3. Turn cap.** `DEFAULT_MAX_ITERATIONS` 50 → 250, plus
+`settings.maxIterations` (clamped 10–2000, default 250) threaded through
+`ensureAgent`; the stop message now points at the setting and suggests
+"continue". Editable in Settings → Advanced → Agent.
+
+Tests: core `agent-approval.test.ts` (6: default gate, autonomous skip, seeded
+tool + group grants, allow-session + allow-group-session reporting);
+`prompts.test.ts` autonomous/todo/options; `multimodal.test.ts` call updates.
+App: `commands.test.ts` `/autonomous`; `session-workspace.test.ts` autonomous
+default + grant normalization round-trip. Verify: core typecheck + 157 tests;
+app typecheck + 1385 tests (1 skipped) + `npm run build` all clean. `CONTEXT.md`
+updated (agent core, plan mode, harness).
+
+---
+
+# Prompt text editing polish (caret/focus/backspace) — across all surfaces
 
 User report: regression of an old bug. Editing prompts in the node view is very
 buggy — focus is lost while typing, the caret jumps to the end. The side-panel
@@ -2793,5 +2908,63 @@ What shipped:
 Verify: `npm run typecheck` clean; `npm test` 1308 passed + 1 skipped (115
 files, incl. the 6 new); `npm run build` clean with the handler in
 `out/main/index.js`. Note: the running Electron main process keeps the build
-it started with — a full dev restart is needed before the new IPC responds
+it started with - a full dev restart is needed before the new IPC responds
 (the known main-restart lesson).
+
+# Friendly MCP server setup in Settings
+
+User report: connecting MCPs meant editing a JSON block in Settings, which is
+too complex for some users.
+
+## Findings (verified)
+
+- MCP config is NOT in `settings.json`; it is `userData/mcp.json`, reached only
+  as raw text (`mcp:getConfig` / `mcp:setConfig`). There is no per-server IPC.
+- `McpServerConfig` / `McpConfigFile` lived only in `main/mcp.ts`; transport is
+  field-derived (url => http, command => stdio).
+- `McpSection.tsx` was a single `AutoTextarea` + Save/Reconnect + status list.
+
+## Decision
+
+Keep the raw JSON as an advanced escape hatch, and add a friendly form editor
+as the primary path. No new IPC channels: the renderer parses the text to a
+typed file, edits it locally, and re-serializes through the existing
+`mcp:setConfig` (minimal main-process impact; the document is small).
+
+## Plan
+
+- [x] `shared/mcp-config.ts`: move the types here (main imports them; one home)
+      + pure `parseMcpConfigText` / `serializeMcpConfig` / `mcpTransport` /
+      `upsertMcpServer` / `removeMcpServer` / `validateMcpServer` /
+      `cleanMcpServer` + field codecs (`linesToArgs`, `envToText`,
+      `textToNames`, ...).
+- [x] `McpSection.tsx`: server cards (status dot, transport badge, tool count /
+      error, on-demand checkbox, Edit/Remove), an add/edit form (name,
+      Local command vs Remote URL, command/args, environment + passthrough
+      under a details, enabled), Add/Reconnect toolbar, and a collapsible
+      "Advanced: edit raw JSON" editor. Unsaved form/raw edits register with the
+      Settings dirty/close guard.
+- [x] `styles.css`: card/form/segmented-control/advanced styles.
+- [x] `app/test/mcp-config.test.ts` (22): parse tolerance + per-entry guard,
+      round-trip serialize, transport detection, position-preserving
+      upsert/rename/remove, transport-aware validation, env/args/names codecs,
+      clean (unknown-key preserving, transport exclusivity).
+- [x] `npm run typecheck`, `npm test`, `npm run build` (app).
+
+## Review
+
+Done. Settings -> Tools & Integrations -> MCP Servers now lists each server as a
+card and connects one through a form — no JSON required. The old paste-a-block
+workflow survives one click away under "Advanced: edit raw JSON", and every
+edit still saves through `mcp:setConfig`, so `mcp.json` and main are unchanged.
+
+What shipped:
+- `shared/mcp-config.ts` (new pure module): the single home for the `mcpServers`
+  grammar. `main/mcp.ts` imports the types from it (re-export preserved), so the
+  renderer and main can't drift.
+- `McpSection.tsx`: card list + form + advanced raw editor + on-demand toggle +
+  Add/Reconnect; invalid/unparseable external configs are surfaced in the raw
+  editor instead of being silently discarded, and unknown server keys survive a
+  form edit.
+- Tests: `mcp-config.test.ts` (22). Full suite `npm test` 1442 passed + 1
+  skipped (127 files); `npm run typecheck` clean; `npm run build` clean.

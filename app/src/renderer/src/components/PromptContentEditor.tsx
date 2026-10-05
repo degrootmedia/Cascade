@@ -10,6 +10,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { isTagOnlyDiff, refTagMatches, type RefTagMatch } from "../../../shared/prompt-grammar.js";
+import { clipboardText } from "../clipboard.js";
 
 export interface PromptContentHandle {
   focus(): void;
@@ -681,7 +682,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
         }}
         onPaste={(e) => {
           e.preventDefault();
-          const t = e.clipboardData.getData("text/plain");
+          const t = clipboardText(e.clipboardData);
           if (t) { pushUndo("paste"); insertPlainText(t); }
         }}
         onDrop={(e) => {

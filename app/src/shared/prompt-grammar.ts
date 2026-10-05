@@ -129,7 +129,7 @@ export function replaceRefTagAt(text: string, index: number, name: string): stri
 // call sites that derive live state from a stored prompt.
 
 /** The whole `Brand identity:` paragraph (leading or following a blank line). */
-export const BRAND_PARA_RE = /(?:^|\n\n)Brand identity: [^\n]*(?=\n\n|$)/;
+export const BRAND_PARA_RE = /(?:^|\n\n)Brand identity: [\s\S]*?(?=\n\n|$)/;
 /** Head anchor of a `Brand identity:` paragraph (for placement checks). */
 export const BRAND_PARA_HEAD_RE = /(?:^|\n\n)Brand identity: /;
 /** The whole `Style:` paragraph. */
@@ -181,15 +181,22 @@ export interface PromptBoxes {
 
 export function parsePromptBoxes(prompt: string): PromptBoxes {
   const boxes: PromptBoxes = { style: "", content: "", brand: "" };
-  const content: string[] = [];
-  for (const para of prompt.split(/\n\n+/)) {
-    const p = para.trim();
-    if (!p) continue;
-    if (!boxes.style && /^Style:[ \t]*/.test(p)) { boxes.style = p.replace(/^Style:[ \t]*/, ""); continue; }
-    if (!boxes.brand && /^Brand identity:[ \t]*/.test(p)) { boxes.brand = p.replace(/^Brand identity:[ \t]*/, ""); continue; }
-    content.push(p);
+  // Pull out the first Style / Brand paragraph but leave the remaining text
+  // byte-for-byte intact — the content box is the user's own prompt, so its
+  // paragraph structure and indentation must survive the decompose/compose
+  // round trip. (A per-paragraph trim here used to flatten pasted text.)
+  let rest = prompt;
+  const style = STYLE_PARA_RE.exec(rest);
+  if (style) {
+    boxes.style = style[0].replace(/^(\n\n)?Style:[ \t]*/, "").trim();
+    rest = rest.slice(0, style.index) + rest.slice(style.index + style[0].length);
   }
-  boxes.content = content.join("\n\n");
+  const brand = BRAND_PARA_RE.exec(rest);
+  if (brand) {
+    boxes.brand = brand[0].replace(/^(\n\n)?Brand identity:[ \t]*/, "").trim();
+    rest = rest.slice(0, brand.index) + rest.slice(brand.index + brand[0].length);
+  }
+  boxes.content = rest.replace(/^\n+|\n+$/g, "");
   return boxes;
 }
 
@@ -198,8 +205,8 @@ export function composePromptBoxes(b: PromptBoxes): string {
   const paras: string[] = [];
   const style = b.style.replace(/\n\s*\n/g, "\n").trim();
   if (style) paras.push(`Style: ${style}`);
-  const content = b.content.trim();
-  if (content) paras.push(content);
+  const content = b.content.replace(/^\n+|\n+$/g, "");
+  if (content.trim()) paras.push(content);
   if (b.brand.trim()) paras.push(`Brand identity: ${b.brand.replace(/\n\s*\n/g, "\n").trimEnd()}`);
   return paras.join("\n\n");
 }

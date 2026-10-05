@@ -16,6 +16,8 @@ export interface SlashCommand {
   instruction: string;
   /** When set, also toggles plan mode to this value (or no-op when undefined). */
   planMode?: boolean;
+  /** When set, also toggles autonomous mode to this value (undefined = no-op). */
+  autonomousMode?: boolean;
 }
 
 /** The default harness command set (name → template). The token appears in the
@@ -73,6 +75,11 @@ export function expandCommand(text: string): SlashCommand | null {
   if (token === "plan-mode") {
     const on = rest.toLowerCase().startsWith("on") ? true : rest.toLowerCase().startsWith("off") ? false : undefined;
     return { name: "plan-mode", rest, instruction: "", planMode: on };
+  }
+
+  if (token === "autonomous" || token === "auto") {
+    const on = rest.toLowerCase().startsWith("on") ? true : rest.toLowerCase().startsWith("off") ? false : undefined;
+    return { name: "autonomous", rest, instruction: "", autonomousMode: on };
   }
 
   const cmd = COMMANDS[token];

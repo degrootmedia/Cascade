@@ -79,20 +79,20 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal agents-modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(780px, 96vw)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0 }}>Agents</h3>
+          <h3 style={{ margin: 0 }}>Personas</h3>
           <button className="link" onClick={onClose}>Close</button>
         </div>
-        <p className="hint">Agents are available in every workspace. Each has its own prompt (<code>.md</code>), model, avatar, and allowed tools. Chats can switch agents at any time.</p>
+        <p className="hint">Personas are available in every workspace. Each has its own prompt (<code>.md</code>), model, avatar, and allowed tools. Chats can switch personas at any time.</p>
 
         <div style={{ display: "flex", gap: 8, margin: "12px 0", flexWrap: "wrap" }}>
-          <button className="primary" onClick={openNew} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--accent)", color: "white", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><PlusIcon size={14} /> New agent</button>
+          <button className="primary" onClick={openNew} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--accent)", color: "white", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><PlusIcon size={14} /> New persona</button>
           <button onClick={() => setImportOpen((v) => !v)} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-raised)", color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><ImportIcon size={14} /> Import…</button>
         </div>
 
         {importOpen && (
           <div style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 12, marginBottom: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            <label style={{ fontWeight: 600 }}>Import agent — paste JSON and Markdown</label>
-            <AutoTextarea value={importJson} onChange={(e) => setImportJson(e.target.value)} placeholder='{"name":"My Agent", ...}' maxHeight={220} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: 8, fontFamily: "monospace", fontSize: "0.85rem" }} />
+            <label style={{ fontWeight: 600 }}>Import persona — paste JSON and Markdown</label>
+            <AutoTextarea value={importJson} onChange={(e) => setImportJson(e.target.value)} placeholder='{"name":"My Persona", ...}' maxHeight={220} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: 8, fontFamily: "monospace", fontSize: "0.85rem" }} />
             <AutoTextarea value={importMd} onChange={(e) => setImportMd(e.target.value)} placeholder="System prompt Markdown…" maxHeight={220} style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: 8 }} />
             <div style={{ display: "flex", gap: 8 }}>
               <button className="primary" onClick={async () => { try { await window.cascade.importAgent(importJson, importMd); setImportJson(""); setImportMd(""); setImportOpen(false); void refresh(); } catch (e) { alert(String(e)); } }} style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--accent)", background: "var(--accent)", color: "white", cursor: "pointer" }}>Import</button>
@@ -102,7 +102,7 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
         )}
 
         <div className="agents-grid">
-          {agents.length === 0 && <div className="hint">No agents yet. Create one above.</div>}
+          {agents.length === 0 && <div className="hint">No personas yet. Create one above.</div>}
           {agents.map((a) => (
             <div key={a.id} className="agent-card">
               <div className="agent-card-head">
@@ -142,11 +142,11 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
         {editing && (
           <div className="modal-backdrop" onClick={() => setEditing(null)} style={{ zIndex: 20 }}>
             <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(640px, 96vw)" }}>
-              <h3 style={{ marginTop: 0 }}>{editing.id ? "Edit agent" : "New agent"}</h3>
+              <h3 style={{ marginTop: 0 }}>{editing.id ? "Edit persona" : "New persona"}</h3>
               <label>Name</label>
               <input value={editing.meta.name ?? ""} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, name: e.target.value } })} placeholder="Researcher" style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }} />
               <label>Description</label>
-              <input value={editing.meta.description ?? ""} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, description: e.target.value } })} placeholder="What this agent does…" style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }} />
+              <input value={editing.meta.description ?? ""} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, description: e.target.value } })} placeholder="What this persona does…" style={{ width: "100%", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }} />
               <label>Avatar</label>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <input value={editing.meta.avatar?.kind === "emoji" ? editing.meta.avatar.value : ""} onChange={(e) => setEditing({ ...editing, meta: { ...editing.meta, avatar: e.target.value ? { kind: "emoji", value: e.target.value.slice(0, 4) } : null } })} placeholder="Emoji (e.g. 🧪)" style={{ width: 120, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }} />
@@ -158,7 +158,7 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
                   if (!editing.id) {
                     // stash as emoji hack: store dataUrl in a temp field, will be handled on save
                     // simplest: create the agent now with placeholder, then upload
-                    const name = (editing.meta.name ?? "").trim() || "Agent";
+                    const name = (editing.meta.name ?? "").trim() || "Persona";
                     const id = await window.cascade.createAgent({ name, description: editing.meta.description ?? "", model: editing.meta.model ?? "", allowedTools: (editing.meta.allowedTools as "all"|string[]) ?? "all", prompt: editing.prompt, avatar: null });
                     await window.cascade.uploadAgentAvatar(id, dataUrl);
                     setEditing(null);
@@ -205,7 +205,7 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
                       </div>
                     </div>
                   ))}
-                  {Array.isArray(editing.meta.allowedTools) && editing.meta.allowedTools.length === 0 && <span className="hint" style={{ color: "var(--danger)" }}>No tools selected — agent won't be able to act.</span>}
+                  {Array.isArray(editing.meta.allowedTools) && editing.meta.allowedTools.length === 0 && <span className="hint" style={{ color: "var(--danger)" }}>No tools selected — persona won't be able to act.</span>}
                 </div>
               )}
               <label>System prompt — saved as <code>{editing.meta.name ? `${editing.meta.name.replace(/[^a-z0-9_-]/gi, "_")}.md` : "<name>.md"}</code></label>

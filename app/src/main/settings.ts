@@ -30,6 +30,10 @@ interface SettingsFile {
    * Production Assistant project instead of `workspace`.
    */
   followProduction: boolean;
+  /** Default for new chats: start in autonomous mode (no approval prompts). */
+  autonomousByDefault: boolean;
+  /** Max model turns per agent send for long agentic tasks (default 250). */
+  maxIterations: number;
   /** Id of the production currently open in the Production Assistant (null when
    *  none has been opened); the folder chats bound to "Active Production" use. */
   activeProductionId: string | null;
@@ -141,6 +145,8 @@ const DEFAULTS: SettingsFile = {
   helpers: {},
   workspace: null,
   followProduction: false,
+  autonomousByDefault: false,
+  maxIterations: 250,
   activeProductionId: null,
   recentWorkspaces: [],
   recentProductions: [],
@@ -335,6 +341,39 @@ export function getFollowProduction(): boolean {
 export function setFollowProduction(on: boolean): void {
   load().followProduction = on;
   save();
+}
+
+/** Default for new chats: start in autonomous mode (no approval prompts). */
+export function getAutonomousByDefault(): boolean {
+  return load().autonomousByDefault === true;
+}
+
+export function setAutonomousByDefault(on: boolean): void {
+  load().autonomousByDefault = on === true;
+  save();
+}
+
+/** Default + bounds for the per-send model-turn cap (long agentic tasks). */
+export const DEFAULT_MAX_ITERATIONS = 250;
+export const MIN_MAX_ITERATIONS = 10;
+export const MAX_MAX_ITERATIONS = 2000;
+
+/** Max model turns per agent send; clamped to a sane range. */
+export function getMaxIterations(): number {
+  const v = load().maxIterations;
+  if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_MAX_ITERATIONS;
+  return Math.min(MAX_MAX_ITERATIONS, Math.max(MIN_MAX_ITERATIONS, Math.floor(v)));
+}
+
+/** Set the turn cap (clamped); returns the normalized value. */
+export function setMaxIterations(v: number): number {
+  const n = Math.floor(Number(v));
+  const next = Number.isFinite(n)
+    ? Math.min(MAX_MAX_ITERATIONS, Math.max(MIN_MAX_ITERATIONS, n))
+    : DEFAULT_MAX_ITERATIONS;
+  load().maxIterations = next;
+  save();
+  return next;
 }
 
 /** Id of the production open in the Production Assistant (null when none). */

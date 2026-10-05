@@ -348,6 +348,17 @@ export function isTweenGenKeyframe(id: string): boolean {
   return id === TWEEN_KEY_IMGGEN || id === TWEEN_KEY_EDITGEN || id.startsWith(TWEEN_KEY_EDITGEN_PREFIX);
 }
 
+/** A video prompt's direct generation reference: a generation node's output
+ *  wired into its reference sockets without a saved `CustomRef`. Stored in
+ *  `GraphVideoNode.refIds` alongside bare reference ids, using the same
+ *  sentinel strings as the in-betweener (`"imagegen"`, `"editgen:<nodeId>"`) —
+ *  a production reference id can never equal them, so the two are unambiguous.
+ *  Resolved at submit time to the node's selected take (like the video source
+ *  frame, but as an extra visual reference rather than the animated frame). */
+export function isVideoGenRef(id: string): boolean {
+  return isTweenGenKeyframe(id);
+}
+
 /** One stored output of a node-graph generation node. */
 export interface GraphGenItem {
   /** Workspace-relative path (boards JPEG for frames, videos file for clips). */

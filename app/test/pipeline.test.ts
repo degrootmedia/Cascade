@@ -26,6 +26,7 @@ import {
   boardPrompt,
   brandPrompt,
   characterSheetPrompt,
+  composeVideoPrompt,
   effectivePrompt,
   formatRuntime,
   hookImageGenToOutput,
@@ -943,5 +944,37 @@ describe("prompt as projection (step 05)", () => {
     const edited = makeProduction({ styles: [{ id: "s-master", index: 1, name: "Heroic 3D", prompt: "Stop-motion" }] });
     expect(effectivePrompt(edited, shot)).toBe("Style: Stop-motion\n\nhold the line");
     expect(shot.prompt).toBe("hold the line");
+  });
+});
+
+describe("composeVideoPrompt", () => {
+  it("force-attaches the master style to a graph-less shot's motion prompt", () => {
+    const p = makeProduction();
+    const shot = makeShot();
+    expect(composeVideoPrompt(p, shot, "slow dolly in, steam rises")).toBe(
+      "Style: Heroic 3D render style\n\nslow dolly in, steam rises"
+    );
+  });
+
+  it("re-adds the live style but keeps reference tags", () => {
+    const p = makeProduction();
+    const shot = makeShot();
+    const out = composeVideoPrompt(p, shot, "ada drifts past @[Gandalf]");
+    expect(out).toContain("Style: Heroic 3D render style");
+    expect(out).toContain("@[Gandalf]");
+    expect(out).toContain("ada drifts past @[Gandalf]");
+  });
+
+  it("strips a style paragraph the caller pasted and re-renders the live one", () => {
+    const p = makeProduction();
+    const shot = makeShot();
+    const out = composeVideoPrompt(p, shot, "Style: stale old look\n\ncamera tilts up");
+    expect(out).toBe("Style: Heroic 3D render style\n\ncamera tilts up");
+  });
+
+  it("omits the style when the shot opts out (styleNone)", () => {
+    const p = makeProduction();
+    const shot = makeShot({ styleNone: true });
+    expect(composeVideoPrompt(p, shot, "hold")).toBe("hold");
   });
 });

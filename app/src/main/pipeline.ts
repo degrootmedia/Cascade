@@ -33,7 +33,7 @@ import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeK
 import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
 import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
-import { isBrandAttached, renderShotPrompt, styleEdgePresent } from "../shared/graph/render.js";
+import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
@@ -959,6 +959,29 @@ export function openArtPrompt(p: Production, shot: ProductionShot, lookClause?: 
   // The look anchor: one verbatim LOOK clause first on every shot whose style
   // owns a frame — cited as a look, never as a subject.
   return styleFrameForShot(p, shot) ? withLookClause(base, lookClause) : base;
+}
+
+/**
+ * The prompt a video submit sends for a shot. The stored motion text is
+ * content-only; the shared Style (and a plugged Brand) sections are re-rendered
+ * from the shot's style system — the same `renderPromptText`/`promptRefsFor`
+ * pair the renderer uses at submit time — so a clip carries the same look as
+ * its frame. The Style section is force-attached whenever the shot resolves a
+ * style (a per-shot pick or the master), because a video prompt node with no
+ * stored `Style:` line and no style edge has no legacy signal to inherit and
+ * would otherwise silently drop the production look. `@[Name]` reference tags
+ * in the motion text are left intact for the provider to anchor/upload.
+ */
+export function composeVideoPrompt(p: Production, shot: ProductionShot, motion: string): string {
+  const content = stripSharedSections(motion ?? "").trim();
+  const refs = promptRefsFor(p, shot, "videoprompt");
+  const styleText = effectiveShotStyle(p, shot);
+  return renderPromptText(content, {
+    styleAttached: refs.styleAttached || !!styleText,
+    styleText: styleText || refs.styleText,
+    brandAttached: refs.brandAttached,
+    brand: refs.brand,
+  });
 }
 
 /** Workspace-relative styles dir for style frames (look plates). */

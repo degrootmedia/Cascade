@@ -213,6 +213,29 @@ export interface AgentConfig {
    * reviews and approves the plan. Enforced in the loop, not just prompted.
    */
   planMode?: boolean;
+  /**
+   * Autonomous mode: the user has granted full permission for this chat, so the
+   * approval gate is skipped entirely. Every tool still emits its
+   * tool-start/tool-result events and file mutations are still journaled for
+   * undo — only the interactive prompt is omitted. Plan mode is a separate,
+   * structural gate and is always enforced first.
+   */
+  autonomousMode?: boolean;
+  /**
+   * Tool names already granted "always allow" for this session (persisted by
+   * the host session so a rebuilt agent doesn't lose them).
+   */
+  initialAllowedTools?: string[];
+  /**
+   * MCP server prefixes (e.g. "openart") already granted "allow all" for this
+   * session. Seeded alongside `initialAllowedTools` on rebuild.
+   */
+  initialAllowedGroups?: string[];
+  /**
+   * Called when the user grants "always allow" for a tool or a whole MCP
+   * group, so the host can persist the grant on the session.
+   */
+  onApprovalGrant?: (grant: { kind: "tool" | "group"; value: string }) => void;
   /** Agent persona prompt injected before the Cascade base prompt. */
   agentPrompt?: string;
   /** Skills advertised in the system prompt; content is fetched via a read_skill tool. */

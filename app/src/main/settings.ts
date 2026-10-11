@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProvider } from "../shared/providers.js";
 import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface } from "../shared/ipc.js";
+import { coerceWhisperModel, isWhisperModel, type WhisperModel } from "../shared/voice.js";
 
 interface SettingsFile {
   /** Selected LLM API provider id (see shared/providers.ts). */
@@ -113,6 +114,12 @@ interface SettingsFile {
   /** User overrides for the creative prompt templates (shared/prompt-templates.ts),
    *  keyed by template id. Absent id = the built-in wording. */
   promptTemplates: Record<string, string>;
+  /** Custom path to the `whisper-cli` binary (null = resolve bundled / PATH). */
+  whisperCliBinary: string | null;
+  /** Whether the chat composer offers voice input (local Whisper). */
+  voiceEnabled: boolean;
+  /** Selected whisper.cpp model size (ggml-<model>.bin). */
+  whisperModel: WhisperModel;
   /** Dev Mode: when true, every generation submission is logged. */
   devMode: boolean;
   /** Credit-free dry run: build + log the real request, throw before vendor call. */
@@ -166,6 +173,9 @@ const DEFAULTS: SettingsFile = {
   modelSurfaces: {},
   modelParamDefaults: {},
   promptTemplates: {},
+  whisperCliBinary: null,
+  voiceEnabled: false,
+  whisperModel: "base.en",
   devMode: false,
   submissionDryRun: false,
   windowState: null,
@@ -350,6 +360,37 @@ export function getAutonomousByDefault(): boolean {
 
 export function setAutonomousByDefault(on: boolean): void {
   load().autonomousByDefault = on === true;
+  save();
+}
+
+/** Custom path to the `whisper-cli` binary (null = resolve bundled / PATH). */
+export function getWhisperCliBinary(): string | null {
+  return load().whisperCliBinary ?? null;
+}
+
+export function setWhisperCliBinary(bin: string | null): void {
+  load().whisperCliBinary = bin && bin.trim() ? bin.trim() : null;
+  save();
+}
+
+/** Whether the chat composer offers voice input (local Whisper). */
+export function getVoiceEnabled(): boolean {
+  return load().voiceEnabled === true;
+}
+
+export function setVoiceEnabled(on: boolean): void {
+  load().voiceEnabled = on === true;
+  save();
+}
+
+/** Selected whisper.cpp model size (validated; falls back to the default). */
+export function getWhisperModel(): WhisperModel {
+  return coerceWhisperModel(load().whisperModel);
+}
+
+export function setWhisperModel(model: WhisperModel): void {
+  if (!isWhisperModel(model)) return;
+  load().whisperModel = model;
   save();
 }
 

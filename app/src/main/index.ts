@@ -31,6 +31,8 @@ import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
+import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
+import type { VoiceStatusIpc, WhisperModel } from "../shared/voice.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
 import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
@@ -1247,6 +1249,82 @@ function registerIpc() {
 
   handle("settings:setAutonomousByDefault", (_e, v: boolean) => {
     settings.setAutonomousByDefault(v === true);
+  });
+
+  // Local voice input (Whisper): locate the CLI + ggml model, download the
+  // model on first use, and transcribe the renderer's microphone PCM. The
+  // engine seam (voice.ts) is pure node; these handlers only resolve app paths
+  // and persist settings.
+  const voiceModelDir = (): string => path.join(app.getPath("userData"), "whisper");
+  let voiceDownloading = false;
+  const voiceStatus = (): VoiceStatusIpc => {
+    const binary = resolveWhisperBinary(settings.getWhisperCliBinary());
+    const model = settings.getWhisperModel();
+    return { available: !!binary, binary, model, modelReady: isModelReady(voiceModelDir(), model), downloading: voiceDownloading };
+  };
+
+  handle("voice:status", () => voiceStatus());
+
+  handle("voice:prepare", async () => {
+    const binary = resolveWhisperBinary(settings.getWhisperCliBinary());
+    const model = settings.getWhisperModel();
+    if (binary && !isModelReady(voiceModelDir(), model)) {
+      voiceDownloading = true;
+      try {
+        await ensureWhisperModel(voiceModelDir(), model, (received, total) => {
+          win?.webContents.send("voice:progress", { model, received, total });
+        });
+      } finally {
+        voiceDownloading = false;
+      }
+    }
+    return voiceStatus();
+  });
+
+  handle("voice:transcribe", async (_e, samples: ArrayBuffer, sampleRate: number) => {
+    const binary = resolveWhisperBinary(settings.getWhisperCliBinary());
+    if (!binary) throw new Error("Voice input is unavailable — the whisper.cpp binary was not found.");
+    const model = settings.getWhisperModel();
+    const modelPath = whisperModelPath(voiceModelDir(), model);
+    if (!isModelReady(voiceModelDir(), model)) {
+      throw new Error("The Whisper model isn't downloaded yet — enable voice input in Settings to download it.");
+    }
+    const view = samples as ArrayBuffer | ArrayBufferView;
+    const bytes = ArrayBuffer.isView(view)
+      ? Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+      : Buffer.from(view);
+    const count = Math.floor(bytes.byteLength / 2);
+    if (count === 0) return { text: "" };
+    const pcm = new Int16Array(count);
+    for (let i = 0; i < count; i++) pcm[i] = (bytes[i * 2]! | (bytes[i * 2 + 1]! << 8)) << 16 >> 16;
+    const dir = path.join(app.getPath("temp"), "cascade-voice");
+    fs.mkdirSync(dir, { recursive: true });
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const wavPath = path.join(dir, `${id}.wav`);
+    try {
+      fs.writeFileSync(wavPath, pcm16ToWav(pcm, sampleRate === 16000 ? 16000 : sampleRate || 16000));
+      const text = await transcribeWav({ bin: binary, modelPath, wavPath, outBase: path.join(dir, id) });
+      return { text };
+    } finally {
+      try {
+        fs.unlinkSync(wavPath);
+      } catch {
+        /* best effort */
+      }
+    }
+  });
+
+  handle("voice:getEnabled", () => settings.getVoiceEnabled());
+  handle("voice:setEnabled", (_e, v: boolean) => {
+    settings.setVoiceEnabled(v === true);
+  });
+  handle("voice:getModel", () => settings.getWhisperModel());
+  handle("voice:setModel", (_e, m: WhisperModel) => {
+    settings.setWhisperModel(m);
+  });
+  handle("voice:getCliBinary", () => settings.getWhisperCliBinary());
+  handle("voice:setCliBinary", (_e, p: string | null) => {
+    settings.setWhisperCliBinary(typeof p === "string" && p.trim() ? p.trim() : null);
   });
 
   handle("settings:getSubmissionDryRun", () => settings.getSubmissionDryRun());

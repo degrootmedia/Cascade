@@ -3679,6 +3679,43 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   stroke-width: 1.75;
   flex-shrink: 0;
 }
+.voice-error {
+  color: var(--danger);
+  font-size: 0.82rem;
+  padding: 6px 10% 0;
+}
+.composer .mic {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 10px;
+  padding: 0;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.composer .mic:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--bg-raised);
+}
+.composer .mic:disabled { opacity: 0.4; cursor: default; }
+.composer .mic.on {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--bg-raised);
+  animation: voice-pulse 1.4s ease-in-out infinite;
+}
+.composer .mic svg { width: 18px; height: 18px; flex-shrink: 0; }
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 .msg-attachments { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .msg-attachments img { max-height: 140px; border-radius: 8px; }
 .msg-file {

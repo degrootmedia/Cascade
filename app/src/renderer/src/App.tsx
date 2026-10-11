@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, VoiceStatusIpc, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
+import { useVoiceInput } from "./voice-input.js";
 import { Transcript } from "./components/Transcript.js";
 import { TodoPanel } from "./components/TodoPanel.js";
 import { GoalPanel } from "./components/GoalPanel.js";
@@ -31,11 +32,32 @@ function isImage(a: ChatAttachment): boolean {
   return a.mime.startsWith("image/");
 }
 
+/** Line-art microphone for the composer's voice-input button. */
+function MicIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <line x1="12" y1="18" x2="12" y2="21" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+    </svg>
+  );
+}
+
 export function App() {
   const [transcripts, setTranscripts] = useState<Record<string, DisplayItem[]>>({});
   const [busyIds, setBusyIds] = useState<Record<string, boolean>>({});
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  /** Local voice input (Whisper): enabled flag, engine/model status, and the
+   *  composer text captured when dictation started (the transcript appends). */
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatusIpc | null>(null);
+  const [voiceBase, setVoiceBase] = useState("");
+  const voice = useVoiceInput((transcript) => {
+    const base = voiceBase.trim();
+    setInput(base ? `${base} ${transcript}` : transcript);
+  });
   const [approval, setApproval] = useState<ApprovalRequestIpc | null>(null);
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -168,6 +190,20 @@ export function App() {
   /** Pure chat = no folder selected for this chat. */
   const pureChat = !workspace;
 
+  // While dictating, the composer shows the committed text plus the live
+  // transcript; the button is shown whenever voice is enabled.
+  const voiceBaseTrim = voiceBase.trim();
+  const composerValue = voice.recording
+    ? voiceBaseTrim + (voice.interim ? (voiceBaseTrim ? "\n" : "") + voice.interim : "")
+    : input;
+  const voiceTitle = voice.recording
+    ? "Stop dictation"
+    : voiceStatus && !voiceStatus.available
+      ? "Voice input needs the speech engine — see Settings → Voice"
+      : voice.preparing
+        ? "Preparing the speech model…"
+        : "Dictate with your voice";
+
   const refreshAgents = useCallback(async () => {
     try { setAgents(await window.cascade.listAgents()); } catch {}
   }, []);
@@ -202,6 +238,8 @@ export function App() {
     applyAccent(s.accent);
     setSessionList(list);
     setCredits(c);
+    void window.cascade.getVoiceEnabled().then(setVoiceEnabled).catch(() => {});
+    void window.cascade.getVoiceStatus().then(setVoiceStatus).catch(() => {});
     try { setAgents(await window.cascade.listAgents()); } catch {}
     let sid: string | null = null;
     await Promise.all([
@@ -408,7 +446,7 @@ export function App() {
   async function send() {
     const raw = input.trim();
     const id = currentId;
-    if ((!raw && attachments.length === 0) || !id || busy) return;
+    if ((!raw && attachments.length === 0) || !id || busy || voice.recording) return;
     // Slash commands (e.g. /research, /plan, /plan-mode on) expand to a plain
     // instruction; /plan-mode toggles the gate and sends nothing.
     const cmd = expandCommand(raw);
@@ -693,6 +731,7 @@ export function App() {
             )}
           </div>
         )}
+        {voice.error && <div className="voice-error">⚠ {voice.error}</div>}
         <div className="composer">
           <input
             ref={fileInputRef}
@@ -714,11 +753,38 @@ export function App() {
           >
             <AttachFileIcon size={18} className="attach-glyph" />
           </button>
+          {voiceEnabled && (
+            <button
+              className={`mic${voice.recording ? " on" : ""}`}
+              title={voiceTitle}
+              aria-label={voice.recording ? "Stop dictation" : "Start dictation"}
+              disabled={busy || voice.preparing}
+              onClick={() => {
+                if (voice.recording) {
+                  voice.stop();
+                } else {
+                  setVoiceBase(input);
+                  void voice.start();
+                }
+              }}
+            >
+              <MicIcon size={18} />
+            </button>
+          )}
           <AutoTextarea
             ref={textareaRef}
             maxHeight={Math.round(viewportH * 0.4)}
-            value={input}
-            placeholder={busy ? "Working…" : pureChat ? "Ask Cascade anything…" : "Ask Cascade to do something in your workspace…"}
+            value={composerValue}
+            readOnly={voice.recording}
+            placeholder={
+              voice.recording
+                ? "Listening…"
+                : busy
+                  ? "Working…"
+                  : pureChat
+                    ? "Ask Cascade anything…"
+                    : "Ask Cascade to do something in your workspace…"
+            }
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
             onPaste={(e) => {
@@ -736,6 +802,7 @@ export function App() {
               requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = caret; });
             }}
             onKeyDown={(e) => {
+              if (voice.recording) return;
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 void send();
@@ -755,7 +822,7 @@ export function App() {
               Stop
             </button>
           ) : (
-            <button className="send" onClick={() => void send()} disabled={!input.trim() && attachments.length === 0}>
+            <button className="send" onClick={() => void send()} disabled={voice.recording || (!input.trim() && attachments.length === 0)}>
               Send
             </button>
           )}

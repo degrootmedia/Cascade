@@ -1,0 +1,4 @@
+The whisper.cpp CLI binary and its libraries are installed here by
+`node scripts/fetch-whisper.mjs` (Windows-only at launch). The binaries are
+gitignored; this file keeps the directory so packaging and resolution always
+find it. The ggml speech model downloads at runtime on first use.

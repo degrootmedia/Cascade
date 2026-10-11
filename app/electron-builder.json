@@ -40,6 +40,10 @@
     {
       "from": "src/main/magic-prompt.md",
       "to": "magic-prompt.md"
+    },
+    {
+      "from": "resources/whisper",
+      "to": "whisper"
     }
   ],
   "nsis": {

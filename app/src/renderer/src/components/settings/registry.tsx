@@ -15,6 +15,7 @@ import { CliToolsSection } from "./sections/CliToolsSection.js";
 import { ExternalEditorSection, resetExternalEditor } from "./sections/ExternalEditorSection.js";
 import { ThreeDSection, resetThreeD } from "./sections/ThreeDSection.js";
 import { McpServersSection } from "./sections/McpServersSection.js";
+import { VoiceSection, resetVoice } from "./sections/VoiceSection.js";
 import { AgentSection, resetAgent } from "./sections/AgentSection.js";
 import { PromptsSection } from "./sections/PromptsSection.js";
 import { DataSection } from "./sections/DataSection.js";
@@ -133,6 +134,16 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           keywords: ["mcp", "server", "servers", "tools", "model context protocol", "connect", "on demand"],
           owns: [],
           render: () => <McpServersSection />,
+        },
+        {
+          id: "voice",
+          title: "Voice",
+          category: "tools",
+          description: "Local Whisper speech-to-text for the chat composer.",
+          keywords: ["voice", "dictation", "microphone", "mic", "speech", "whisper", "transcribe", "speech to text", "stt"],
+          owns: [],
+          render: () => <VoiceSection />,
+          onReset: resetVoice,
         },
       ],
     },

@@ -1,4 +1,26 @@
-﻿## 2026-09-27 — Node-graph prompt blanked after a style change (selection ≠ focus)
+﻿## 2026-10-10 — a third-party download URL is a runtime dependency: probe it, don't assume it
+
+- Symptom (caught before shipping voice input): `ensureWhisperModel` built the
+  ggml URL as `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/models/
+  ggml-<size>.bin`, citing a plausible-looking path from an older doc. The live
+  HEAD is **404** — the converted models live at the repo ROOT
+  (`.../resolve/main/ggml-<size>.bin`); the `models/` prefix was never a real
+  path (that is the CMake source dir, not the HF repo layout).
+- Rules:
+  1. Any hard-coded download URL (models, binaries, release assets) is a
+     runtime dependency. Verify it with a live `curl -sIL` (expect a 2xx/302
+     with a real content-length) BEFORE wiring it, and pin the exact URL in a
+     unit test so a future edit can't silently break it.
+  2. Release assets aren't always on the `latest` tag — whisper.cpp attaches
+     its Windows binaries to NIGHTLY (`b####`) tags, and `latest` has zero
+     assets. Query the releases list for the asset by name, don't assume
+     `latest`.
+  3. Do the end-to-end run with the EXACT argv the code builds (fetched binary
+     + a real sample) before calling the feature done — the transcript of
+     `samples/jfk.wav` via `-m … -f … -otxt -of … --no-prints` is the proof the
+     spawn contract is right.
+
+## 2026-09-27 — Node-graph prompt blanked after a style change (selection ≠ focus)
 
 - Symptom: changing the style plugged into a node made the composer prompt in
   the node graph disappear; the side panel (behind it) stayed correct, and

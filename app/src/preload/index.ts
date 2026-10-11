@@ -107,6 +107,12 @@ function buildApi(): CascadeApi {
     return () => ipcRenderer.removeListener("window:detachedClosed", listener);
   };
 
+  // Voice model download progress (local Whisper, first use).
+  api.onVoiceProgress = (cb: (e: import("../shared/ipc.js").VoiceProgressIpc) => void) => {
+    const listener = (_e: unknown, e: import("../shared/ipc.js").VoiceProgressIpc) => cb(e);
+    ipcRenderer.on("voice:progress", listener);
+    return () => ipcRenderer.removeListener("voice:progress", listener);
+  };
   // The contract↔CascadeApi drift guard in shared/ipc.ts guarantees every
   // method this object carries is a real CascadeApi member, so the cast is
   // safe by construction.

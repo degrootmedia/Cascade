@@ -43,6 +43,7 @@ import {
   VIDEO_URI_EXT_RX,
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
+import { closestResolution, resolutionWeight } from "../../shared/resolution.js";
 import type {
   CliModelSchema,
   ImageGenAspectRatio,
@@ -579,10 +580,16 @@ export class OpenArtClient implements MediaProvider {
     return null;
   }
 
-  /** Map the 1k/2k/4k bucket onto whatever sizing param the model's schema declares. */
+  /** Map the 1k/2k/4k bucket onto whatever sizing param the model's schema
+   *  declares. When the model's enum doesn't carry the exact requested tier
+   *  (OpenArt caps some image models at 2K), the CLOSEST supported tier is
+   *  chosen rather than sending nothing — an unsupported pick that fell through
+   *  to the vendor default rendered at the smallest size (a Seedream 5 Pro "4K"
+   *  pick came back 1424×800 because its form only offers 1K/2K). */
   private resolutionAssign(resolution: string, props: Record<string, unknown>): Record<string, unknown> | null {
-    const tier = resolution === "4k" ? 4 : resolution === "2k" ? 2 : 1;
-    const label = `${tier}k`; // "1k" | "2k" | "4k" (matched case-insensitively)
+    const want = String(resolution).replace(/\s+/g, "").toLowerCase();
+    const wantWeight = resolutionWeight(want);
+    const tier = wantWeight !== null && wantWeight >= 4000 ? 4 : wantWeight !== null && wantWeight >= 2000 ? 2 : 1;
     for (const key of Object.keys(props)) {
       const p = props[key] as { type?: string; enum?: unknown[] } | undefined;
       if (!p) continue;
@@ -594,13 +601,19 @@ export class OpenArtClient implements MediaProvider {
       if (/^(size|width|height|image_width|image_height)/i.test(key) && (p.type === "integer" || p.type === "number")) {
         return { [key]: tier === 4 ? 4096 : tier === 2 ? 2048 : 1024 };
       }
-      // Enum with "1K/2K/4K"-style tiers — pick the exact tier label.
+      // Enum sizing fields: the exact tier label when present, else the closest
+      // supported tier so a "4k" pick on a 2K-capped model still lands on 2K.
       if (Array.isArray(p.enum)) {
-        const exact = p.enum.find((v) => String(v).replace(/\s/g, "").toLowerCase() === label);
+        const vals = p.enum.map((v) => String(v));
+        const exact = vals.find((v) => v.replace(/\s/g, "").toLowerCase() === want);
         if (exact !== undefined) return { [key]: exact };
-        if (tier === 1) {
-          const low = p.enum.find((v) => /^(standard|base|normal|low|1)$/i.test(String(v).trim()));
-          if (low !== undefined) return { [key]: low };
+        if (/resolution|quality|definition|size|tier/i.test(key)) {
+          const tiers = vals.filter((v) => resolutionWeight(v) !== null);
+          if (tiers.length) return { [key]: closestResolution(want, tiers) };
+          if (tier === 1) {
+            const low = vals.find((v) => /^(standard|base|normal|low|1)$/i.test(v.trim()));
+            if (low !== undefined) return { [key]: low };
+          }
         }
         continue;
       }

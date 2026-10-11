@@ -2968,3 +2968,258 @@ What shipped:
   form edit.
 - Tests: `mcp-config.test.ts` (22). Full suite `npm test` 1442 passed + 1
   skipped (127 files); `npm run typecheck` clean; `npm run build` clean.
+
+---
+
+# Chat voice input (local Whisper) + on-demand vision & screen capture
+
+User: two chat-agent capabilities found in other agents. (1) let the model SEE
+images/videos it produces to judge them (character consistency, artifacts) and
+decide to redo; (2) natural voice input (stream-of-consciousness). Must not
+break any existing functionality.
+
+## Decisions (confirmed with the user)
+
+- **Whisper delivery:** bundle the `whisper.cpp` binary in the installer
+  (cross-platform seam), download the ggml model on first use.
+- **Dictation UX:** click-to-toggle mic in the composer, with LIVE (rolling)
+  text, committed on stop.
+- **Screen capture:** agent-callable tool ONLY; captures the whole primary
+  display. No composer screenshot button.
+- **Vision feedback:** the model must NOT receive images automatically. It gets
+  access to ALL images (MCP results, references, generated frames/clips) but
+  CHOOSES what to look at by calling a tool. Generation flows must expose the
+  on-disk path so the model can inspect a frame and decide to regenerate.
+- **Platform:** Windows only at launch (`--win nsis`); keep the seams
+  cross-platform for later.
+
+## Non-breakage contract (applies to every item below)
+
+- Every core change is additive with a default that reproduces today's wire:
+  `ToolRunResult.modelImages` absent + `AgentConfig.visionEnabled` false =>
+  byte-identical messages. No existing tool returns `modelImages`.
+- Every new IPC channel is one `ipcContract` entry (preload follows
+  mechanically); the `SettingsView` coverage test is updated in the same step
+  that adds a settings key.
+- New settings keys default to today's behavior (voice off; capture off until
+  enabled).
+- The microphone/capture permission handling is scoped and additive; it must
+  never deny a permission the app currently gets by default.
+- `electron-builder.json` changes are additive (`extraResources`, maybe
+  `asarUnpack`).
+
+---
+
+## Part A - Voice input (local Whisper)
+
+### A1. Deep module `app/src/main/voice.ts` (new)
+
+Follows the `ffmpeg.ts` shape exactly (pure node, injected `run`/`resolveBin`
+seam = the test surface).
+
+- `resolveWhisperBinary()`: locate the bundled `whisper-cli`/`main` binary -
+  dev from `resources/whisper/`, packaged from
+  `process.resourcesPath/whisper/` (mirror `resolveFfmpeg`); null when absent.
+- `whisperModelPath(model)`: `<userData>/whisper/ggml-<model>.bin`.
+- `ensureWhisperModel(model, onProgress)`: if absent, download from the
+  whisper.cpp HF repo, verify size/sha, write temp + atomic rename; emit
+  progress. Returns the path.
+- Pure helpers (unit-tested): `wavFromPcm16(pcm, sampleRate)` (build a 16 kHz
+  mono PCM WAV header+data), `parseWhisperOutput(raw)` (text from `--output-*`
+  / the JSON form).
+- `transcribe(audio, opts, deps)`: spawn the CLI with
+  `-m <model> -f <wav> --output-txt --no-prints` (or `-oj`), parse, return
+  `{ text }`. deps `{ resolveBin, run }` are injected.
+
+### A2. Renderer capture hook `useVoiceInput` (new)
+
+- `getUserMedia({ audio })`; `AudioContext({ sampleRate: 16000 })`; an
+  `AudioWorklet` (fallback `ScriptProcessor`) collects `Float32` -> `Int16`
+  PCM.
+- Rolling live text: every ~1.2 s send the accumulated utterance PCM to
+  `voice:transcribe` (`{ samples, sampleRate, final:false }`); render the
+  returned provisional text (distinct style). On stop, send `final:true` and
+  commit the final text into the composer `input`.
+- A single in-flight request at a time; a newer buffer supersedes a pending
+  one (drop stale responses) so audio never backs up.
+
+### A3. IPC (new fragment `shared/ipc-channels/voice.ts`, merged into `ipcContract`)
+
+- `voice:status` (invoke) -> `{ available: boolean, model: string,
+  modelReady: boolean }` (binary present + model downloaded).
+- `voice:prepare` (invoke) -> ensure the model, resolve when ready; progress
+  via an `onVoiceProgress` subscription if needed (hand-wired in preload like
+  the other `on*`).
+- `voice:transcribe` (invoke) -> `{ text, final }`.
+- Main handlers wire the real deps; no domain logic in `index.ts`.
+
+### A4. Composer wiring (`App.tsx`)
+
+- A mic button beside Attach; visible only when `voiceEnabled` and
+  `voice:status` is available. Click toggles recording; the live text streams
+  into the existing `input` state; no change to `send()` semantics.
+- Microphone permission: add a scoped `session.setPermissionRequestHandler`
+  that allows `media` for the main window and falls through for everything
+  else (additive).
+
+### A5. Settings
+
+- `settings.ts`: `voiceEnabled: boolean` (default false), `whisperModel:
+  "tiny.en" | "base.en" | "small.en"` (default `base.en`), optional
+  `voiceLanguage`.
+- `SettingsView`: add the mirroring keys; add a `Voice` `SettingsSection`
+  (category Tools & Integrations) and update the coverage test.
+
+### A6. Packaging + tests
+
+- `electron-builder.json`: `extraResources` the `whisper/` binary dir;
+  `asarUnpack` if any binary sits in node_modules.
+- `app/test/voice.test.ts`: WAV builder, output parser, binary resolution
+  (packaged vs dev), missing-binary path, model-path naming, and a
+  `transcribe` call against a fake `run` (argv assertions).
+
+---
+
+## Part B - On-demand vision + screen capture
+
+### B1. Core loop - opt-in model images (`core/src`)
+
+- `types.ts`: `ToolRunResult.modelImages?: string[]` (data URLs the MODEL
+  should receive; `images` stays UI-only, unchanged).
+- `AgentConfig.visionEnabled?: boolean`.
+- `agent.ts`: `executeToolCall` returns `{ text, modelImages }`; in `send`,
+  collect `modelImages` across the turn's tool calls, and - only when
+  `visionEnabled` and the list is non-empty - push ONE synthetic `user`
+  message carrying the image parts AFTER all `tool` messages are appended
+  (keeps tool messages contiguous; a user-message image part is the most
+  widely supported form across OpenAI-compatible endpoints, unlike images on
+  the `tool` role). No tool returns `modelImages` today, so nothing else
+  changes.
+- `core/test`: modelImages becomes one user turn; absent => identical message
+  array; `visionEnabled:false` => images dropped.
+
+### B2. App vision tools `app/src/main/vision-tools.ts` (new deep module)
+
+Host seam injected (the test surface). Two tools, both returning
+`modelImages`:
+
+- `view_image({ path })`: workspace-confined read (`resolveSafe`-style,
+  `mustExist`), reject non-image / oversize, downscale via injected
+  `nativeImage` to `<= 1024` px JPEG, return `{ text, modelImages }`. This is
+  how the model looks at MCP images, references, and generated frames/clips
+  (video: a still is extracted first - reuse the `video-still`/thumbnail
+  seam).
+- `capture_screen()`: injected `capture` seam; in production uses
+  `desktopCapturer.getSources({ types: ["screen"], thumbnailSize:
+  primaryDisplaySize })` in MAIN (Electron exposes `desktopCapturer` to main),
+  saves the PNG under `<workspace>/cascade-images/`, returns
+  `{ text, modelImages }`. `requiresApproval: true` (privacy) so it prompts
+  outside autonomous mode and runs unattended inside it; a settings toggle can
+  disable it outright. Fallback if thumbnails come back empty on a Windows
+  setup: a `System.Drawing` PowerShell capture behind the same seam.
+
+### B3. Model-vision gating
+
+- Resolve the active chat model's vision flag in `ensureAgent` (via the
+  existing `/models` path + `normalizeModelList`'s `vision`, memoized) and set
+  `AgentConfig.visionEnabled`. Add `view_image` + `capture_screen` to
+  `extraTools` ONLY when vision is enabled (and capture when the setting is
+  on), so a non-vision model is never advertised tools it can't use; core also
+  guards defensively.
+
+### B4. Expose inspectable paths to the model
+
+- `productionDigest` (production-tools.ts): add the relative frame/clip paths
+  (e.g. `artworkPath`, `videoPath`) and reference `imagePath` so the model can
+  call `view_image` on a generation and judge whether to redo it. Additive
+  fields; update `production-tools.test.ts` snapshots.
+
+### B5. Settings + tests + packaging
+
+- `settings.ts` + `SettingsView`: `screenCaptureEnabled: boolean` (default
+  false) owned by a section (Voice/Agent); capture approval already covers
+  consent when it is on.
+- `app/test/vision-tools.test.ts`: `view_image` path guard + downscale arg,
+  oversize/non-image rejection, `capture_screen` writes a file and returns an
+  image (both against faked seams).
+- No new packaging (uses built-in Electron `desktopCapturer`).
+
+---
+
+## Verification (must pass before done)
+
+- `app`: `npm run typecheck`, `npm test`, `npm run build`.
+- `core`: `npm test`.
+- Manual: dictate into the composer (live text + commit); ask the agent to
+  generate a frame then `view_image` it and report/adjust; `capture_screen`
+  prompts once (non-autonomous) and runs unattended (autonomous).
+
+## Open risks / fallbacks
+
+- `desktopCapturer.getSources` can return empty thumbnails on some Windows
+  configurations -> PowerShell `System.Drawing` fallback behind the capture
+  seam.
+- Whisper streaming latency/accuracy: default `base.en`; the rolling-buffer
+  approach trades a little latency for correctness, and the binary/model seam
+  lets us swap engines later.
+- First-run model download UX (offline/proxy): surface a clear status and let
+  the user retry; the feature stays hidden until the model is ready.
+- The synthetic user-message form for model images is a deliberate choice for
+  provider compatibility; if Gab's models reject it, the tool-message
+  content-parts form is the fallback (one localized change in `agent.ts`).
+
+## Status
+
+- [x] Part A (voice) - done
+- [ ] Part B (vision/capture) - not started
+
+---
+
+# Review - Part A (voice input, local Whisper)
+
+Shipped the whole voice path. The composer gains a microphone button (shown only
+when `voiceEnabled`), and dictation streams live text into the message box.
+
+What shipped:
+- `main/voice.ts` (new deep module, pure node): `resolveWhisperBinary`
+  (override → env → packaged → dev `resources/whisper` → PATH),
+  `ensureWhisperModel` (ggml download to `userData/whisper` behind an injected
+  `fetchTo` seam), `pcm16ToWav`, `parseWhisperText`, `transcribeWav` (spawn
+  seam), `coerceWhisperModel`.
+- `shared/voice.ts` (new): `WhisperModel` + `WHISPER_MODELS` +
+  `DEFAULT_WHISPER_MODEL` + `VoiceStatusIpc`/`VoiceProgressIpc`.
+- `renderer/src/voice-input.ts` (new): `useVoiceInput` — `getUserMedia` +
+  16 kHz `AudioContext`/`ScriptProcessor`, rolling interim transcription (one
+  in-flight request, newest-wins), commit on stop, 120 s auto-stop.
+- IPC: `shared/ipc-channels/voice.ts` (9 channels) + `onVoiceProgress`
+  subscription; main handlers resolve app paths and persist settings; preload
+  follows the contract.
+- Settings: `whisperCliBinary`/`voiceEnabled`/`whisperModel` in `settings.ts` +
+  a new **Voice** section (Tools & Integrations) with enable, model picker,
+  status/Download, and a CLI-path override.
+- Packaging: `scripts/fetch-whisper.mjs` installs `whisper-cli.exe` + DLLs into
+  `resources/whisper/` (gitignored, `.gitkeep` keeps the dir);
+  `electron-builder.json` `extraResources` ships it; `npm run fetch:whisper`.
+- CSS: `.composer .mic` (+ `.on` pulse) and `.voice-error`.
+
+Bug caught + fixed during verification: the model URL was wrong (`.../models/`
+prefix). The converted ggml files live at the whisper.cpp HF repo ROOT
+(`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-<size>.bin`);
+a regression test now pins the exact URL. Verified live: the fetched
+`whisper-cli.exe` + `ggml-tiny.en.bin` transcribed `samples/jfk.wav` with the
+exact argv `transcribeWav` builds.
+
+Tests: `test/voice.test.ts` (12). Three App test mocks gained the two new
+`getVoiceEnabled`/`getVoiceStatus` stubs (partial API mocks).
+
+Verify: `app` typecheck clean; `app` tests **1454 passed + 1 skipped** (128
+files); `app` build clean; `core` tests **157 passed**.
+
+Note (known main-restart lesson): the running Electron main keeps the build it
+started with — a full `npm run dev` restart is needed before the new `voice:*`
+IPC responds and the fetched binary is resolvable in dev.
+
+## Status
+
+- [x] Part A (voice) - done
+- [ ] Part B (vision/capture) - not started

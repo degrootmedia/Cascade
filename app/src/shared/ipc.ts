@@ -13,6 +13,8 @@ import { goalChannels } from "./ipc-channels/goals.js";
 import { suiteChannels } from "./ipc-channels/suite.js";
 import { windowChannels } from "./ipc-channels/window.js";
 import { cameraGridChannels } from "./ipc-channels/camera-grid.js";
+import { voiceChannels } from "./ipc-channels/voice.js";
+import type { VoiceStatusIpc, VoiceProgressIpc, WhisperModel } from "./voice.js";
 import type {
   GenParams,
   GraphLayout,
@@ -102,6 +104,7 @@ export * from "./ipc/todos.js";
 export * from "./ipc/window.js";
 export * from "./ipc/camera-grid.js";
 export * from "./ipc/shot-sequence.js";
+export * from "./voice.js";
 
 
 export interface ApprovalRequestIpc {
@@ -458,6 +461,24 @@ export interface CascadeApi {
   setOpenArtCliBinary(path: string | null): Promise<void>;
   /** The OpenArt CLI transport status (binary, version, auth). */
   getOpenArtCliStatus(): Promise<OpenArtCliStatus>;
+
+  /** Local voice input (Whisper): binary present + model downloaded. */
+  getVoiceStatus(): Promise<VoiceStatusIpc>;
+  /** Download the Whisper model if needed; resolves with the fresh status. */
+  prepareVoice(): Promise<VoiceStatusIpc>;
+  /** Transcribe one chunk of 16-bit mono PCM (16 kHz); returns the text. */
+  transcribeVoice(samples: ArrayBuffer, sampleRate: number): Promise<{ text: string }>;
+  /** Whether the composer offers voice input. */
+  getVoiceEnabled(): Promise<boolean>;
+  setVoiceEnabled(v: boolean): Promise<void>;
+  /** Selected whisper.cpp model size. */
+  getWhisperModel(): Promise<WhisperModel>;
+  setWhisperModel(model: WhisperModel): Promise<void>;
+  /** Custom path to the `whisper-cli` binary (null = resolve bundled / PATH). */
+  getVoiceCliBinary(): Promise<string | null>;
+  setVoiceCliBinary(path: string | null): Promise<void>;
+  /** Fired while the Whisper model downloads on first use. */
+  onVoiceProgress(cb: (e: VoiceProgressIpc) => void): () => void;
 
   listAgents(): Promise<AgentMeta[]>;
   getAgent(id: string): Promise<AgentDetail | null>;
@@ -1066,6 +1087,7 @@ export const ipcContract = {
   ...suiteChannels,
   ...windowChannels,
   ...cameraGridChannels,
+  ...voiceChannels,
 } as const satisfies Record<string, IpcChannelSpec>;
 
 /** The subscription methods on CascadeApi, which preload wires by hand. */
@@ -1085,7 +1107,8 @@ type SubscriptionMethod =
   | "onCanvasContext"
   | "onCanvasSelectionChanged"
   | "onCanvasBusy"
-  | "onDetachedClosed";
+  | "onDetachedClosed"
+  | "onVoiceProgress";
 
 /** Every non-subscription method on CascadeApi must be wired in ipcContract,
  *  and every contract method must exist on CascadeApi — a type-level drift

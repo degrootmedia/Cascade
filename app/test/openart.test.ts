@@ -631,6 +631,41 @@ describe("OpenArtClient.imageGenFn", () => {
     }
   });
 
+  it("clamps an unsupported resolution tier onto the model's closest supported one", async () => {
+    // A pick the form can't do must not fall through to the vendor default
+    // (Seedream 5 Pro "4K" rendered at 1424×800 because its form only offers
+    // 1K/2K and the omitted resolution left the smallest default).
+    const cases: Array<{ req: "1k" | "2k" | "4k"; tiers: string[]; want: string }> = [
+      { req: "4k", tiers: ["1K", "2K"], want: "2K" }, // Seedream 5 Pro caps at 2K
+      { req: "1k", tiers: ["2K", "4K"], want: "2K" }, // Seedream 4.5 has no 1K
+      { req: "4k", tiers: ["2K", "3K"], want: "3K" }, // Seedream 5 Lite
+    ];
+    for (const c of cases) {
+      const generated: Record<string, unknown>[] = [];
+      const mcp = fakeMcp({
+        openart_model_list: () => JSON.stringify([{ model: "seedream", media: ["image"], modes: [] }]),
+        openart_model_form_get: () =>
+          JSON.stringify({
+            jsonSchema: {
+              properties: {
+                aspectRatio: { type: "string", enum: ["16:9", "4:3"] },
+                resolution: { type: "string", enum: c.tiers },
+              },
+            },
+          }),
+        openart_generate_image: (args) => {
+          generated.push(args);
+          return '{"status":"PENDING","historyId":"h-tier","pollAfterSeconds":0}';
+        },
+        openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("tier-jpeg")] }),
+      });
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction({ openArt: { model: "auto", resolution: c.req } }))!;
+      await gen("A frame", []);
+      const params = (generated[0] as Record<string, unknown>).params as Record<string, unknown>;
+      expect(params.resolution, `${c.req} onto ${c.tiers.join("/")}`).toBe(c.want);
+    }
+  });
+
   it("returns null when no image-generation tool is connected", () => {
     const client = new OpenArtClient(fakeMcp({ openart_model_list: () => "[]" }));
     expect(client.imageGenFn(makeProduction())).toBeNull();

@@ -36,6 +36,8 @@ function installCascade() {
     getSettings: async () => ({ hasApiKey: true, model: "m1", accent: "blue" }),
     listSessions: async () => [],
     getCredits: async () => null,
+    getVoiceEnabled: async () => false,
+    getVoiceStatus: async () => ({ available: false, binary: null, model: "base.en", modelReady: false, downloading: false }),
     listAgents: async () => [],
     getSessionAgent: async () => null,
     getWorkspaceState: async () => ({ workspace: null, followProduction: false, production: null }),

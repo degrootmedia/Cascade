@@ -5,6 +5,7 @@ node_modules/
 app/out/
 app/build/
 app/build_new/
+app/release/
 release-builds/
 win-unpacked/
 

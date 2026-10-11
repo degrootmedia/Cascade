@@ -20,7 +20,7 @@ describe("packaging hardening", () => {
 
   it("mac hardened runtime + windows timestamp configured", () => {
     expect(builder.mac?.hardenedRuntime).toBe(true);
-    expect(builder.win?.timeStampServer).toBeTruthy();
+    expect(builder.win?.signtoolOptions?.timeStampServer).toBeTruthy();
   });
 
   it("afterPack flips the hardening fuses", () => {

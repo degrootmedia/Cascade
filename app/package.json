@@ -11,6 +11,7 @@
     "test:security": "vitest run test/security",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "fetch:whisper": "node scripts/fetch-whisper.mjs",
+    "pack:dir": "electron-vite build && electron-builder --win --dir",
     "package": "electron-vite build && electron-builder --win nsis"
   },
   "dependencies": {

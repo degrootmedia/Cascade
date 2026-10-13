@@ -19,7 +19,7 @@ import { ingestScript, refineStylePrompt, refineCharacterDescription, generateSt
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { createJobLedger } from "./jobs.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
@@ -4602,7 +4602,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
     if (shot.videoPath) {
-      try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* missing file is already removed */ }
+      mediaFiles.removeFile(p, shot.videoPath);
       delete shot.videoPath;
       productions.saveProduction(p);
       productionEmit(id, `Shot ${shot.number}: video removed.`);
@@ -5257,6 +5257,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         try { fs.unlinkSync(assetPath(p, prev.sheetPath)); } catch { /* old sheet already gone */ }
       }
       fs.writeFileSync(assetPath(p, rel), buf);
+      // Register the sheet before exposing it (the brief's rule).
+      mediaFiles.register(p, rel, "image", "generated");
       // Carry the node's wiring + picks forward; replace only the sheet. A
       // fresh generation supersedes any manually imported grid image. The
       // geometry follows the generated size (panels/labels re-derive from it).
@@ -5344,6 +5346,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
     );
     p.references = [...(p.references ?? []), ...result.refs];
+    // Register the exported panels before exposing them.
+    for (const rel of result.paths) mediaFiles.register(p, rel, "image", "generated");
     productions.saveProduction(p);
     productionEmit(req.productionId, `Exported ${result.refs.length} camera-grid panel${result.refs.length === 1 ? "" : "s"} as references.`, "done");
     return { refs: result.refs, production: p };

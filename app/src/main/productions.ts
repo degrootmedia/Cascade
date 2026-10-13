@@ -12,15 +12,16 @@ import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, 
 from "../shared/ipc.js";
 import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
-relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath }
+relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs }
 from "./pipeline.js";
+import { normalizeMediaRegistry } from "../shared/media-registry.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
 import { normalizeGraph } from "../shared/graph/normalize.js";
 import { setStyleEdge } from "../shared/graph/connect.js";
 import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
-import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS } from "./shot-ownership.js";
+import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
 
 export interface ProductionFile extends Production {}
@@ -96,6 +97,10 @@ function normalize(p: ProductionFile): ProductionFile {
     const liveRefIds = new Set((p.references ?? []).map((r) => r.id));
     p.shotSequences = normalizeShotSequences(p.shotSequences, liveIds, liveRefIds);
   }
+  // The media registry is read-repaired: dedupe by path, drop terminal
+  // `deleted` entries. (The present/missing disk sweep runs in
+  // `loadProduction`'s bootstrap, after the migrations settle the paths.)
+  p.media = normalizeMediaRegistry(p.media);
   return p;
 }
 
@@ -169,13 +174,22 @@ export function loadProduction(id: string): ProductionFile | null {
   // still skips the JSON.parse on hits.
   // Perf 1.2: post-migration loads skip the full-board walk entirely. The
   // >= keeps a downgrade from silently stamping a newer document down.
-  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) return structuredClone(p);
+  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) {
+    // The media registry bootstraps on every load: upsert an entry per
+    // referenced path, mark present/missing from disk (the storyboard's
+    // explicit "Missing file" badge reads it), and prune entries no field
+    // references. It bootstraps on the CACHED document (before the clone), so
+    // ids stay stable across loads — a move re-points the path, never the id.
+    mediaFiles.bootstrap(p, productionMediaRefs(p));
+    return structuredClone(p);
+  }
   // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
   // node-graph generation nodes). Persist in place so the very next read
   // sees the new layout. Always stamp, even when the walk reports no change,
   // so the next load hits the fast path.
   migrateBoardArtwork(p);
   p.schemaVersion = PRODUCTION_SCHEMA_VERSION;
+  mediaFiles.bootstrap(p, productionMediaRefs(p));
   store.save(p);
   return structuredClone(p);
 }
@@ -419,8 +433,10 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   delete mergedRec.transition;
   for (const [key, value] of Object.entries(incomingRec)) {
     if (DENIED.has(key)) continue;
-    if (key === "artwork" || key === "videoPath") continue; // explicit-null / editvideo rules below
-    if (key === "graphEditNodes" || key === "graphVideoNodes" || key === "graphTweenBlocks" || key === "graphUpscale") continue; // merged by id / pair / state below
+    // The pipe mirrors (artwork/videoPath) and the per-node/block state have
+    // dedicated merge rules below — skip them here. The list derives from the
+    // ownership table (`SHOT_SPECIAL_FIELDS`).
+    if (SHOT_SPECIAL_FIELDS.includes(key as keyof ProductionShot)) continue;
     mergedRec[key] = value;
   }
   merged.graphImageGenIndex = takeGenIndex(
@@ -542,6 +558,12 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // a reorder.
   fresh.promptOverrides =
     fresh.promptOverrides && typeof fresh.promptOverrides === "object" ? { ...fresh.promptOverrides } : {};
+  // The media registry is main-owned (like promptOverrides): the media
+  // service maintains it, and a stale renderer snapshot — captured before a
+  // move/registration — must never revert an entry's path or state. It is
+  // deliberately absent from the copy list above, so the fresh document's
+  // registry always wins.
+  fresh.media = normalizeMediaRegistry(fresh.media);
   fresh.characters = Array.isArray(p.characters) ? p.characters : [];
   fresh.products = Array.isArray(p.products) ? p.products : [];
   fresh.references = Array.isArray(p.references) ? p.references : [];

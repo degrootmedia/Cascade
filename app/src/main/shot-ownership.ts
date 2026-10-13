@@ -129,3 +129,11 @@ export const SHOT_MERGE_DENIED_FIELDS: (keyof ProductionShot)[] = (
 export const SHOT_INDEX_FIELDS: (keyof ProductionShot)[] = (
   Object.keys(SHOT_FIELD_OWNERSHIP) as (keyof ProductionShot)[]
 ).filter((k) => SHOT_FIELD_OWNERSHIP[k].merge === "index");
+
+/** Fields merged by a dedicated rule — skipped in `mergeRendererShot`'s
+ *  generic copy loop (`artwork`/`videoPath` mirrors + the per-node/block
+ *  state merges). Derived from the table so the merge and the classification
+ *  cannot drift. */
+export const SHOT_SPECIAL_FIELDS: (keyof ProductionShot)[] = (
+  Object.keys(SHOT_FIELD_OWNERSHIP) as (keyof ProductionShot)[]
+).filter((k) => SHOT_FIELD_OWNERSHIP[k].merge === "special");

@@ -10,6 +10,7 @@ import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { findGeneration } from "../../../../shared/generations.js";
+import { mediaEntryForPath } from "../../../../shared/media-registry.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
@@ -520,6 +521,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             title="This shot's video is still rendering (or its download failed) — fetch to download the clip when ready"
           >
             video pending
+          </span>
+        )}
+        {!pending && !videoPending && shot.artwork && mediaEntryForPath(prod.media, shot.artwork)?.state === "missing" && (
+          <span
+            className="prod-board-pending prod-board-missing"
+            title="The file for this frame is missing on disk — regenerate it, or use Repair links to re-link it"
+          >
+            missing file
           </span>
         )}
         <button

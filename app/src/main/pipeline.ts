@@ -36,6 +36,7 @@ import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } f
 import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
 import { resolveSelectedOutput } from "../shared/selected-output.js";
+import { createMediaService, type MediaService } from "./media.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
@@ -246,6 +247,15 @@ export async function validateAssetPath(p: Production, rel: string): Promise<str
   }
   return assetPath(p, rel);
 }
+
+/**
+ * The one media file service (architecture hardening, brief recommendation
+ * 1): every registration, adoption, move, and deletion of production media
+ * rides through here, keeping the production's media registry in lockstep
+ * with the files on disk. `assetPath` (above) is the realpath-verified
+ * workspace resolver — a function declaration, so it hoists.
+ */
+export const mediaFiles: MediaService = createMediaService({ resolveAbs: assetPath });
 
 /**
  * Move an audio asset into <dir>/archive instead of deleting it, so replaces
@@ -1028,6 +1038,7 @@ export function writeStyleFrame(p: Production, styleId: string, dataUrl: string)
     i++;
   }
   fs.writeFileSync(assetPath(p, rel), buf);
+  mediaFiles.register(p, rel, "image", "generated");
   return rel;
 }
 
@@ -1186,6 +1197,9 @@ export function writeBoardFrame(
     jpegBytes = originalBytes;
   }
   fs.writeFileSync(assetPath(p, jpegRel), jpegBytes);
+  // Register the served frame with the media registry BEFORE it is exposed to
+  // any consumer (the brief's rule: register a result before showing it).
+  mediaFiles.register(p, jpegRel, "image", "generated");
   return { jpegRel, originalRel };
 }
 
@@ -1217,6 +1231,7 @@ export function writeShotVideo(
   const rel = shotVideoRelPath(p, shot, ext, variant);
   fs.mkdirSync(assetPath(p, shotVideoDir(p, shot)), { recursive: true });
   fs.writeFileSync(assetPath(p, rel), bytes);
+  mediaFiles.register(p, rel, "video", "generated");
   return rel;
 }
 
@@ -1245,6 +1260,7 @@ export function writeSequenceVideo(
   const rel = sequenceVideoRelPath(p, seq, ext);
   fs.mkdirSync(assetPath(p, sequenceVideoDir(p, seq)), { recursive: true });
   fs.writeFileSync(assetPath(p, rel), bytes);
+  mediaFiles.register(p, rel, "video", "generated");
   return rel;
 }
 
@@ -1258,7 +1274,10 @@ export function relocateClipToSequence(p: Production, seq: { id: string }, rel: 
   const ext = path.extname(rel).toLowerCase().replace(/^\./, "") || "mp4";
   const dest = sequenceVideoRelPath(p, seq, ext);
   fs.mkdirSync(assetPath(p, sequenceVideoDir(p, seq)), { recursive: true });
-  fs.renameSync(assetPath(p, rel), assetPath(p, dest));
+  // The one move path: the registry entry follows the file, so the sequence's
+  // take keeps resolving no matter where a later renumber relocates boards.
+  const moved = mediaFiles.moveFile(p, rel, dest);
+  if (!moved) throw new Error(`Couldn't move the generated clip into the sequence folder (${rel}) — the file may already be gone.`);
   return dest;
 }
 
@@ -1376,8 +1395,11 @@ export function migrateBoardArtworkToJpeg(p: Production, shot: ProductionShot): 
  *  already-relocated paths no longer match the flat pattern. */
 export function relocateBoardLayout(p: Production, shot: ProductionShot): boolean {
   let changed = false;
+  const moved = new Map<string, string>();
   const move = (rel: string): string => {
     if (!rel) return rel;
+    const cached = moved.get(rel);
+    if (cached) return cached;
     const flat = /^([^/]+)\/shot-(\d{4})-[^/]+\.(?:jpg|png|webp)$/i.exec(rel);
     if (!flat || flat[1] !== p.assets.boardsDir) return rel;
     const newRel = `${p.assets.boardsDir}/${flat[2]}/${path.basename(rel)}`;
@@ -1388,12 +1410,15 @@ export function relocateBoardLayout(p: Production, shot: ProductionShot): boolea
       fs.mkdirSync(assetPath(p, `${p.assets.boardsDir}/${flat[2]}`), { recursive: true });
       fs.renameSync(abs, assetPath(p, newRel));
       changed = true;
+      moved.set(rel, newRel);
       return newRel;
     } catch { return rel; }
   };
   if (shot.artwork) shot.artwork = move(shot.artwork);
   if (shot.artworkHistory?.length) shot.artworkHistory = shot.artworkHistory.map(move);
   if (shot.graphImageGens?.length) shot.graphImageGens = shot.graphImageGens.map((g) => ({ ...g, path: move(g.path) }));
+  // The media registry follows the moved files.
+  if (moved.size) mediaFiles.remapPaths(p, (rel) => moved.get(rel) ?? rel);
   try {
     const originalsDir = assetPath(p, `${p.assets.boardsDir}/originals`);
     if (fs.existsSync(originalsDir)) {
@@ -1468,6 +1493,8 @@ export function relocateVideoLayout(p: Production, shot: ProductionShot): boolea
       b.gens?.length ? { ...b, gens: b.gens.map((g) => ({ ...g, path: move(g.path)! })) } : b
     );
   }
+  // The media registry follows the moved clips.
+  if (moved.size) mediaFiles.remapPaths(p, (rel) => moved.get(rel) ?? rel);
   return changed;
 }
 
@@ -1716,7 +1743,9 @@ export function deleteGeneration(p: Production, shot: ProductionShot, rel: strin
   const reason = generationInUse(shot, gen);
   if (reason) throw new Error(generationInUseMessage(reason));
   if (!removeGeneration(shot, gen)) throw new Error("That generation's owner no longer exists.");
-  try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already removed */ }
+  // The one deletion path: unlink + the registry entry's terminal `deleted`
+  // state (dropped from the doc by the next normalize).
+  mediaFiles.removeFile(p, rel);
   deleteBoardOriginal(p, rel);
 }
 
@@ -1759,6 +1788,9 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
     i++;
   }
   fs.copyFileSync(src, assetPath(p, destRel));
+  // The adopted copy registers with the media registry, so the reference
+  // survives deleting the source generation and any later move re-points it.
+  mediaFiles.register(p, destRel, media === "video" ? "video" : "image", "adopted");
   const ref: CustomRef = media === "video"
     ? { id: newRefId(), name, media, mediaPath: destRel, shotIds: [] }
     : { id: newRefId(), name, imagePath: destRel, shotIds: [] };
@@ -1936,7 +1968,7 @@ export function removeShotsFromSequences(p: Production, shotIds: Iterable<string
  * file and rewrites exactly these fields — one list so a new path-bearing
  * field can't silently stop following its shot on reorder.
  */
-function shotMediaRefs(shot: ProductionShot): string[] {
+export function shotMediaRefs(shot: ProductionShot): string[] {
   const refs: string[] = [];
   const push = (rel: string | undefined) => { if (typeof rel === "string" && rel) refs.push(rel); };
   push(shot.artwork);
@@ -1950,6 +1982,36 @@ function shotMediaRefs(shot: ProductionShot): string[] {
   push(shot.graphTweenOutput);
   for (const b of shot.graphTweenBlocks ?? []) for (const g of b.gens ?? []) push(g.path);
   return [...new Set(refs)];
+}
+
+/**
+ * Every workspace-relative media path a production references — active shots,
+ * the outdated bucket, sequence canvases, style frames, references,
+ * voiceover/music, and 3D models. The media registry bootstraps from this
+ * list at load, so a new path-bearing field must land here too (or the
+ * registry can't track it and the missing-media state drifts).
+ */
+export function productionMediaRefs(p: Production): string[] {
+  const refs = new Set<string>();
+  const add = (rel: string | undefined) => { if (typeof rel === "string" && rel) refs.add(rel); };
+  for (const scene of p.scenes ?? []) {
+    for (const shot of scene.shots ?? []) for (const rel of shotMediaRefs(shot)) refs.add(rel);
+  }
+  for (const shot of p.outdatedShots ?? []) for (const rel of shotMediaRefs(shot)) refs.add(rel);
+  for (const seq of p.shotSequences ?? []) {
+    if (seq.graph) for (const rel of shotMediaRefs(seq.graph)) refs.add(rel);
+  }
+  for (const style of p.styles ?? []) add(style.imagePath);
+  for (const c of p.characters ?? []) add(c.imagePath);
+  for (const pr of p.products ?? []) add(pr.imagePath);
+  for (const r of p.references ?? []) {
+    add(r.imagePath);
+    add(r.mediaPath);
+  }
+  add(p.voiceoverPath);
+  add(p.musicPath);
+  for (const m of p.models3d ?? []) add(m.glbPath);
+  return [...refs];
 }
 
 /**
@@ -2172,11 +2234,12 @@ export function relocateBoardsForRenumber(
   // never existed stay byte-identical (still dangling, still repairable via
   // refreshBoardLinks) rather than pointing at a new non-existent location.
   const patched: string[] = [];
+  const landedRel = new Map<string, string>(); // old rel → new rel, for the registry
   const patchShotPaths = (shot: ProductionShot, oldNum: string, newNum: string) => {
     const patchOne = (rel: string): string => {
       const next = relocatedRel(rel, oldNum, newNum);
       if (next === rel) return rel;
-      if (newLanded.has(next) || existsRel(next)) { patched.push(next); return next; }
+      if (newLanded.has(next) || existsRel(next)) { patched.push(next); landedRel.set(rel, next); return next; }
       return rel;
     };
     // The same field list renumber's moves touch — frames, histories, node
@@ -2184,6 +2247,9 @@ export function relocateBoardsForRenumber(
     mapShotMediaPaths(shot, patchOne);
   };
   for (const { shot, oldNum, newNum } of moves) patchShotPaths(shot, oldNum, newNum);
+  // The media registry follows the fields exactly: only paths that actually
+  // landed get re-pointed (a dangling link keeps its old registry path too).
+  if (landedRel.size) mediaFiles.remapPaths(p, (rel) => landedRel.get(rel) ?? rel);
 
   // Phase 5: verify every patched path exists on disk. A missing file here
   // means the move lost data — roll back and fail loudly instead of saving a
@@ -2247,11 +2313,15 @@ function moveShotMediaDir(
     };
     renameIn(toAbs);
   }
-  mapShotMediaPaths(shot, (rel) => {
+  const remap = (rel: string): string => {
     if (!rel.startsWith(`${fromDirRel}/`)) return rel;
     const rest = rel.slice(fromDirRel.length + 1);
     return `${toDirRel}/` + (fromNumber !== toNumber ? rest.split(`shot-${fromNumber}-`).join(`shot-${toNumber}-`) : rest);
-  });
+  };
+  mapShotMediaPaths(shot, remap);
+  // The media registry follows the same remap, so registered ids keep
+  // resolving after the folder (and inner filenames) moved.
+  mediaFiles.remapPaths(p, remap);
   return true;
 }
 
@@ -2331,7 +2401,7 @@ export function removeOutdatedShot(p: Production, shotId: string): void {
   } catch { /* folder already gone */ }
   for (const rel of shotMediaRefs(shot)) {
     if (rel.startsWith(`${dirRel}/`)) continue; // removed with the folder
-    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* already gone / external */ }
+    mediaFiles.removeFile(p, rel);
   }
 }
 
@@ -3383,6 +3453,7 @@ export function importBoardDataUrl(
     i++;
   }
   fs.writeFileSync(assetPath(p, rel), bytes);
+  mediaFiles.register(p, rel, "image", "imported");
   const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   p.references = [...(p.references ?? []), { id: refId, name: stem, imagePath: rel, shotIds: [] }];
   // Board frame from the same bytes — mirrors the image branch of
@@ -3446,6 +3517,7 @@ export function importBoardVideo(
     i++;
   }
   fs.writeFileSync(assetPath(p, rel), buf);
+  mediaFiles.register(p, rel, "video", "imported");
   const name = parsed.name.trim().replace(/\s+/g, " ").slice(0, 60) || "Dropped clip";
   const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   p.references = [...(p.references ?? []), { id: refId, name, media: "video" as const, mediaPath: rel, shotIds: [] }];

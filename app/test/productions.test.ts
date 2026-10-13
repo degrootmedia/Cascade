@@ -30,6 +30,7 @@ import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { assemblyPlan } from "../src/main/assembly.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
+import { mediaEntryForPath } from "../src/shared/media-registry.js";
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -1220,6 +1221,41 @@ describe("shotSequences persistence", () => {
     const reloadedLegacy = loadProduction(legacy.meta.id)!;
     expect(reloadedLegacy.shotSequences![0].graph!.graphOutputSource).toBe("videogen");
     expect(reloadedLegacy.shotSequences![0].graph!.graphVideoNodes![0].gens).toHaveLength(1);
+  });
+});
+
+describe("media registry (architecture hardening)", () => {
+  it("is main-owned: a stale renderer snapshot cannot revert it", () => {
+    const fresh = baseProduction({
+      media: [{ id: "m1", path: "boards/0100/shot-0100-a.jpg", kind: "image", origin: "generated", state: "present" }],
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "v", artwork: "boards/0100/shot-0100-a.jpg" }] }],
+    });
+    const incoming = baseProduction({
+      media: [],
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "edited", visual: "v" }] }],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.media).toHaveLength(1);
+    expect(merged.scenes[0].shots[0].audio).toBe("edited");
+  });
+
+  it("bootstraps the registry on load: present files and missing files both record state", () => {
+    const folder = path.join(dataDir, "media-bootstrap");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "bytes");
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "media-bootstrap", folder },
+      schemaVersion: 3,
+      scenes: [{ number: 1, title: "S1", shots: [{
+        id: "s1", number: "0100", audio: "", visual: "v",
+        artwork: "boards/0100/shot-0100-a.jpg",
+        artworkHistory: ["boards/0100/shot-0100-gone.jpg"],
+      }] }],
+    });
+    saveProduction(doc);
+    const loaded = loadProduction("media-bootstrap")!;
+    expect(mediaEntryForPath(loaded.media, "boards/0100/shot-0100-a.jpg")?.state).toBe("present");
+    expect(mediaEntryForPath(loaded.media, "boards/0100/shot-0100-gone.jpg")?.state).toBe("missing");
   });
 });
 

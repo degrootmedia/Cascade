@@ -23,6 +23,7 @@ import {
   SHOT_FIELD_OWNERSHIP,
   SHOT_INDEX_FIELDS,
   SHOT_MERGE_DENIED_FIELDS,
+  SHOT_SPECIAL_FIELDS,
 } from "../src/main/shot-ownership.js";
 
 const { dataDir } = vi.hoisted(() => {
@@ -138,6 +139,12 @@ describe("shot field ownership", () => {
     for (const key of ["graphVideoNodes", "graphEditNodes", "graphTweenBlocks", "graphUpscale", "graphCameraGrid"] as const) {
       expect(SHOT_FIELD_OWNERSHIP[key].merge, key).toBe("special");
     }
+  });
+
+  it("derives the special-case skip set exactly (the merge and the table can't drift)", () => {
+    expect([...SHOT_SPECIAL_FIELDS].sort()).toEqual(
+      ["artwork", "videoPath", "graphVideoNodes", "graphEditNodes", "graphTweenBlocks", "graphUpscale", "graphCameraGrid"].sort()
+    );
   });
 
   it("keeps main-owned shot state over a stale whole-document save", () => {

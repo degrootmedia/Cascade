@@ -3886,10 +3886,6 @@ every surface agrees, and unrelated edits cannot make it disappear.
 
 ## Deferred (per the rollout plan — separate passes after the three above land)
 
-- Phase 2: media registry with stable media IDs (`videoPath`, `graphVideoGens`,
-  `graphEditVideoGens`, `graphTweenOutput`, tween blocks, artwork history →
-  media IDs behind one adoption/move/delete service); legacy normalization on
-  load.
 - Phase 3: typed intent commands for the highest-risk whole-document saves
   (move/resize node, reorder shots, rename shot), `applyRendererState` as a
   compatibility boundary; stored graph becomes the canvas's sole read path.
@@ -4020,4 +4016,109 @@ loudly with the version named, per the existing guard.
 Verify (follow-up): `app` typecheck clean; `app` tests **1528 passed + 1
 skipped** (136 files); `app` build clean (the `jobsChanged` registration is
 in the main bundle).
+
+---
+
+# Media registry: one stable ID per media file, one move/delete service
+
+Brief recommendation 1 (rollout Phase 2): a generated frame or clip should
+keep the same identity even if its file is moved, renamed, or adopted from a
+temporary generation directory. Transitional form (per the rollout's
+"introduce authorities behind compatibility layers"): path fields stay the
+transport for now — the registry adds stable identity, lifecycle state
+(present/missing/deleted), and ONE adoption/move/delete service, so the
+path-patch lists and unlinks stop being hand-rolled per flow. Phase 4 later
+swaps fields to media ids and reads them through the registry.
+
+## Plan
+
+- [ ] 2a.1 `shared/media-registry.ts` (pure): `MediaEntry
+      {id, path, kind, origin, state}` + `normalizeMediaRegistry`
+      (dedupe by path, drop terminal `deleted`, keep `missing`) +
+      pure helpers (`entryForPath`, `markMissing`). `Production.media?`
+      additive field.
+- [ ] 2a.2 `main/media.ts`: `createMediaService` — `register(p, rel, kind,
+      origin)` (upsert by path, stable id), `move(p, fromRel, toRel)` (fs
+      rename + registry re-point; null on failure — an interrupted move
+      leaves the old state recoverable), `remove(p, rel)` (unlink + state),
+      `markMissing(p, rel)`, `relocatePrefix(p, fromPrefix, toPrefix)`
+      (folder renames follow via prefix rewrite). Main-owned:
+      `applyRendererState` fresh-wins `media` like `promptOverrides`; read
+      repair on load/save.
+- [ ] 2a.3 Wire the file-write choke points to register: `writeBoardFrame`,
+      `writeShotVideo`, `writeStyleFrame`, `importBoardDataUrl/Video`,
+      `saveGenerationAsReference`, `saveVideoStillAsReference`,
+      camera-grid cutout.
+- [ ] 2a.4 Wire the movers/deleters through the service:
+      `relocateBoardsForRenumber`, `archiveShotsToOutdated`,
+      `restoreOutdatedShot`, `relocateClipToSequence`, the legacy
+      `relocateBoardLayout`/`relocateVideoLayout` migrations,
+      `deleteGeneration` unlink, `production:removeVideo`,
+      `refreshBoardLinks` re-point.
+- [ ] 2a.5 Missing state surfaces: mark `missing` when a thumbnail/image
+      probe finds the file gone; the storyboard card shows an explicit
+      "Missing file" badge instead of a blank frame.
+- [ ] 2a.6 Ownership tie-in: derive `mergeRendererShot`'s special-case skip
+      list from the ownership table (`SHOT_SPECIAL_FIELDS`) so the merge and
+      the table can't drift; extend the ownership test.
+- [ ] 2a.7 Tests: `media-registry.test.ts` (pure) + `media-service.test.ts`
+      (temp-fs moves/removes, interrupted move recoverable, prefix rewrite)
+      + productions merge (media main-owned) + movers keep the registry in
+      sync + delete-in-use still blocked.
+- [ ] 2a.8 Verify: `npm run typecheck`, `npm test`, `npm run build`;
+      `CONTEXT.md` row; full app restart (main-process change).
+
+## Review
+
+Done — the transitional media registry landed (brief recommendation 1,
+rollout Phase 2a): stable identity + lifecycle state behind ONE file service,
+with path fields still the transport until Phase 4 swaps them to ids.
+
+- `shared/media-registry.ts` (pure): `MediaEntry {id, path, kind, origin,
+  state}`, `normalizeMediaRegistry` (dedupe by path, drop terminal
+  `deleted`), `mediaEntryForPath`, `upsertMediaEntry`, `remapMediaPaths`,
+  `mediaKindForRel`. `Production.media?` is the additive field (older
+  documents open with an empty registry; it fills on the first load).
+- `main/media.ts`: `createMediaService(resolveAbs)` — the ONE door for
+  files: `register` (idempotent per path; the brief's "register a result
+  before exposing it"), `moveFile` (fs rename + registry re-point; null on
+  failure so an interrupted adoption leaves the old path + registry intact —
+  recoverable, never a broken published path), `removeFile` (unlink +
+  terminal `deleted` state), `markMissing`, `remapPaths` (folder-level moves
+  follow), `bootstrap` (load-time: upsert every referenced path,
+  present/missing from disk, prune unreferenced entries). Wired in
+  `pipeline.ts` as the `mediaFiles` singleton over the realpath-verified
+  `assetPath`.
+- Write choke points register: `writeBoardFrame`, `writeShotVideo`,
+  `writeSequenceVideo`, `writeStyleFrame`, `importBoardDataUrl/Video`,
+  `saveGenerationAsReference`, camera-grid sheet generation + panel cutouts.
+  Movers/deleters ride the service: `relocateClipToSequence`,
+  `moveShotMediaDir` (outdated archive/restore), `relocateBoardsForRenumber`
+  (registry follows only paths that actually landed), the legacy
+  `relocateBoardLayout`/`relocateVideoLayout` migrations, `deleteGeneration`,
+  `removeOutdatedShot`, `production:removeVideo`.
+- Missing state: `loadProduction` bootstraps the registry (present/missing
+  from disk, stable ids — bootstrapped on the cached doc before the clone);
+  the storyboard card shows an explicit **"missing file"** badge instead of
+  a silently blank frame. The registry is main-owned (`applyRendererState`
+  fresh-wins, like `promptOverrides`).
+- Ownership tie-in: `SHOT_SPECIAL_FIELDS` now derives the merge's special-
+  case skip list from the ownership table (the two can't drift).
+
+Tests: `media-registry.test.ts` (14: pure helpers + service + interrupted
+move + bootstrap + outdated/renumber keep the registry in lockstep — a moved
+file still resolves from storyboard/canvas/history), `productions.test.ts`
+(+2: registry main-owned over a stale renderer save; load bootstrap present/
+missing), `shot-ownership.test.ts` (+1: the derived special set).
+
+Verify: `app` typecheck clean; `app` tests **1543 passed + 1 skipped** (137
+files); `app` build clean. `core` untouched. Main-process change — fully
+restart the app before testing.
+
+**Known residual:** the registry is transitional — fields still store paths
+(Phase 4 swaps them to media ids). Registration covers the generation/import/
+adoption flows; files written by raw provider download paths still land in
+the registry via their write choke points (`writeBoardFrame`/`writeShotVideo`
+are every provider's finish line). Suite outputs (Image Suite) live outside
+production fields and aren't registered yet.
 

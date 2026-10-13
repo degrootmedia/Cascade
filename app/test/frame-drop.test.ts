@@ -79,6 +79,7 @@ function cascadeMock(): Record<string, unknown> {
     addReferenceImage: async () => ({ path: "references/Frame 0001.png" }),
     getBoardPrompt: async (_id: string, shotId: string) => effectivePrompt(disk ?? freshProd(), shotId),
     saveProduction: async (p: Record<string, unknown>) => { disk = JSON.parse(JSON.stringify(p)) as Record<string, unknown>; savedProds.push(disk); },
+    updateGraphShotFields: async (_id: string, shotId: string, patch: Record<string, unknown>) => { const prod = disk as unknown as { scenes: Array<{ shots: Array<Record<string, unknown>> }> } | null; if (!prod) return disk; const shot = prod.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId); if (shot) { for (const [k, v] of Object.entries(patch)) { if (v === undefined) delete shot[k]; else shot[k] = JSON.parse(JSON.stringify(v)); } } return disk; },
     getMcpStatus: async () => [],
     listOpenArtModels: async () => [],
     getMediaProvider: async () => "openart",

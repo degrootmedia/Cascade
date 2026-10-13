@@ -881,9 +881,9 @@ describe("board frame selection persistence", () => {
       expect(resolveShotDisplay(restored)).toMatchObject({ media: "still", path: rel });
       expect(restored.graphOutputSource).toBe(kind === "edit" ? "editgen" : "imagegen");
       expect(restored.graphImageGenIndex).toBe(selected.graphImageGenIndex);
-      expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
-      expect(restored.graphImageGens).toEqual(selected.graphImageGens);
-      expect(restored.graphVideoNodes?.[0]?.gens).toEqual(selected.graphVideoGens);
+      expect(restored.graphEditNodes?.map((n) => ({ ...n, gens: n.gens?.map(({ mediaId: _mediaId, ...g }) => g) }))).toEqual(selected.graphEditNodes?.map((n) => ({ ...n, gens: n.gens?.map(({ mediaId: _mediaId2, ...g }) => g) })));
+      expect(restored.graphImageGens?.map(({ mediaId: _mediaId, ...g }) => g)).toEqual(selected.graphImageGens);
+      expect(restored.graphVideoNodes?.[0]?.gens?.map(({ mediaId: _mediaId, ...g }) => g)).toEqual(selected.graphVideoGens);
       expect(restored.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
       expect(boardFrameHistory(restored)).toEqual(history);
       saveProduction(loaded!);
@@ -925,8 +925,8 @@ describe("board frame selection persistence", () => {
       expect(active.source).toEqual(expectedSource);
       expect(restored.graphImageGenIndex).toBe(1);
       expect(restored.graphEditPrompt).toBe(prompt);
-      expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
-      expect(restored.graphImageGens).toEqual(images);
+      expect(restored.graphEditNodes?.map((n) => ({ ...n, gens: n.gens?.map(({ mediaId: _mediaId, ...g }) => g) }))).toEqual(selected.graphEditNodes?.map((n) => ({ ...n, gens: n.gens?.map(({ mediaId: _mediaId2, ...g }) => g) })));
+      expect(restored.graphImageGens?.map(({ mediaId: _mediaId, ...g }) => g)).toEqual(images);
       expect(restored.artworkHistory).toEqual(selected.artworkHistory);
       expect(restored.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
       incoming.scenes = loaded.scenes;

@@ -42,6 +42,7 @@ import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../../../shared/graph/layout.js";
+import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -2479,7 +2480,25 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   function saveGraphShotFields(shotId: string, patch: Partial<ProductionShot>) {
     const current = prodRef.current;
     if (!current) return;
-    saveField({ scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) });
+    // Narrow command (Step 2): only allow-listed graph fields travel; main
+    // applies them onto the freshest document, so a generation that landed
+    // after this snapshot survives. The optimistic local update mirrors
+    // saveGraphLayout; the authoritative snapshot lands on response.
+    const allowed = pickGraphShotPatch(patch as Record<string, unknown>) as Partial<ProductionShot>;
+    if (Object.keys(allowed).length === 0) return;
+    const next = {
+      ...current,
+      scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...allowed } : s) })),
+    };
+    prodRef.current = next;
+    setProd(next);
+    void window.cascade.updateGraphShotFields(current.meta.id, shotId, allowed)
+      .then((merged) => { applySnapshot(merged); })
+      .catch(() => {
+        void window.cascade.loadProduction(current.meta.id)
+          .then((fresh) => { if (fresh) applySnapshot(fresh); })
+          .catch(() => {});
+      });
   }
 
   /** Patch one video node's fields on the shot's list (immutably). */

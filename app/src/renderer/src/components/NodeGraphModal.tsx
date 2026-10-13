@@ -59,7 +59,7 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
 import { graphEdgesToFlow, promptSockets, type PromptSocket } from "./graphFlow.js";
-import { materializeGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
+import { storedOrMaterializedGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
 import { canConnect, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
@@ -3971,7 +3971,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // load guarantee (`ensureShotGraphs`) means loaded projects never take this
   // branch at all.
   const fallbackGraph = useMemo(
-    () => shot.graph ?? normalizeGraph(materializeGraph(shot, references)).graph,
+    () => storedOrMaterializedGraph(shot, references),
     [shot, references]
   );
   const wiringGraph = shot.graph ?? fallbackGraph;
@@ -4235,7 +4235,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const key = `${prod.meta.id}:${shot.id}`;
     if (ensuredGraphFor.current === key) return;
     ensuredGraphFor.current = key;
-    let fresh = normalizeGraph(materializeGraph(shot, references)).graph;
+    let fresh = storedOrMaterializedGraph(shot, references);
     if (styleValue && !styleEdgePresent(fresh, "composer")) {
       fresh = normalizeGraph(setStyleEdge(fresh, "composer", true)).graph;
     }

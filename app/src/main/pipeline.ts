@@ -201,12 +201,18 @@ export function suggestedReferences(rawCharacters: RawCharacter[] | undefined, r
 }
 
 /** Absolute path of a production asset that lives inside its folder. Realpath-verified so symlinks cannot escape. */
-export function assetPath(p: Production, rel: string): string {
+/** Absolute path of a production asset inside `folder` (folder-only:
+ *  no production document load — the media-serving hot path uses this). */
+export function assetPathInFolder(folder: string, rel: string): string {
+  return assetPathWithFolder(folder, rel);
+}
+
+function assetPathWithFolder(folder: string, rel: string): string {
   if (typeof rel !== "string" || rel.trim() === "" || rel.includes("\0")) {
     throw new Error(`Refusing to touch outside the production folder: ${rel}`);
   }
-  const abs = path.resolve(p.meta.folder, rel);
-  const root = path.resolve(p.meta.folder);
+  const abs = path.resolve(folder, rel);
+  const root = path.resolve(folder);
   if (abs !== root && !abs.startsWith(root + path.sep)) {
     throw new Error(`Refusing to touch outside the production folder: ${rel}`);
   }
@@ -238,6 +244,11 @@ export function assetPath(p: Production, rel: string): string {
     throw new Error(`Refusing to touch outside the production folder: ${rel}`);
   }
   return abs;
+}
+
+/** Absolute path of a production asset that lives inside its folder. Realpath-verified so symlinks cannot escape. */
+export function assetPath(p: Production, rel: string): string {
+  return assetPathWithFolder(p.meta.folder, rel);
 }
 
 /** Async boundary validator for pipeline asset paths entering main. */
@@ -2747,6 +2758,40 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
 export function hookVideoGenToOutput(shot: ProductionShot, nodeId?: string): void {
   setShotSelectedOutput(shot, { kind: "videogen", nodeId });
 }
+/** Where a generation was initiated. Classic storyboard actions
+ *  auto-connect their result to Frame Output (through the normal
+ *  selection write-through); node-view generations stay local to
+ *  their node until the user wires them explicitly. Generation type
+ *  never changes the rule. */
+export type GenerationSurface = "classic" | "node";
+
+/** Record a finished image generation on its node; classic surface
+ *  also hooks it to the output. Node surface leaves the pipe untouched. */
+export function completeImageGeneration(shot: ProductionShot, rel: string, prompt: string, model: string, surface: GenerationSurface): void {
+  recordGraphImageGen(shot, rel, prompt, model);
+  if (surface === "classic") hookImageGenToOutput(shot);
+}
+
+/** Record a finished video generation on its node; classic surface
+ *  also binds it as the output feed. */
+export function completeVideoGeneration(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string, draftJobId: string | undefined, surface: GenerationSurface): void {
+  recordGraphVideoGen(shot, nodeId, rel, prompt, model, draftJobId);
+  if (surface === "classic") hookVideoGenToOutput(shot, nodeId);
+}
+
+/** Record a finished edit generation on its node; classic surface
+ *  also makes it the output feed. */
+export function completeEditGeneration(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string, surface: GenerationSurface): void {
+  recordGraphEditGen(shot, nodeId, rel, prompt, model);
+  if (surface === "classic") setShotSelectedOutput(shot, { kind: "editgen", nodeId });
+}
+
+/** Record a finished upscale on its node; classic surface also
+ *  makes it the output feed. */
+export function completeUpscaleGeneration(shot: ProductionShot, rel: string, model: string, surface: GenerationSurface): void {
+  recordGraphUpscaleGen(shot, rel, model);
+  if (surface === "classic") setShotSelectedOutput(shot, { kind: "upscale" });
+}
 
 /** Re-anchor a generation node's selected index after a finished job's rebase
  *  copied a changed generation array over a concurrent selection change
@@ -3229,11 +3274,9 @@ export async function generateBoards(
       const genPrompt = openArtPrompt(p, shot, opts.lookClause);
       const png = await generate(genPrompt, genRefs, shot);
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordGraphImageGen(shot, jpegRel, genPrompt, "auto");
-      // Classic flow: the storyboard frame comes from the output pipe — if
-      // nothing is piped yet, hook the image node in so the new frame shows
-      // in the storyboard AND the node view (never displaces a pipe).
-      hookImageGenToOutput(shot);
+      // Classic flow: hook the image node in so the new frame shows in
+      // the storyboard AND the node view (never displaces a pipe).
+      completeImageGeneration(shot, jpegRel, genPrompt, "auto", "classic");
       done++;
     } catch (e) {
       failed++;

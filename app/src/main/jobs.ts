@@ -17,6 +17,7 @@
  * never an indefinite spinner and never a silent drop.
  */
 import type { JobKind, JobRecord, JobSnapshot, JobState } from "../shared/ipc.js";
+import { jobForChannel, jobLabel } from "../shared/ipc/jobs.js";
 
 export interface JobBeginOptions {
   productionId: string;
@@ -54,6 +55,30 @@ export interface JobLedger {
   subscribe(listener: (snapshot: JobSnapshot) => void): () => void;
   /** Jobs recovered from a crash (running → interrupted). */
   readonly interrupted: JobRecord[];
+}
+
+/** Run `fn` under a ledger record derived from the IPC channel — the one
+ *  lifecycle every generation door shares (the renderer's IPC wrapper and
+ *  the agent tools both call this), so a generation cannot bypass the
+ *  ledger by entering through a different door. Non-generation channels
+ *  run unwrapped. A failure records `failed` and rethrows. */
+export async function runWithJobLedger<T>(
+  ledger: JobLedger,
+  channel: string,
+  args: unknown[],
+  fn: () => Promise<T> | T
+): Promise<T> {
+  const job = jobForChannel(channel, args);
+  if (!job) return await fn();
+  const rec = ledger.begin({ productionId: args[0] as string, ...job, label: jobLabel(job.kind) });
+  try {
+    const result = await fn();
+    rec.succeed();
+    return result;
+  } catch (e) {
+    rec.fail(e instanceof Error ? e.message : String(e));
+    throw e;
+  }
 }
 
 export function createJobLedger(deps: JobLedgerDeps = {}): JobLedger {

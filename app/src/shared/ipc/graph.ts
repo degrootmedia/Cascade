@@ -384,6 +384,10 @@ export interface GraphGenItem {
   model: string;
   /** ISO timestamp. */
   at: string;
+  /** Stable media-registry identity for this take's file (back-filled at
+   *  load from the registry entry for `path`). The path stays as
+   *  compatibility data; a file move re-points the entry, never the id. */
+  mediaId?: string;
   /** Present when this clip is a Seedance 2.5 **draft** (480p): the vendor job
    *  id needed to finalize it at 1080p within the vendor's window. Absent for
    *  ordinary takes and for an already-finalized draft. */
@@ -489,6 +493,10 @@ export interface PendingImageGen {
   /** Uploaded reference URLs from the submission. Kept so a recheck can
    *  exclude an echoed reference URL the same way the submit-time wait did. */
   refUrls?: string[];
+  /** Where the job was initiated: a reclaimed node-view frame must stay
+   *  local on reclaim, exactly as a direct completion would. Absent =
+   *  classic (every pre-existing record). */
+  surface?: "classic" | "node";
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }

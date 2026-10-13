@@ -4,6 +4,7 @@ import { applyShotSequences, type Production, type ProductionShot, type Sequence
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 import { mediaRev } from "./media-rev.js";
+import { batchedBoardThumb } from "./board-thumbs.js";
 import { snapDurationToVideoEnd } from "./animatic-snap.js";
 import {
   clampSlipOffsetSec,
@@ -56,7 +57,7 @@ function AnimaticThumb({ prodId, shotId, artwork, explicitRel, title }: { prodId
     if (cached) { setSrc(cached); return () => { live = false; }; }
     setSrc(null);
     if (artwork) {
-      window.cascade.boardThumbnail(prodId, shotId).then((d) => {
+      batchedBoardThumb(prodId, shotId).then((d) => {
         if (!live) return;
         if (d) {
           // Bounded memory: after enough distinct thumbs, drop the whole map

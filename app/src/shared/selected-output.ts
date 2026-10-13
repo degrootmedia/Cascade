@@ -140,6 +140,14 @@ export interface ShotDisplay {
   legacy?: boolean;
 }
 
+/** The still-frame path a surface should paint for this shot: the pipe's
+ *  selected still, or a clip's feed still. Thumbnail and export paths use
+ *  this — never the clip path itself. */
+export function shotStillRel(shot: ProductionShot): string | undefined {
+  const display = resolveShotDisplay(shot);
+  return display.media === "still" ? display.path : display.stillPath;
+}
+
 export function resolveShotDisplay(shot: ProductionShot): ShotDisplay {
   const out = resolveSelectedOutput(shot);
   if (out.source) {

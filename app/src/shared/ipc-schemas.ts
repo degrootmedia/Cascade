@@ -11,6 +11,7 @@
 import { isProductionRelative, type SuiteSession } from "./ipc/suite.js";
 import { normalizeCanvasBusy } from "./ipc/window.js";
 import { normalizeGraphSource } from "./ipc/camera-grid.js";
+import { isGraphShotPatchField } from "./graph/shot-patch.js";
 
 function isString(v: unknown): v is string {
   return typeof v === "string";
@@ -157,6 +158,20 @@ const validators: Record<string, (args: unknown[]) => void> = {
       }
     }
   },
+  "production:updateGraphShotFields": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "shotId");
+    const patch = args[2];
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+      throw new Error("IPC validation: updateGraphShotFields patch must be an object");
+    }
+    for (const key of Object.keys(patch as Record<string, unknown>)) {
+      if (!isGraphShotPatchField(key)) {
+        throw new Error("IPC validation: updateGraphShotFields field not allowed: " + key);
+      }
+    }
+  },
+
   "production:import": (args) => {
     checkPathString(args[0], "folder");
   },

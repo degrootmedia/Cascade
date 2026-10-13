@@ -65,6 +65,17 @@ export function mediaEntryForPath(media: MediaEntry[] | undefined, rel: string |
   return media.find((e) => e.path === rel);
 }
 
+/** The registry entry for a stable media id. */
+export function mediaEntryForId(media: MediaEntry[] | undefined, id: string | undefined): MediaEntry | undefined {
+  if (!id || !Array.isArray(media)) return undefined;
+  return media.find((e) => e.id === id);
+}
+
+/** The current path for a stable media id (a move re-points it). */
+export function mediaPathForId(media: MediaEntry[] | undefined, id: string | undefined): string | undefined {
+  return mediaEntryForId(media, id)?.path;
+}
+
 /** Upsert one entry (by id, else by path), preserving array order. */
 export function upsertMediaEntry(media: MediaEntry[] | undefined, entry: MediaEntry): MediaEntry[] {
   const list = normalizeMediaRegistry(media);

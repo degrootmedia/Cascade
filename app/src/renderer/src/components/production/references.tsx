@@ -398,8 +398,8 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
           <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
         </button>
         <input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} />
+        <span className="hint">({items.length})</span>
         <button className="prod-ref-gen-btn" title={`Generate a new reference image into "${category.name}"`} onClick={() => onGenerate(category.id || undefined)}>✨</button>
-        <span className="hint">{items.length}</span>
       </div>
       {open && (
         <div className="prod-ref-grid">

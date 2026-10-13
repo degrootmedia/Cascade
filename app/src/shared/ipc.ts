@@ -764,10 +764,6 @@ export interface CascadeApi {
    * raw (ArrayBuffer, like `addReferenceMedia`), never as a data URL.
    */
   importBoardVideo(productionId: string, shotId: string, fileName: string, mime: string, bytes: ArrayBuffer): Promise<Production>;
-/** Load a board frame as a data URL (thumbnail) for the contact sheet.
-   *  `framePath` selects a frame from either generation node or legacy history;
-   *  omit it for the current frame. */
-  boardImage(productionId: string, shotId: string, framePath?: string): Promise<string | null>;
   /** Full-resolution board frame for the lightbox (perf 2.5): a
    *  cascade-media:// URL streamed by media-protocol.ts, not a base64 blob.
    *  Usable directly as an <img> src. */
@@ -945,6 +941,13 @@ export interface CascadeApi {
    * newer layout. Returns the updated production.
    */
   updateGraphLayout(productionId: string, shotId: string, patch: GraphLayoutPatch): Promise<Production>;
+  /**
+   * Narrow graph-field edit for one shot: only allow-listed renderer-owned
+   * graph fields are applied, onto the freshest document main-side, so an
+   * unrelated edit cannot overwrite a generation that landed after the
+   * renderer's snapshot. Returns the updated production.
+   */
+  updateGraphShotFields(productionId: string, shotId: string, patch: Partial<ProductionShot>): Promise<Production>;
   /**
    * The main job ledger's current state for one production — every
    * non-terminal generation job plus recently finished ones. Call on open,

@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, ShotSequence, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
+import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
 import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
@@ -152,6 +153,12 @@ export const PRODUCTION_SCHEMA_VERSION = 3;
  *  of silently dropping fields. (v1 and unversioned legacy docs migrate.) */
 export const MIN_PRODUCTION_SCHEMA_VERSION = 1;
 
+/** Folder-only lookup for media serving: the production's folder without
+ *  loading, cloning, migrating, or media-bootstrapping the document. */
+export function productionFolder(id: string): string | null {
+  return getProductionMeta(id)?.folder ?? null;
+}
+
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
@@ -186,19 +193,103 @@ export function loadProduction(id: string): ProductionFile | null {
     // Same pattern for the stored node graphs: every canvas must own its
     // wiring at load so the canvas reads stored nodes/edges only.
     mediaFiles.bootstrap(p, productionMediaRefs(p));
+    backfillGenerationMediaIds(p);
     ensureShotGraphs(p);
     return structuredClone(p);
   }
-  // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
-  // node-graph generation nodes). Persist in place so the very next read
-  // sees the new layout. Always stamp, even when the walk reports no change,
-  // so the next load hits the fast path.
-  migrateBoardArtwork(p);
-  p.schemaVersion = PRODUCTION_SCHEMA_VERSION;
-  mediaFiles.bootstrap(p, productionMediaRefs(p));
-  ensureShotGraphs(p);
-  store.save(p);
-  return structuredClone(p);
+  // One-time migrations run on a COPY: validate the result, keep a
+  // recoverable pre-migration backup, and only then replace the file.
+  // A failing step leaves the original document untouched (the cached
+  // object included) and names the step that failed. Always stamp, even
+  // when the walk reports no change, so the next load hits the fast path
+  // and a second load changes nothing.
+  const fromVersion = typeof p.schemaVersion === "number" && Number.isFinite(p.schemaVersion) ? p.schemaVersion : 1;
+  const working = structuredClone(p);
+  try {
+    migrateBoardArtwork(working);
+  } catch (e) {
+    throw new Error(`Migration failed during board/graph migration from schema ${fromVersion}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  working.schemaVersion = PRODUCTION_SCHEMA_VERSION;
+  mediaFiles.bootstrap(working, productionMediaRefs(working));
+  backfillGenerationMediaIds(working);
+  ensureShotGraphs(working);
+  validateMigratedProduction(working);
+  writePreMigrationBackup(p.meta.id, fromVersion, p);
+  store.save(working);
+  return structuredClone(working);
+}
+
+/** Check the migrated document before it may replace the original:
+ *  unique shot ids, every shot owns a stored graph with unique node ids
+ *  and edges that land on real nodes, and output picks that name nodes
+ *  which exist. Unknown node kinds and extra fields are preserved, never
+ *  rejected. Throws naming the failing shot. */
+/** Attach stable media-registry ids to generation takes (by their path's
+ *  registry entry, created by the bootstrap just before this runs). Paths
+ *  remain as compatibility data; consumers may resolve a take by id so a
+ *  file move cannot orphan it. Idempotent: an existing id is kept. */
+export function backfillGenerationMediaIds(p: Production): void {
+  const media = p.media ?? [];
+  if (!media.length) return;
+  const byPath = new Map(media.map((e) => [e.path, e.id]));
+  const attach = (gens: { path: string; mediaId?: string }[] | undefined): void => {
+    for (const g of gens ?? []) {
+      if (g.mediaId) continue;
+      const id = byPath.get(g.path);
+      if (id) g.mediaId = id;
+    }
+  };
+  const shots = [...(p.scenes ?? []).flatMap((s) => s.shots ?? []), ...(p.outdatedShots ?? [])];
+  for (const shot of shots) {
+    attach(shot.graphImageGens);
+    attach(shot.graphVideoGens);
+    attach(shot.graphEditGens);
+    for (const n of shot.graphVideoNodes ?? []) attach(n.gens);
+    for (const n of shot.graphEditNodes ?? []) attach(n.gens);
+    attach(shot.graphUpscale?.gens);
+    for (const b of shot.graphTweenBlocks ?? []) attach(b.gens);
+  }
+}
+
+export function validateMigratedProduction(p: Production): void {
+  const seenShots = new Set<string>();
+  const allShots = [...(p.scenes ?? []).flatMap((s) => s.shots ?? []), ...(p.outdatedShots ?? [])];
+  {
+    for (const shot of allShots) {
+      const fail = (why: string): never => { throw new Error(`Migration validation failed for shot ${shot.id ?? "(missing id)"}: ${why}`); };
+      if (!shot.id || seenShots.has(shot.id)) fail("duplicate or missing shot id");
+      seenShots.add(shot.id);
+      if (!shot.graph) fail("no stored graph after migration");
+      const nodeIds = new Set<string>();
+      for (const n of shot.graph!.nodes ?? []) {
+        if (!n.id || nodeIds.has(n.id)) fail(`duplicate or missing graph node id "${n.id ?? ""}"`);
+        nodeIds.add(n.id);
+      }
+      for (const e of shot.graph!.edges ?? []) {
+        if (!nodeIds.has(e.from?.node) || !nodeIds.has(e.to?.node)) fail(`graph edge "${e.id ?? ""}" lands on a missing node`);
+      }
+      if (shot.graphOutputVideoNodeId && !(shot.graphVideoNodes ?? []).some((n) => n.id === shot.graphOutputVideoNodeId)) {
+        fail(`selected video node "${shot.graphOutputVideoNodeId}" does not exist`);
+      }
+      if (shot.graphOutputEditNodeId && !(shot.graphEditNodes ?? []).some((n) => n.id === shot.graphOutputEditNodeId)) {
+        fail(`selected edit node "${shot.graphOutputEditNodeId}" does not exist`);
+      }
+    }
+  }
+}
+
+/** Keep the pre-migration document recoverable: one backup per starting
+ *  version, written before the migrated file replaces the original and
+ *  never overwritten by a retry, so the earliest original survives. */
+export function writePreMigrationBackup(id: string, fromVersion: number, original: ProductionFile): string {
+  const dir = path.join(store.dir(), "pre-migration");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${id}-v${fromVersion}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify(original, null, 2), { encoding: "utf8", flag: "wx" });
+  } catch { /* an earlier backup for this version already exists — keep it */ }
+  return file;
 }
 
 /** Absolute paths of every artwork-bearing reference — reference images
@@ -490,6 +581,29 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   // and every surface resolves the pipe live. The ref-output store still
   // writes through its command path, never the merge.)
   return merged;
+}
+
+/**
+ * Apply a narrow graph-field patch to the freshest shot (the
+ * production:updateGraphShotFields command). Only allow-listed
+ * renderer-owned fields are taken from the patch; everything else on the
+ * shot comes from the fresh document, and the per-node merges inside
+ * mergeRendererShot keep each surviving node generation history
+ * main-owned. A generation that landed after the renderer snapshot
+ * therefore survives an unrelated graph edit.
+ */
+export function applyGraphShotPatch(
+  freshShot: ProductionShot,
+  patch: Partial<ProductionShot>
+): ProductionShot {
+  const allowed = pickGraphShotPatch(patch as Record<string, unknown>) as Partial<ProductionShot>;
+  const incoming: ProductionShot = { ...freshShot, ...allowed };
+  for (const key of Object.keys(allowed)) {
+    if ((allowed as Record<string, unknown>)[key] === undefined) {
+      (incoming as unknown as Record<string, unknown>)[key] = undefined;
+    }
+  }
+  return mergeRendererShot(freshShot, incoming);
 }
 
 /**

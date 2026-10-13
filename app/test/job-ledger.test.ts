@@ -14,7 +14,7 @@
  *     canvas projection drives the same busy shape the windows render.
  */
 import { describe, it, expect, vi } from "vitest";
-import { createJobLedger } from "../src/main/jobs.js";
+import { createJobLedger, runWithJobLedger } from "../src/main/jobs.js";
 import { jobForChannel, jobLabel, jobsToCanvasBusy, type JobRecord } from "../src/shared/ipc.js";
 
 const makeLedger = (persisted: JobRecord[] = []) => {
@@ -43,6 +43,24 @@ describe("job ledger lifecycle", () => {
     expect(ledger.snapshot("p1").jobs[0].state).toBe("succeeded");
     expect(ledger.snapshot("p1").jobs[0].finishedAt).toBeDefined();
     expect(seen[seen.length - 1][0]).toBe("job-1:succeeded");
+  });
+
+  it("runWithJobLedger records generation channels and passes others through", async () => {
+    const { ledger } = makeLedger();
+    const out = await runWithJobLedger(ledger, "production:generateVideoNode", ["p1", "s1", { nodeId: "vid2" }], async () => "done");
+    expect(out).toBe("done");
+    const jobs = ledger.snapshot("p1").jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ kind: "videoNode", shotId: "s1", nodeId: "vid2", state: "succeeded" });
+
+    await runWithJobLedger(ledger, "production:updateBoardPrompt", ["p1", "s1", "text"], async () => {});
+    expect(ledger.snapshot("p1").jobs).toHaveLength(1);
+  });
+
+  it("runWithJobLedger records a failure and rethrows", async () => {
+    const { ledger } = makeLedger();
+    await expect(runWithJobLedger(ledger, "production:generateBoards", ["p1"], async () => { throw new Error("no credits"); })).rejects.toThrow("no credits");
+    expect(ledger.snapshot("p1").jobs[0]).toMatchObject({ kind: "boards", state: "failed", error: "no credits" });
   });
 
   it("records failures with a reason", () => {

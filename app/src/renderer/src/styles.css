@@ -960,6 +960,8 @@ body {
 .prod-brand-toggle input:checked::before { transform: translateX(14px); background: white; }
 @media (max-width: 900px) { .prod-storyboard-layout { grid-template-columns: 1fr; } .prod-prompt-sidepanel { position: static; min-height: 320px; } }
 .prod-board { position: relative; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+/* No content-visibility on board cards: its paint containment clips the
+   selection ring and the insert button that overhang the card box. */
 .prod-board.dragging { opacity: 0.38; filter: saturate(0.6); }
 .prod-board.drop-target { outline: none; }
 .prod-board.drop-target .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 6px 20px color-mix(in srgb, var(--accent) 25%, transparent); }

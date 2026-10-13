@@ -57,6 +57,30 @@ export function findGeneration(shot: ProductionShot, rel: string): GenerationRef
   return null;
 }
 
+/** Where a displayed frame originates, for the storyboard corner badge.
+ *  Short code for the corner, full label for the tooltip. Null when the
+ *  frame isn't a stored generation (legacy/imported frames get no badge). */
+export interface FrameOrigin { code: string; label: string }
+
+export function frameOrigin(shot: ProductionShot, rel: string | undefined): FrameOrigin | null {
+  if (!rel) return null;
+  const gen = findGeneration(shot, rel);
+  if (gen) {
+    switch (gen.kind) {
+      case "image": return { code: "IMG", label: "Image gen node" };
+      case "edit": return { code: "EDIT", label: "Edit image node" };
+      case "video": return { code: "VIDEO", label: "Video gen node" };
+      case "editvideo": return { code: "V-EDIT", label: "Video edit node" };
+      case "upscale": return { code: "UPSCALE", label: "Upscale node" };
+      case "tween": return { code: "TWEEN", label: "Tween node" };
+    }
+  }
+  switch (shot.graphOutputSource) {
+    case "ref": return rel === shot.artwork || rel === shot.videoPath ? { code: "REF", label: "Reference node" } : null;
+    default: return null;
+  }
+}
+
 /** The selected path on a history array, or null when nothing is selected. */
 function selectedPath(arr: GraphGenItem[] | undefined, index: number | undefined): string | null {
   return arr?.[index ?? 0]?.path ?? null;

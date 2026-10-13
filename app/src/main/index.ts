@@ -20,7 +20,7 @@ import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/l
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
 import { assetPathInFolder } from "./pipeline.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
 import { createJobLedger, runWithJobLedger } from "./jobs.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
@@ -4690,6 +4690,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
       }
     }
+    // The stored graph wire follows the selection, whichever surface moved it.
+    syncShotGraphOutput(shot);
     productions.saveProduction(p);
     return p;
   });

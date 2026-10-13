@@ -7,7 +7,7 @@ export function boardFrameHistory(shot: ProductionShot): string[] {
     ...(shot.graphEditGens ?? []),
     ...(shot.graphEditNodes ?? []).flatMap((n) => n.gens ?? []),
   ];
-  const generations = [...(shot.graphImageGens ?? []), ...editGens]
+  const generations = [...(shot.graphImageGens ?? []), ...editGens, ...(shot.graphUpscale?.gens ?? [])]
     .sort((a, b) => {
       const aTime = Date.parse(a.at);
       const bTime = Date.parse(b.at);

@@ -9,7 +9,7 @@ import { CostValue, GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
-import { findGeneration } from "../../../../shared/generations.js";
+import { findGeneration, frameOrigin } from "../../../../shared/generations.js";
 import { mediaEntryForId, mediaEntryForPath } from "../../../../shared/media-registry.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { closestResolution } from "../resolution.js";
@@ -240,6 +240,11 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // The generation actually on screen — a browsed history frame, the shot's
   // video, or the current frame — is what "Save as reference" copies.
   const saveableRel = relForFolder ?? stillRel;
+  // Origin of what's on screen (browsed history frame, clip, or current
+  // still) for the tiny corner badge — where this frame came from.
+  const origin = showingVideo
+    ? frameOrigin(shot, clipRel)
+    : frameOrigin(shot, histPath ?? stillRel) ?? (display.source === "ref" ? { code: "REF", label: "Reference node" } : display.source === "tween" ? { code: "TWEEN", label: "Tween node" } : null);
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
@@ -497,6 +502,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
           </>
         ) : (
           <span className="prod-board-empty">{display.path ? "…" : pending ? "pending…" : "no frame"}</span>
+        )}
+        {origin && (
+          <span className="prod-board-origin" title={origin.label}>{origin.code}</span>
         )}
         {histIdx === null && clipRel && !videoFailed && (
           <span

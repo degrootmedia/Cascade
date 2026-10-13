@@ -1207,6 +1207,12 @@ body {
   filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.65));
 }
 .prod-board-frame:hover .prod-board-video-badge { opacity: 0; }
+.prod-board-origin {
+  position: absolute; bottom: 6px; right: 6px; z-index: 6; pointer-events: auto;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.05em; line-height: 1;
+  padding: 3px 5px; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55); color: rgba(255, 255, 255, 0.92);
+}
 .prod-boards-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
 /* Storyboard frame overlay buttons. The zoom/enlarge button sits alone in the
    top-left; the action row (Regenerate Â· Edit Â· Movie Â· Import) is centered at

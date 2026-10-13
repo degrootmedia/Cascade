@@ -15,6 +15,7 @@ void import("electron")
   })
   .catch(() => {});
 import { ChatClient } from "@core";
+import { syncOutputEdge, videoNodeCanvasId, videoEdgeId, editVideoEdgeId } from "../shared/graph/connect.js";
 import {
   dataUrlToBytes,
   escapeRegExp,
@@ -2970,6 +2971,42 @@ export type ShotSelection =
  * in, so the ref branch records it as the shot's frame (the ref take's only
  * store); and unpipe blanks the output so the display goes blank.
  */
+/** Rewire the stored graph's Frame Output edge to match the flat
+ *  selection fields — the storyboard and the canvas read the same
+ *  selection, so a storyboard Make Primary must move the wire in node
+ *  view too (and a canvas selection moves it back). No-ops without a
+ *  stored graph or for selections the graph doesn't wire (sequence /
+ *  camera-grid outputs keep their structural edges). */
+export function syncShotGraphOutput(shot: ProductionShot): void {
+  const graph = shot.graph;
+  if (!graph || !graph.nodes.some((n) => n.id === "output")) return;
+  let source: string | null;
+  let edgeId: string | undefined;
+  switch (shot.graphOutputSource) {
+    case "imagegen": source = "imagegen"; edgeId = "e-img-out"; break;
+    case "editgen": source = shot.graphOutputEditNodeId ? `editgen:${shot.graphOutputEditNodeId}` : null; edgeId = "e-edit-out"; break;
+    case "upscale": source = "upscale"; edgeId = "e-upscale-out"; break;
+    case "videogen": {
+      const node = getVideoNode(shot, shot.graphOutputVideoNodeId ?? "vid0");
+      source = node ? videoNodeCanvasId(node) : null;
+      edgeId = node ? (node.mode === "edit" ? editVideoEdgeId("e-editvideo-out", node.id) : videoEdgeId("e-vid-out", node.id)) : undefined;
+      break;
+    }
+    case "editvideo": {
+      const node = getVideoNode(shot, "ev0");
+      source = node ? videoNodeCanvasId(node) : "editvideogen:ev0";
+      edgeId = editVideoEdgeId("e-editvideo-out", "ev0");
+      break;
+    }
+    case "tween": source = "tween"; edgeId = "e-tween-out"; break;
+    case "ref": source = shot.graphOutputRefId ? `ref:${shot.graphOutputRefId}` : null; edgeId = "e-ref-out"; break;
+    case undefined: source = null; break;
+    default: return;
+  }
+  const next = syncOutputEdge(graph, source, edgeId);
+  if (next !== graph) shot.graph = next;
+}
+
 export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection): void {
   switch (sel.kind) {
     case "imagegen":
@@ -3027,6 +3064,9 @@ export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection):
   // An explicit node selection exists now; the classic migration must not
   // sweep the new frame into the image node's history on the next load.
   shot.graphMigrated = true;
+  // The stored graph wire follows every selection write, whichever
+  // surface made it.
+  syncShotGraphOutput(shot);
 }
 
 /** One-time migration: MOVE the classic generations (current artwork +

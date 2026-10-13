@@ -16,9 +16,16 @@ import { makeGoalTools, workspaceGoalPersistence } from "./goal.js";
 import type { ToolDefinition, ApprovalRequest, AgentTool } from "./types.js";
 
 const MAX_READ_CHARS = 50_000;
+/**
+ * Hard cap before `read_file` pulls a file into memory as a string. A large
+ * binary (a video/PDF/texture sitting in the workspace) read as UTF-8 can blow
+ * past V8's max string length and take the whole process down; refuse it with a
+ * clear message instead. The spill mechanism only ever needs the head anyway.
+ */
+const MAX_READ_BYTES = 32 * 1024 * 1024;
 const MAX_OUTPUT_CHARS = 10_000;
 const MAX_GREP_RESULTS = 200;
-const DEFAULT_CMD_TIMEOUT_MS = 60_000;
+export const DEFAULT_CMD_TIMEOUT_MS = 60_000;
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__"]);
 
 /** Built-in tools share the AgentTool shape used for dynamic (MCP) tools. */
@@ -56,7 +63,7 @@ const readFile: ToolSpec = {
     function: {
       name: "read_file",
       description:
-        "Read a text file inside the workspace. Oversized output spills to .cascade/tool-output/ with a preview + path; page it with offset/limit (1-indexed lines).",
+        "Read a text file inside the workspace. Oversized output spills to .cascade/tool-output/ with a preview + path; page it with offset/limit (1-indexed lines). Refuses binary files and files larger than 32 MB (use grep, or view_image for images).",
       parameters: {
         type: "object",
         properties: {
@@ -70,6 +77,32 @@ const readFile: ToolSpec = {
   },
   async run(args, root) {
     const p = resolveSafe(root, str(args, "path"), { mustExist: true });
+    const rel = str(args, "path");
+    // Guard before reading: an oversized file (a 400 MB .mov, a 150 MB PDF) read
+    // as UTF-8 can exceed V8's max string length and crash the process.
+    let size = 0;
+    try {
+      size = fs.statSync(p).size;
+    } catch {
+      /* stat failed — let the read below surface the real error */
+    }
+    if (size > MAX_READ_BYTES) {
+      return `ERROR: ${rel} is too large to read as text (${Math.round(size / 1048576)} MB). Use grep to search it, or read a specific line range.`;
+    }
+    // Sniff the head for a NUL byte: that means binary, not text.
+    if (size > 0) {
+      try {
+        const fd = fs.openSync(p, "r");
+        const head = Buffer.alloc(Math.min(8192, size));
+        fs.readSync(fd, head, 0, head.length, 0);
+        fs.closeSync(fd);
+        if (head.includes(0)) {
+          return `ERROR: ${rel} looks like a binary file; read_file only reads text. Use view_image for images or list_directory/glob to inspect it.`;
+        }
+      } catch {
+        /* sniff is best-effort — fall through to the read */
+      }
+    }
     const full = fs.readFileSync(p, "utf8");
     const offset = numArg(args, "offset") ?? 1;
     const limit = numArg(args, "limit");
@@ -386,7 +419,7 @@ export function parseArgv(input: string): string[] {
 
 const REENTRANT_EXT = new Set([".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"]);
 
-function assertLaunchable(exe: string): void {
+export function assertLaunchable(exe: string): void {
   const ext = path.extname(exe).toLowerCase();
   if (REENTRANT_EXT.has(ext)) {
     throw new CommandParseError(
@@ -459,7 +492,17 @@ const runCommand: ToolSpec = {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
     const timeoutMs = Math.min(Number(args.timeout_seconds) || 0, 300) * 1000 || DEFAULT_CMD_TIMEOUT_MS;
-    return new Promise((resolve) => {
+    return runCommandArgv(argv, root, timeoutMs);
+  },
+};
+
+/**
+ * Spawn an already-tokenized argv in the workspace (shell:false) and capture
+ * its combined output, spilling oversized results. Shared by `run_command` and
+ * the optional sandbox wrapper so both keep one spawn/resolve implementation.
+ */
+export function runCommandArgv(argv: string[], root: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
       const child = spawn(argv[0], argv.slice(1), {
         cwd: root,
         shell: false,
@@ -524,9 +567,8 @@ const runCommand: ToolSpec = {
           resolve(combined || "(no output)");
         }
       });
-    });
-  },
-};
+  });
+}
 
 // ------------------------------------------------------------------ helpers
 

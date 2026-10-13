@@ -7,13 +7,15 @@
  * until the model produces a plain text answer or maxIterations is hit.
  */
 import { ChatClient, friendlyApiError } from "./chat.js";
-import { TOOLS } from "./tools.js";
+import { TOOLS, parseArgv, assertLaunchable, runCommandArgv, DEFAULT_CMD_TIMEOUT_MS } from "./tools.js";
+import { applySandbox, normalizeSandboxMode, sandboxAvailable, sandboxFallbackNotice, type SandboxMode } from "./sandbox.js";
 import { systemPrompt, pureChatSystemPrompt } from "./prompts.js";
 import { planGate } from "./planmode.js";
 import { loadWorkspaceInstructions, resolveSafe, WorkspaceError } from "./workspace.js";
 import { FileJournal } from "./journal.js";
 import { planCompaction, summaryPrompt, summaryMessage } from "./compact.js";
-import { contentText, attachmentParts, type AgentConfig, type AgentTool, type Attachment, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
+import { formatVerificationFeedback, maxRepairRounds, passed, runVerification, type VerificationConfig, type VerifyResult } from "./verify.js";
+import { contentText, attachmentParts, toolImageContent, type AgentConfig, type AgentTool, type Attachment, type ChatMessage, type ToolCall, type ToolDefinition } from "./types.js";
 
 /** Fallback turn cap for long agentic tasks; the host may override it. */
 const DEFAULT_MAX_ITERATIONS = 250;
@@ -24,6 +26,18 @@ const FIRST_PARTY_GROUP = "firstparty";
 const FIRST_PARTY_TRIGGERS = ["upload", "reference", "picker", "pick a file", "choose a file"];
 /** MCP groups that, when enabled, also activate the first-party helpers. */
 const FIRST_PARTY_COMPANIONS = ["openart"];
+
+/** What one tool call contributes: the text that becomes the `tool` message,
+ *  plus (optionally) image data-URLs the model should also receive — attached
+ *  later as a synthetic user turn, and only when `visionEnabled`. */
+interface ToolExecution {
+  text: string;
+  modelImages?: string[];
+  /** The tool run errored (or was blocked/denied) — no workspace mutation. */
+  isError?: boolean;
+  /** The tool mutated the workspace and succeeded (drives verification). */
+  mutated?: boolean;
+}
 
 export class Agent {
   private messages: ChatMessage[] = [];
@@ -39,6 +53,11 @@ export class Agent {
   private enabledLazyGroups = new Set<string>();
   /** Per-turn snapshot of file states so the last response can be undone. */
   private journal = new FileJournal();
+  /** Verification config resolved once per agent (static config or host resolver). */
+  private verificationResolved = false;
+  private resolvedVerification: VerificationConfig | null = null;
+  /** Notices queued during construction (before the host can receive events). */
+  private pendingNotices: string[] = [];
   totalCredits = 0;
 
   constructor(private config: AgentConfig) {
@@ -46,6 +65,7 @@ export class Agent {
     const pureChat = config.pureChat === true;
     this.tools = pureChat ? {} : { ...TOOLS, ...config.extraTools };
     this.lazyTools = pureChat ? {} : (config.lazyTools ?? {});
+    this.applySandboxToRunCommand(pureChat);
     this.toolDefinitions = Object.values(this.tools).map((t) => t.definition);
     // Session grants are persisted by the host, so a rebuilt agent re-seeds the
     // "always allow" decisions instead of asking again.
@@ -69,8 +89,25 @@ export class Agent {
             planMode: config.planMode,
             autonomousMode: config.autonomousMode,
             hasTodoTools: !pureChat && !!this.tools["todo_write"],
+            verificationChecks: config.verificationCommands ?? config.verification?.commands.map((c) => c.name),
           }),
     });
+  }
+
+  /** Wrap the built-in run_command in the selected OS sandbox (default none).
+   *  An unavailable backend is surfaced to the user, never silently faked. */
+  private applySandboxToRunCommand(pureChat: boolean): void {
+    const mode = normalizeSandboxMode(this.config.sandbox);
+    if (pureChat || mode === "none") return;
+    const base = this.tools["run_command"];
+    if (!base) return;
+    if (!sandboxAvailable(mode)) {
+      // Defer the notice: the host's onEvent can't route to this agent until
+      // after construction, so flush it on the first send().
+      this.pendingNotices.push(sandboxFallbackNotice(mode));
+      return;
+    }
+    this.tools["run_command"] = makeSandboxedRunCommand(base, mode, this.config.workspaceRoot ?? "");
   }
 
   /** Restore a previous conversation (excluding system prompt). */
@@ -157,6 +194,11 @@ export class Agent {
   async send(userText: string, attachments?: Attachment[]): Promise<void> {
     const { onEvent, requestApproval } = this.config;
     const maxIter = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    // Flush any construction-time notices now that the host can route events.
+    if (this.pendingNotices.length) {
+      for (const text of this.pendingNotices) onEvent({ type: "notice", text });
+      this.pendingNotices = [];
+    }
     const content: ChatMessage["content"] = attachmentParts(userText, attachments);
     this.messages.push({ role: "user", content });
     this.abort = new AbortController();
@@ -164,10 +206,19 @@ export class Agent {
     this.journal.beginTurn();
 
     try {
-      await this.maybeCompact();
       // Attach any on-demand tool group the user just asked for by name.
       this.activateLazyToolsFor(userText);
+      // Verification bookkeeping for this turn: `dirty` is set only when a
+      // mutating tool actually succeeded; `repairRound` bounds the auto-repair
+      // feedback loop. Both are inert unless a verification config resolves.
+      let dirty = false;
+      let repairRound = 0;
       for (let iter = 0; iter < maxIter; iter++) {
+        // Re-check the budget every few iterations: a long autonomous run can
+        // push large tool results (production digests, command output) into the
+        // history for hundreds of turns. Compacting only once before the loop
+        // let the request — and the main-process heap — grow without bound.
+        if (iter % 4 === 0) await this.maybeCompact();
         let streamedText = "";
         const { message, usage } = await this.client.complete(
           this.config.model,
@@ -189,9 +240,29 @@ export class Agent {
           return;
         }
 
+        const turnImages: string[] = [];
         for (const call of message.tool_calls) {
-          const result = await this.executeToolCall(call, requestApproval);
-          this.messages.push({ role: "tool", tool_call_id: call.id, content: result });
+          const { text, modelImages, mutated } = await this.executeToolCall(call, requestApproval);
+          this.messages.push({ role: "tool", tool_call_id: call.id, content: text });
+          if (modelImages?.length) turnImages.push(...modelImages);
+          if (mutated) dirty = true;
+        }
+        // Tool images the model asked to see: attach them as ONE user turn
+        // after all tool messages (keeps the tool messages contiguous, and a
+        // user-message image part is the most widely supported shape). Gated on
+        // visionEnabled so a non-vision model is never sent image parts.
+        if (this.config.visionEnabled && turnImages.length) {
+          this.messages.push({ role: "user", content: toolImageContent(turnImages) });
+        }
+
+        // Automated verification: after a mutation, run the configured checks
+        // and feed failures back. Never runs on the terminal iteration (there
+        // must be room to continue), never in pure chat, and never when the
+        // plan gate blocked the mutation (those don't mark `dirty`).
+        if (dirty && iter < maxIter - 1) {
+          dirty = false;
+          const verified = await this.verifyAfterMutation(repairRound);
+          if (verified !== null) repairRound = verified;
         }
       }
       const msg = `Stopped after ${maxIter} turns without a final answer. This usually means the model kept calling tools instead of answering. Send "continue" to keep going, or raise the turn limit in Settings → Advanced → Agent.`;
@@ -226,20 +297,90 @@ export class Agent {
     }
   }
 
+  /**
+   * Resolve the verification config once per agent: a statically configured
+   * `verification` wins, otherwise the host's `resolveVerification` is asked
+   * (at most once) so it can detect checks and obtain consent. Returns null
+   * when there's nothing to run.
+   */
+  private async resolveVerificationConfig(): Promise<VerificationConfig | null> {
+    if (this.verificationResolved) return this.resolvedVerification;
+    let v: VerificationConfig | null = this.config.verification ?? null;
+    if (!v && this.config.resolveVerification) {
+      try {
+        v = await this.config.resolveVerification();
+      } catch {
+        v = null;
+      }
+    }
+    this.resolvedVerification = v && Array.isArray(v.commands) && v.commands.length ? v : null;
+    this.verificationResolved = true;
+    return this.resolvedVerification;
+  }
+
+  /**
+   * Run configured checks after a successful mutation and feed failures back
+   * for a bounded number of repair rounds. Returns the (possibly incremented)
+   * repair round, or null when no verification is configured.
+   */
+  private async verifyAfterMutation(repairRound: number): Promise<number | null> {
+    const config = await this.resolveVerificationConfig();
+    if (!config) return null;
+    const ws = this.config.workspaceRoot ?? "";
+    const { onEvent } = this.config;
+    onEvent({ type: "verification-start", commands: config.commands.map((c) => c.name) });
+    let results: VerifyResult[];
+    try {
+      const runner = this.config.verificationRunner ?? runVerification;
+      results = await runner(config, ws);
+    } catch (e) {
+      results = [
+        {
+          name: "verification",
+          argv: [],
+          exitCode: null,
+          timedOut: false,
+          output: `ERROR: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      ];
+    }
+    onEvent({ type: "verification-result", results });
+
+    const failures = results.filter((r) => !passed(r));
+    if (!failures.length) return repairRound;
+
+    const max = maxRepairRounds(config);
+    const feedback = formatVerificationFeedback(results);
+    if (repairRound < max) {
+      const round = repairRound + 1;
+      onEvent({ type: "repair-round", round, max });
+      this.messages.push({ role: "user", content: feedback });
+      return round;
+    }
+    onEvent({ type: "verification-exhausted", rounds: repairRound });
+    this.messages.push({
+      role: "user",
+      content:
+        feedback +
+        `\n\nAutomatic repair attempts are exhausted (${repairRound}/${max}). Summarize the remaining failures for the user and stop.`,
+    });
+    return repairRound;
+  }
+
   private async executeToolCall(
     call: ToolCall,
     requestApproval: AgentConfig["requestApproval"]
-  ): Promise<string> {
+  ): Promise<ToolExecution> {
     const { onEvent, workspaceRoot } = this.config;
     const ws = workspaceRoot ?? ""; // pure-chat agents never reach here (no tools)
     const spec = this.tools[call.function.name];
-    if (!spec) return `ERROR: unknown tool ${call.function.name}`;
+    if (!spec) return { text: `ERROR: unknown tool ${call.function.name}`, isError: true };
 
     let args: Record<string, unknown>;
     try {
       args = JSON.parse(call.function.arguments || "{}");
     } catch {
-      return `ERROR: tool arguments were not valid JSON`;
+      return { text: `ERROR: tool arguments were not valid JSON`, isError: true };
     }
 
     onEvent({ type: "tool-start", call: { name: call.function.name, args } });
@@ -251,7 +392,7 @@ export class Agent {
       const gate = planGate(call.function.name, args, ws);
       if (!gate.allowed) {
         onEvent({ type: "tool-result", name: call.function.name, result: gate.message, isError: true });
-        return gate.message;
+        return { text: gate.message, isError: true };
       }
     }
 
@@ -270,13 +411,13 @@ export class Agent {
               detail: JSON.stringify(args, null, 2).slice(0, 2000),
             };
       } catch (e) {
-        return `ERROR: ${e instanceof Error ? e.message : e}`;
+        return { text: `ERROR: ${e instanceof Error ? e.message : e}`, isError: true };
       }
       const decision = await requestApproval(req);
       if (decision === "deny") {
         const result = "DENIED: the user rejected this action.";
         onEvent({ type: "tool-result", name: call.function.name, result, isError: true });
-        return result;
+        return { text: result, isError: true };
       }
       if (decision === "allow-session") {
         this.sessionAllowed.add(call.function.name);
@@ -308,19 +449,48 @@ export class Agent {
 
     let result: string;
     let images: string[] | undefined;
+    let modelImages: string[] | undefined;
     let isError = false;
     try {
       const out = await spec.run(args, ws);
       result = typeof out === "string" ? out : out.text;
       images = typeof out === "string" ? undefined : out.images;
+      modelImages = typeof out === "string" ? undefined : out.modelImages;
       isError = result.startsWith("ERROR");
     } catch (e: unknown) {
       isError = true;
       result = e instanceof WorkspaceError ? `ERROR: ${e.message}` : `ERROR: ${String(e)}`;
     }
     onEvent({ type: "tool-result", name: call.function.name, result, isError, images });
-    return result;
+    // A mutating tool that succeeded marks the workspace dirty so the loop can
+    // verify; a failed/blocked/denied mutation never does.
+    const mutated = spec.requiresApproval === true && !isError;
+    return { text: result, modelImages, isError, mutated };
   }
+}
+
+/**
+ * A `run_command` that transparently routes its argv through the selected
+ * sandbox. `describe`/approval come from the base tool; only the spawn gains the
+ * backend wrapper (parse + launchability checks are identical to the base).
+ */
+function makeSandboxedRunCommand(base: AgentTool, mode: SandboxMode, root: string): AgentTool {
+  return {
+    ...base,
+    async run(args, ws) {
+      const cmd = typeof args.command === "string" ? args.command : "";
+      let argv: string[];
+      try {
+        argv = parseArgv(cmd);
+        assertLaunchable(argv[0]);
+      } catch {
+        return base.run(args, ws); // base reports the parse/launch error
+      }
+      const wrapped = applySandbox(argv, mode, ws || root);
+      const timeoutMs = Math.min(Number(args.timeout_seconds) || 0, 300) * 1000 || DEFAULT_CMD_TIMEOUT_MS;
+      return runCommandArgv(wrapped.argv, ws || root, timeoutMs);
+    },
+  };
 }
 
 /** Escape a string for literal use inside a RegExp (for group-name matching). */

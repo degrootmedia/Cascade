@@ -88,7 +88,7 @@ export interface MediaProvider {
     sourcePathOverride?: string,
     extraRefs?: { name: string; dataUrl: string }[],
     frameRefs?: { start: { name: string; dataUrl: string }; end?: { name: string; dataUrl: string } }
-  ): Promise<{ rel: string }>;
+  ): Promise<{ rel: string; jobId?: string }>;
 
   /**
    * Recheck a pending image job and return the finished bytes, or null when

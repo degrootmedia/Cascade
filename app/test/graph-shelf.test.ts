@@ -20,6 +20,9 @@ gWin.cascade = {
   boardThumbnail: async () => null,
   videoModelOptions: async () => null,
 };
+// Deterministic delete confirm (jsdom's live confirm reports "not implemented"
+// and returns undefined). Individual tests override as needed.
+gWin.confirm = () => false;
 
 const P0 = "Style: S\n\nhello @[Hero]\n\nBrand identity: B";
 const REFS = [
@@ -31,9 +34,10 @@ const REFS = [
 let savedLayouts: Array<{ positions?: Record<string, { x: number; y: number }>; sizes?: Record<string, { width: number; height: number }>; collapsed?: Record<string, boolean>; viewport?: { x: number; y: number; zoom: number } }> = [];
 let lastEmittedPrompt: string | null = null;
 let lastGraph: { edges: Array<{ id: string }> } | null = null;
+let lastShotPatch: Record<string, unknown> = {};
 let renames: Array<[string, string]> = [];
 
-function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable, videoEditUnavailable, fetchVideo }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; fetchVideo?: () => void }) {
+function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscaleUnavailable, videoEditUnavailable, draftUpgradeAvailable, imageModels, videoModels, fetchVideo }: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; draftUpgradeAvailable?: boolean; imageModels?: unknown[]; videoModels?: unknown[]; fetchVideo?: () => void }) {
   const [prompt, setPrompt] = useState(initial ?? P0);
   // References are stateful here so a "Save as reference" action can append the
   // created ref and the shelf re-render, like the real workspace's `apply()`.
@@ -69,19 +73,20 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
     onToggleBrand: () => {},
     onDropFile: () => {},
     onStyleDetached: () => {},
-    imageModels: [],
-    videoModels: [],
+    imageModels: (imageModels ?? []) as never[],
+    videoModels: (videoModels ?? []) as never[],
     defaultImageModel: "auto",
     defaultImageResolution: "1k",
     upscaleUnavailable,
     videoEditUnavailable,
+    draftUpgradeAvailable,
     onRunImageGen: async () => {},
     onRunVideoGen: async () => {},
     onRunEditGen: async () => {},
     onFetchVideo: async () => { fetchVideo?.(); },
     onSelectGraphGen: () => {},
     onCycleGraphGen: () => {},
-    onGraphField: (patch: Record<string, unknown>) => { if (patch.graph) lastGraph = patch.graph as { edges: Array<{ id: string }> }; setShotState((prev) => ({ ...prev, ...patch })); },
+    onGraphField: (patch: Record<string, unknown>) => { if (patch.graph) lastGraph = patch.graph as { edges: Array<{ id: string }> }; lastShotPatch = patch; setShotState((prev) => ({ ...prev, ...patch })); },
     onRenameRef: (id: string, name: string) => { renames.push([id, name]); },
     onSaveGenerationAsReference: async () => {
       const ref = saveRef?.() ?? null;
@@ -103,7 +108,7 @@ function Harness({ initial, shotPatch, prodPatch, refs, layout, saveRef, upscale
   });
 }
 
-function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; fetchVideo?: () => void } = {}): { root: any; host: HTMLDivElement } {
+function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknown>; prodPatch?: Record<string, unknown>; refs?: typeof REFS; layout?: Record<string, unknown>; saveRef?: () => { id: string; name: string; artwork: string } | null; upscaleUnavailable?: boolean; videoEditUnavailable?: boolean; draftUpgradeAvailable?: boolean; imageModels?: unknown[]; videoModels?: unknown[]; fetchVideo?: () => void } = {}): { root: any; host: HTMLDivElement } {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -643,7 +648,8 @@ describe("node-graph delete key", () => {
     document.body.removeChild(host);
   });
 
-  it("is blocked while a tool is in use", async () => {
+  it("asks before deleting a data-holding tool, then deletes on confirm", async () => {
+    gWin.confirm = () => true;
     const { root, host } = renderModal({
       shotPatch: {
         graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
@@ -656,9 +662,136 @@ describe("node-graph delete key", () => {
     await pressDeleteKey(host);
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
-    // In use → stays on the canvas, and the user gets an explanation.
+    // Confirmed → the node (and its clip) are gone.
+    expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeNull();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("keeps a data-holding tool when the delete confirm is declined", async () => {
+    gWin.confirm = () => false;
+    const { root, host } = renderModal({
+      shotPatch: {
+        graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
+      },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    selectNode(host, ".prod-graph-node.prod-graph-videogen");
+    await pressDeleteKey(host);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
     expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeTruthy();
-    expect(host.querySelector(".prod-graph-drop-hint")?.textContent).toContain("in use");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("deletes an unused node via its × (no keyboard, no selection required)", async () => {
+    gWin.confirm = () => true;
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { dropOnCanvas(host, "application/x-cascade-tool", "video"); await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { dropOnCanvas(host, "application/x-cascade-tool", "video"); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelectorAll(".prod-graph-node.prod-graph-videogen").length).toBe(2);
+
+    // The unused second video node's × removes just it.
+    const second = host.querySelectorAll(".prod-graph-node.prod-graph-videogen")[1] as HTMLElement;
+    const del = second.closest(".react-flow__node")?.querySelector(".prod-graph-node-del") as HTMLButtonElement | null;
+    expect(del).toBeTruthy();
+    await act(async () => { del!.click(); await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(host.querySelectorAll(".prod-graph-node.prod-graph-videogen").length).toBe(1);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("caps the take strip at 6 and opens the full history from its button", async () => {
+    const gens = Array.from({ length: 8 }, (_, i) => ({
+      path: `boards/0001/shot-1-${i}.jpg`, prompt: `p${i}`, model: "auto", at: `2026-01-0${i + 1}T00:00:00.000Z`,
+    }));
+    const { root, host } = renderModal({ shotPatch: { graphImageGens: gens } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const strip = host.querySelector(".prod-graph-node.prod-graph-imagegen .prod-graph-gen-strip") as HTMLElement;
+    expect(strip).toBeTruthy();
+    // 6 newest takes + the History button.
+    expect(strip.querySelectorAll("button").length).toBe(7);
+    const histBtn = strip.querySelector(".prod-graph-gen-history") as HTMLButtonElement;
+    expect(histBtn).toBeTruthy();
+
+    await act(async () => { histBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
+    const modal = document.body.querySelector(".prod-graph-history") as HTMLElement;
+    expect(modal).toBeTruthy();
+    expect(modal.querySelectorAll(".prod-graph-history-tile").length).toBe(8);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("offers the Seedance draft toggle only for Seedance 2.5 on Higgsfield", async () => {
+    const s25 = [{ id: "higgsfield-cli:seedance_2_5", displayName: "Seedance 2.5", videoInput: true }];
+    const s20 = [{ id: "higgsfield-cli:seedance_2_0", displayName: "Seedance 2.0", videoInput: true }];
+    const draftOnly = [{ id: "openart:seedance_2_5_draft", displayName: "Seedance 2.5 Draft", videoInput: true }];
+
+    const render = async (opts: { videoModels: unknown[]; draftUpgradeAvailable: boolean }) => {
+      const r = renderModal({ videoModels: opts.videoModels, draftUpgradeAvailable: opts.draftUpgradeAvailable });
+      await act(async () => { await new Promise((res) => setTimeout(res, 0)); });
+      await act(async () => { dropOnCanvas(r.host, "application/x-cascade-tool", "video"); await new Promise((res) => setTimeout(res, 0)); });
+      const node = r.host.querySelector(".prod-graph-node.prod-graph-videogen") as HTMLElement;
+      return { ...r, node };
+    };
+
+    // Higgsfield + Seedance 2.5 → the checkbox shows.
+    const a = await render({ videoModels: s25, draftUpgradeAvailable: true });
+    expect(a.node.querySelector(".prod-graph-gen-draft")).toBeTruthy();
+    await act(async () => { a.root.unmount(); }); document.body.removeChild(a.host);
+
+    // Higgsfield + another model → no checkbox.
+    const b = await render({ videoModels: s20, draftUpgradeAvailable: true });
+    expect(b.node.querySelector(".prod-graph-gen-draft")).toBeNull();
+    await act(async () => { b.root.unmount(); }); document.body.removeChild(b.host);
+
+    // OpenArt (no upgrade path) + Seedance 2.5 → no checkbox.
+    const c = await render({ videoModels: s25, draftUpgradeAvailable: false });
+    expect(c.node.querySelector(".prod-graph-gen-draft")).toBeNull();
+    await act(async () => { c.root.unmount(); }); document.body.removeChild(c.host);
+
+    // A distinct 480p-only "Draft" model → no checkbox, and only 480p resolution.
+    const d = await render({ videoModels: draftOnly, draftUpgradeAvailable: false });
+    expect(d.node.querySelector(".prod-graph-gen-draft")).toBeNull();
+    const resSel = d.node.querySelectorAll("select")[1] as HTMLSelectElement;
+    expect([...resSel.options].map((o) => o.value)).toEqual(["480p"]);
+    await act(async () => { d.root.unmount(); }); document.body.removeChild(d.host);
+  });
+
+  it("an image-gen node remembers its own model/resolution over the production master", async () => {
+    const models = [
+      { id: "model-a", displayName: "Model A" },
+      { id: "model-b", displayName: "Model B" },
+    ];
+    const { root, host } = renderModal({
+      imageModels: models,
+      prodPatch: { openArt: { model: "model-a", resolution: "1k" } },
+      shotPatch: { graphImageModel: "model-b", graphImageResolution: "2k" },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const node = host.querySelector(".prod-graph-node.prod-graph-imagegen") as HTMLElement;
+    const selects = node.querySelectorAll("select");
+    // The shot's own pick wins over the storyboard master (model-a / 1k).
+    expect((selects[0] as HTMLSelectElement).value).toBe("model-b");
+    expect((selects[1] as HTMLSelectElement).value).toBe("2k");
+
+    // Changing the pick persists it per shot (not just the global media default).
+    lastShotPatch = {};
+    await act(async () => {
+      (selects[0] as HTMLSelectElement).value = "model-a";
+      selects[0].dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(lastShotPatch.graphImageModel).toBe("model-a");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

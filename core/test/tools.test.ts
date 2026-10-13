@@ -24,6 +24,20 @@ describe("write_file / read_file", () => {
   it("read_file reports missing files as an error", async () => {
     await expect(TOOLS.read_file.run({ path: "nope.txt" }, root)).rejects.toThrow("file not found");
   });
+
+  it("refuses a binary file instead of reading it as text", async () => {
+    fs.writeFileSync(path.join(root, "blob.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x00, 0x47]));
+    const res = await TOOLS.read_file.run({ path: "blob.bin" }, root);
+    expect(res).toContain("binary");
+  });
+
+  it("refuses an oversized file before reading it into memory", async () => {
+    const p = path.join(root, "huge.bin");
+    fs.writeFileSync(p, "x");
+    fs.truncateSync(p, 40 * 1024 * 1024); // sparse, no real bytes written
+    const res = await TOOLS.read_file.run({ path: "huge.bin" }, root);
+    expect(res).toContain("too large");
+  });
 });
 
 describe("edit_file", () => {

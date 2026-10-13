@@ -8,5 +8,6 @@ export const chatChannels = {
   "chat:setAutonomousMode": { method: "setAutonomousMode", kind: "invoke" },
   "chat:getAutonomousMode": { method: "getAutonomousMode", kind: "invoke" },
   "approval:response": { method: "respondApproval", kind: "send" },
+  "verification:response": { method: "respondVerification", kind: "send" },
   "display:sync": { method: "syncDisplay", kind: "send" },
 } as const;

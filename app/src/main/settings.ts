@@ -9,7 +9,8 @@ import { app, safeStorage } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProvider } from "../shared/providers.js";
-import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface } from "../shared/ipc.js";
+import { normalizeSandboxMode, type SandboxMode } from "@core";
+import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface, type VerifyCommandIpc } from "../shared/ipc.js";
 import { coerceWhisperModel, isWhisperModel, type WhisperModel } from "../shared/voice.js";
 
 interface SettingsFile {
@@ -35,6 +36,14 @@ interface SettingsFile {
   autonomousByDefault: boolean;
   /** Max model turns per agent send for long agentic tasks (default 250). */
   maxIterations: number;
+  /**
+   * Automated verification commands the user approved "for this workspace",
+   * keyed by absolute workspace path. On the first successful mutation in a
+   * session the agent asks once; choosing "workspace" persists the detected
+   * checks here so every chat in that folder verifies automatically. Absent =
+   * never approved (the agent asks, or stays silent when nothing is detected).
+   */
+  verifyCommandsByWorkspace: Record<string, VerifyCommandIpc[]>;
   /** Id of the production currently open in the Production Assistant (null when
    *  none has been opened); the folder chats bound to "Active Production" use. */
   activeProductionId: string | null;
@@ -120,6 +129,14 @@ interface SettingsFile {
   voiceEnabled: boolean;
   /** Selected whisper.cpp model size (ggml-<model>.bin). */
   whisperModel: WhisperModel;
+  /** Whether the agent may capture the primary display (`capture_screen`). */
+  screenCaptureEnabled: boolean;
+  /**
+   * Optional OS-level sandbox for command execution. Default "none": approval
+   * gating + shell:false, NOT OS isolation. "srt"/"docker" are honored only when
+   * the backend is on PATH; otherwise the user is told and nothing is faked.
+   */
+  sandboxMode: SandboxMode;
   /** Dev Mode: when true, every generation submission is logged. */
   devMode: boolean;
   /** Credit-free dry run: build + log the real request, throw before vendor call. */
@@ -154,6 +171,7 @@ const DEFAULTS: SettingsFile = {
   followProduction: false,
   autonomousByDefault: false,
   maxIterations: 250,
+  verifyCommandsByWorkspace: {},
   activeProductionId: null,
   recentWorkspaces: [],
   recentProductions: [],
@@ -176,6 +194,8 @@ const DEFAULTS: SettingsFile = {
   whisperCliBinary: null,
   voiceEnabled: false,
   whisperModel: "base.en",
+  screenCaptureEnabled: true,
+  sandboxMode: "none",
   devMode: false,
   submissionDryRun: false,
   windowState: null,
@@ -394,6 +414,26 @@ export function setWhisperModel(model: WhisperModel): void {
   save();
 }
 
+/** Whether the agent may capture the primary display (`capture_screen`). */
+export function getScreenCaptureEnabled(): boolean {
+  return load().screenCaptureEnabled !== false;
+}
+
+export function setScreenCaptureEnabled(on: boolean): void {
+  load().screenCaptureEnabled = on === true;
+  save();
+}
+
+/** Optional OS-level sandbox for command execution (default "none"). */
+export function getSandboxMode(): SandboxMode {
+  return normalizeSandboxMode(load().sandboxMode);
+}
+
+export function setSandboxMode(mode: SandboxMode): void {
+  load().sandboxMode = normalizeSandboxMode(mode);
+  save();
+}
+
 /** Default + bounds for the per-send model-turn cap (long agentic tasks). */
 export const DEFAULT_MAX_ITERATIONS = 250;
 export const MIN_MAX_ITERATIONS = 10;
@@ -415,6 +455,24 @@ export function setMaxIterations(v: number): number {
   load().maxIterations = next;
   save();
   return next;
+}
+
+/**
+ * Verification commands approved "for this workspace" (absolute path key), or
+ * null when none were approved. Read on the first mutation of a chat so a
+ * rebuilt agent never re-asks for a folder the user already allowed.
+ */
+export function getVerifyCommands(workspace: string): VerifyCommandIpc[] | null {
+  const map = load().verifyCommandsByWorkspace ?? {};
+  const v = map[workspace];
+  return Array.isArray(v) && v.length ? v : null;
+}
+
+export function setVerifyCommands(workspace: string, commands: VerifyCommandIpc[]): void {
+  const map = load().verifyCommandsByWorkspace ?? (load().verifyCommandsByWorkspace = {});
+  if (commands.length) map[workspace] = commands;
+  else delete map[workspace];
+  save();
 }
 
 /** Id of the production open in the Production Assistant (null when none). */

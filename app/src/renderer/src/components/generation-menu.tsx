@@ -35,13 +35,15 @@ function targetIsVideo(t: GenerationMenuTarget): boolean {
  * "Save as reference" is offered whenever the caller can act on it; "Delete
  * generation…" appears only where deletion is already wired.
  */
-export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onEditInSuite, extra }: {
+export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onRefresh, onEditInSuite, extra }: {
   menu: GenerationMenuTarget | null;
   onClose: () => void;
   /** Copy this take into referencesDir as a new "Saved Ref_NN" reference. */
   onSaveAsReference?: (rel: string) => void;
   /** Permanently delete this take (confirmation lives in the workspace). */
   onDelete?: (rel: string) => void;
+  /** Re-fetch this take from disk (external-edit fallback). */
+  onRefresh?: (rel: string) => void;
   /** Seed this image as the Image Suite's edit source ("Before edit" frame). */
   onEditInSuite?: (rel: string) => void;
   /** Additional items rendered above the shared ones. */
@@ -114,6 +116,15 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onE
       {onEditInSuite && !isVideo && (
         <button className="ctx-item" onClick={() => { onEditInSuite(menu.rel); onClose(); }}>
           Edit in Suite
+        </button>
+      )}
+      {onRefresh && (
+        <button
+          className="ctx-item"
+          title="Re-fetch this take from disk — use if it was edited outside Cascade and the automatic update didn't land"
+          onClick={() => { onClose(); onRefresh(menu.rel); }}
+        >
+          {isVideo ? "Refresh clip" : "Refresh image"}
         </button>
       )}
       {onDelete && (

@@ -1,4 +1,6 @@
 /** Shared types for the Cascade agent core. */
+import type { VerificationConfig, VerifyResult, VerifyRunner } from "./verify.js";
+import type { SandboxMode } from "./sandbox.js";
 
 export interface ToolCall {
   id: string;
@@ -113,6 +115,19 @@ export function attachmentParts(text: string, attachments?: Attachment[]): ChatM
   return parts;
 }
 
+/**
+ * Content parts for a synthetic user turn carrying tool-produced images (the
+ * model's on-demand view of a screenshot, a generated frame, or a reference).
+ * The text part tells the model these are what it asked to see.
+ */
+export function toolImageContent(images: string[]): ChatMessage["content"] {
+  const parts: ContentPart[] = [
+    { type: "text", text: "Here is the visual output you requested. Review it and continue." },
+  ];
+  for (const url of images) parts.push({ type: "image_url", image_url: { url } });
+  return parts;
+}
+
 export interface Usage {
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -155,12 +170,25 @@ export type AgentEvent =
   | { type: "agent-done"; finalText: string; totalCredits: number }
   | { type: "group-enabled"; group: string }
   | { type: "notice"; text: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "verification-start"; commands: string[] }
+  | { type: "verification-result"; results: VerifyResult[] }
+  | { type: "repair-round"; round: number; max: number }
+  | { type: "verification-exhausted"; rounds: number };
 
 /** Rich tool result: text goes to the model; images (data URLs) go to the UI. */
 export interface ToolRunResult {
   text: string;
   images?: string[];
+  /**
+   * Images (data URLs) the MODEL should receive. Distinct from `images`, which
+   * is UI-only: this is fed back into the conversation as a synthetic user
+   * message so the model can actually see the tool's visual output (a
+   * screenshot, a generated frame, a reference). Only honored when
+   * `AgentConfig.visionEnabled` — a non-vision model must never receive image
+   * parts. Tools that don't set it behave exactly as before.
+   */
+  modelImages?: string[];
 }
 
 /** A tool the agent can call. Built-ins and MCP wrappers share this shape. */
@@ -222,6 +250,13 @@ export interface AgentConfig {
    */
   autonomousMode?: boolean;
   /**
+   * The active model can see images. When true, a tool that returns
+   * `ToolRunResult.modelImages` has them attached to the conversation (as a
+   * synthetic user turn) so the model can inspect its visual output. Default
+   * false — a non-vision model is never sent image parts.
+   */
+  visionEnabled?: boolean;
+  /**
    * Tool names already granted "always allow" for this session (persisted by
    * the host session so a rebuilt agent doesn't lose them).
    */
@@ -236,6 +271,34 @@ export interface AgentConfig {
    * group, so the host can persist the grant on the session.
    */
   onApprovalGrant?: (grant: { kind: "tool" | "group"; value: string }) => void;
+  /**
+   * Automated verification feedback: after a successful mutating tool call the
+   * loop runs these checks once per iteration and, on failure, feeds a compact
+   * summary back so the model can self-correct (bounded by `maxRepairRounds`).
+   * Omitted ⇒ the loop behaves exactly as before (no verification events).
+   */
+  verification?: VerificationConfig;
+  /**
+   * Resolver used when `verification` is not statically configured: called at
+   * most once, on the first successful mutation, so the host can detect the
+   * workspace's checks and obtain the user's consent before any auto-run.
+   * Returning null leaves verification off for this agent.
+   */
+  resolveVerification?: () => Promise<VerificationConfig | null>;
+  /** Injectable runner for verification (defaults to `runVerification`). */
+  verificationRunner?: VerifyRunner;
+  /**
+   * Names of already-configured checks, surfaced in the system prompt so the
+   * model knows they exist and will run after edits (feed-forward). Does not
+   * enable anything by itself — `verification`/`resolveVerification` does.
+   */
+  verificationCommands?: string[];
+  /**
+   * Optional OS-level sandbox for command execution (`run_command` and
+   * verification). Default "none" — approval + shell:false, NOT OS isolation.
+   * An unavailable backend is reported to the user and never silently faked.
+   */
+  sandbox?: SandboxMode;
   /** Agent persona prompt injected before the Cascade base prompt. */
   agentPrompt?: string;
   /** Skills advertised in the system prompt; content is fetched via a read_skill tool. */

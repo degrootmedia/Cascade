@@ -49,6 +49,7 @@ import {
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
 import {
+  DRAFT_RESOLUTION,
   resolveAspectRatio,
   type CliModelSchema,
   type CliOptionField,
@@ -1748,6 +1749,33 @@ export class HiggsfieldCliProvider implements MediaProvider {
       items = [];
     }
 
+    // Finalize a previously-submitted Seedance draft: `generate create <model>
+    // --draft-job-id <id> --wait`. No prompt or references — the vendor reuses
+    // the draft job's inputs. Returns the full-resolution clip as a new take.
+    if (opts.draftJobId) {
+      const modelId = rawJobType(opts.model) || (await this.resolveVideoModel(opts.model, items, false));
+      if (!modelId) throw new Error("The Higgsfield CLI listed no video models to finalize the draft with.");
+      emit(`Shot ${shot.number}: finalizing the draft at 1080p via ${modelId} (Higgsfield CLI)…`);
+      const done = await this.createAndWait(
+        [modelId, "--draft-job-id", opts.draftJobId],
+        true,
+        VIDEO_WAIT_TIMEOUT_MS,
+        (status) => emit(`Shot ${shot.number}: draft finalize ${status.toLowerCase()}… still rendering.`, "info")
+      );
+      const safeExtF = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
+      const rel = writeShotVideo(p, shot, done.buf, safeExtF);
+      this.fireGeneration({
+        kind: "video",
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
+        resolution: "1080p",
+        durationSec: Number(opts.durationSec) > 0 ? Number(opts.durationSec) : 0,
+        at: Date.now(),
+        productionId: p.meta.id,
+        shotId: shot.id,
+      });
+      return { rel };
+    }
+
     // References: the source frame(s) first, then extras, then @[name] tags —
     // the same assembly order the MCP transports use (tokens are @image1-based).
     const refs: { name: string; dataUrl: string }[] = [];
@@ -1898,11 +1926,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
       }
       args.push("--duration", String(durationSec));
       const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
-      if (opts.resolution) {
-        const want = String(opts.resolution).replace(/\s+/g, "").toLowerCase();
+      // A draft is always 480p regardless of the node's resolution pick.
+      const wantResolution = opts.draft ? DRAFT_RESOLUTION : opts.resolution;
+      if (wantResolution) {
+        const want = String(wantResolution).replace(/\s+/g, "").toLowerCase();
         const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
         if (match) args.push("--resolution", match);
       }
+      // Cheap low-res draft: the flag drives 480p. Emitted here (not via the
+      // schema extras) so it works even when `draft` isn't a declared parameter.
+      if (opts.draft && !args.includes("--draft")) args.push("--draft", "true");
       const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
       const paramAspect = opts.params?.aspect_ratio;
       const wantAspect = resolveAspectRatio(typeof paramAspect === "string" ? paramAspect : undefined);
@@ -1925,8 +1958,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
             ...(e.url ? { url: e.url } : {}),
             prompt: opts.prompt,
             model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
-            resolution: opts.resolution || "",
+            resolution: opts.draft ? DRAFT_RESOLUTION : (opts.resolution || ""),
             durationSec,
+            ...(opts.draft ? { draftJobId: e.jobId } : {}),
             ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
             ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
             at: new Date().toISOString(),
@@ -1941,7 +1975,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       this.fireGeneration({
         kind: "video",
         model: `${HIGGSFIELD_CLI_ID_PREFIX}${modelId}`,
-        resolution: opts.resolution || "",
+        resolution: opts.draft ? DRAFT_RESOLUTION : (opts.resolution || ""),
         durationSec,
         // Best-effort submit-time credit quote (see the image path — usually
         // a cache hit from the renderer's pre-submit probe).
@@ -1957,7 +1991,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         shotId: shot.id,
       });
 
-      return { rel };
+      return { rel, ...(opts.draft ? { jobId: done.jobId } : {}) };
     } finally {
       cleanup();
     }

@@ -1,7 +1,7 @@
 export { Agent } from "./agent.js";
 export { ChatClient, friendlyApiError, redactSecrets, logChatMetadata, type BalanceEndpoint } from "./chat.js";
 export { suggestChatTitle, titlePrompt } from "./compact.js";
-export { TOOLS, TOOL_DEFINITIONS, labelCommandRisk, parseArgv, CommandParseError, lineDiff } from "./tools.js";
+export { TOOLS, TOOL_DEFINITIONS, labelCommandRisk, parseArgv, CommandParseError, lineDiff, runCommandArgv, assertLaunchable, DEFAULT_CMD_TIMEOUT_MS } from "./tools.js";
 export {
   SPILL_DIR,
   DEFAULT_SPILL_THRESHOLD_CHARS,
@@ -43,4 +43,26 @@ export {
 export type { ContinuationPlan, GoalPersistence, GoalRecord, GoalStatus, ParseGoalStatus, ParseGoalText } from "./goal.js";
 export { FileJournal } from "./journal.js";
 export { planGate } from "./planmode.js";
+export {
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  DEFAULT_MAX_REPAIR_ROUNDS,
+  MAX_VERIFY_OUTPUT_CHARS,
+  VERIFY_FEEDBACK_BUDGET_CHARS,
+  detectVerifyCommands,
+  formatVerificationFeedback,
+  maxRepairRounds,
+  passed,
+  runVerification,
+  runVerifyCommand,
+} from "./verify.js";
+export type { VerificationConfig, VerifyCommand, VerifyResult, VerifyRunner } from "./verify.js";
+export {
+  SANDBOX_DOCKER_IMAGE,
+  applySandbox,
+  normalizeSandboxMode,
+  resolveOnPath,
+  sandboxAvailable,
+  sandboxFallbackNotice,
+} from "./sandbox.js";
+export type { SandboxDeps, SandboxMode, SandboxWrap } from "./sandbox.js";
 export * from "./types.js";

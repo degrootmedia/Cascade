@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "./agent.js";
 import { ChatClient } from "./chat.js";
+import { detectVerifyCommands, type VerificationConfig } from "./verify.js";
 import type { ApprovalRequest, ApprovalDecision, AgentEvent } from "./types.js";
 
 const apiKey = process.env.GAB_API_KEY ?? process.env.CASCADE_API_KEY;
@@ -27,6 +28,19 @@ const workspaceRoot = path.resolve(argValue("--workspace") ?? "./workspace");
 const model = argValue("--model") ?? "arya";
 const baseUrl = argValue("--base-url");
 fs.mkdirSync(workspaceRoot, { recursive: true });
+
+// Optional automated verification: `--verify` detects the workspace's checks
+// (typecheck/lint/test) and feeds failures back for bounded repair rounds.
+let verification: VerificationConfig | undefined;
+if (process.argv.includes("--verify")) {
+  const commands = detectVerifyCommands(workspaceRoot);
+  if (commands.length) {
+    verification = { commands };
+    console.log(`Verification on: ${commands.map((c) => c.name).join(", ")}`);
+  } else {
+    console.log("Verification requested but no checks were detected for this workspace.");
+  }
+}
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -68,6 +82,23 @@ function onEvent(e: AgentEvent) {
     case "error":
       console.log(red(`\n[error] ${e.message}`));
       break;
+    case "verification-start":
+      console.log(dim(`\n⚑ running checks: ${e.commands.join(", ")}`));
+      break;
+    case "verification-result": {
+      const failed = e.results.filter((r) => r.exitCode !== 0 || r.timedOut);
+      if (failed.length) console.log(yellow(`✗ ${failed.map((r) => r.name).join(", ")} failed`));
+      else console.log(dim(`✓ checks passed (${e.results.map((r) => r.name).join(", ")})`));
+      break;
+    }
+    case "repair-round":
+      console.log(yellow(`↻ repair round ${e.round}/${e.max}`));
+      break;
+    case "verification-exhausted":
+      console.log(red(`\n[checks still failing after ${e.rounds} repair round(s)]`));
+      break;
+    default:
+      break;
   }
 }
 
@@ -84,7 +115,7 @@ async function showBalance() {
   }
 }
 
-const agent = new Agent({ apiKey, model, baseUrl, workspaceRoot, requestApproval, onEvent });
+const agent = new Agent({ apiKey, model, baseUrl, workspaceRoot, verification, requestApproval, onEvent });
 
 console.log(`Cascade CLI — model: ${model} — workspace: ${workspaceRoot}`);
 console.log(dim('Type a request, or "exit" to quit.\n'));

@@ -41,6 +41,8 @@ import {
   buildEditGenPrompt,
   wireEditNodeToCurrentFrame,
   recordGraphEditGen,
+  recordGraphVideoGen,
+  replaceVideoGenTake,
   rebaseGenIndex,
   refTokens,
   resolveReferenceTags,
@@ -976,5 +978,41 @@ describe("composeVideoPrompt", () => {
     const p = makeProduction();
     const shot = makeShot({ styleNone: true });
     expect(composeVideoPrompt(p, shot, "hold")).toBe("hold");
+  });
+});
+
+describe("recordGraphVideoGen / replaceVideoGenTake (Seedance draft lifecycle)", () => {
+  it("records a draft take with its vendor job id", () => {
+    const shot = makeShot();
+    recordGraphVideoGen(shot, "vid0", "boards/0100/video/a.mp4", "animate", "higgsfield-cli:seedance_2_5", "job-123");
+    expect(shot.graphVideoNodes?.[0].gens?.[0]).toMatchObject({ path: "boards/0100/video/a.mp4", draftJobId: "job-123" });
+  });
+
+  it("omits draftJobId for an ordinary take", () => {
+    const shot = makeShot();
+    recordGraphVideoGen(shot, "vid0", "boards/0100/video/a.mp4", "animate", "higgsfield-cli:seedance_2_5");
+    expect(shot.graphVideoNodes?.[0].gens?.[0].draftJobId).toBeUndefined();
+  });
+
+  it("replaces a draft take in place, clears the draft id, and re-points videoPath", () => {
+    const shot = makeShot({ videoPath: "boards/0100/video/a.mp4", graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0" });
+    recordGraphVideoGen(shot, "vid0", "boards/0100/video/a.mp4", "animate", "higgsfield-cli:seedance_2_5", "job-123");
+    recordGraphVideoGen(shot, "vid0", "boards/0100/video/older.mp4", "older", "higgsfield-cli:seedance_2_5");
+    const node = shot.graphVideoNodes![0];
+    node.genIndex = 1; // the draft is the older take; selection must NOT move
+    const superseded = replaceVideoGenTake(shot, "vid0", "boards/0100/video/a.mp4", "boards/0100/video/final.mp4");
+    expect(superseded).toBe("boards/0100/video/a.mp4");
+    const replaced = shot.graphVideoNodes![0].gens![1];
+    expect(replaced.path).toBe("boards/0100/video/final.mp4");
+    expect(replaced.draftJobId).toBeUndefined();
+    expect(replaced.prompt).toBe("animate");
+    expect(shot.graphVideoNodes![0].genIndex).toBe(1);
+    expect(shot.videoPath).toBe("boards/0100/video/final.mp4");
+  });
+
+  it("returns null when the take isn't in the node's history", () => {
+    const shot = makeShot();
+    recordGraphVideoGen(shot, "vid0", "boards/0100/video/a.mp4", "animate", "auto");
+    expect(replaceVideoGenTake(shot, "vid0", "boards/0100/video/missing.mp4", "boards/0100/video/x.mp4")).toBeNull();
   });
 });

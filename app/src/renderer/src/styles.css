@@ -2834,6 +2834,84 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .mention-label { font-size: 0.8rem; color: var(--text-dim); overflow-wrap: anywhere; }
 
 /* ---------- tool run group (collapsed panel of tool cards) ---------- */
+.checks-block {
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  overflow: hidden;
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+.checks-block.pending { border-color: var(--accent); }
+.checks-block.error { border-color: #b4453a; }
+.checks-header {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: none;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  cursor: pointer;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1;
+  user-select: none;
+}
+.checks-header:hover { color: var(--text); background: #2a3036; }
+.checks-icon { flex-shrink: 0; color: #4caf7d; }
+.checks-block.error .checks-icon { color: #e06c5e; }
+.checks-title { color: var(--text); flex: 1; text-align: left; }
+.checks-status { flex-shrink: 0; color: var(--text-dim); }
+.checks-block.error .checks-status { color: #e06c5e; }
+.checks-exhausted {
+  padding: 6px 12px;
+  color: #e0a15e;
+  font-size: 0.8rem;
+  border-top: 1px solid var(--border);
+}
+.checks-body { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 10px; }
+.check-row-head { display: flex; align-items: center; gap: 8px; }
+.check-name { color: var(--text); font-weight: 600; }
+.check-row.error .check-name { color: #e06c5e; }
+.check-status { color: var(--text-dim); margin-left: auto; font-size: 0.8rem; }
+.check-command {
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  background: var(--bg-raised);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.check-output {
+  margin: 4px 0 0;
+  padding: 8px;
+  background: #14171a;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.verify-intro { color: var(--text-dim); font-size: 0.9rem; }
+.verify-command-list { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
+.verify-command-list li { display: flex; align-items: center; gap: 10px; }
+.verify-command-list code {
+  flex: 1;
+  padding: 4px 8px;
+  background: var(--bg-raised);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+.verify-command-name { color: var(--text-dim); font-size: 0.8rem; }
+
 .tool-group {
   display: block;
   min-height: 38px;
@@ -4556,6 +4634,33 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 .prod-graph-node-title { font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 7px; }
+/* Delete affordance: a small × at the node's top-right, a sibling of the node
+   body inside the React Flow wrapper (so it travels with the node and works
+   regardless of keyboard focus). Revealed on hover / when the node is selected. */
+.prod-graph-node-del {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  z-index: 6;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.prod-graph-canvas .react-flow__node:hover .prod-graph-node-del,
+.prod-graph-canvas .react-flow__node.selected .prod-graph-node-del { opacity: 1; }
+.prod-graph-node-del:hover { color: var(--danger, #f87171); border-color: var(--danger, #f87171); background: var(--bg); }
 .prod-graph-node .react-flow__handle { width: 12px; height: 12px; background: var(--accent); border: 2px solid var(--bg-raised); }
 .prod-graph-canvas .react-flow__node.selected .prod-graph-node {
   border-color: var(--accent);
@@ -4819,6 +4924,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-gen-go { padding: 7px 10px; font-size: 0.78rem; }
 /* Fetch button for a video node whose vendor job outlived its wait. */
 .prod-graph-gen-fetch { padding: 5px 10px; font-size: 0.72rem; margin-bottom: 6px; }
+/* Draft toggle + finalize button (Seedance 2.5 480p → 1080p). */
+.prod-graph-gen-draft { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--text-dim); margin: 6px 0 2px; cursor: pointer; }
+.prod-graph-gen-draft input { accent-color: var(--accent); }
+.prod-graph-gen-upgrade { padding: 5px 10px; font-size: 0.72rem; margin-bottom: 6px; }
 /* Generation history strip: every stored generation, click to select. */
 .prod-graph-gen-strip { display: flex; flex-wrap: wrap; gap: 4px; max-height: 84px; overflow-y: auto; }
 .prod-graph-gen-strip button {
@@ -4838,6 +4947,44 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-graph-gen-strip button img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .prod-graph-gen-strip button.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* History button: shown when a node stores more takes than the strip lists. */
+.prod-graph-gen-strip button.prod-graph-gen-history { width: auto; min-width: 46px; padding: 0 7px; gap: 3px; color: var(--text-dim); }
+.prod-graph-gen-strip button.prod-graph-gen-history:hover { color: var(--text); border-color: var(--accent); }
+
+/* Full take-history modal (opened by the strip's History button). */
+.prod-graph-history-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.prod-graph-history {
+  width: min(720px, 88vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.prod-graph-history-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.prod-graph-history-title { font-weight: 600; font-size: 0.85rem; }
+.prod-graph-history-count { color: var(--text-dim); font-size: 0.72rem; margin-left: auto; }
+.prod-graph-history-close { border: none; background: none; color: var(--text-dim); font-size: 1.1rem; cursor: pointer; line-height: 1; }
+.prod-graph-history-close:hover { color: var(--text); }
+.prod-graph-history-empty { padding: 24px 14px; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
+.prod-graph-history-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; padding: 14px; overflow-y: auto; }
+.prod-graph-history-tile { position: relative; aspect-ratio: 16 / 9; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raised); overflow: hidden; cursor: pointer; }
+.prod-graph-history-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.prod-graph-history-tile.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.prod-graph-history-badge { position: absolute; left: 5px; bottom: 5px; padding: 1px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.62); color: #fff; font-size: 0.66rem; }
+.prod-graph-history-upgrade { position: absolute; right: 5px; bottom: 5px; padding: 2px 6px; border-radius: 5px; background: var(--accent); color: #fff; font-size: 0.64rem; font-weight: 600; cursor: pointer; }
+.prod-graph-history-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
 .prod-graph-output-hint { font-size: 0.68rem; color: var(--text-dim); line-height: 1.4; }
 /* The in-betweener shares the gen node chrome but is not resizable. */
 .prod-graph-tween { width: 300px; height: auto; }
@@ -5845,3 +5992,30 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 
 .prod-graph-tools.hidden { display: none; }
+
+.crash-screen {
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 32px;
+  background: #14171a;
+  color: #e6e6e6;
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.crash-screen h2 { margin: 0; }
+.crash-screen p { color: var(--text-dim, #9aa4ad); margin: 0; }
+.crash-detail {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: #0f1215;
+  border: 1px solid #2a3036;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: #e06c5e;
+}
+.crash-actions { display: flex; gap: 8px; }

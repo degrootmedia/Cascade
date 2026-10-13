@@ -70,6 +70,13 @@ describe("systemPrompt", () => {
     expect(systemPrompt({ workspaceRoot: "/ws" })).not.toMatch(/call todo_write first/);
   });
 
+  it("adds the verification feed-forward note only when checks are configured", () => {
+    const withChecks = systemPrompt({ workspaceRoot: "/ws", verificationChecks: ["typecheck", "test"] });
+    expect(withChecks).toContain("typecheck, test");
+    expect(withChecks).toMatch(/run automatically after you change files/);
+    expect(systemPrompt({ workspaceRoot: "/ws" })).not.toMatch(/run automatically after you change files/);
+  });
+
   it("keeps pure-chat prompt free of plan mode and skills", () => {
     const p = pureChatSystemPrompt();
     expect(p).not.toMatch(/PLAN MODE/);

@@ -148,4 +148,34 @@ describe("GenerationMenu native media actions", () => {
     });
     expect(labels()).not.toContain("Edit in Suite");
   });
+
+  it("offers Refresh when wired and routes the take path (image label)", async () => {
+    const seen: string[] = [];
+    let closed = 0;
+    await renderMenu({
+      menu: { x: 0, y: 0, rel: "boards/0100/frame.png", src: "cascade-media://p1/frame.png", media: "image" },
+      onClose: () => { closed++; },
+      onRefresh: (rel) => seen.push(rel),
+    });
+    expect(labels()).toContain("Refresh image");
+    await click("Refresh image");
+    expect(seen).toEqual(["boards/0100/frame.png"]);
+    expect(closed).toBe(1);
+  });
+
+  it("labels Refresh for a video take and omits it without a handler", async () => {
+    await renderMenu({
+      menu: { x: 0, y: 0, rel: "boards/0100/video/shot-0100.mp4", src: "cascade-media://p1/shot-0100.mp4", media: "video" },
+      onClose: () => {},
+      onRefresh: () => {},
+    });
+    expect(labels()).toContain("Refresh clip");
+
+    await act(async () => { root!.unmount(); }); root = null; document.body.innerHTML = "";
+    await renderMenu({
+      menu: { x: 0, y: 0, rel: "boards/0100/frame.png", src: "cascade-media://p1/frame.png", media: "image" },
+      onClose: () => {},
+    });
+    expect(labels().some((l) => l.startsWith("Refresh"))).toBe(false);
+  });
 });

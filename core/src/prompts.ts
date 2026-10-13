@@ -70,6 +70,16 @@ export function autonomousPrompt(): string {
   );
 }
 
+/**
+ * Feed-forward note: when the workspace has automated checks configured, the
+ * model should know they exist (it can also run them on demand via run_command).
+ * Purely informational — the checks still run automatically after edits.
+ */
+export function verificationPrompt(checks: string[]): string {
+  if (!checks.length) return "";
+  return `\n\nThis workspace has automated checks configured — ${checks.join(", ")}. They run automatically after you change files, and any failures come back to you to fix. You may also run them yourself with run_command when useful.`;
+}
+
 /** The todo-discipline directive, shown only when the todo tools are present. */
 export function todoPrompt(): string {
   return (
@@ -92,10 +102,12 @@ export interface SystemPromptOptions {
   autonomousMode?: boolean;
   /** True when todo_read/todo_write are available — adds the task-list directive. */
   hasTodoTools?: boolean;
+  /** Names of configured automated checks — adds the feed-forward note. */
+  verificationChecks?: string[];
 }
 
 export function systemPrompt(opts: SystemPromptOptions): string {
-  const { workspaceRoot, skills, instructions, lazyToolsNote, agentPrompt, planMode, autonomousMode, hasTodoTools } = opts;
+  const { workspaceRoot, skills, instructions, lazyToolsNote, agentPrompt, planMode, autonomousMode, hasTodoTools, verificationChecks } = opts;
   const agentSection = agentPrompt?.trim()
     ? `${agentPrompt.trim()}\n\n---\n\n`
     : "";
@@ -107,6 +119,7 @@ export function systemPrompt(opts: SystemPromptOptions): string {
   const planSection = planMode ? planModePrompt() : "";
   const autonomousSection = autonomousMode ? autonomousPrompt() : "";
   const todoSection = hasTodoTools ? todoPrompt() : "";
+  const verificationSection = verificationChecks?.length ? verificationPrompt(verificationChecks) : "";
   const approvalGuideline = autonomousMode
     ? `- You have full permission to act in this chat — make changes directly without asking for confirmation.`
     : `- Mutating actions require user approval; if the user denies an action, respect that and ask how they'd like to proceed.`;
@@ -122,5 +135,5 @@ Guidelines:
 - If a task is ambiguous, ask a clarifying question before acting.
 ${approvalGuideline}
 - When a tool result contains an image URL, show it to the user with a markdown image: ![description](url). When it reports a saved file path, state that exact path — never invent placeholders like "[image shown]".
-- The operating system is ${process.platform === "win32" ? "Windows (shell commands run in cmd.exe)" : process.platform}.${skillsSection}${todoSection}${planSection}${autonomousSection}${instructionsSection}${lazySection}`;
+- The operating system is ${process.platform === "win32" ? "Windows (shell commands run in cmd.exe)" : process.platform}.${skillsSection}${todoSection}${verificationSection}${planSection}${autonomousSection}${instructionsSection}${lazySection}`;
 }

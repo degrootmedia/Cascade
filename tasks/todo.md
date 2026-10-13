@@ -1,4 +1,193 @@
-﻿# Long agentic tasks: autonomous mode, sticky approvals, todo discipline, higher cap
+﻿# Frequent crashes in chat-agent mode (autonomous production runs)
+
+User report: still frequent crashes in chat agent mode. Evidence: recent crash
+sessions (`mv43c7k8`, `mv43i2fp`) all carry the same "run the full production
+pipeline autonomously" prompt, workspace `C:\Users\degro\Desktop`,
+`allowedTools: [cascade_create_production]`, and an incomplete turn (history
+saved but the turn never finished) — so it dies mid-turn, early (~30s in).
+`%APPDATA%\cascade-app\crash.log` did not exist, so the previous JS
+`uncaughtException`/`unhandledRejection` handler never fired: the crash is a
+native/OOM abort, a renderer-process crash, or an unhandled path the earlier
+build didn't cover.
+
+## Findings (audit + subagent review)
+
+- Several `win?.webContents.send(...)` calls (`productionEmit`, external-edit
+  sends, `agents:switched`, mode-toggle notices) are unguarded: `win?.` guards
+  null but not a destroyed window, and `send` throws "Object has been
+  destroyed". Those run inside generation runners / IPC listeners → an
+  uncaughtException or unhandledRejection → app exits.
+- `void checkExternalEdits()` (window focus) had no `.catch`.
+- The `on()` IPC wrapper invoked listeners with no `try/catch`; a sync throw in
+  an `ipcMain.on` listener is an uncaughtException.
+- `shotReferences` base64-encoded **every** reference for **every** shot in a
+  storyboard batch (then filtered to cited ones) — a large transient main-heap
+  spike during Design/Storyboard.
+- `Agent.send` compacted the context only **once, before** the loop; a long
+  autonomous run (up to `maxIterations`) grew the request body and heap without
+  bound across hundreds of turns.
+- The renderer re-rendered the permanently-mounted `ProductionWorkspace` on
+  every streamed token (it wasn't memoized and took an inline `onOpenSettings`),
+  and streamed text rebuilt the transcript per token — heavy during long runs.
+
+## Fixes
+
+- [x] `app/src/main/index.ts`: `safeSend` helper (guards destroyed window +
+  clone errors); routed `productionEmit`, external-edit sends, `agents:switched`,
+  mode-toggle notices, `broadcastSessions`, `emitWorkspaceChanged`,
+  `window:detachedClosed` through it. `checkExternalEdits().catch(reportCrash)`.
+  `on()` wraps listener execution in try/catch. `render-process-gone` /
+  `child-process-gone` logged; a crashed main-window renderer is reloaded once
+  (guarded against loops). `console.error`/`warn` + renderer console messages
+  are mirrored to `<userData>/main.log`; a 30s memory watchdog logs RSS.
+- [x] `core/src/agent.ts`: compact the context periodically inside the loop
+  (`iter % 4 === 0`), not only before it.
+- [x] `app/src/main/pipeline.ts`: `shotReferences` reads reference artwork
+  lazily, only for cited/style refs.
+- [x] `app/src/renderer/src/components/ErrorBoundary.tsx` + `main.tsx`: a React
+  error boundary (shows the error + Reload instead of a blank window) and global
+  renderer error logging. `ProductionWorkspace` memoized with a stable
+  `onOpenSettings`.
+
+## Review
+
+Could not reproduce locally (needs the user's credits/provider), and the crash
+left no JS stack, so this pass both removes concrete crash vectors and makes the
+next occurrence diagnosable. The unguarded sends/rejection are the most likely
+"silent" kills; the per-shot reference base64 and unbounded per-turn context are
+the most likely OOM drivers during a long autonomous production. Verify: core
+typecheck + 194 tests; app typecheck + 1472 tests + 1 skipped; `npm run build`
+clean. If it recurs, `<userData>/main.log` + `crash.log` will now hold the cause.
+
+---
+
+# Crash on "update your own Cascade skill" + vision guidance in the film skill
+
+User report: asking Cascade to update its own Cascade skill (so it uses the new
+vision capabilities to monitor generations/progress) crashed the app twice.
+
+## Findings
+
+- Both crash sessions (`userData/sessions/mv3y1m4i…`, `mv3y5sot…`) show
+  `workspace: C:\Users\degro\Desktop`, `allowedTools: ["run_command"]`,
+  `history: []` (the turn never completed), and `verifyDeclined: true` — the
+  agent was mid-turn exploring the filesystem with `run_command` when it died.
+- The agent `dir`-ed `userData/sessions` (spilled run_command output in
+  `Desktop/.cascade/tool-output/`), i.e. it was hunting for the skill file
+  (which lives in `userData/skills/`, outside the workspace).
+- No Windows Application-Error event and no Crashpad dump → not a native fault;
+  consistent with an uncaught JS exception/unhandled rejection in the main
+  process, which Electron exits on.
+- The workspace contains a **446 MB `.mov`** (and 157 MB PDF, 64 MB `.tga`).
+  `read_file` read the whole file with `fs.readFileSync(p, "utf8")` before the
+  size check — reading a large binary as UTF-8 can exceed V8's max string length
+  and take the process down. A real, deterministic crash vector in this
+  workspace.
+- The seeded `userData/skills/production/film.md` was a stale 80-line copy that
+  never mentioned vision (`seedSkills` only copies when missing), so the agent
+  had no instruction to use `view_image` and the skill the user meant to edit was
+  outside the workspace.
+
+## Fixes
+
+- [x] `app/src/main/index.ts`: `reportCrash` writes `<userData>/crash.log` and
+      surfaces a notice; `process.on("uncaughtException"/"unhandledRejection")`
+      keep the app alive and diagnosable. `sendAgentEvent` never throws back into
+      the agent loop. `autoNameSession` is rejection-safe.
+- [x] `core/src/tools.ts`: `read_file` stats first (refuses > 32 MB) and sniffs
+      the head for NUL bytes (refuses binary) instead of reading it as text.
+- [x] `app/skills/production/film.md` (+ the seeded userData copy): use
+      `view_image` to inspect every generated style frame, character sheet, and
+      storyboard frame and regenerate anything wrong before moving on.
+
+## Review
+
+Root cause was not fully provable without the runtime stack (no crash dump), so
+the fix is two-pronged: remove the one concrete crash vector in this workspace
+(`read_file` reading a 446 MB video as UTF-8 → process death) and make the app
+never die silently again — global handlers log to `crash.log` and keep running,
+so a recurrence is diagnosable. The skill now teaches vision-based self-checking.
+Verify: core typecheck clean + 194 tests (2 new `read_file` guard tests); app
+typecheck clean + 1472 tests; `npm run build` clean.
+
+---
+
+# Harness competitiveness: automated verification + optional OS sandbox
+
+Audit findings (`Cascade-Harness-Implementation-Plan.md`, 2026-10-10): Cascade is
+strong on deterministic tools, context management, and process safety, but was
+missing an **automatic verification feedback loop** — the agent had to *choose*
+to run checks, and there was no post-edit run-checks-feed-failures-back step.
+Secondary gap: no OS-level sandbox option.
+
+## Plan
+
+### Workstream A — automated verification feedback (primary)
+- [x] A1 `core/src/verify.ts`: `VerifyCommand`/`VerifyResult`/`VerificationConfig`;
+      `runVerifyCommand` (argv-only, `shell:false`, `resolveSafe` cwd, timeout
+      kill-tree, spill oversized output), `runVerification` (sequential, optional
+      stop-early), `detectVerifyCommands` (check:fast/typecheck/lint/test + tsc /
+      python fallbacks, package-manager aware), `formatVerificationFeedback`.
+- [x] A2 `core/src/types.ts`: optional `AgentConfig.verification` +
+      `resolveVerification`/`verificationRunner` seams, `verificationCommands`
+      feed-forward; `AgentEvent` verification-start/-result/repair-round/
+      verification-exhausted.
+- [x] A3 `core/src/agent.ts`: `dirty` set only on a successful `requiresApproval`
+      tool; run checks after the batch; bounded repair rounds; no verification in
+      pure chat, terminal iteration, or when the plan gate blocked the mutation.
+      Unset config ⇒ byte-identical event stream.
+- [x] A4 `core/src/index.ts`: export the verify + sandbox surface.
+- [x] A5 host wiring: `verify-consent.ts` (`makeVerificationResolver`, injected
+      store + consent prompt), `settings.verifyCommandsByWorkspace`,
+      `SessionFile.verifyCommands`/`verifyDeclined`, IPC `verification:request`/
+      `:response` + preload `onVerificationRequest`, renderer `VerifyApprovalModal`
+      + collapsible **Checks** block, `AgentEventIpc` mirror.
+- [x] A6 `core/src/cli.ts`: `--verify` flag (detect + run) and event handling.
+- [x] A7 tests: `core/test/verify.test.ts`, `core/test/agent-verification.test.ts`,
+      `app/test/verification-wiring.test.ts`.
+
+### Workstream B — optional OS sandbox (secondary, default off)
+- [x] B `core/src/sandbox.ts`: `applySandbox` (srt/docker argv wrapping),
+      `sandboxAvailable`, `sandboxFallbackNotice`; `AgentConfig.sandbox`; Agent
+      wraps `run_command` (`makeSandboxedRunCommand`) and verification uses the
+      mode; Settings → Advanced → Agent selector (default None); `core/test/sandbox.test.ts`.
+
+### Workstream C — polish
+- [x] Feed-forward: configured check names surfaced in the system prompt
+      (`verificationPrompt`), `prompts.test.ts` case.
+- [x] Verification gets its own 120s timeout vs `run_command`'s 60s.
+- [ ] (deferred) on-demand `verify` tool; per-model compaction budget.
+
+## Review
+
+Implemented. The gap was a missing **feedback sensor**: `run_command` existed but
+nothing ran the project's checks automatically. Workstream A adds a deep
+`core/src/verify.ts` module — argv-only, `shell:false`, workspace-contained,
+spill-backed — and wires it into the loop behind an **opt-in** config so the
+default event stream is unchanged. A successful mutation sets `dirty`; the loop
+then runs the checks once, emits `verification-start`/`-result`, and on failure
+feeds a compact summary back for `maxRepairRounds` (default 2) before
+`verification-exhausted`. The host's `makeVerificationResolver` gets consent once
+(per workspace or per chat, or declines silently when nothing is detected), so
+auto-run is never unapproved. The repair loop never touches tests.
+
+Workstream B adds `core/src/sandbox.ts` (srt/docker argv wrapping, default
+`"none"`), surfaced honestly: an unavailable backend returns the unchanged argv
+plus a notice instead of pretending to isolate. The Agent swaps `run_command` for
+a wrapped variant and threads the mode into verification; a Settings selector
+(default None) enables it.
+
+Workstream C feeds the configured check names into the system prompt so the model
+knows they exist.
+
+Verify: core typecheck clean, 192 tests (was 157); app typecheck clean, 1472
+tests + 1 skipped (was 1469/1); `npm run build` clean. New: `verify.test.ts`
+(16), `agent-verification.test.ts` (7), `sandbox.test.ts`, `verification-wiring.test.ts`
+(8). No existing behavior changed with `verification`/`sandbox` unset.
+
+---
+
+# Long agentic tasks: autonomous mode, sticky approvals, todo discipline, higher cap
 
 User report (three linked issues from one long video-production run):
 1. Approval friction — had to approve OpenArt tool calls repeatedly; "always
@@ -3171,7 +3360,71 @@ Host seam injected (the test surface). Two tools, both returning
 ## Status
 
 - [x] Part A (voice) - done
-- [ ] Part B (vision/capture) - not started
+- [x] Part B (vision/capture) - done
+
+---
+
+# Review - Part B (on-demand vision + screen capture)
+
+Shipped the model's "eyes", strictly on demand: images are only ever put in
+front of the model when the model asks, and only on a vision-capable model.
+Nothing is auto-included.
+
+What shipped:
+- Core (`core/src/types.ts` + `agent.ts`): `ToolRunResult.modelImages` (data
+  URLs the MODEL receives, distinct from the UI-only `images`),
+  `AgentConfig.visionEnabled`, and `toolImageContent()`. `executeToolCall` now
+  returns `{ text, modelImages }`; `send()` collects a turn's `modelImages` and
+  appends ONE synthetic `user` turn after the tool messages, gated on
+  `visionEnabled`. Existing tools return no `modelImages`, so their stream is
+  byte-identical.
+- `main/screen-capture.ts` (new deep module): `capturePrimaryDisplay` with a
+  soft-imported Electron `desktopCapturer`/`screen` and an injectable
+  `CaptureDeps` seam; long-edge cap 2560; PNG data URL.
+- `main/vision-tools.ts` (new deep module): `makeVisionTools(host, {capture})`
+  over a `VisionHost` seam. `view_image` (workspace-confined via core
+  `resolveSafe`, image-extension + 24 MB guards, downscale to the model,
+  read-only) and `capture_screen` (approval-gated, saves the PNG under
+  `<workspace>/cascade-images/` so the model can re-view it).
+- Wiring (`index.ts`): `makeVisionHost` (real capture + `nativeImage`
+  downscale/`toJPEG(82)`); `modelVisionCache` records each model's vision flag
+  from `models:list`; both tools are added to a chat agent's `extraTools` only
+  when the resolved model has vision (`AgentConfig.visionEnabled`), and
+  `capture_screen` additionally only when `screenCaptureEnabled`.
+- `productionDigest`: shots gain `artworkPath`/`videoPath`, references gain
+  `imagePath` (working-folder-relative) so the model can `view_image` a
+  generation and decide to regenerate.
+- Settings: `screenCaptureEnabled` (default true) + a Settings → Agent
+  checkbox; `settings:get/setScreenCaptureEnabled` channels; setting it
+  recycles agents so the tool appears/disappears next message.
+
+Tests: `core/test/vision-model-images.test.ts` (4: attaches on visionEnabled,
+drops when disabled, no-op when a tool returns none, coalesces + orders after
+tool messages) and `app/test/vision-tools.test.ts` (9: mime mapping, load,
+escape rejection, non-image, missing, required path, capture gating, capture
+save/return, capture failure). The settings-panel test mock gained the new
+settings getter.
+
+Verify: `core` tests **161 passed**; `app` typecheck clean, tests **1464 passed
++ 1 skipped** (129 files), build clean.
+
+Design notes:
+- The synthetic `user`-turn form (rather than images on the `tool` role) is
+  deliberate: it is the most widely supported shape across OpenAI-compatible
+  endpoints. If a provider rejects it, the tool-message content-parts form is a
+  one-place change in `agent.ts`.
+- `capture_screen` defaults ON but is approval-gated (and runs unprompted only
+  in autonomous mode, the user's blanket consent); `screenCaptureEnabled` is the
+  hard kill-switch. `view_image` needs no toggle and is the main "inspect my
+  generation" path.
+- Windows note: `desktopCapturer.getSources` can return empty thumbnails on some
+  setups; the `CaptureDeps` seam leaves room for a PowerShell `System.Drawing`
+  fallback without touching the tools.
+
+## Status
+
+- [x] Part A (voice) - done
+- [x] Part B (vision/capture) - done
 
 ---
 
@@ -3223,3 +3476,268 @@ IPC responds and the fetched binary is resolvable in dev.
 
 - [x] Part A (voice) - done
 - [ ] Part B (vision/capture) - not started
+
+---
+
+# Node graph: robust node deletion, capped take history + history panel, Seedance draft upgrade
+
+User report (three requests):
+1. Deleting nodes is finicky — an empty, unwired second video-gen node wouldn't
+   delete. Want a robust system for cleaning up unused nodes.
+2. Nodes pile up generations. Show only the last 6, with a button to see older
+   takes (video + image nodes).
+3. Higgsfield CLI can generate Seedance 2.5 in cheap 480p **draft** mode and
+   **finalize** the same draft at 1080p within 7 days. Add an Upgrade button to
+   video nodes for draft takes.
+
+## Decisions (user-confirmed)
+
+- Deletion: add a visible × per removable node + route both it and the Delete
+  key through one confirm; a data-holding node is deleted after a `window.confirm`
+  naming what is destroyed (never a silent refusal).
+- Older takes: an in-app **History** panel (per node), not an OS folder reveal.
+- Drafts: a dedicated **Draft (480p)** toggle on the video node; upgrading
+  **replaces the draft take in place** (old 480p file removed; ledger bills both).
+
+## Findings (verified)
+
+- The only delete path is select + Delete/Backspace (`NodeGraphModal.tsx:5215`);
+  no × button, no context-menu delete. Data-holding nodes are hard-blocked with a
+  transient 4s hint (`:4073-4103`). `vidInUse` (:4076) checks gens/prompt/source/
+  refIds. The finickiness is the lack of a non-keyboard affordance + the hard block.
+- `GRAPH_HISTORY_CAP = 20` (`pipeline.ts:2437`); the strip renders every take
+  uncapped (`:1007`, `:1172`). All takes of all nodes share the shot's board
+  folder (`boards/<n>/` frames, `boards/<n>/video/` clips).
+- `draft` is NOT in `OWNED_FLAGS` (`model-schema.ts:86`), so if
+  `higgsfield model get seedance_2_5` declares it, it already reaches
+  `emitExtraParams` → `--draft true`. `createAndWait` returns the job id but callers
+  discard it (`higgsfield-cli.ts:1421-1467`, `:1960`).
+
+## Plan
+
+### A — robust node deletion
+- [x] `NodeGraphModal.tsx`: `NodeDeleteContext` (`createContext`) + `withNodeDelete`
+  HOC at module scope; wrap every removable node type in `nodeTypes`
+  (videogen/videoprompt/editvideo/editvideoprompt/editgen/editprompt/tween/
+  cameraGrid/upscale). Provide `requestDeleteNode` around `<ReactFlow>`.
+- [x] Replace the hard block with a single confirm: `deleteWarningFor(id)` names
+  the node's lost data + a cleared output feed; `window.confirm` (codebase
+  convention) in `onNodesChange`; the × and the Delete key both funnel through it.
+- [x] CSS `.prod-graph-node-del`; tests in `graph-shelf.test.ts` (empty node × +
+  key both delete; data node confirms then deletes; cancel keeps it).
+
+### B — capped history + History panel
+- [x] `HISTORY_STRIP_LIMIT = 6`: the 5 generator node views render
+  `items.slice(0, 6)`; a `History (N)` button (when `items.length > 6`) opens the
+  panel. Add `onOpenHistory` to each node data type + `buildDerived`.
+- [x] `components/graph/history-modal.tsx`: a portal modal listing every stored
+  take (thumbnails via `refThumbUrl`), click-to-select, right-click
+  `GenerationMenu`, Save-as-reference / Edit-in-Suite / Delete. State
+  `historyView` in `NodeGraphModal` (kind + nodeId + title).
+- [x] CSS + a UI test (only 6 tiles + a History button; clicking a tile selects).
+
+### C — Seedance 2.5 draft → upgrade
+- [x] Types: `GraphGenItem.draftJobId?`, `PendingVideoGen.draftJobId?`,
+  `VideoGenOptions.draft`/`draftJobId`, `MediaProvider.generateVideoClip` return
+  `{ rel: string; jobId?: string }`; shared `DRAFT_RESOLUTION`.
+- [x] `higgsfield-cli.ts`: draft submits force 480p + `--draft true`; return the
+  create job id; a `draftJobId` opts value runs the finalize path
+  (`generate create <model> --draft-job-id <id> --wait`); a draft pending records
+  its job id.
+- [x] `pipeline.ts`: `recordGraphVideoGen(…, draftJobId?)` + `replaceVideoGenTake`.
+- [x] `index.ts`: `production:generateVideoNode` stores the draft job id; recheck
+  carries it; new `production:upgradeDraftVideo` replaces the take in place
+  (delete the draft file, re-point `videoPath` when it fed the output, bill).
+  IPC contract + channel + `CascadeApi` (preload follows mechanically).
+- [x] Renderer video node: a **Draft (480p)** toggle (sets `params.draft`, locks
+  resolution to 480p); a **Finalize 1080p** button on a draft take;
+  `onUpgradeDraft` through data → workspace → IPC; the history modal's per-tile
+  upgrade button. Hidden on the sequence canvas (`draftSupported: false`).
+- [x] Tests: draft arg emission + finalize argv (provider seam);
+  `recordGraphVideoGen`/`replaceVideoGenTake`; history-cap UI.
+
+### D — verify
+- [x] `npm run typecheck`, `npm test` (app), `npm run build`; `npm test` (core).
+- [x] `CONTEXT.md`: node graph / draft-upgrade notes.
+
+## Review
+
+Done — three requested improvements, each with its own deep seam.
+
+**1. Robust node deletion.** The only delete path was select + Delete/Backspace,
+and a data-holding node was *hard-blocked* with a transient 4s hint (the reported
+finickiness: a fresh, unused second video node wouldn't delete when focus sat in
+a node control). Every removable node view is now wrapped by `withNodeDelete`,
+which renders a small **× in the node's top-right** (via `NodeDeleteContext`, so
+no callback threading through `data`), and both the × and the Delete key funnel
+through the one `onNodesChange` removal engine. The block is gone: a node that
+holds data (clips, prompt, pipes, output feed) is deleted after a
+`window.confirm` (`toolDeleteWarning`) that names exactly what is discarded.
+`nodeFeedsOutput`/`toolNodeDeleteSummary` read `videoNodesFor(shot)` so legacy
+materialized nodes are judged correctly. Edit-node pairs, tween, camera-grid,
+and upscale all gained the × too.
+
+**2. Capped history + History panel.** All five generator nodes now render the
+shared `GenHistoryStrip`, which shows only the newest `HISTORY_STRIP_LIMIT` (6)
+takes and adds a **History (N)** button when more are stored. That opens
+`GraphHistoryModal` (new `components/graph/history-modal.tsx`, portaled like
+`GenerationMenu`), a grid of every stored take (thumbnails via `refThumbUrl`,
+click-to-select, double-click-to-enlarge, right-click for the shared menu) with
+an Open-folder footer. State is a `historyTarget` descriptor; `historyViewFor`
+resolves items/selection live from the shot so the modal tracks a selection
+change, and selection routes through the existing `onSelectGraphGen`.
+
+**3. Seedance 2.5 draft → 1080p.** `VideoGenOptions.draft` submits the cheap
+480p draft (`--draft true`, resolution forced from the shared `DRAFT_RESOLUTION`);
+`createAndWait`'s job id is returned and stored as `GraphGenItem.draftJobId` on
+the take. The video node gains a **Draft (480p)** toggle (persisted in
+`params.draft`, locks the resolution select) and, on a draft take, a
+**Finalize 1080p** button; the history modal offers the same per-tile. Both call
+the new `production:upgradeDraftVideo`, which reuses the draft job
+(`generate create seedance_2_5 --draft-job-id <id> --wait`, no prompt/refs) and
+**replaces the take in place** via `pipeline.replaceVideoGenTake` (drops the
+480p file, re-points `videoPath` when it fed the output, clears `draftJobId`),
+billing the finalize as a second generation. A pending draft keeps its job id on
+`PendingVideoGen.draftJobId` so a reclaimed clip stays upgradeable. The toggle is
+hidden on the shot-sequence canvas (`draftSupported: false`) — its submit is a
+separate handler.
+
+Verify: `app` typecheck clean; `app` tests **1481 passed + 1 skipped** (130
+files); `app` `npm run build` clean; `core` tests **194 passed**. New/changed:
+`graph-shelf.test.ts` (delete confirm + × + history cap), `higgsfield-cli.test.ts`
+(draft 480p submit + `--draft-job-id` finalize), `pipeline.test.ts`
+(`recordGraphVideoGen` draft id + `replaceVideoGenTake`). `CONTEXT.md` updated
+(MediaProvider row, Node graph bullet, Seedance draft term).
+
+### Follow-up (user feedback): narrow the draft affordance
+
+The draft toggle must appear ONLY for the Seedance 2.5 model, and only on the
+Higgsfield CLI (no OpenArt MCP upgrade path); and OpenArt's separate
+"Seedance 2.5 Draft" model must offer only 480p.
+
+- `shared/ipc/media.ts`: `isSeedance25Model(id)` (namespace-stripped, matches
+  `seedance_2_5` / `seedance-2.5` / `seedance_2.5`, never a `_draft` sibling),
+  `isDraftOnlyModel({id,displayName})` (name/id contains "draft"),
+  `providerSupportsDraftUpgrade(id)` (Higgsfield CLI only), `rawMediaModelId`.
+- `NodeGraphModal`: the video node computes `draftSupported = data.draftUpgradeAvailable && isSeedance25Model(effModel)`;
+  a `draftModel` (draft-named) collapses the resolution ladder to `[480p]` and
+  pins the submitted resolution via `effectiveResolution`. New
+  `draftUpgradeAvailable` prop, threaded into `videoGenNodeFor`'s data (and
+  `false` on the sequence canvas).
+- `ProductionWorkspace`: `draftUpgradeAvailable = providerSupportsDraftUpgrade(mediaProviderId)`,
+  passed to the shot graph's `NodeGraphModal`.
+- `index.ts`: `production:generateVideoNode` maps `params.draft` to the provider
+  flag only when `isSeedance25Model(modelChoice)` (a stale flag on another model
+  is ignored).
+- Tests: `seedance-draft.test.ts` (pure helpers) + a `graph-shelf.test.ts` UI
+  case (shown for Higgsfield+Seedance 2.5; hidden for another model, for OpenArt,
+  and for the 480p-only draft model — whose resolution select is `["480p"]`).
+
+Verify (follow-up): `app` typecheck clean; `app` tests **1485 passed + 1 skipped**
+(131 files); `app` build clean; `core` **194 passed**.
+
+
+---
+
+# Image-gen node: remember its own model/resolution per shot
+
+User report: entering a shot's node graph under OpenArt MCP, the image-generation
+node reset to the storyboard page's master model selector. Each image-gen node
+should remember its own chosen model and params (as the video node already does).
+
+## Findings
+
+- `ImageGenNodeView` seeded its model from `data.defaultModel` (the production
+  master `prod.openArt.model`) and resolution from `data.defaultResolution`, and
+  its `onChange` only called `rememberMediaDefault("image", …)` (a global memo) —
+  it never saved the pick per shot. So the node always re-seeded from the master
+  on re-entry. (Video nodes already seed from `node.model`/`node.resolution` and
+  persist via `onSaveFields`.) Params already persisted (`graphImageParams`), but
+  the model reset made the params form reseed.
+
+## Plan
+
+- [x] `shared/ipc/production.ts`: `ProductionShot.graphImageModel?` +
+  `graphImageResolution?` (renderer-owned, copied by `mergeRendererShot`).
+- [x] `ImageGenData`: `savedModel?`/`savedResolution?`; `imageGenNodeFor` sets them
+  from `shot.graphImageModel`/`graphImageResolution`.
+- [x] `ImageGenNodeView`: seed `savedModel ?? (valid master) ?? media default`;
+  `savedResolution ?? defaultResolution`; `onChange` persists per shot via
+  `onSaveFields({ graphImageModel | graphImageResolution })` (and still updates
+  the global media default).
+- [x] Test (`graph-shelf.test.ts`): the node shows its own model/resolution over
+  the production master, and changing the pick emits a per-shot
+  `graphImageModel` patch.
+
+## Review
+
+Done. The image-gen node now owns its model/resolution per shot
+(`shot.graphImageModel`/`graphImageResolution`), seeding from the shot's pick
+first, then the storyboard master, then the remembered media default; changes
+persist onto the shot (and still update the global memo). This mirrors the video
+node, works identically under OpenArt MCP and the Higgsfield CLI, and survives
+the whole-document save path via `mergeRendererShot` (the fields are not in the
+main-owned deny list).
+
+Verify: `app` typecheck clean; `app` tests **1486 passed + 1 skipped** (131 files);
+`app` build clean; `core` **194 passed**. `CONTEXT.md` Media-defaults term updated.
+
+---
+
+# Node graph: refresh externally-edited generated takes (auto + right-click)
+
+User report: externally editing an image in the image-generation node's history
+didn't update in the node. Want auto-update, plus a right-click **Refresh**
+fallback in case auto fails.
+
+## Findings
+
+- Generated takes (board frames) *are* tracked: a take's "Edit externally"
+  (`openImageExternally`) hands the editor the archived **original** and
+  `trackExternalEdit`s the (original, jpeg) pair; the window-focus sweep
+  (`checkExternalEdits`) re-encodes the JPEG and emits `board:externalUpdate`.
+- But the node graph never refreshed: (a) `board:externalUpdate`'s renderer
+  handler bumped only `bustOne`/`bustAll` (BoardCard counters) — not the media
+  revision; (b) `graphMediaUrl` (the node graph's URL builder for generated
+  takes) carried **no** `?v=` revision and did not read `mediaRev`, so the URL
+  was stable across renders and the `<img>` kept its cached bitmap. References
+  already worked because `cascadeMedia` + `bumpMediaRev` are rev-aware.
+- No manual refresh affordance existed on a take.
+
+## Plan
+
+- [x] `NodeGraphModal.graphMediaUrl`: revision-aware (reads `mediaRev`, appends
+  `?v=`), so a bump changes every generated-take URL (preview + strip + history
+  modal).
+- [x] `ProductionWorkspace.onBoardExternalUpdate`: `bumpMediaRev(prodId, jpegRel)`
+  before the reload, so the auto path re-fetches the fresh pixels on re-render.
+- [x] Main `production:refreshMedia(productionId, rel)`: re-encode the JPEG from
+  its archived original **only when the original is newer** (a directly-edited
+  JPEG is never reverted). IPC channel + `CascadeApi.refreshMedia`.
+- [x] `GenerationMenu`: a **Refresh image/clip** item (`onRefresh` prop). The
+  node graph wires `stable.onRefreshGen` = `refreshMedia` → `bumpMediaRev` →
+  local `mediaRevTick` re-render (rebuilds node URLs); passed to all 5 generator
+  nodes, the lightbox menu, and the take-history modal.
+- [x] `mediaRevTick` added to `buildDerived`'s deps so a manual refresh
+  recomputes the node data.
+- [x] Tests: `generation-menu.test.ts` (Refresh item shown/labeled/routed,
+  omitted without a handler), `media-rev.test.ts` (bump semantics).
+
+## Review
+
+Done. The auto path now works end-to-end: a generated take opened via **Edit
+externally** is tracked, the focus sweep re-encodes its JPEG and emits
+`board:externalUpdate`, and the handler bumps the frame's media revision before
+reloading — since `graphMediaUrl` is now revision-aware, the node graph's
+preview, strip, and history modal all re-fetch the fresh pixels (for any take in
+the history, not just the shot's output frame). The right-click **Refresh
+image/clip** fallback goes through `production:refreshMedia` (re-encode from the
+original when it is the newer file), then bumps the revision and re-renders the
+node — a local `mediaRevTick` recomputes `buildDerived` without a production
+reload, so unsaved renderer edits survive. The Refresh item was also wired
+through the lightbox and the take-history modal.
+
+Verify: `app` typecheck clean; `app` tests **1489 passed + 1 skipped** (132
+files); `app` build clean; `core` **194 passed**. `CONTEXT.md` gained a
+"Generated-take external edits" bullet.
+

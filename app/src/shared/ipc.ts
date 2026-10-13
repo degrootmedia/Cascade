@@ -116,6 +116,34 @@ export interface ApprovalRequestIpc {
 
 export type ApprovalDecisionIpc = "allow" | "allow-session" | "allow-group-session" | "deny";
 
+/** A verification command: an argv array (never a shell string), never a
+ *  back door to a shell. Mirrors the core `VerifyCommand`. */
+export interface VerifyCommandIpc {
+  name: string;
+  argv: string[];
+  cwd?: string;
+}
+
+/** One verification command's outcome. Mirrors the core `VerifyResult`. */
+export interface VerifyResultIpc {
+  name: string;
+  argv: string[];
+  exitCode: number | null;
+  timedOut: boolean;
+  output: string;
+}
+
+/** The one-time consent request shown before any check auto-runs. */
+export interface VerificationRequestIpc {
+  id: number;
+  commands: VerifyCommandIpc[];
+}
+
+export type VerificationDecisionIpc = "workspace" | "session" | "deny";
+
+/** Optional OS-level sandbox mode for command execution (default "none"). */
+export type SandboxModeIpc = "none" | "srt" | "docker";
+
 /** Mirror of the core AgentEvent, safe to send over IPC. */
 export type AgentEventIpc =
   | { type: "text-delta"; text: string }
@@ -126,7 +154,11 @@ export type AgentEventIpc =
   | { type: "agent-done"; finalText: string; totalCredits: number }
   | { type: "group-enabled"; group: string }
   | { type: "notice"; text: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "verification-start"; commands: string[] }
+  | { type: "verification-result"; results: VerifyResultIpc[] }
+  | { type: "repair-round"; round: number; max: number }
+  | { type: "verification-exhausted"; rounds: number };
 
 /** An agent event tagged with the chat (session) it belongs to, so the renderer
  *  can route it to the right transcript even when multiple chats are live. */
@@ -281,7 +313,8 @@ export type DisplayItem =
   | { kind: "tool"; name: string; args: string; result?: string; isError?: boolean; images?: string[] }
   | { kind: "mention"; filename: string; image: string }
   | { kind: "agent-switch"; agentId: string | null; name: string; description?: string; model?: string; avatar: { kind: "emoji"; value: string } | { kind: "image"; path: string } | null; avatarDataUrl?: string | null; at: string }
-  | { kind: "notice"; text: string };
+  | { kind: "notice"; text: string }
+  | { kind: "checks"; commands: string[]; results?: VerifyResultIpc[]; exhausted?: number };
 
 /** API exposed to the renderer via contextBridge. */
 export interface CascadeApi {
@@ -299,8 +332,11 @@ export interface CascadeApi {
   /** Whether autonomous mode is currently on for the given chat. */
   getAutonomousMode(sessionId: string): Promise<boolean>;
   respondApproval(id: number, decision: ApprovalDecisionIpc): void;
+  /** Answer the one-time "run these checks automatically?" consent request. */
+  respondVerification(id: number, decision: VerificationDecisionIpc): void;
   onAgentEvent(cb: (e: ChatEvent) => void): () => void;
   onApprovalRequest(cb: (req: ApprovalRequestIpc) => void): () => void;
+  onVerificationRequest(cb: (req: VerificationRequestIpc) => void): () => void;
   /** Called when a reference image is picked/uploaded via the OpenArt native picker. */
   onMentionAdded(cb: (e: { sessionId: string; dataUrl: string; filename: string }) => void): () => void;
 
@@ -381,6 +417,12 @@ export interface CascadeApi {
   /** Default for new chats: start in autonomous mode (no approval prompts). */
   getAutonomousByDefault(): Promise<boolean>;
   setAutonomousByDefault(v: boolean): Promise<void>;
+  /** Whether the agent may capture the primary display (`capture_screen` tool). */
+  getScreenCaptureEnabled(): Promise<boolean>;
+  setScreenCaptureEnabled(v: boolean): Promise<void>;
+  /** Optional OS-level sandbox for command execution (default "none"). */
+  getSandboxMode(): Promise<SandboxModeIpc>;
+  setSandboxMode(v: SandboxModeIpc): Promise<void>;
   /** Credit-free dry run: build + log the request, throw before vendor call. */
   getSubmissionDryRun(): Promise<boolean>;
   setSubmissionDryRun(v: boolean): Promise<void>;
@@ -813,7 +855,14 @@ export interface CascadeApi {
    * when absent the shot's current frame is used. The result is stored on the
    * video generation node. Returns the updated production.
    */
-  generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[] }): Promise<Production>;
+  generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  /**
+   * Step 3 node graph: finalize a Seedance 2.5 draft take (480p) at 1080p,
+   * reusing the draft job's inputs. `rel` identifies the draft take; it is
+   * replaced in place by the full-resolution clip. Returns the updated
+   * production.
+   */
+  upgradeDraftVideo(productionId: string, shotId: string, nodeId: string, rel: string): Promise<Production>;
   /**
    * Shot sequence canvas: generate the sequence's clip. The member frames
    * wired into the video node ride as visual references (the first doubles as
@@ -936,6 +985,9 @@ export interface CascadeApi {
   get3daiCredits(): Promise<number | null>;
   /** Board external edit — re-encode any externally modified originals to their JPEG previews. */
   checkExternalEdits(): Promise<void>;
+  /** Re-derive one board frame's JPEG preview from its archived original (the
+   *  UI "Refresh" fallback for an externally edited take). No-op without one. */
+  refreshMedia(productionId: string, rel: string): Promise<void>;
   /** Fired after an externally edited board's JPEG preview has been regenerated. */
   onBoardExternalUpdate(cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void): () => void;
   /** Fired the moment a reference file is saved over outside Cascade, so every
@@ -1094,6 +1146,7 @@ export const ipcContract = {
 type SubscriptionMethod =
   | "onAgentEvent"
   | "onApprovalRequest"
+  | "onVerificationRequest"
   | "onMentionAdded"
   | "onOpenSettings"
   | "onZoomChanged"

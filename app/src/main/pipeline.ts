@@ -1104,17 +1104,24 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   };
   // Only explicit human-friendly tags assign images to a shot. This prevents
   // script text, legacy shot toggles, or old associations from being uploaded.
-  const candidates: ShotRef[] = [
-    ...p.characters.map((c) => ({ id: c.id, name: c.name, artwork: refArtworkDataUrl(p, c) })),
-    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
-    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, artwork: refArtworkDataUrl(p, r) })),
+  //
+  // Candidates are kept LAZY: their artwork is read (and base64-encoded) only
+  // when the shot actually cites the reference. Reading every reference's file
+  // for every shot in a batch was a large transient memory spike — a batch of
+  // shots each re-read all character sheets / plates / video refs at once.
+  type Candidate = { id?: string; name: string; read: () => string | undefined };
+  const candidates: Candidate[] = [
+    ...p.characters.map((c) => ({ id: c.id, name: c.name, read: () => refArtworkDataUrl(p, c) })),
+    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, read: () => refArtworkDataUrl(p, pr) })),
+    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, read: () => refArtworkDataUrl(p, r) })),
   ];
+  const materialize = (c: Candidate): ShotRef => ({ id: c.id, name: c.name, artwork: c.read() });
   const promptForTags = p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()
     ? p.magicPrompts[shot.id]
     : shot.prompt ?? "";
   for (const { name } of refTagMatches(promptForTags)) {
     const ref = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
-    if (ref) push(ref);
+    if (ref) push(materialize(ref));
   }
   // Style-only refs auto-attach after content refs (no tag required).
   // Per-ref `styleOnly` wins; otherwise the category `kind === "style"` flags it.
@@ -1124,7 +1131,7 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   for (const r of p.references ?? []) {
     if (r.styleOnly === true || (r.categoryId && styleCats.has(r.categoryId))) {
       const ref = candidates.find((c) => c.name.toLowerCase() === r.name.toLowerCase());
-      if (ref) push(ref);
+      if (ref) push(materialize(ref));
     }
   }
   return out;
@@ -1566,7 +1573,7 @@ export function newVideoNode(shot: ProductionShot, prompt: string, source?: Grap
 /** Store a generated clip on the named video node (newest first), creating the
  *  node when the shot has none yet (e.g. a classic generation after every
  *  video node was removed). */
-export function recordGraphVideoGen(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string): void {
+export function recordGraphVideoGen(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string, draftJobId?: string): void {
   const id = nodeId || "vid0";
   if (!shot.graphVideoNodes) shot.graphVideoNodes = videoNodesFor(shot);
   let node = shot.graphVideoNodes.find((n) => n.id === id);
@@ -1574,9 +1581,24 @@ export function recordGraphVideoGen(shot: ProductionShot, nodeId: string, rel: s
     node = { id, prompt: "" };
     shot.graphVideoNodes.push(node);
   }
-  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
+  const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString(), ...(draftJobId ? { draftJobId } : {}) };
   node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
   node.genIndex = 0;
+}
+
+/** Replace a stored video take in a node's history with a new file (the
+ *  Seedance draft → 1080p finalize keeps the same slot/selection), re-pointing
+ *  the shot's `videoPath` when that take fed the output. Returns the superseded
+ *  workspace-relative path (for the caller to unlink), or null when `rel` isn't
+ *  in the node's history. */
+export function replaceVideoGenTake(shot: ProductionShot, nodeId: string, rel: string, nextRel: string): string | null {
+  const node = (shot.graphVideoNodes ?? []).find((n) => n.id === (nodeId || "vid0"));
+  const idx = node?.gens?.findIndex((g) => g.path === rel) ?? -1;
+  if (!node || !node.gens || idx < 0) return null;
+  const item = node.gens[idx];
+  node.gens[idx] = { path: nextRel, prompt: item.prompt, model: item.model, at: new Date().toISOString() };
+  if (shot.videoPath === rel) shot.videoPath = nextRel;
+  return item.path;
 }
 
 /** The source frame an edit node edits, resolved to a workspace-relative path:

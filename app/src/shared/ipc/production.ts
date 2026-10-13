@@ -102,6 +102,12 @@ graphImageGenIndex?: number;
   /** Schema-driven advanced/variant params for the image gen node (keyed by
    *  canonical flag). Optional/additive. */
   graphImageParams?: GenParams;
+  /** The image gen node's own model pick (workspace model id). Saved per shot
+   *  so the node remembers its choice; falls back to the storyboard master
+   *  selector / media default when unset. Optional/additive. */
+  graphImageModel?: string;
+  /** The image gen node's own resolution pick (e.g. "1k"/"2k"/"4k"). */
+  graphImageResolution?: string;
   /** Node graph video generation node: stored clips (newest first) + index.
    *  @deprecated Migrated into `graphVideoNodes[0]` (id "vid0"). */
   graphVideoGens?: GraphGenItem[];

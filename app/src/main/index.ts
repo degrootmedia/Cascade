@@ -15,7 +15,7 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -33,12 +33,15 @@ import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, san
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
 import type { VoiceStatusIpc, WhisperModel } from "../shared/voice.js";
+import { makeVisionTools, type VisionHost } from "./vision-tools.js";
+import { makeVerificationResolver, type VerificationConsentStore } from "./verify-consent.js";
+import { capturePrimaryDisplay } from "./screen-capture.js";
 import { loadSkills, makeReadSkillTool, ensureSkillsDir, seedSkills } from "./skills.js";
 import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
 import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { makeProductionAgentTools, type ProductionOp } from "./production-tools.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
+import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, isSeedance25Model, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
 styleFrameOverride, normalizeCanvasBusy, normalizeCameraGridData, recordSequenceVideoGen, sequenceSelectedTake, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, 
 CAMERA_GRID_COLS, CAMERA_GRID_ROWS, type DisplayItem, type GraphSource, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
@@ -51,7 +54,7 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -63,6 +66,157 @@ let mcp: McpManager;
 let agentProductionTools: Record<string, AgentTool> = {};
 /** The single detached canvas window (Spec 03) — created in `whenReady`. */
 let detached: DetachedCanvasController | null = null;
+
+/**
+ * Append an internal error to `<userData>/crash.log` and surface a short notice
+ * to the renderer. A desktop app must never die silently: a stray exception or
+ * an unhandled rejection from a tool/stream would otherwise close the whole
+ * window with no trace. Logging the stack (and keeping the app alive) turns the
+ * next occurrence into something we can actually diagnose.
+ */
+/** Append one line to `<userData>/main.log`, rotating at ~2 MB. Best-effort. */
+function mainLog(line: string): void {
+  try {
+    const dir = app.getPath("userData");
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, "main.log");
+    try {
+      if (fs.statSync(p).size > 2_000_000) fs.renameSync(p, `${p}.1`);
+    } catch {
+      /* no existing log */
+    }
+    fs.appendFileSync(p, `[${new Date().toISOString()}] ${line}\n`, "utf8");
+  } catch {
+    /* logging is best-effort */
+  }
+}
+
+/** A one-line, stack-preserving string for a log argument. */
+function logArg(a: unknown): string {
+  if (a instanceof Error) return a.stack ?? `${a.name}: ${a.message}`;
+  if (typeof a === "string") return a;
+  try {
+    return JSON.stringify(a);
+  } catch {
+    return String(a);
+  }
+}
+
+function reportCrash(kind: string, err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  const line = `[${new Date().toISOString()}] ${kind}: ${detail}\n`;
+  try {
+    const dir = app.getPath("userData");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "crash.log"), line, "utf8");
+  } catch {
+    /* logging is best-effort */
+  }
+  mainLog(`${kind}: ${detail}`);
+  console.error(`[cascade] ${kind}:`, err);
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send("agent:event", {
+        sessionId: curId ?? "",
+        event: { type: "error", message: `Cascade hit an internal error (${kind}). Details were saved to crash.log.` },
+      });
+    }
+  } catch {
+    /* the window may already be gone */
+  }
+}
+
+// Keep the app alive and diagnosable instead of dying on an uncaught error.
+process.on("uncaughtException", (err) => reportCrash("uncaughtException", err));
+process.on("unhandledRejection", (reason) => reportCrash("unhandledRejection", reason));
+
+// Record main-process warnings/errors to main.log too: the dev console is often
+// minimized, so a library/agent error would otherwise vanish.
+{
+  const origError = console.error.bind(console);
+  const origWarn = console.warn.bind(console);
+  console.error = (...args: unknown[]) => {
+    mainLog(`ERROR ${args.map(logArg).join(" ")}`);
+    origError(...args);
+  };
+  console.warn = (...args: unknown[]) => {
+    mainLog(`WARN ${args.map(logArg).join(" ")}`);
+    origWarn(...args);
+  };
+}
+
+// A crashed renderer/child process is the most common way a desktop app
+// "disappears"; capture it (and the reason) so it isn't a silent dead end.
+let lastRendererReloadAt = 0;
+app.on("render-process-gone", (_e, wc, details) => {
+  reportCrash("render-process-gone", new Error(`${details.reason} exitCode=${details.exitCode} url=${safeUrl(wc)}`));
+  // Keep the app usable: a dead main-window renderer otherwise leaves a blank
+  // window the user just closes. Reload once, guarded against a reload loop.
+  if (wc === win?.webContents && details.reason !== "clean-exit" && details.reason !== "killed") {
+    if (Date.now() - lastRendererReloadAt > 30_000) {
+      lastRendererReloadAt = Date.now();
+      try {
+        wc.reload();
+      } catch {
+        try {
+          win?.reload();
+        } catch {
+          /* window already gone */
+        }
+      }
+    }
+  }
+});
+app.on("child-process-gone", (_e, details) => {
+  reportCrash("child-process-gone", new Error(`${details.type} ${details.reason} exitCode=${details.exitCode}`));
+});
+
+function safeUrl(wc: Electron.WebContents): string {
+  try {
+    return wc.getURL();
+  } catch {
+    return "(gone)";
+  }
+}
+
+// Memory watchdog: leave a trail when the main process approaches an OOM, so a
+// crash that bypasses the JS handlers (V8 abort) is still diagnosable.
+{
+  let warned = false;
+  const timer = setInterval(() => {
+    try {
+      const m = process.memoryUsage();
+      const rssMb = Math.round(m.rss / 1048576);
+      if (rssMb > 1500 && !warned) {
+        warned = true;
+        mainLog(`high memory: rss=${rssMb}MB heapUsed=${Math.round(m.heapUsed / 1048576)}MB`);
+      } else if (rssMb <= 1500) {
+        warned = false;
+      }
+    } catch {
+      /* ignore */
+    }
+  }, 30_000);
+  timer.unref?.();
+}
+
+/** Send to the main window, tolerating a destroyed/closed window or a payload
+ *  that can't be cloned — a failed send must never throw into the caller (an
+ *  agent turn, a generation runner, an IPC listener). */
+function safeSend(channel: string, payload: unknown): void {
+  try {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  } catch (e) {
+    mainLog(`send ${channel} failed: ${logArg(e)}`);
+  }
+}
+
+/** Send an agent event to the renderer without ever throwing back into the
+ *  agent loop (a destroyed window or an uncloneable payload must not abort a
+ *  turn). */
+function sendAgentEvent(sessionId: string, event: AgentEventIpc): void {
+  safeSend("agent:event", { sessionId, event });
+}
 
 /** Perf 1.3: memoized 480px board thumbnails. Keyed by
  *  productionId:shotId:framePath, validated by artworkPath:mtimeMs so a
@@ -255,7 +409,7 @@ function handleExternalRefChanges(productionId: string, changes: RefChange[]): v
       touched = true;
       if (shot.artwork) shotIds.push(shot.id);
     }
-    win?.webContents.send("references:externalUpdate", {
+    safeSend("references:externalUpdate", {
       productionId,
       refId: change.id,
       refRel: change.rel,
@@ -263,7 +417,7 @@ function handleExternalRefChanges(productionId: string, changes: RefChange[]): v
     } satisfies ReferencesExternalUpdate);
   }
   if (touched) {
-    win?.webContents.send("production:event", {
+    safeSend("production:event", {
       id: productionId,
       message: `External edit applied — refreshed the storyboard frame for reference ${changes.map((c) => c.rel).join(", ")}`,
       level: "done",
@@ -304,8 +458,8 @@ async function checkExternalEdits(): Promise<void> {
     if (ok) {
       w.mtimeMs = st.mtimeMs;
       w.size = st.size;
-      win?.webContents.send("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
-      win?.webContents.send("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
+      safeSend("board:externalUpdate", { productionId: w.productionId, jpegRel: w.jpegRel, originalRel: w.originalRel });
+      safeSend("production:event", { id: w.productionId, message: `External edit applied — refreshed preview for ${w.jpegRel}`, level: "done" } satisfies ProductionEvent);
     }
   }
   // Catch any reference change the directory watchers missed while backgrounded.
@@ -453,6 +607,10 @@ const chats = new Map<string, LiveChat>();
 /** Follower chats whose agent rebuild was deferred because a turn was running
  *  when the active production changed (see `rebindFollowChats`). */
 const deferredProductionRebind = new Set<string>();
+/** Per-model vision capability, recorded from each `models:list` response so
+ *  agent construction (synchronous) can decide whether to attach the on-demand
+ *  vision tools. Unknown models default to no vision (tools omitted). */
+const modelVisionCache = new Map<string, boolean>();
 /** The currently-focused chat id (what the transcript sidebar shows). */
 let curId: string | null = null;
 
@@ -472,7 +630,7 @@ function cur(): LiveChat | null {
 }
 
 function broadcastSessions(): void {
-  win?.webContents.send("sessions:updated", sessions.listSessions());
+  safeSend("sessions:updated", sessions.listSessions());
 }
 
 /** Working folder for a given chat: following the active production wins, then
@@ -512,7 +670,7 @@ function rebindFollowChats(): void {
 
 /** Tell the renderer the current chat's folder binding may have changed. */
 function emitWorkspaceChanged(): void {
-  win?.webContents.send("workspace:changed");
+  safeSend("workspace:changed", undefined);
 }
 
 /** Record which production is open; re-point follower chats when it changes. */
@@ -535,6 +693,38 @@ function requestApprovalFromUser(req: { tool: string; summary: string; detail: s
     // Flash the taskbar icon so a background approval prompt gets noticed.
     if (win && !win.isFocused()) win.flashFrame(true);
   });
+}
+
+// ---- verification consent plumbing ----------------------------------------
+let verifySeq = 0;
+const pendingVerifications = new Map<number, (d: VerificationDecisionIpc) => void>();
+
+/** Ask the user once whether the agent may auto-run detected checks. */
+function requestVerificationFromUser(commands: VerifyCommandIpc[]) {
+  return new Promise<VerificationDecisionIpc | "none">((resolve) => {
+    const id = ++verifySeq;
+    pendingVerifications.set(id, resolve);
+    win?.webContents.send("verification:request", { id, commands });
+    if (win && !win.isFocused()) win.flashFrame(true);
+  });
+}
+
+/** The per-chat store backing the verification-consent decision. */
+function verificationStoreFor(entry: LiveChat): VerificationConsentStore {
+  return {
+    getWorkspaceCommands: (ws) => settings.getVerifyCommands(ws),
+    setWorkspaceCommands: (ws, cmds) => settings.setVerifyCommands(ws, cmds),
+    getSessionCommands: () => (entry.session.verifyCommands?.length ? entry.session.verifyCommands : null),
+    setSessionCommands: (cmds) => {
+      entry.session.verifyCommands = cmds;
+      sessions.saveSession(entry.session);
+    },
+    isDeclined: () => entry.session.verifyDeclined === true,
+    setDeclined: () => {
+      entry.session.verifyDeclined = true;
+      sessions.saveSession(entry.session);
+    },
+  };
 }
 
 // ---- agent lifecycle ------------------------------------------------------
@@ -570,6 +760,36 @@ function filterTools(
   return out;
 }
 
+/** Build the vision-tools host: real screen capture + image encoding. Injected
+ *  into `makeVisionTools` so the tool module stays testable without Electron. */
+function makeVisionHost(): VisionHost {
+  return {
+    captureDisplay: () => capturePrimaryDisplay(),
+    saveCapture: (dataUrl, workspaceRoot) => {
+      const dir = path.join(workspaceRoot, "cascade-images");
+      fs.mkdirSync(dir, { recursive: true });
+      const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+      const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      fs.writeFileSync(path.join(dir, name), Buffer.from(b64, "base64"));
+      return `cascade-images/${name}`;
+    },
+    toModelImage: (bytes, mime) => {
+      try {
+        const img = nativeImage.createFromBuffer(bytes);
+        if (!img.isEmpty()) {
+          const { width, height } = img.getSize();
+          const long = Math.max(width, height);
+          const resized = long > 1024 ? img.resize(width >= height ? { width: 1024 } : { height: 1024 }) : img;
+          return `data:image/jpeg;base64,${resized.toJPEG(82).toString("base64")}`;
+        }
+      } catch {
+        /* fall through to the raw bytes */
+      }
+      return `data:${mime};base64,${bytes.toString("base64")}`;
+    },
+  };
+}
+
 /** Create (lazily) the Agent that streams a specific chat, bound to its entry. */
 function ensureAgent(entry: LiveChat): Agent {
   const apiKey = settings.getApiKey();
@@ -586,9 +806,7 @@ function ensureAgent(entry: LiveChat): Agent {
         pureChat: true,
         requestApproval: (req) => requestApprovalFromUser(req),
         onEvent: (e) => {
-          if (entry.agent === pureAgent) {
-            win?.webContents.send("agent:event", { sessionId: entry.session.id, event: e as AgentEventIpc });
-          }
+          if (entry.agent === pureAgent) sendAgentEvent(entry.session.id, e as AgentEventIpc);
         },
       });
       if (entry.session.history.length) pureAgent.loadHistory(entry.session.history);
@@ -663,6 +881,16 @@ function ensureAgent(entry: LiveChat): Agent {
       // For now, filter the MCP sets; built-in filtering is applied by pruning
       // the Agent's toolDefinitions post-construction (see below).
     }
+    // On-demand vision tools (view_image + capture_screen): offered only when
+    // the active model can actually see images (its flag was recorded from the
+    // last models:list). `capture_screen` is additionally gated by the Settings
+    // toggle. The core loop only feeds modelImages back when visionEnabled.
+    const effModel = agentModel || settings.getModel();
+    const visionOn = modelVisionCache.get(effModel) === true;
+    if (visionOn) {
+      const visionTools = makeVisionTools(makeVisionHost(), { capture: settings.getScreenCaptureEnabled() });
+      for (const [name, tool] of Object.entries(visionTools)) extraTools[name] = tool;
+    }
     extraTools = filterTools(extraTools, allowedTools);
     lazyTools = filterTools(lazyTools, allowedTools);
 
@@ -680,7 +908,7 @@ function ensureAgent(entry: LiveChat): Agent {
     const thisAgent = new Agent({
       apiKey,
       // An empty agent model means "follow the app default".
-      model: agentModel || settings.getModel(),
+      model: effModel,
       baseUrl: settings.getBaseUrl(),
       helperModel: settings.getHelperModel(),
       workspaceRoot: workspace,
@@ -688,7 +916,9 @@ function ensureAgent(entry: LiveChat): Agent {
       skills: skillsList,
       planMode: !!entry.session.planMode,
       autonomousMode: !!entry.session.autonomousMode,
+      visionEnabled: visionOn,
       maxIterations: settings.getMaxIterations(),
+      sandbox: settings.getSandboxMode(),
       // Session grants persisted on the chat file survive this rebuild, so an
       // "always allow" decision doesn't get asked for again after a production
       // switch or settings change.
@@ -704,14 +934,28 @@ function ensureAgent(entry: LiveChat): Agent {
         }
         sessions.saveSession(entry.session);
       },
+      // Automated verification feedback: the first successful mutation asks the
+      // user once whether detected checks (typecheck/lint/test) may auto-run;
+      // the decision is persisted per workspace or per session, and nothing runs
+      // when no config/detection exists.
+      resolveVerification: makeVerificationResolver({
+        workspace,
+        store: verificationStoreFor(entry),
+        prompt: (commands) => requestVerificationFromUser(commands),
+      }),
+      // Feed-forward: tell the model which checks exist once the user has
+      // approved them (session grant or workspace grant).
+      verificationCommands: (
+        entry.session.verifyCommands?.length
+          ? entry.session.verifyCommands
+          : (settings.getVerifyCommands(workspace) ?? [])
+      ).map((c) => c.name),
       extraTools,
       lazyTools,
       lazyGroupNotes,
       requestApproval: (req) => requestApprovalFromUser(req),
       onEvent: (e) => {
-        if (entry.agent === thisAgent) {
-          win?.webContents.send("agent:event", { sessionId: entry.session.id, event: e as AgentEventIpc });
-        }
+        if (entry.agent === thisAgent) sendAgentEvent(entry.session.id, e as AgentEventIpc);
       },
     });
     // Prune built-in tool definitions if agent has a restricted allowlist
@@ -751,6 +995,8 @@ function apiKeyRequired(): string {
 function rejectPendingApprovals() {
   for (const resolve of pendingApprovals.values()) resolve("deny" as ApprovalDecisionIpc);
   pendingApprovals.clear();
+  for (const resolve of pendingVerifications.values()) resolve("deny" as VerificationDecisionIpc);
+  pendingVerifications.clear();
   win?.flashFrame(false);
 }
 
@@ -778,9 +1024,10 @@ async function applyChatTitle(history: ChatMessage[], targetId: string, force: b
   return title;
 }
 
-/** Fire-and-forget auto-name right after a chat's first request. */
+/** Fire-and-forget auto-name right after a chat's first request. Never rejects:
+ *  a failed title call must not surface as an unhandled rejection. */
 function autoNameSession(entry: LiveChat): Promise<string | null> {
-  return applyChatTitle(entry.session.history, entry.session.id, false);
+  return applyChatTitle(entry.session.history, entry.session.id, false).catch(() => null);
 }
 
 // ---- IPC ------------------------------------------------------------------
@@ -843,7 +1090,13 @@ function registerIpc() {
       } catch {
         return;
       }
-      listener(event, ...args);
+      // A synchronous throw in a `send` listener is an uncaughtException (it
+      // would close the app); contain it to this channel.
+      try {
+        listener(event, ...args);
+      } catch (e) {
+        reportCrash(`ipc ${channel}`, e);
+      }
     });
   }
 
@@ -959,10 +1212,7 @@ function registerIpc() {
     entry.sendToken++; // invalidate the in-flight handler so it can't overwrite newer state
     entry.running = false; // unblock THIS chat's composer immediately
     // Clear the streaming cursor in that chat's transcript.
-    win?.webContents.send("agent:event", {
-      sessionId,
-      event: { type: "error", message: "Stopped by user." },
-    });
+    sendAgentEvent(sessionId, { type: "error", message: "Stopped by user." });
   });
 
   // Turn plan mode on/off for a chat. Persists per session and rebuilds that
@@ -977,14 +1227,11 @@ function registerIpc() {
     sessions.saveSession(entry.session);
     entry.agent?.stop();
     entry.agent = null; // rebuild with the new plan-mode flag next message
-    win?.webContents.send("agent:event", {
-      sessionId,
-      event: {
-        type: "notice",
-        text: entry.session.planMode
-          ? "Plan mode ON — Cascade will research and write a plan first; file edits and commands are gated until you approve it."
-          : "Plan mode OFF.",
-      },
+    sendAgentEvent(sessionId, {
+      type: "notice",
+      text: entry.session.planMode
+        ? "Plan mode ON — Cascade will research and write a plan first; file edits and commands are gated until you approve it."
+        : "Plan mode OFF.",
     });
   });
 
@@ -1003,14 +1250,11 @@ function registerIpc() {
     sessions.saveSession(entry.session);
     entry.agent?.stop();
     entry.agent = null;
-    win?.webContents.send("agent:event", {
-      sessionId,
-      event: {
-        type: "notice",
-        text: entry.session.autonomousMode
-          ? "Autonomous mode ON — Cascade will act without asking for approval. Turn it off any time."
-          : "Autonomous mode OFF.",
-      },
+    sendAgentEvent(sessionId, {
+      type: "notice",
+      text: entry.session.autonomousMode
+        ? "Autonomous mode ON — Cascade will act without asking for approval. Turn it off any time."
+        : "Autonomous mode OFF.",
     });
   });
 
@@ -1032,6 +1276,12 @@ function registerIpc() {
     pendingApprovals.get(id)?.(decision);
     pendingApprovals.delete(id);
     if (pendingApprovals.size === 0) win?.flashFrame(false); // nothing left awaiting input
+  });
+
+  on("verification:response", (_e, id: number, decision: VerificationDecisionIpc) => {
+    pendingVerifications.get(id)?.(decision);
+    pendingVerifications.delete(id);
+    if (pendingVerifications.size === 0 && pendingApprovals.size === 0) win?.flashFrame(false);
   });
 
   on("display:sync", (_e, sessionId: string, display: DisplayItem[]) => {
@@ -1251,6 +1501,18 @@ function registerIpc() {
     settings.setAutonomousByDefault(v === true);
   });
 
+  handle("settings:getScreenCaptureEnabled", () => settings.getScreenCaptureEnabled());
+  handle("settings:setScreenCaptureEnabled", (_e, v: boolean) => {
+    settings.setScreenCaptureEnabled(v === true);
+    resetAllAgents(); // rebuilt agents drop/restore the capture tool next message
+  });
+
+  handle("settings:getSandboxMode", () => settings.getSandboxMode());
+  handle("settings:setSandboxMode", (_e, v: SandboxModeIpc) => {
+    settings.setSandboxMode(v);
+    resetAllAgents(); // rebuilt agents wrap run_command with the new sandbox
+  });
+
   // Local voice input (Whisper): locate the CLI + ggml model, download the
   // model on first use, and transcribe the renderer's microphone PCM. The
   // engine seam (voice.ts) is pure node; these handlers only resolve app paths
@@ -1439,6 +1701,9 @@ function registerIpc() {
         return { ok: false, error: `Non-JSON response from ${settings.getBaseUrl()}/models: ${text.slice(0, 200)}` };
       }
       const models = normalizeModelList(extractModelList(json));
+      // Record each model's vision flag so agent construction can decide
+      // whether the on-demand vision tools apply (see modelVisionCache).
+      for (const m of models) modelVisionCache.set(m.id, m.vision);
       if (models.length === 0) {
         // An unrecognized /models shape silently hiding models is worse than
         // showing the raw reply so the schema can be fixed.
@@ -1710,7 +1975,7 @@ function registerIpc() {
   // ---- productions (Production Assistant) ----
   /** Stream a log line to the Production UI. */
   const productionEmit = (id: string, message: string, level: ProductionEvent["level"] = "info") => {
-    win?.webContents.send("production:event", { id, message, level } satisfies ProductionEvent);
+    safeSend("production:event", { id, message, level } satisfies ProductionEvent);
   };
 
   handle("production:list", () => productions.listProductions());
@@ -2647,7 +2912,7 @@ function registerIpc() {
       if (target?.kind === "videoPath") {
         if (shot.videoPath && shot.videoPath !== rel) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old clip already gone */ } }
         shot.videoPath = rel;
-        recordGraphVideoGen(shot, "vid0", rel, pending.prompt, pending.model);
+        recordGraphVideoGen(shot, "vid0", rel, pending.prompt, pending.model, pending.draftJobId);
         hookVideoGenToOutput(shot, "vid0");
       } else if (target?.kind === "editVideoNode") {
         // Legacy pending record (flat edit-video node): land it on the migrated
@@ -2664,7 +2929,7 @@ function registerIpc() {
         // bind the recovered take like a direct generation so it shows
         // without an unplug/replug round-trip.
         const nodeId = target?.kind === "videoNode" ? (target.nodeId ?? "vid0") : "vid0";
-        recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model);
+        recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model, pending.draftJobId);
         hookVideoGenToOutput(shot, nodeId);
         applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
       }
@@ -3024,6 +3289,25 @@ function registerIpc() {
 
   handle("production:checkExternalEdits", async () => {
     await checkExternalEdits();
+  });
+
+  // Re-derive a board frame's JPEG preview from its archived original (the
+  // high-quality file an external editor edits), so a UI "Refresh" picks up a
+  // change the focus sweep may have missed (e.g. the original was edited before
+  // "Edit externally" registered a watch). No-op when the file has no original.
+  handle("production:refreshMedia", (_e, id: string, rel: string) => {
+    const p = productions.loadProduction(id);
+    if (!p || typeof rel !== "string" || !rel) return;
+    const originalRel = originalForJpegRel(p, rel);
+    if (!originalRel || originalRel === rel) return;
+    // Only re-encode when the original is the newer file — i.e. the external
+    // editor's save is what's stale in the preview. If the JPEG itself is newer
+    // (edited directly), leave it so Refresh can't revert the user's work.
+    try {
+      const jpg = fs.statSync(assetPath(p, rel));
+      const orig = fs.statSync(assetPath(p, originalRel));
+      if (orig.mtimeMs > jpg.mtimeMs) regenerateBoardJpeg(p, originalRel, rel);
+    } catch { /* missing file — nothing to refresh */ }
   });
 
   // Step 3: image/video-capable models for the model dropdowns. Empty on
@@ -3631,12 +3915,24 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       const nodeId = typeof opts?.nodeId === "string" && opts.nodeId ? opts.nodeId : "vid0";
+      const modelChoice = typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto";
+      // A Seedance draft submission rides `params.draft`; it maps to the
+      // provider's explicit `draft` flag (forced 480p) and is stripped from the
+      // schema extras so the flag isn't emitted twice. Only the Seedance 2.5
+      // model has this capability — a stale flag on another model is ignored.
+      const draft = isSeedance25Model(modelChoice)
+        && (opts?.params?.draft === true || opts.params?.draft === "true" || opts.params?.draft === "1");
+      const paramBag = opts?.params && typeof opts.params === "object" ? { ...opts.params } : undefined;
+      if (paramBag && "draft" in paramBag) delete (paramBag as Record<string, unknown>).draft;
       const clean: VideoGenOptions = {
-        model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
+        model: modelChoice,
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
         durationSec: Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : 5,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
-        ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
+        // Schema-driven extras ride through opaquely; the provider's arg
+        // builder drops anything the active model's schema doesn't allow.
+        ...(paramBag && Object.keys(paramBag).length ? { params: paramBag } : {}),
+        ...(draft ? { draft: true } : {}),
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       // Additional references plugged into the video node's open sockets. Both
@@ -3677,15 +3973,18 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
       let rel: string;
+      let draftJobId: string | undefined;
       try {
-        rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs)).rel;
+        const res = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
+        rel = res.rel;
+        draftJobId = draft ? res.jobId : undefined;
       } catch (e) {
         // Tag the orphaned job so a later Fetch stores the clip on the video
         // generation node (and the output when it feeds it).
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
         throw e;
       }
-      recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
+      recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model, draftJobId);
       // A node-graph video generation is an explicit user action on this node —
       // bind it as the output feed at once so the clip shows without an
       // unplug/replug round-trip (a stale renderer save re-deriving the pipe
@@ -3694,6 +3993,41 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       hookVideoGenToOutput(shot, nodeId);
       applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: node video ready.`, "done");
+    })
+  );
+
+  // Finalize a Seedance 2.5 draft take at 1080p. The vendor reuses the draft
+  // job's inputs within its upgrade window; the full-res clip REPLACES the
+  // draft take in place (its 480p file is removed) so the node keeps one clean
+  // take, and the ledger bills the finalize as a second generation.
+  handle("production:upgradeDraftVideo", (_e, id: string, shotId: string, nodeId: string, rel: string) =>
+    runVideoJob(id, "finalizing a draft video at 1080p", async (p, emit) => {
+      const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+      if (!shot) throw new Error("Shot not found.");
+      const node = (shot.graphVideoNodes ?? []).find((n) => n.id === (nodeId || "vid0"));
+      const item = node?.gens?.find((g) => g.path === rel);
+      if (!item) throw new Error("That draft take is no longer in this node's history.");
+      if (!item.draftJobId) throw new Error("That take isn't an upgradeable Seedance draft.");
+      const clean: VideoGenOptions = {
+        model: item.model,
+        resolution: "1080p",
+        durationSec: Number(node?.durationSec) > 0 ? Number(node!.durationSec) : 0,
+        prompt: "",
+        draftJobId: item.draftJobId,
+      };
+      emit(`Shot ${shot.number}: finalizing the draft at 1080p…`);
+      let nextRel: string;
+      try {
+        nextRel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit)).rel;
+      } catch (e) {
+        // Surface the vendor reason with a hint about the upgrade window, since
+        // an expired draft is the common cause.
+        throw new Error(`${friendlyApiError(e)} The draft may be past its 7-day vendor upgrade window (or already finalized).`);
+      }
+      // Replace the take in place — same slot/selection, no dangling 480p file.
+      const superseded = replaceVideoGenTake(shot, nodeId, rel, nextRel);
+      if (superseded && superseded !== nextRel) { try { fs.unlinkSync(assetPath(p, superseded)); } catch { /* draft file already gone */ } }
+      emit(`Shot ${shot.number}: draft finalized at 1080p.`, "done");
     })
   );
 
@@ -5255,7 +5589,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     sessions.saveSession(entry.session);
     entry.agent?.stop();
     entry.agent = null;
-    win?.webContents.send("agents:switched", { sessionId, agentId: next, frame });
+    safeSend("agents:switched", { sessionId, agentId: next, frame });
   });
 
   // Every declared channel must be handled — catches contract drift.
@@ -5421,6 +5755,13 @@ function createWindow() {
   });
   if (saved?.isMaximized) win.maximize();
 
+  // Capture renderer errors/warnings into main.log — the renderer's console is
+  // invisible when the dev console is minimized, so a render crash would
+  // otherwise leave no trace.
+  win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    if (level >= 2) mainLog(`[renderer:${level === 3 ? "error" : "warn"}] ${message} (${sourceId}:${line})`);
+  });
+
   installApplicationMenu();
 
   // Remember size/position across restarts. Resize/move fire continuously,
@@ -5474,7 +5815,7 @@ function createWindow() {
   // sees stale pixels.
   win.on("focus", () => {
     win?.flashFrame(false);
-    void checkExternalEdits();
+    void checkExternalEdits().catch((e) => reportCrash("checkExternalEdits", e));
   });
 
   // External links open in the default browser, never inside the app.
@@ -5514,6 +5855,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  mainLog(`app ready — electron ${process.versions.electron}, chrome ${process.versions.chrome}, node ${process.versions.node}`);
   // First chat inherits the default folder.
   const s = sessions.newSessionFile(settings.getWorkspace(), null, settings.getFollowProduction(), settings.getAutonomousByDefault());
   sessions.saveSession(s); // persist so the active chat shows in the sidebar
@@ -5559,7 +5901,7 @@ app.whenReady().then(async () => {
     resolveLoadUrl: (ctx) => detachedLoadUrl(ctx.target),
     ensureVisible: ensureDetachedOnScreen,
     onClosed: () => {
-      if (win && !win.isDestroyed()) win.webContents.send("window:detachedClosed", {});
+      safeSend("window:detachedClosed", {});
     },
   });
   registerIpc();

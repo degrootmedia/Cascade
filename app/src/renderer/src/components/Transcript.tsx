@@ -103,6 +103,8 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
                 {item.text}
               </div>
             );
+          case "checks":
+            return <ChecksBlock key={itemKey(item)} item={item} />;
         }
       })}
       <div ref={endRef} />
@@ -140,6 +142,8 @@ function itemKey(item: DisplayItem): string {
       return `agentswitch:${item.agentId}:${item.at}:${item.name}`;
     case "notice":
       return `notice:${item.text}`;
+    case "checks":
+      return `checks:${item.commands.join(",")}:${item.results ? item.results.map((r) => `${r.name}:${r.exitCode}`).join(",") : "pending"}`;
   }
 }
 
@@ -300,6 +304,51 @@ function ToolCard({ item }: { item: ToolItem }) {
         <div className="tool-body">
           <pre className="tool-args">{item.args}</pre>
           {item.result !== undefined && <pre className="tool-result">{item.result}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ChecksItem = Extract<DisplayItem, { kind: "checks" }>;
+
+/** A collapsed-by-default block for an automated verification run. Reuses the
+ *  tool-group disclosure idiom; passing checks collapse to a single header. */
+function ChecksBlock({ item }: { item: ChecksItem }) {
+  const [open, setOpen] = useState(false);
+  const running = item.results === undefined;
+  const failed = item.results?.filter((r) => r.timedOut || r.exitCode !== 0) ?? [];
+  const status = running ? "running…" : failed.length ? `${failed.length} failed` : "passed";
+  return (
+    <div className={`checks-block${failed.length ? " error" : ""}${running ? " pending" : ""}`}>
+      <button type="button" className="checks-header" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="tool-chevron">{open ? "▾" : "▸"}</span>
+        <span className="checks-icon" aria-hidden="true">✓</span>
+        <span className="checks-title">Checks: {item.commands.join(", ")}</span>
+        <span className="checks-status">{status}</span>
+      </button>
+      {item.exhausted !== undefined && (
+        <div className="checks-exhausted">
+          Automatic repair attempts exhausted after {item.exhausted} round{item.exhausted === 1 ? "" : "s"}.
+        </div>
+      )}
+      {open && item.results && (
+        <div className="checks-body">
+          {item.results.map((r, i) => {
+            const bad = r.timedOut || r.exitCode !== 0;
+            return (
+              <div key={`${r.name}-${i}`} className={`check-row${bad ? " error" : ""}`}>
+                <div className="check-row-head">
+                  <span className="check-name">{r.name}</span>
+                  <span className="check-status">
+                    {r.timedOut ? "timed out" : r.exitCode === 0 ? "passed" : `exit ${r.exitCode ?? "?"}`}
+                  </span>
+                </div>
+                <pre className="check-command">{r.argv.join(" ")}</pre>
+                {r.output && <pre className="check-output">{r.output}</pre>}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

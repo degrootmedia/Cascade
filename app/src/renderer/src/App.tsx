@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, VoiceStatusIpc, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, VerificationRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, VoiceStatusIpc, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
 import { useVoiceInput } from "./voice-input.js";
 import { Transcript } from "./components/Transcript.js";
 import { TodoPanel } from "./components/TodoPanel.js";
 import { GoalPanel } from "./components/GoalPanel.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
+import { VerifyApprovalModal } from "./components/VerifyApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { OPEN_SETTINGS_EVENT } from "./components/settings/open-settings.js";
 import { ModelCustomizer } from "./components/ModelCustomizer.js";
@@ -26,6 +27,11 @@ import { expandCommand } from "../../shared/commands.js";
 import { applyAccent } from "./theme.js";
 
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+/** The production workspace is expensive and stays mounted while chats stream;
+ *  memoize it (with a stable `onOpenSettings`) so a per-token chat re-render
+ *  doesn't rebuild the whole workspace. */
+const MemoProductionWorkspace = memo(ProductionWorkspace);
 
 /** Whether an attachment is an image (rendered as a thumbnail, not a file chip). */
 function isImage(a: ChatAttachment): boolean {
@@ -59,8 +65,10 @@ export function App() {
     setInput(base ? `${base} ${transcript}` : transcript);
   });
   const [approval, setApproval] = useState<ApprovalRequestIpc | null>(null);
+  const [verification, setVerification] = useState<VerificationRequestIpc | null>(null);
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const openSettings = useCallback(() => setShowSettings(true), []);
   const [showModelCustomizer, setShowModelCustomizer] = useState(false);
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [credits, setCredits] = useState<ChatBalance | null>(null);
@@ -404,6 +412,7 @@ export function App() {
       if (event.type === "error") setBusyIds((p) => ({ ...p, [sessionId]: false }));
     });
     const offApproval = window.cascade.onApprovalRequest(setApproval);
+    const offVerification = window.cascade.onVerificationRequest(setVerification);
     const offRenamed = window.cascade.onSessionRenamed(() => void window.cascade.listSessions().then(setSessionList));
     const offMention = window.cascade.onMentionAdded(({ sessionId, dataUrl, filename }) => {
       updateTranscript(sessionId, (prev) => [...prev, { kind: "mention", filename, image: dataUrl }]);
@@ -418,6 +427,7 @@ export function App() {
       offSwitched();
       offEvent();
       offApproval();
+      offVerification();
       offRenamed();
       offMention();
       offTodos();
@@ -886,7 +896,7 @@ export function App() {
             : { display: "flex", flex: 1, minHeight: 0, minWidth: 0, flexDirection: "column" }
         }
       >
-        {prodEverOpen && <ProductionWorkspace onOpenSettings={() => setShowSettings(true)} />}
+        {prodEverOpen && <MemoProductionWorkspace onOpenSettings={openSettings} />}
       </div>
       {approval && (
         <ApprovalModal
@@ -894,6 +904,15 @@ export function App() {
           onDecision={(d) => {
             window.cascade.respondApproval(approval.id, d);
             setApproval(null);
+          }}
+        />
+      )}
+      {verification && (
+        <VerifyApprovalModal
+          request={verification}
+          onDecision={(d) => {
+            window.cascade.respondVerification(verification.id, d);
+            setVerification(null);
           }}
         />
       )}
@@ -949,6 +968,33 @@ function applyEvent(prev: DisplayItem[], e: AgentEventIpc): DisplayItem[] {
       return [...clearStreaming(prev), { kind: "notice", text: e.message }];
     case "notice":
       return [...prev, { kind: "notice", text: e.text }];
+    case "verification-start":
+      return [...prev, { kind: "checks", commands: e.commands }];
+    case "verification-result": {
+      // Attach to the most recent checks block still awaiting its results.
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const item = prev[i];
+        if (item.kind === "checks" && item.results === undefined) {
+          const updated = [...prev];
+          updated[i] = { ...item, results: e.results };
+          return updated;
+        }
+      }
+      return [...prev, { kind: "checks", commands: e.results.map((r) => r.name), results: e.results }];
+    }
+    case "repair-round":
+      return [...prev, { kind: "notice", text: `Checks failed — fixing (round ${e.round}/${e.max})…` }];
+    case "verification-exhausted": {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const item = prev[i];
+        if (item.kind === "checks" && item.exhausted === undefined) {
+          const updated = [...prev];
+          updated[i] = { ...item, exhausted: e.rounds };
+          return updated;
+        }
+      }
+      return prev;
+    }
     case "agent-done":
       return clearStreaming(prev);
     default:

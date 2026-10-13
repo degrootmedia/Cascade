@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type ProductionEvent, type SessionTasks, type SessionGoal, type DetachedCanvasContext, type CanvasBusySnapshot } from "../shared/ipc.js";
+import { ipcContract, type CascadeApi, type ChatEvent, type ApprovalRequestIpc, type ApprovalDecisionIpc, type VerificationRequestIpc, type ProductionEvent, type SessionTasks, type SessionGoal, type DetachedCanvasContext, type CanvasBusySnapshot } from "../shared/ipc.js";
 
 /**
  * Build `window.cascade` mechanically from the shared channel contract
@@ -26,6 +26,11 @@ function buildApi(): CascadeApi {
     const listener = (_e: unknown, req: ApprovalRequestIpc) => cb(req);
     ipcRenderer.on("approval:request", listener);
     return () => ipcRenderer.removeListener("approval:request", listener);
+  };
+  api.onVerificationRequest = (cb: (req: VerificationRequestIpc) => void) => {
+    const listener = (_e: unknown, req: VerificationRequestIpc) => cb(req);
+    ipcRenderer.on("verification:request", listener);
+    return () => ipcRenderer.removeListener("verification:request", listener);
   };
   api.onMentionAdded = (cb: (e: { sessionId: string; dataUrl: string; filename: string }) => void) => {
     const listener = (_e: unknown, e: { sessionId: string; dataUrl: string; filename: string }) => cb(e);

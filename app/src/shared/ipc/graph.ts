@@ -369,6 +369,10 @@ export interface GraphGenItem {
   model: string;
   /** ISO timestamp. */
   at: string;
+  /** Present when this clip is a Seedance 2.5 **draft** (480p): the vendor job
+   *  id needed to finalize it at 1080p within the vendor's window. Absent for
+   *  ordinary takes and for an already-finalized draft. */
+  draftJobId?: string;
 }
 
 /** One action block on the in-betweener timeline: a start keyframe, an end
@@ -429,6 +433,9 @@ export interface PendingVideoGen {
   params?: Record<string, string | number | boolean | string[]>;
   /** The frame the clip was animated from (provenance for the node output). */
   sourcePath?: string;
+  /** Set when the orphaned job was a Seedance draft: its vendor job id, so a
+   *  reclaimed clip is recorded as an upgradeable draft take. */
+  draftJobId?: string;
   /** Where a reclaimed clip belongs. Tagged by the call site (the provider
    *  only knows it generated a clip, not which node asked). */
   target?: PendingVideoTarget;

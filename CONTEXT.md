@@ -22,9 +22,12 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
 | ChatClient | `core/src/chat.ts` | The provider-agnostic OpenAI-compatible streaming client (`complete`/`completeOnce`/`balance`) every LLM call rides on; takes `apiKey` + `baseUrl` so the registry supplies the vendor. Background jobs (compaction, chat titles) use `AgentConfig.helperModel` — the cheapest discovered model, cached per provider in settings — never a hardcoded model id. |
 | Harness skills | `app/src/main/skills.ts` | The chat-side skill system: markdown instruction files the agent pulls in on demand via `read_skill`. Flat files or namespaced directories (`skills/spec/research.md` → `spec:research`); optional frontmatter (`kind: sequential|advisory|utility`, `triggers`, `namespace`) parsed by `parseFrontmatter`; advertised grouped-by-kind in the system prompt (`prompts.skillsPrompt`) so the model knows how to treat each. Bundled harness skills in `app/skills/` (`spec:` RPI, `oracle:` advisory, `code:` utilities) are seeded into `userData/skills/` on startup (`seedSkills`). |
 | Voice input | `app/src/main/voice.ts` + `renderer/src/voice-input.ts` | Local, offline speech-to-text for the chat composer (Windows-only at launch; the seam stays cross-platform). The main-process module mirrors `ffmpeg.ts`: `resolveWhisperBinary` resolves the bundled `whisper-cli` (Settings override → `CASCADE_WHISPER_BIN` → `resourcesPath/whisper` packaged → `resources/whisper` dev → PATH), `ensureWhisperModel` downloads the ggml model from the whisper.cpp HF repo **root** (`ggml-<size>.bin`, not under `models/`) into `userData/whisper` on first use behind an injected fetch seam, and `transcribeWav` runs `whisper-cli -m … -f … -otxt -of … --no-prints` and reads `-otxt`'s file (spawn/run is the injected seam). The renderer hook captures 16 kHz mono via `getUserMedia` + an `AudioContext`/`ScriptProcessor`, and on a rolling interval sends the accumulated PCM to `voice:transcribe` for a live interim transcript (one in-flight request, newest-wins); stopping transcribes once more and commits via a suffix. The mic button appears only when `voiceEnabled`; the model downloads on first record (`voice:prepare`) with progress on `voice:progress`. The binary is fetched by `scripts/fetch-whisper.mjs` (gitignored `resources/whisper/`) and shipped via electron-builder `extraResources`. |
+| On-demand vision | `core/src/types.ts` + `core/src/agent.ts` + `app/src/main/vision-tools.ts` + `main/screen-capture.ts` | The model's **eyes**, on demand — images are never pushed into context automatically. The core loop gained `ToolRunResult.modelImages` (data URLs the MODEL should receive, distinct from the UI-only `images`) and `AgentConfig.visionEnabled`: after a turn's tool calls, any collected `modelImages` are attached as ONE synthetic `user` turn (after the tool messages, so they stay contiguous; a user-message image part is the most widely supported shape) — and only when `visionEnabled`, so a non-vision model never gets image parts. Existing tools return no `modelImages`, so their message stream is byte-identical. `vision-tools.ts` (`makeVisionTools(host, {capture})`, `VisionHost` = the test seam) builds `view_image` (any workspace image via core's `resolveSafe` — a generated frame/still, a reference, a saved MCP image; downscaled ≤1024px JPEG; read-only, no approval) and, when capture is enabled, `capture_screen` (approval-gated, primary display). `screen-capture.ts` resolves Electron's `desktopCapturer`/`screen` lazily (soft-import, injectable `CaptureDeps`), caps the long edge at 2560, and returns the PNG data URL; captures are saved under `<workspace>/cascade-images/` so the model can re-view them. Wiring (`makeVisionHost` in `index.ts`) does the actual `nativeImage` downscale + `toJPEG(82)`. Both tools are added to a chat agent's `extraTools` only when the active model reports vision (recorded per model from each `models:list` response in `modelVisionCache`) and `settings.screenCaptureEnabled` is on (default true; Settings → Agent toggle). `productionDigest` now exposes each shot's working-folder-relative `artworkPath`/`videoPath` and each reference's `imagePath` so the model can `view_image` a generation and decide to regenerate it. |
 | Plan mode | `core/src/planmode.ts` + `app/src/shared/commands.ts` | The Research→Plan→Implement gate: `AgentConfig.planMode` turns on a system-prompt directive and `planGate` blocks `write_file`/`edit_file`/`run_command` in the loop until the plan is approved. Toggled per chat (persisted on the session), surfaced via a composer chip and `/plan-mode on|off`. **Autonomous mode** is the inverse: `AgentConfig.autonomousMode` skips the approval gate entirely (a system-prompt directive tells the model not to ask for confirmation), toggled per chat from the composer chip or `/autonomous on|off` (alias `/auto`), with a Settings default for new chats. The two are mutually exclusive (turning one on clears the other). `/research /plan /implement /finish /architect /challenge /review /commit` expand to skill instructions (`expandCommand`). |
+| Automated verification | `core/src/verify.ts` + `app/src/main/verify-consent.ts` | The agent's feedback sensor: after a **successful** mutating tool call the loop runs the workspace's configured checks (`detectVerifyCommands` proposes `check:fast`/`typecheck`/`lint`/`test` from `package.json`, in that order, plus `tsc --noEmit`/`python -m compileall` fallbacks) and, on failure, feeds a compact `formatVerificationFeedback` summary back as one `user` message for a bounded number of repair rounds (`VerificationConfig.maxRepairRounds`, default 2), then `verification-exhausted`. Commands are **argv arrays, never shell strings**, run with `shell:false` and a `resolveSafe` cwd (own 120s timeout, longer than `run_command`'s 60s); the repair loop never edits/skips/deletes tests. Disabled by default: `AgentConfig.verification` (static) or `AgentConfig.resolveVerification` (asked at most once per agent, on the first mutation) — with neither, the event stream is byte-identical to before. `AgentConfig.verificationRunner` is the runner seam; `verifyAfterMutation` never runs in pure chat, on the terminal iteration, or when the plan gate blocked the mutation (only a successful mutation sets `dirty`). The host side is `makeVerificationResolver` (injected store + consent prompt IS the test surface): a saved session grant or a saved **per-workspace** grant (`settings.verifyCommandsByWorkspace`, keyed by absolute folder path) runs the checks; otherwise the user gets one consent card ("Always for this folder / This chat only / Don't run"), and a folder with nothing detected stays silent. Events (`verification-start`/`verification-result`/`repair-round`/`verification-exhausted`) render as a collapsible **Checks** block; `AgentConfig.verificationCommands` feeds the detected names forward into the system prompt once approved. Consuming `OpenArtClient`'s cost-preflight precedent: never auto-run an unconfigured command. |
+| Command sandbox | `core/src/sandbox.ts` | Optional OS-level isolation for command execution, default `"none"` (approval + `shell:false` is **not** OS isolation and is never claimed as such). `applySandbox` wraps an argv for the selected backend — `"srt"` (Anthropic sandbox-runtime: `srt --deny-network --allow-write <ws> -- …`) or `"docker"` (network-off container mounted at the workspace) — and, when the backend isn't on PATH, returns the **unchanged** argv plus `sandboxFallbackNotice` rather than faking isolation. The Agent swaps the built-in `run_command` for a sandbox-wrapped variant (`makeSandboxedRunCommand`, shared `runCommandArgv` spawn path) and threads the mode into verification; `SandboxDeps.commandExists` is the test seam. Chosen in Settings → Advanced → Agent (default None). |
 | OpenArtClient | `app/src/main/providers/openart.ts` | The whole OpenArt integration: model discovery, live form-schema introspection, per-model option assignment, async image/video generation + polling, project resolution, video-options cache. Takes the `McpManager` as its constructor seam — that interface IS the test surface. Implements `MediaProvider` (foreign Higgsfield model ids resolve to the house default). Image polling prefers the **non-blocking** `openart_creation_get` (the blocking `creation_wait` is only a fallback) and tolerates transient per-call errors until the deadline, so a batch of concurrent waits can't pile up behind the MCP client's per-call timeout and discard a frame whose job already finished server-side. Any failure past submission that isn't a hard `OpenArtImageFailedError` (FAILED/CANCELLED) records the job as pending — on the shot (`shot.pendingImageGen`, reclaimed by `production:recheckBoard`) and through an optional `ImageGenFn` `onPending` sink for targets that aren't shots (a style frame, `production:recheckStyleFrame`). Video jobs get the same contingency across every flow: a wait cap or a failed result download records `shot.pendingVideoGen` (the call site tags its `target`), reclaimed by `production:recheckVideo`, which re-polls the vendor job, writes the clip, and applies it to the classic `videoPath`, the video node, the edit-video node, or an in-betweener block (billing the ledger once, like an image recheck). |
-| MediaProvider | `app/src/main/providers/` | The abstraction over image/video vendors: the `MediaProvider` interface (`types.ts`), the global registry (`registry.ts`), vendor-neutral `resolvePromptRefs` + `citePrompt` (`refs.ts` — both vendors bind references positionally from the submitted array, probed live on each), and the `HiggsfieldProvider` adapter (`higgsfield-cli.ts` — CLI-driven, `generate create/wait/get`, temp-file reference path, no project concept; ordinary non-tween submissions ride the reference path, dropped video refs downscaled to 720p first via `video-ref`; only in-betweener `frameRefs` bind start/end slots; `imageUpscaleModels()` probes the catalog's upscale families — Topaz, Bytedance Image Upscale — and `imageGenFn` omits `--prompt` when the model's schema declares none, since upscalers reject it). index.ts resolves the active vendor per call from the global settings selection. Model ids are namespaced (`higgsfield-cli:<id>`, legacy `higgsfield:<id>` routes to the CLI) where they leave the provider. An explicit model pick that isn't in the active vendor's catalog **throws instead of substituting** (a stale cross-vendor pick from a provider switch once billed a job to the wrong model while the dropdown showed another); only `auto`/empty fall back to the house default. |
+| MediaProvider | `app/src/main/providers/` | The abstraction over image/video vendors: the `MediaProvider` interface (`types.ts`), the global registry (`registry.ts`), vendor-neutral `resolvePromptRefs` + `citePrompt` (`refs.ts` — both vendors bind references positionally from the submitted array, probed live on each), and the `HiggsfieldProvider` adapter (`higgsfield-cli.ts` — CLI-driven, `generate create/wait/get`, temp-file reference path, no project concept; ordinary non-tween submissions ride the reference path, dropped video refs downscaled to 720p first via `video-ref`; only in-betweener `frameRefs` bind start/end slots; `imageUpscaleModels()` probes the catalog's upscale families — Topaz, Bytedance Image Upscale — and `imageGenFn` omits `--prompt` when the model's schema declares none, since upscalers reject it). index.ts resolves the active vendor per call from the global settings selection. Model ids are namespaced (`higgsfield-cli:<id>`, legacy `higgsfield:<id>` routes to the CLI) where they leave the provider. An explicit model pick that isn't in the active vendor's catalog **throws instead of substituting** (a stale cross-vendor pick from a provider switch once billed a job to the wrong model while the dropdown showed another); only `auto`/empty fall back to the house default. Seedance 2.5 **drafts** (Higgsfield CLI only): `VideoGenOptions.draft` submits the cheap 480p draft (`--draft true`, resolution forced from `DRAFT_RESOLUTION`), the finished take records its vendor job id (`GraphGenItem.draftJobId`), and `VideoGenOptions.draftJobId` runs the finalize path (`generate create <model> --draft-job-id <id> --wait`, no prompt/refs) that replaces the take at 1080p. |
 | MCP manager | `app/src/main/mcp.ts` | Connecting/owning MCP servers; namespaced tools; the `callRaw*` host-side call surface the media providers use. Config is the Claude Desktop-compatible `{ "mcpServers": … }` document in `userData/mcp.json`, reached over IPC as text (`mcp:getConfig`/`mcp:setConfig`) — main validates and rewrites it; the type lives in the MCP config grammar below. |
 | MCP config grammar | `app/src/shared/mcp-config.ts` | The one home for the `mcpServers` document shape (`McpServerConfig`/`McpConfigFile`, imported by `main/mcp.ts` so the type isn't duplicated) plus the pure parse/serialize/edit helpers the Settings **MCP Servers** section uses: tolerant `parseMcpConfigText` (readable error, never silently drops an unparseable config), `serializeMcpConfig`, `mcpTransport` (url ⇒ http, command ⇒ stdio), `upsertMcpServer`/`removeMcpServer` (position-preserving rename/edit), `validateMcpServer`, `cleanMcpServer` (drops blank fields + the unused transport's, preserves unknown keys), and the field-text codecs (`linesToArgs`/`envToText`/`textToNames`…). Unit-tested in `app/test/mcp-config.test.ts`. |
 | ModelgenClient | `app/src/main/modelgen.ts` | The 3D AI Studio REST integration: Tencent Hunyuan Pro text/image-to-3D generation (submit → poll → download), GLB bytes + credit balance. Takes the API key getter and an `HttpFetch` as constructor seams — that injection IS the test surface (`app/test/modelgen.test.ts`). |
@@ -74,6 +77,14 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   `app/src/shared/commands.ts` (`expandCommand`).
   The harness is designed to be **engineered** the same way as the software it
   produces — add skills for how you write code, test, and think about design.
+- **Automated verification** — the loop's feedback sensor. After a successful
+  mutation the agent runs the workspace's checks (detected from `package.json`
+  or configured by the user) and feeds failures back for a bounded number of
+  repair rounds, so it self-corrects instead of guessing. Off unless the user
+  consents (one card, once, on the first edit); see the Automated verification
+  module row. **OS-level sandbox** is the separate, default-off execution
+  isolation (`core/src/sandbox.ts`): approval + `shell:false` is reported as
+  what it is, never as OS isolation.
 - **Production** — one project folder with a 5-step pipeline state machine
   (`Production` in `shared/ipc.ts`). Owns scenes, styles, references, brand, assets.
 - **Active Production workspace** — the chat side's folder chip can bind a chat
@@ -154,6 +165,19 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   painting it — Design grid, node shelf, moodboard, suite — without a
   whole-document reload, so unsaved edits survive. The node canvas already read
   the live reference; the focus sweep (`checkExternalEdits`) stays as a fallback.
+- **Generated-take external edits** — a generated board frame edited outside
+  Cascade refreshes the node graph too. Opening a take's **Edit externally**
+  hands the editor its archived original and `trackExternalEdit`s the pair;
+  the window-focus sweep (`checkExternalEdits`) re-encodes the JPEG preview
+  (`regenerateBoardJpeg`) and emits `board:externalUpdate`, which bumps the
+  frame's media revision (`bumpMediaRev`) and reloads the production. The
+  node graph's generated-take URLs are revision-aware (`graphMediaUrl` appends
+  `?v=`, like `cascadeMedia`), so the re-render re-fetches the fresh pixels —
+  for any take in a node's history, not only the shot's output frame. The
+  shared take menu (`GenerationMenu`) also offers **Refresh image/clip** as a
+  fallback: `production:refreshMedia` re-encodes the JPEG from its original
+  (only when the original is newer, so a directly-edited JPEG is never reverted),
+  then the renderer bumps the revision (`stable.onRefreshGen`).
 - **Character sheet** — the generated reference image for a character (built by
   the Step 2 character builder): a full body shot (front, or front + back) with a
   face-closeup inset, always neutral pose/expression/lighting on a plain gray
@@ -213,7 +237,8 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   reference / character / tween). Every model dropdown seeds from its
   context's remembered choice (validated against the current list; existing
   per-shot/per-production persistence like `prod.openArt`,
-  `CharacterSheet.builder`, `shot.graphTweenModel` wins when set) and writes
+  `CharacterSheet.builder`, `shot.graphTweenModel`, and the image node's
+  `shot.graphImageModel`/`graphImageResolution` wins when set) and writes
   back on change via the renderer's `production/media-defaults.ts` cache —
   so each dropdown starts where the user last left it, globally.
 - **Model options schema** — the live per-model option surface, derived from
@@ -335,7 +360,19 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   the sequence canvas has a sequence-scoped edit handler
   (`production:generateSequenceEditVideo`).
 - **Node graph** — per-shot canvas of reference/composer/style/brand/output nodes
-  whose persisted state lives on `ProductionShot.graph*` fields. **Edit-image
+  whose persisted state lives on `ProductionShot.graph*` fields. Every removable
+  node (video/edit/tween/camera-grid/upscale, and either member of a pair)
+  carries a small **× in its top-right** (`withNodeDelete` wraps the node type;
+  `NodeDeleteContext` carries the request) so deletion never depends on keyboard
+  focus; both the × and the Delete key funnel through the same `onNodesChange`
+  engine. A node that still holds data (clips, prompt, pipes, output feed) is
+  **not refused** — a `window.confirm` (`toolDeleteWarning`) names exactly what
+  will be discarded, then the node and its wiring are removed. A generator node's
+  inline take strip shows only the newest `HISTORY_STRIP_LIMIT` (6) takes
+  (shared `GenHistoryStrip`); a **History** button appears beyond that and opens
+  the full-take `GraphHistoryModal` (`components/graph/history-modal.tsx`),
+  listing every stored take (bounded by `GRAPH_HISTORY_CAP`) with click-to-select
+  and the shared right-click menu. **Edit-image
   nodes** are a list (`graphEditNodes: GraphEditNode[]`), not a singleton: each
   has its own prompt, generation history, and `source` pipe (the image node,
   a reference, or a parent edit node), so any edit can daisy-chain into
@@ -526,6 +563,23 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   Records live on `prod.models3d`. Input images arrive as data URLs resolved in
   the renderer (from dragged in-app references, external drops, or the native
   file browser).
+- **Seedance draft** — a cheap low-resolution take whose vendor job can be
+  **finalized** at full resolution within the vendor's window (Higgsfield CLI:
+  `generate create seedance_2_5 --draft true` at 480p, then
+  `… --draft-job-id <id> --wait`). Offered only for the **Seedance 2.5** model
+  on the **Higgsfield CLI** (`isSeedance25Model` + `providerSupportsDraftUpgrade`)
+  — OpenArt MCP has no upgrade path. The video-generation node's **Draft (480p)**
+  toggle writes `params.draft`; `production:generateVideoNode` maps it (gated on
+  the Seedance 2.5 model) to `VideoGenOptions.draft`, and the finished take
+  stores the vendor job id as `GraphGenItem.draftJobId`. The node (and the
+  take-history modal) then offer **Finalize 1080p** → `production:upgradeDraftVideo`,
+  which reuses the draft job and **replaces the take in place**
+  (`pipeline.replaceVideoGenTake` drops the 480p file and re-points `videoPath`
+  when it fed the output; the ledger bills the finalize as a second generation).
+  A separate 480p-only **draft model** (e.g. OpenArt's "Seedance 2.5 Draft",
+  matched by name via `isDraftOnlyModel`) gets no toggle and its resolution
+  ladder collapses to 480p. The toggle is hidden on the shot-sequence canvas,
+  whose submit is a separate handler.
 
 ## Serialization grammars
 

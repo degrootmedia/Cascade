@@ -62,9 +62,17 @@ expect to find it.
   when a shot with a video generation has no registered clip; treat that warning
   as a blocker — reclaim or regenerate those shots, then assemble again. Never
   deliver a render that carries that warning.
-- You cannot see or hear the generated media (frames/clips come back as bytes,
-  not viewable images). Do not claim visual or audio quality — say what you
-  generated and let the user review it in the Production Assistant.
+- **Use your eyes to check every generation.** `view_image` opens a workspace
+  image so you can actually see it — pass the shot's `artworkPath` from the
+  digest (or the style/reference path). Look at each frame you generate and
+  judge the failures that matter: the subject not matching the cited `@[Name]`
+  references, broken faces/hands, artifacts or seams, garbled text, wrong
+  framing/composition, or a missing subject. When a frame is wrong, fix the
+  prompt (or the reference) and regenerate that shot before moving on — a bad
+  frame that silently reaches the animatic is far more expensive than looking.
+  Video clips are not viewable as images, so judge a clip from its source frame
+  and the returned `hasVideo` status. You cannot hear audio, so never claim
+  audio quality.
 - The active production is the default target. When you create one, keep the
   returned `id` and pass it as `productionId` on later calls.
 - Generation costs credits and time. Agree the plan (shot count, style, clip
@@ -87,7 +95,10 @@ expect to find it.
    (medium, rendering, palette, lighting — no story content). Anchor it with
    `cascade_generate_style_frame`. For each character call
    `cascade_generate_character_sheet` with a concrete visual description; cite
-   other references by name with `@[Name]` tags in the description.
+   other references by name with `@[Name]` tags in the description. **`view_image`
+   each style frame and character sheet and regenerate it if it's wrong** (the
+   look-anchor isn't the intended style, the sheet has the wrong design or broken
+   anatomy) before building the storyboard on top of it.
 4. **Wire references (Step 3, before the storyboard).** Call
    `cascade_generate_magic_prompts` to write a content prompt for every shot
    that cites the references each shot actually contains. This is what makes the
@@ -98,7 +109,9 @@ expect to find it.
    `shotIds` it fills every missing frame; pass `shotIds` (from
    `cascade_list_productions`) to regenerate specific shots. Frames are saved in
    the production's `boards/` folder with the style frame and each cited
-   reference attached.
+   reference attached. **Then `view_image` each frame** and check it against the
+   shot's prompt and cited references; regenerate any frame that is wrong (pass
+   its `shotId`) before generating videos from it.
 6. **Plan timing (Step 4, optional).** If the user wants a specific runtime,
    call `cascade_plan_animatic` to assign each shot a `durationSec` from the
    script. Confirm the resulting per-shot durations in the returned plan.
@@ -116,8 +129,10 @@ expect to find it.
    warnings: if it flags suspicious stills or blanks, fix those shots and
    assemble again before reporting success.
 9. **Report.** Tell the user the production name, its folder path, the runtime,
-   what was generated, and what to review in the Production Assistant. Be honest
-   that you could not see the frames/clips.
+   what was generated, what you checked with `view_image`, and what you
+   regenerated because of it. Point them to the Production Assistant for a full
+   review, and be honest about what you could not assess (audio, and clip
+   motion).
 
 ## Reference
 
@@ -139,6 +154,11 @@ expect to find it.
 | `cascade_generate_video` | 4 | Generate a shot's clip from its frame (style applied; cite refs). |
 | `cascade_recheck_video` | 4 | Reclaim a still-rendering clip so it registers. |
 | `cascade_assemble` | 5 | Build the export package (and optionally render MP4); warns on missing clips. |
+
+`view_image` is not a `cascade_*` tool — it is your on-demand eyes, offered when
+the active model is vision-capable. Point it at the workspace-relative paths the
+production digest returns (each shot's `artworkPath`, each reference's
+`imagePath`).
 
 This skill builds the production. Editing the app's own source code is a
 different task.

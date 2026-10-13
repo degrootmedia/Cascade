@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -583,6 +583,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   useEffect(() => {
     const off = window.cascade.onBoardExternalUpdate(async (e) => {
       if (prod?.meta.id && e.productionId !== prod.meta.id) return;
+      // Bump the edited frame's media revision first: every surface that builds
+      // its URL via `cascadeMedia`/`graphMediaUrl` (the node graph's generated
+      // takes included) then re-fetches the fresh pixels on the re-render below.
+      bumpMediaRev(e.productionId, e.jpegRel);
       try {
         const next = await window.cascade.loadProduction(e.productionId);
         if (next) {
@@ -2823,6 +2827,18 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
+  /** Step 3 node graph: finalize a Seedance 2.5 draft take (480p) at 1080p,
+   *  replacing it in place. */
+  async function upgradeDraftVideo(shotId: string, nodeId: string, rel: string) {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const next = await window.cascade.upgradeDraftVideo(prod.meta.id, shotId, nodeId, rel);
+      setProd(next);
+      bustOne(shotId);
+    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
+  }
+
   /** Step 3 node graph: run one edit-video node (mandatory source clip +
    *  prompt + references). Its source comes from the node's wiring. */
   async function runEditVideoNode(shotId: string, nodeId: string, model: string, prompt: string, params?: Record<string, string>) {
@@ -3651,6 +3667,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  edit-video node is disabled with an explanatory hint. */
   const videoEditUnavailable = !providerSupportsVideoEdit(mediaProviderId);
 
+  /** The Seedance 2.5 draft → 1080p finalize is Higgsfield-CLI only. */
+  const draftUpgradeAvailable = providerSupportsDraftUpgrade(mediaProviderId);
+
   if (!prod) {
     // Detached canvas: never show the picker — a missing production reads as a
     // clear "no longer available" state instead of a create form.
@@ -4471,10 +4490,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   endFrameModelIds={endFrameModelIds}
                   upscaleUnavailable={upscaleUnavailable}
                   videoEditUnavailable={videoEditUnavailable}
+                  draftUpgradeAvailable={draftUpgradeAvailable}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
                   onRunImageGen={(model, resolution, params) => graphShotId ? runImageGenNode(graphShotId, model, resolution, params) : Promise.resolve()}
                   onRunVideoGen={(nodeId, model, resolution, durationSec, params) => graphShotId ? runVideoGenNode(graphShotId, nodeId, model, resolution, durationSec, params) : Promise.resolve()}
+                  onUpgradeDraft={(nodeId, rel) => graphShotId ? upgradeDraftVideo(graphShotId, nodeId, rel) : Promise.resolve()}
                   onRunEditGen={(nodeId, model, resolution, params) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution, params) : Promise.resolve()}
                   onRunEditVideo={(nodeId, model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, nodeId, model, editPrompt, params) : Promise.resolve()}
                   onRunCameraGrid={(opts) => graphShotId ? runCameraGridGen(graphShotId, opts) : Promise.resolve()}

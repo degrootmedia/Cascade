@@ -127,6 +127,7 @@ export function productionDigest(p: Production): Record<string, unknown> {
       id: r.id,
       name: r.name,
       categoryId: r.categoryId ?? null,
+      imagePath: r.imagePath ?? null,
     })),
     scenes: p.scenes.map((sc) => ({ number: sc.number, title: sc.title, shotCount: sc.shots.length })),
     shots: p.scenes.flatMap((sc) =>
@@ -140,6 +141,10 @@ export function productionDigest(p: Production): Record<string, unknown> {
         hasFrame: !!s.artwork,
         hasVideo: !!s.videoPath,
         pendingVideo: !!s.pendingVideoGen,
+        // Working-folder-relative media paths, so the model can `view_image`
+        // a generated frame/clip and judge whether to regenerate it.
+        artworkPath: s.artwork ?? null,
+        videoPath: s.videoPath ?? null,
       }))
     ),
     assembly: p.assembly

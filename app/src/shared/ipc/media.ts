@@ -181,6 +181,39 @@ export type MediaDefaultCtx = "image" | "video" | "edit" | "reference" | "charac
  *  is "16:9". */
 export const DEFAULT_ASPECT_RATIO = "16:9";
 
+/** The resolution a cheap Seedance draft is generated at (the Higgsfield CLI's
+ *  `--draft` mode, forced regardless of the node's pick); the vendor finalizes
+ *  it at full resolution later. Shared by the provider and the node UI. */
+export const DRAFT_RESOLUTION = "480p";
+
+/** A model id with any `<vendor>:` namespace stripped (`higgsfield-cli:seedance_2_5`
+ *  → `seedance_2_5`). */
+export function rawMediaModelId(id: string): string {
+  const i = id.indexOf(":");
+  return i >= 0 ? id.slice(i + 1) : id;
+}
+
+/** Whether a model id is Seedance 2.5 — the ONLY model with the cheap 480p
+ *  draft → 1080p finalize capability. Accepts the common separators
+ *  (`seedance_2_5` / `seedance-2.5` / `seedance_2.5`); a distinct draft model
+ *  (`seedance_2_5_draft`) is deliberately NOT a match. */
+export function isSeedance25Model(id: string): boolean {
+  return /^seedance[-_]?2[._-]?5$/i.test(rawMediaModelId(id).trim());
+}
+
+/** Whether a video model is a cheap 480p-only "draft" model (e.g. OpenArt's
+ *  separate "Seedance 2.5 Draft"), matched from its display name or id so a
+ *  vendor rename still lands. Such a model only offers 480p. */
+export function isDraftOnlyModel(choice: { id: string; displayName?: string }): boolean {
+  return /draft/i.test(`${choice.id} ${choice.displayName ?? ""}`);
+}
+
+/** Whether the active vendor supports the Seedance draft → 1080p finalize
+ *  flow. Only the Higgsfield CLI does; OpenArt MCP has no upgrade path. */
+export function providerSupportsDraftUpgrade(id: MediaProviderId): boolean {
+  return id === "higgsfield-cli";
+}
+
 /** Normalize a chosen aspect ratio to the shared default. Empty/whitespace
  *  falls back to 16:9; otherwise the caller's value is returned verbatim
  *  (only values the model lists is ever submitted). */
@@ -256,6 +289,19 @@ export interface VideoGenOptions {
    * require it); the in-betweener keeps the start/end pair.
    */
   refsOnly?: boolean;
+  /**
+   * Generate a cheap low-res **draft** clip (Seedance 2.5 on the Higgsfield
+   * CLI: `--draft true`, forced to 480p) whose vendor job id can later finalize
+   * it at full resolution within the vendor's window. The finished draft take
+   * records its job id (`GraphGenItem.draftJobId`) so the UI offers an Upgrade.
+   */
+  draft?: boolean;
+  /**
+   * Finalize a previously-submitted draft: submit
+   * `<model> --draft-job-id <id> --wait`. No prompt/references are sent — the
+   * vendor reuses the draft job's inputs.
+   */
+  draftJobId?: string;
 }
 
 /** Per-config credit quote for one generation (Higgsfield CLI `generate

@@ -54,6 +54,7 @@ function installCascade() {
     onAgentSwitched: () => () => {},
     onAgentEvent: () => () => {},
     onApprovalRequest: () => () => {},
+    onVerificationRequest: () => () => {},
     onSessionRenamed: () => () => {},
     onMentionAdded: () => () => {},
     onTodosChanged: () => () => {},

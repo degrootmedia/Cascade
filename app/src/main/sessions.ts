@@ -6,7 +6,7 @@
  * this module owns the session shape and its back-fill rules.
  */
 import type { ChatMessage } from "@core";
-import type { DisplayItem, SessionMeta } from "../shared/ipc.js";
+import type { DisplayItem, SessionMeta, VerifyCommandIpc } from "../shared/ipc.js";
 import { createStore } from "./store.js";
 
 export interface SessionFile {
@@ -39,6 +39,10 @@ export interface SessionFile {
   allowedTools: string[];
   /** MCP server prefixes (e.g. "openart") granted "allow all" this session. */
   allowedToolGroups: string[];
+  /** Verification checks the user approved for THIS chat (auto-run after edits). */
+  verifyCommands: VerifyCommandIpc[];
+  /** The user declined auto-run checks for this chat, so the agent stops asking. */
+  verifyDeclined: boolean;
 }
 
 const store = createStore<SessionFile>({
@@ -59,6 +63,23 @@ function normalizeGrantList(v: unknown, max: number, maxLen: number): string[] {
     seen.add(s);
     if (out.length >= max) break;
     out.push(s);
+  }
+  return out;
+}
+
+/** Clean persisted verification commands: argv arrays only, never shell strings. */
+function normalizeVerifyCommands(v: unknown): VerifyCommandIpc[] {
+  if (!Array.isArray(v)) return [];
+  const out: VerifyCommandIpc[] = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as { name?: unknown; argv?: unknown; cwd?: unknown };
+    const name = typeof rec.name === "string" ? rec.name.trim() : "";
+    if (!name || !Array.isArray(rec.argv) || rec.argv.length === 0) continue;
+    if (!rec.argv.every((a) => typeof a === "string" && a.length > 0)) continue;
+    const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : undefined;
+    out.push(cwd ? { name, argv: rec.argv as string[], cwd } : { name, argv: rec.argv as string[] });
+    if (out.length >= 32) break;
   }
   return out;
 }
@@ -107,6 +128,10 @@ export function saveSession(s: SessionFile): void {
   }
   s.allowedTools = normalizeGrantList((s as { allowedTools?: unknown }).allowedTools, 256, 128);
   s.allowedToolGroups = normalizeGrantList((s as { allowedToolGroups?: unknown }).allowedToolGroups, 64, 64);
+  s.verifyCommands = normalizeVerifyCommands((s as { verifyCommands?: unknown }).verifyCommands);
+  if (typeof (s as { verifyDeclined?: unknown }).verifyDeclined !== "boolean") {
+    (s as SessionFile).verifyDeclined = false;
+  }
   store.save(s);
 }
 
@@ -148,6 +173,8 @@ export function newSessionFile(
     autonomousMode,
     allowedTools: [],
     allowedToolGroups: [],
+    verifyCommands: [],
+    verifyDeclined: false,
   };
 }
 

@@ -208,7 +208,7 @@ const seedance25Get = () =>
     aspect_ratios: ["auto", "16:9", "9:16"],
     parameters: [
       { name: "duration", options: [4, 8, 12], default: 4 },
-      { name: "resolution", options: ["720p", "1080p"], default: "720p" },
+      { name: "resolution", options: ["480p", "720p", "1080p"], default: "720p" },
       { name: "mode", options: ["t2v", "omni_reference"], default: "t2v" },
       { name: "prompt", options: [] },
     ],
@@ -823,6 +823,88 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
       productionId: "prod-1",
       shotId: "s1",
     });
+  });
+
+  it("submits a Seedance draft at 480p with --draft and returns the draft job id", async () => {
+    const seen: string[][] = [];
+    const jobId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_5": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/draft.mp4" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const prod = prodDir("prod-draft");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([1, 1]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    let res: { rel: string; jobId?: string };
+    try {
+      res = await p.generateVideoClip(
+        prod,
+        shot(),
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, resolution: "1080p", durationSec: 4, prompt: "animate", draft: true },
+        () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args[args.indexOf("--draft") + 1]).toBe("true");
+    // Draft forces 480p even though the caller asked for 1080p.
+    expect(args[args.indexOf("--resolution") + 1]).toBe("480p");
+    // The returned job id is what a later finalize needs.
+    expect(res.jobId).toBe(jobId);
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ kind: "video", resolution: "480p" }));
+  });
+
+  it("finalizes a draft via --draft-job-id with no prompt or references", async () => {
+    const seen: string[][] = [];
+    const newId = "11111111-2222-3333-4444-555555555555";
+    const draftId = "99999999-8888-7777-6666-555555555555";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_5": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: newId }));
+        },
+        [`generate wait ${newId}`]: () =>
+          ok(JSON.stringify([{ id: newId, status: "succeeded", video_url: "https://example.invalid/final.mp4" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const prod = prodDir("prod-finalize");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([2, 2]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await p.generateVideoClip(
+        prod,
+        shot(),
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, resolution: "1080p", durationSec: 5, prompt: "", draftJobId: draftId },
+        () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args[0]).toBe("seedance_2_5");
+    expect(args[args.indexOf("--draft-job-id") + 1]).toBe(draftId);
+    expect(args).not.toContain("--prompt");
+    expect(args).not.toContain("--start-image");
+    expect(args).not.toContain("--draft");
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ kind: "video", resolution: "1080p" }));
   });
 
   it("records a pending video when the wait outlives the cap, then a recheck reclaims it", async () => {

@@ -43,6 +43,11 @@ function displayText(items: DisplayItem[]): string[] {
       if (it.text?.trim()) out.push(it.text);
     } else if (it.kind === "mention") {
       if (it.filename?.trim()) out.push(it.filename);
+    } else if (it.kind === "checks") {
+      if (it.commands?.length) out.push(it.commands.join(" "));
+      for (const r of it.results ?? []) {
+        if (r.output?.trim()) out.push(r.output);
+      }
     }
   }
   return out;

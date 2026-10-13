@@ -43,6 +43,8 @@ import type {
   CameraGridGenOptions,
   CameraGridImportResult,
 } from "./ipc/camera-grid.js";
+import type { SelectGraphTakeRequest } from "./selected-output.js";
+import type { JobSnapshot } from "./ipc/jobs.js";
 import type {
   ProductionMeta,
   ProductionScene,
@@ -95,6 +97,7 @@ import type {
 // `shared/ipc.js` import path keeps working.
 export * from "./ipc/goal.js";
 export * from "./ipc/graph.js";
+export * from "./ipc/jobs.js";
 export * from "./ipc/ledger.js";
 export * from "./ipc/media.js";
 export * from "./ipc/production.js";
@@ -924,6 +927,27 @@ export interface CascadeApi {
    * Returns the updated production.
    */
   applyGraphRefOutput(productionId: string, shotId: string, refId: string): Promise<Production>;
+  /**
+   * Step 3 node graph: select the shot's output take through the one
+   * write-through — a storyboard promotion by stored path, a canvas selection
+   * by node kind + take index (the index moves; the mirrors re-derive only
+   * when that node feeds the output), or an unpipe. Main validates, applies,
+   * and returns the updated production, so the storyboard and the canvas can
+   * never show different outputs.
+   */
+  selectGraphTake(productionId: string, shotId: string, req: SelectGraphTakeRequest): Promise<Production>;
+  /**
+   * The main job ledger's current state for one production — every
+   * non-terminal generation job plus recently finished ones. Call on open,
+   * then subscribe via `onJobsChanged`, so busy/result state survives window
+   * reloads and is identical across windows (the ledger is main-authoritative).
+   */
+  jobsSnapshot(productionId: string): Promise<JobSnapshot>;
+  /**
+   * Subscribe to job-ledger changes. Fires for every production (filter by
+   * `snapshot.productionId`); returns the unsubscribe function.
+   */
+  onJobsChanged(cb: (snapshot: JobSnapshot) => void): () => void;
   /** Step 4: streamable `cascade-media://` URL for a shot's generated video. */
   videoUrl(productionId: string, shotId: string): Promise<string | null>;
   /** Step 4: remove a shot's generated video file and clear videoPath. */

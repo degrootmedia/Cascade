@@ -63,6 +63,7 @@ import { materializeGraph, videoNodesFor } from "../../../shared/graph/materiali
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
 import { canConnect, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
+import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../../../shared/graph/render.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
 import { GraphHistoryModal, type GraphHistoryItem, type GraphHistoryTarget } from "./graph/history-modal.js";
@@ -4193,36 +4194,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       // missed in-place edits (same count, changed item) AND rebuilt data on
       // every pass; when nothing genuinely differs the OLD node (and its data
       // reference) is reused verbatim so React Flow skips the re-render.
-      const sameGenItems = (x: unknown, y: unknown): boolean => {
-        const ax = x as { url: string; prompt: string; path: string }[];
-        const by = y as { url: string; prompt: string; path: string }[];
-        if (!Array.isArray(ax) || !Array.isArray(by) || ax.length !== by.length) return false;
-        return ax.every((it, i) => it.url === by[i]?.url && it.prompt === by[i]?.prompt && it.path === by[i]?.path);
-      };
-      const sameKeyframes = (x: unknown, y: unknown): boolean => {
-        const ax = x as { id: string; name: string; artwork: string }[];
-        const by = y as { id: string; name: string; artwork: string }[];
-        if (!Array.isArray(ax) || !Array.isArray(by) || ax.length !== by.length) return false;
-        return ax.every((k, i) => k.id === by[i]?.id && k.name === by[i]?.name && k.artwork === by[i]?.artwork);
-      };
-      let equal = true;
-      if (d.type !== old.type) equal = false;
-      else if (d.type === "composer") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.magicActive as boolean) === (b.magicActive as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "videogen") equal = (a.hasImageSource as boolean) === (b.hasImageSource as boolean) && (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
-      else if (d.type === "tween") equal = (a.refIds as string[]).length === (b.refIds as string[]).length && (a.refIds as string[]).every((v, i) => v === (b.refIds as string[])[i]) && sameKeyframes(a.keyframes, b.keyframes) && (a.blockCount as number) === (b.blockCount as number) && (a.readyBlocks as number) === (b.readyBlocks as number) && (a.stitched as boolean) === (b.stitched as boolean) && (a.reencoded as boolean) === (b.reencoded as boolean);
-      else if (d.type === "editgen") equal = (a.sourceHint as string) === (b.sourceHint as string) && (a.prompt as string) === (b.prompt as string) && (a.sourceRefId as string | undefined) === (b.sourceRefId as string | undefined) && (a.sourcePath as string | undefined) === (b.sourcePath as string | undefined) && (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
-      else if (d.type === "videoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "sequenceprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string) && JSON.stringify(a.segments) === JSON.stringify(b.segments);
-      else if (d.type === "editprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "editvideoprompt") equal = (a.value as string) === (b.value as string) && (a.includeBrand as boolean) === (b.includeBrand as boolean) && (a.refHandles as string[]).length === (b.refHandles as string[]).length && (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) && (a.openHandleId as string) === (b.openHandleId as string);
-      else if (d.type === "style") equal = (a.value as string) === (b.value as string);
-      else if (d.type === "brand") equal = (a.include as boolean) === (b.include as boolean);
-      else if (d.type === "ref") equal = (a.name as string) === (b.name as string) && (a.artwork as string) === (b.artwork as string) && (a.tagged as boolean) === (b.tagged as boolean) && (a.sourced as boolean) === (b.sourced as boolean) && (a.missing as boolean) === (b.missing as boolean) && (a.collapsed as boolean) === (b.collapsed as boolean) && (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined);
-      else if (d.type === "frame") equal = (a.previewUrl as string) === (b.previewUrl as string) && (a.previewKind as string) === (b.previewKind as string) && (a.bound as boolean) === (b.bound as boolean);
-      else if (d.type === "imagegen") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean);
-      else if (d.type === "editvideo") equal = (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean) && (a.piped as boolean) === (b.piped as boolean) && (a.sourceLabel as string | null) === (b.sourceLabel as string | null);
-      else if (d.type === "cameraGrid") equal = (a.sheetUrl as string | null) === (b.sheetUrl as string | null) && (a.sheetPath as string | undefined) === (b.sheetPath as string | undefined) && (a.cols as number) === (b.cols as number) && (a.rows as number) === (b.rows as number) && (a.savedModel as string | undefined) === (b.savedModel as string | undefined) && (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) && JSON.stringify(a.savedParams ?? {}) === JSON.stringify(b.savedParams ?? {}) && (a.sourceLabel as string | null) === (b.sourceLabel as string | null) && (a.gridSourceLabel as string | null) === (b.gridSourceLabel as string | null) && JSON.stringify(a.refIds) === JSON.stringify(b.refIds) && (a.models as unknown[]).length === (b.models as unknown[]).length;
-      else if (d.type === "upscale") equal = (a.savedModel as string | undefined) === (b.savedModel as string | undefined) && (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) && JSON.stringify(a.savedParams ?? {}) === JSON.stringify(b.savedParams ?? {}) && (a.sourceHint as string) === (b.sourceHint as string) && (a.sourceRefId as string | undefined) === (b.sourceRefId as string | undefined) && (a.sourcePath as string | undefined) === (b.sourcePath as string | undefined) && (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.models as unknown[]).length === (b.models as unknown[]).length;
+      // The per-type rules live in `shared/graph/reconcile.ts` — one
+      // registration per canvas type, enforced by the completeness test
+      // (a new node type must ship its equality rule or the test fails).
+      let equal = d.type === old.type && nodeDataEqual(d.type, a, b);
       if (equal) return old;
       changed = true;
       // A rebuilt node keeps its canvas geometry: position, selection, and —

@@ -73,6 +73,30 @@ const validators: Record<string, (args: unknown[]) => void> = {
     }
     checkPathString(args[1], "folder");
   },
+  "production:selectGraphTake": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "shotId");
+    const req = args[2];
+    if (!req || typeof req !== "object" || Array.isArray(req)) {
+      throw new Error("IPC validation: selectGraphTake request must be an object");
+    }
+    const r = req as Record<string, unknown>;
+    if (typeof r.path === "string") {
+      if (r.path.length > 4096) throw new Error("IPC validation: selectGraphTake path too long");
+      return;
+    }
+    if (r.kind === "unpipe") return;
+    if (r.kind === "imagegen" || r.kind === "editgen" || r.kind === "upscale" || r.kind === "videogen") {
+      if (typeof r.index !== "number" || !Number.isInteger(r.index) || r.index < 0) {
+        throw new Error("IPC validation: selectGraphTake index must be a non-negative integer");
+      }
+      if (r.nodeId !== undefined && typeof r.nodeId !== "string") {
+        throw new Error("IPC validation: selectGraphTake nodeId must be a string");
+      }
+      return;
+    }
+    throw new Error("IPC validation: selectGraphTake request shape invalid");
+  },
   "production:import": (args) => {
     checkPathString(args[0], "folder");
   },

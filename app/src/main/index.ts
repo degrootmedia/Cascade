@@ -19,7 +19,8 @@ import { ingestScript, refineStylePrompt, refineCharacterDescription, generateSt
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode } from "./pipeline.js";
+import { createJobLedger } from "./jobs.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
@@ -54,7 +55,9 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, JobSnapshot } from "../shared/ipc.js";
+import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
+import { jobForChannel, jobLabel } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1070,6 +1073,47 @@ function registerIpc() {
   // agent tools) can invoke a production operation directly without a renderer
   // round-trip or the sender/schema gate. Only mapped channels are reachable.
   const ipcListeners = new Map<string, (event: any, ...args: any[]) => unknown>();
+
+  // ---- Main job ledger (architecture hardening WS3) -----------------------
+  // One authoritative lifecycle for every generation job. Every generation
+  // channel passing through `handle` is recorded here (queued → running →
+  // succeeded/failed); renderers subscribe to snapshots so busy/result state
+  // is identical across windows and survives a reload. Non-terminal jobs are
+  // persisted to userData so a crash leaves them as `interrupted` — visible and
+  // recoverable (paired with the pending*/recheck affordances), never a
+  // silent drop or an indefinite spinner.
+  const jobLedgerFile = path.join(app.getPath("userData"), "jobs.json");
+  const jobLedger = createJobLedger({
+    persist(active) {
+      try {
+        const tmp = `${jobLedgerFile}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(active), "utf8");
+        fs.renameSync(tmp, jobLedgerFile);
+      } catch { /* persistence is best-effort; losing it only loses recovery metadata */ }
+    },
+    loadPersisted() {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(jobLedgerFile, "utf8"));
+        return Array.isArray(parsed) ? (parsed as JobSnapshot["jobs"]) : [];
+      } catch {
+        return [];
+      }
+    },
+  });
+  // The recovered (interrupted) jobs are no longer "running" — clear the file
+  // so a second crash can't re-mark them.
+  if (jobLedger.interrupted.length) {
+    try { fs.writeFileSync(jobLedgerFile, "[]", "utf8"); } catch { /* best-effort */ }
+  }
+  const broadcastJobs = (snapshot: JobSnapshot): void => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        if (!w.isDestroyed()) w.webContents.send("production:jobsChanged", snapshot);
+      } catch { /* a destroyed window must not break the broadcast */ }
+    }
+  };
+  jobLedger.subscribe(broadcastJobs);
+
   function handle(channel: string, listener: (event: import("electron").IpcMainInvokeEvent, ...args: any[]) => unknown): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
     ipcHandlers.add(channel);
@@ -1077,6 +1121,20 @@ function registerIpc() {
     ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
       if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
       validateIpcArgs(channel, args);
+      // Record generation jobs on the ledger — the wrapper, not the call
+      // site, so a generation can't ship without a job record.
+      const job = jobForChannel(channel, args);
+      if (job) {
+        const h = jobLedger.begin({ productionId: args[0] as string, ...job, label: jobLabel(job.kind) });
+        try {
+          const result = await listener(event, ...args);
+          h.succeed();
+          return result;
+        } catch (e) {
+          h.fail(e instanceof Error ? e.message : String(e));
+          throw e;
+        }
+      }
       return await listener(event, ...args);
     });
   }
@@ -1099,6 +1157,12 @@ function registerIpc() {
       }
     });
   }
+
+  // `production:jobsChanged` is a main→renderer broadcast (the ledger emits;
+  // renderers subscribe in preload) — the renderer never sends on it. The
+  // no-op listener keeps the contract-drift guard happy (every declared
+  // channel must be handled).
+  on("production:jobsChanged", () => {});
 
   // Detached canvas window (Spec 03): a single window, retargeted on reopen.
   // `detached` is assigned in `whenReady` before registerIpc() runs, so these
@@ -3862,7 +3926,6 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         throw e;
       }
       if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
-      shot.videoPath = rel;
       recordGraphVideoGen(shot, "vid0", rel, clean.prompt, clean.model);
       hookVideoGenToOutput(shot, "vid0");
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
@@ -4545,6 +4608,83 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       productionEmit(id, `Shot ${shot.number}: video removed.`);
     }
     return p;
+  });
+
+  // Step 3: select a shot's output take through the ONE write-through — the
+  // storyboard's Make Primary (by stored path) and the canvas's take
+  // select/cycle (by node kind + index) share this command, so both surfaces
+  // always resolve the same selected output. Main validates, applies the
+  // selection via `setShotSelectedOutput` (the only writer of the artwork/
+  // videoPath mirrors), and returns the updated production.
+  handle("production:selectGraphTake", (_e, id: string, shotId: string, req: SelectGraphTakeRequest): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    if ("path" in req) {
+      selectBoardFrame(shot, req.path);
+    } else if (req.kind === "unpipe") {
+      // The canvas's unpipeOutput clears the whole output binding: pipe ids
+      // and BOTH mirrors (the storyboard goes blank regardless of which kind
+      // was piped).
+      shot.graphOutputVideoNodeId = undefined;
+      shot.graphOutputEditNodeId = undefined;
+      setShotSelectedOutput(shot, { kind: "unpipe" });
+      shot.artwork = undefined;
+      shot.videoPath = undefined;
+    } else {
+      const checkIndex = (gens: GraphGenItem[] | undefined): void => {
+        if (req.index >= (gens ?? []).length) throw new Error("That take no longer exists.");
+      };
+      switch (req.kind) {
+        case "imagegen": {
+          checkIndex(shot.graphImageGens);
+          shot.graphImageGenIndex = req.index;
+          // Re-derive the mirrors only when this node feeds the output — a
+          // selection on an unbound node moves the index alone.
+          if (shot.graphOutputSource === "imagegen") setShotSelectedOutput(shot, { kind: "imagegen" });
+          break;
+        }
+        case "editgen": {
+          const node = getEditNode(shot, req.nodeId);
+          if (!node) throw new Error("That edit node no longer exists.");
+          checkIndex(node.gens);
+          node.genIndex = req.index;
+          if (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === node.id) {
+            setShotSelectedOutput(shot, { kind: "editgen", nodeId: node.id });
+          }
+          break;
+        }
+        case "upscale": {
+          if (!shot.graphUpscale) throw new Error("The upscale node no longer exists.");
+          checkIndex(shot.graphUpscale.gens);
+          shot.graphUpscale.genIndex = req.index;
+          if (shot.graphOutputSource === "upscale") setShotSelectedOutput(shot, { kind: "upscale" });
+          break;
+        }
+        case "videogen": {
+          const node = getVideoNode(shot, req.nodeId);
+          if (!node) throw new Error("That video node no longer exists.");
+          checkIndex(node.gens);
+          node.genIndex = req.index;
+          const boundId = shot.graphOutputVideoNodeId ?? "vid0";
+          if (shot.graphOutputSource === "videogen" && boundId === node.id) {
+            setShotSelectedOutput(shot, { kind: "videogen", nodeId: node.id });
+          }
+          break;
+        }
+      }
+    }
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // The main job ledger's current state for one production. A renderer calls
+  // this on open (and after a reload), then listens to `production:jobsChanged`
+  // — the ledger is authoritative, so a window opened mid-generation shows the
+  // live job immediately instead of guessing from its own local state.
+  handle("production:jobsSnapshot", (_e, productionId: string): JobSnapshot => {
+    return jobLedger.snapshot(typeof productionId === "string" ? productionId : undefined);
   });
 
   // Per-model video options for the generation modal/node: read the model's

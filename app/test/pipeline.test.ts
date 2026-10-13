@@ -773,13 +773,15 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
   it("an explicit classic video generation always takes over the output", () => {
     // The storyboard mirrors the output pipe and the animatic plays videoPath,
     // so a video the user asked for must bind videogen (the displaced still
-    // lives on in its node's history) or the sync would wipe the clip.
+    // lives on in its node's history) or the sync would wipe the clip. The
+    // real flow records the clip on the node first, then hooks — the
+    // write-through derives the clip mirror from the recorded take.
     const shot = makeShot({
       graphOutputSource: "editgen",
       graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 0, gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }] }],
-      videoPath: "videos/shot-0100-new.mp4",
     });
-    hookVideoGenToOutput(shot);
+    recordGraphVideoGen(shot, "vid0", "videos/shot-0100-new.mp4", "motion", "auto");
+    hookVideoGenToOutput(shot, "vid0");
     expect(shot.graphOutputSource).toBe("videogen");
     expect(shot.videoPath).toBe("videos/shot-0100-new.mp4");
     expect(shot.graphEditNodes).toHaveLength(1);

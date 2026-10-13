@@ -39,6 +39,8 @@ import { getPromptTemplate, primePromptTemplates } from "./production/prompt-tem
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
+import { resolveSelectedOutput } from "../../../shared/selected-output.js";
+import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -1079,6 +1081,27 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (typeof window.cascade.onCanvasBusy !== "function") return;
     return window.cascade.onCanvasBusy((s) => setRemoteCanvasBusy(s));
   }, []);
+
+  // ---- Main job ledger (architecture hardening WS3) -----------------------
+  // The ledger is the authoritative job state: every window requests the
+  // snapshot for the production on screen and then subscribes, so busy/result
+  // state is identical across windows and survives a reload — the peer busy
+  // relay above stays only as a fallback for pre-ledger surfaces.
+  const [ledgerJobs, setLedgerJobs] = useState<JobRecord[]>([]);
+  useEffect(() => {
+    if (!activeProdId || typeof window.cascade.jobsSnapshot !== "function") return;
+    let live = true;
+    void window.cascade.jobsSnapshot(activeProdId)
+      .then((s) => { if (live) setLedgerJobs(s.jobs); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [activeProdId]);
+  useEffect(() => {
+    if (typeof window.cascade.onJobsChanged !== "function") return;
+    return window.cascade.onJobsChanged((s) => {
+      if (s.productionId === prodRef.current?.meta.id) setLedgerJobs(s.jobs);
+    });
+  }, []);
   useEffect(() => {
     if (!activeProdId || typeof window.cascade.canvasBusyChanged !== "function") return;
     window.cascade.canvasBusyChanged({
@@ -1093,7 +1116,31 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
   }, [activeProdId, nodeImageBusyIds, nodeVideoBusyIds, nodeEditVideoBusyIds, nodeEditBusyIds, tweenBusyByShot, tweenStitchingIds, seqBusyIds]);
   // The sibling's snapshot is only meaningful for the production on screen.
-  const remoteBusy = remoteCanvasBusy && activeProdId && remoteCanvasBusy.productionId === activeProdId ? remoteCanvasBusy : null;
+  // The union ALSO folds in the main job ledger's running jobs — the ledger is
+  // authoritative, the peer snapshot the legacy fallback. Both windows derive
+  // this identically, so "Generating…" agrees everywhere without
+  // renderer-to-renderer mirroring for real jobs.
+  const ledgerCanvasBusy = useMemo(
+    () => (activeProdId ? jobsToCanvasBusy(activeProdId, ledgerJobs) : null),
+    [activeProdId, ledgerJobs],
+  );
+  const remoteBusy = useMemo(() => {
+    if (!activeProdId) return null;
+    const peer = remoteCanvasBusy && remoteCanvasBusy.productionId === activeProdId ? remoteCanvasBusy : null;
+    const led = ledgerCanvasBusy;
+    if (!peer && !led) return null;
+    const union = (a: string[] | undefined, b: string[] | undefined): string[] => [...new Set([...(a ?? []), ...(b ?? [])])];
+    return {
+      productionId: activeProdId,
+      image: union(peer?.image, led?.image),
+      video: union(peer?.video, led?.video),
+      editVideo: union(peer?.editVideo, led?.editVideo),
+      editNodes: union(peer?.editNodes, led?.editNodes),
+      tween: { ...(peer?.tween ?? {}), ...(led?.tween ?? {}) },
+      stitching: union(peer?.stitching, led?.stitching),
+      sequences: union(peer?.sequences, led?.sequences),
+    };
+  }, [activeProdId, remoteCanvasBusy, ledgerCanvasBusy]);
   /** `${sequenceId}:${nodeId}` generating here OR in the sibling window. */
   const seqBusyAll = useMemo(
     () => (remoteBusy ? new Set([...seqBusyIds, ...(remoteBusy.sequences ?? [])]) : seqBusyIds),
@@ -2463,17 +2510,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     saveField({ scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) });
   }
 
-  /** Step 3 node graph: make a generation node's selected output the shot's
-   *  primary output (artwork / videoPath). */
-  async function applyGraphOutput(shotId: string, kind: "image" | "video", path: string) {
-    if (!prod) return;
-    try {
-      const next = await window.cascade.applyGraphOutput(prod.meta.id, shotId, { kind, path });
-      setProd(next);
-      bustOne(shotId);
-    } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
-  }
-
   /** Patch one video node's fields on the shot's list (immutably). */
   function patchVideoNodeList(shot: ProductionShot, nodeId: string, patch: Partial<GraphVideoNode>): GraphVideoNode[] {
     return (shot.graphVideoNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n));
@@ -2514,18 +2550,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: pipe the image node's output into the output — binds
    *  it as the feed and applies its currently selected generation. The
-   *  storyboard mirrors the output node: a leftover video path is cleared, and
-   *  an empty image node leaves the frame blank. */
+   *  storyboard mirrors the output node: the optimistic mirrors derive from
+   *  the SHARED resolver (the same one main's write-through uses), so the two
+   *  sides can't disagree. */
   function pipeImageToOutput(shotId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const path = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
+    const pipe: Partial<ProductionShot> = { graphOutputSource: "imagegen", graphOutputRefId: undefined };
+    const out = resolveSelectedOutput({ ...shot, ...pipe });
     saveGraphShotFields(shotId, {
-      graphOutputSource: "imagegen",
-      graphOutputRefId: undefined,
+      ...pipe,
       videoPath: undefined,
-      artwork: path,
+      artwork: out.media === "still" ? out.path : undefined,
     });
   }
 
@@ -2551,22 +2588,24 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 node graph: pipe a video node's output into the output — binds it
-   *  as the feed and applies its currently selected clip. The storyboard
-   *  mirrors the output node: a leftover frame is cleared, and an empty video
-   *  node leaves the frame blank. */
+   *  as the feed and applies its currently selected clip. The optimistic
+   *  mirrors derive from the shared resolver (main's write-through derives the
+   *  same values authoritatively on the save). */
   function pipeVideoToOutput(shotId: string, nodeId: string) {
-    const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+    if (!prod) return;
+    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const node = (shot.graphVideoNodes ?? []).find((n) => n.id === nodeId) ?? shot.graphVideoNodes?.[0];
-    const path = node?.gens?.[node.genIndex ?? 0]?.path;
-    saveGraphShotFields(shotId, {
+    const pipe: Partial<ProductionShot> = {
       graphOutputSource: "videogen",
       graphOutputVideoNodeId: nodeId,
       graphOutputRefId: undefined,
+    };
+    const out = resolveSelectedOutput({ ...shot, ...pipe });
+    saveGraphShotFields(shotId, {
+      ...pipe,
       artwork: undefined,
-      ...(path ? {} : { videoPath: undefined }),
+      ...(out.media === "clip" && out.path ? { videoPath: out.path } : { videoPath: undefined }),
     });
-    if (path) void applyGraphOutput(shotId, "video", path);
   }
 
   /** Step 3 node graph: unbind the image node's output feed (and the output
@@ -2581,12 +2620,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => id !== TWEEN_KEY_IMGGEN);
     const editNodes = (shot.graphEditNodes ?? []).map((n) => (n.source?.kind === "imagegen" ? { ...n, source: undefined } : n));
     const videoNodes = (shot.graphVideoNodes ?? []).map((n) => (n.source?.kind === "imagegen" ? { ...n, source: undefined } : n));
+    const out = resolveSelectedOutput(shot);
     saveGraphShotFields(shotId, {
       graphImageToVideo: undefined,
       ...(videoNodes.some((n, i) => n !== (shot.graphVideoNodes ?? [])[i]) ? { graphVideoNodes: videoNodes } : {}),
       ...(editNodes.some((n, i) => n !== (shot.graphEditNodes ?? [])[i]) ? { graphEditNodes: editNodes } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
-      ...(shot.graphOutputSource === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
+      ...(out.source === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
     });
   }
 
@@ -2596,7 +2636,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (shot.graphOutputSource === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputVideoNodeId: undefined, videoPath: undefined });
+    if (resolveSelectedOutput(shot).source === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputVideoNodeId: undefined, videoPath: undefined });
   }
 
   /** Step 3 in-betweener: replace the ordered keyframe ref ids. Blocks are
@@ -2607,21 +2647,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 in-betweener: pipe the stitched continuous clip into the output —
-   *  binds the tween as the feed and applies the stitch. The storyboard
-   *  mirrors the output node: a leftover frame is cleared, and an unstitched
-   *  node leaves the frame blank. */
+   *  binds the tween as the feed and applies the stitch. The optimistic
+   *  mirrors derive from the shared resolver (main re-derives authoritatively). */
   function pipeTweenToOutput(shotId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const path = shot.graphTweenOutput;
+    const pipe: Partial<ProductionShot> = { graphOutputSource: "tween", graphOutputRefId: undefined };
+    const out = resolveSelectedOutput({ ...shot, ...pipe });
     saveGraphShotFields(shotId, {
-      graphOutputSource: "tween",
-      graphOutputRefId: undefined,
+      ...pipe,
       artwork: undefined,
-      ...(path ? {} : { videoPath: undefined }),
+      ...(out.media === "clip" && out.path ? { videoPath: out.path } : { videoPath: undefined }),
     });
-    if (path) void applyGraphOutput(shotId, "video", path);
   }
 
   /** Step 3 in-betweener: unbind the tween output feed (the stitched clip and
@@ -2630,7 +2668,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (shot.graphOutputSource === "tween") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+    if (resolveSelectedOutput(shot).source === "tween") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
   }
 
   /** Step 3 in-betweener: generate one action block's clip (prompt = the
@@ -2715,20 +2753,21 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: pipe one edit-image node's output into the output —
    *  binds it as the feed and applies its currently selected edit. The
-   *  storyboard mirrors the output node: a leftover video path is cleared, and
-   *  an empty edit node leaves the frame blank. */
+   *  optimistic mirrors derive from the shared resolver. */
   function pipeEditToOutput(shotId: string, nodeId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const node = (shot.graphEditNodes ?? []).find((n) => n.id === nodeId);
-    const path = node?.gens?.[node.genIndex ?? 0]?.path;
-    saveGraphShotFields(shotId, {
+    const pipe: Partial<ProductionShot> = {
       graphOutputSource: "editgen",
       graphOutputEditNodeId: nodeId,
       graphOutputRefId: undefined,
+    };
+    const out = resolveSelectedOutput({ ...shot, ...pipe });
+    saveGraphShotFields(shotId, {
+      ...pipe,
       videoPath: undefined,
-      artwork: path,
+      artwork: out.media === "still" ? out.path : undefined,
     });
   }
 
@@ -2743,23 +2782,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const keys = new Set([`${TWEEN_KEY_EDITGEN_PREFIX}${nodeId}`, ...(nodeId === "edit0" ? [TWEEN_KEY_EDITGEN] : [])]);
     const tweenRefIds = (shot.graphTweenRefIds ?? []).filter((id) => !keys.has(id));
     const videoNodes = (shot.graphVideoNodes ?? []).map((n) => (n.source?.kind === "editgen" && n.source.nodeId === nodeId ? { ...n, source: undefined } : n));
+    const out = resolveSelectedOutput(shot);
     saveGraphShotFields(shotId, {
       // The edit node's output may also feed the video node's source input.
       ...(shot.graphEditToVideo && shot.graphVideoSourceEditNodeId === nodeId ? { graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined } : {}),
       ...(videoNodes.some((n, i) => n !== (shot.graphVideoNodes ?? [])[i]) ? { graphVideoNodes: videoNodes } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
-      ...(shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === nodeId ? { graphOutputSource: undefined, graphOutputEditNodeId: undefined, artwork: undefined } : {}),
+      ...(out.source === "editgen" && shot.graphOutputEditNodeId === nodeId ? { graphOutputSource: undefined, graphOutputEditNodeId: undefined, artwork: undefined } : {}),
     });
   }
 
   /** Step 3 node graph: unbind whatever currently feeds the output — the
    *  storyboard frame goes blank until a generation is piped back in. Other
-   *  pipes (e.g. imagegen → videogen) are untouched. */
-  function unpipeOutput(shotId: string) {
+   *  pipes (e.g. imagegen → videogen) are untouched. Routes through the
+   *  selection command (main owns the output write-through). */
+  async function unpipeOutput(shotId: string) {
     if (!prod) return;
-    const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
-    if (!shot) return;
-    saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputRefId: undefined, graphOutputVideoNodeId: undefined, graphOutputEditNodeId: undefined, artwork: undefined, videoPath: undefined });
+    setErr(null);
+    try {
+      const next = await window.cascade.selectGraphTake(prod.meta.id, shotId, { kind: "unpipe" });
+      applySnapshot(next);
+      bustOne(shotId);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
   }
 
   /** Step 3 node graph: run the image generation node (prompt = the
@@ -3005,23 +3051,18 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     saveGraphShotFields(shotId, { graphEditNodes: (shot.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, prompt: text } : n)) });
   }
 
-  /** Step 3 node graph: select a generation node's stored output by index;
-   *  the piped node's selection becomes the shot's primary output. */
-  function selectGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo" | "upscale", index: number, nodeId?: string) {
+  /** Step 3 node graph: select a generation node's stored output by index; the
+   *  piped node's selection becomes the shot's primary output. Routes through
+   *  the ONE selection command (`production:selectGraphTake`) — main validates
+   *  the index, re-derives the storyboard mirrors, and returns the updated
+   *  production, so the canvas and the storyboard can never disagree. */
+  async function selectGraphGen(shotId: string, kind: "image" | "video" | "edit" | "editvideo" | "upscale", index: number, nodeId?: string) {
     if (!prod) return;
     const shot = prodRef.current?.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (kind === "upscale") {
-      const node = shot.graphUpscale;
-      const items = node?.gens;
-      if (!node || !items || !items[index]) return;
-      saveGraphShotFields(shotId, {
-        graphUpscale: { ...node, genIndex: index },
-        ...(shot.graphOutputSource === "upscale" ? { artwork: items[index].path, videoPath: undefined } : {}),
-      });
-      return;
-    }
     if (kind === "editvideo") {
+      // Legacy flat edit-video history (pre-multi-node documents only) — no
+      // stored node exists to select through, so it rides the plain save.
       const items = shot.graphEditVideoGens;
       if (!items || !items[index]) return;
       saveGraphShotFields(shotId, {
@@ -3030,28 +3071,23 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       });
       return;
     }
-    const editNode = kind === "edit" && nodeId ? (shot.graphEditNodes ?? []).find((n) => n.id === nodeId) : undefined;
-    const videoNode = kind === "video" ? ((shot.graphVideoNodes ?? []).find((n) => n.id === nodeId) ?? shot.graphVideoNodes?.[0]) : undefined;
-    const items = kind === "image" ? shot.graphImageGens : kind === "video" ? videoNode?.gens : editNode?.gens;
-    if (!items || !items[index]) return;
-    const bound = kind === "image" ? shot.graphOutputSource === "imagegen"
-      : kind === "video" ? shot.graphOutputSource === "videogen" && (shot.graphOutputVideoNodeId ?? "vid0") === (videoNode?.id ?? "vid0")
-      : (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === nodeId);
-    if (kind === "edit" && nodeId) {
-      saveGraphShotFields(shotId, {
-        graphEditNodes: (shot.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, genIndex: index } : n)),
-        ...(bound ? { artwork: items[index].path, videoPath: undefined } : {}),
-      });
-    } else if (kind === "video" && videoNode) {
-      saveGraphShotFields(shotId, {
-        graphVideoNodes: (shot.graphVideoNodes ?? []).map((n) => (n.id === videoNode.id ? { ...n, genIndex: index } : n)),
-        ...(bound ? { videoPath: items[index].path } : {}),
-      });
-    } else {
-      saveGraphShotFields(shotId, {
-        graphImageGenIndex: index,
-        ...(bound ? { artwork: items[index].path, videoPath: undefined } : {}),
-      });
+    // Bounds pre-check so a stale index (concurrent delete) fails fast.
+    const bounds = kind === "image" ? shot.graphImageGens
+      : kind === "video" ? ((shot.graphVideoNodes ?? []).find((n) => n.id === nodeId) ?? shot.graphVideoNodes?.[0])?.gens
+      : kind === "upscale" ? shot.graphUpscale?.gens
+      : (shot.graphEditNodes ?? []).find((n) => n.id === nodeId)?.gens;
+    if (!bounds || !bounds[index]) return;
+    setErr(null);
+    try {
+      const req = kind === "image" ? { kind: "imagegen" as const, index }
+        : kind === "video" ? { kind: "videogen" as const, nodeId, index }
+        : kind === "upscale" ? { kind: "upscale" as const, index }
+        : { kind: "editgen" as const, nodeId, index };
+      const next = await window.cascade.selectGraphTake(prod.meta.id, shotId, req);
+      applySnapshot(next);
+      bustOne(shotId);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -3189,14 +3225,15 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3: promote a browsed history frame back to primary for one shot.
-   *  The current frame swaps into the history (nothing is deleted). */
+   *  The current frame swaps into the history (nothing is deleted). Routes
+   *  through the same selection command the canvas uses, so both surfaces
+   *  resolve the same output. */
   async function promoteHistory(shotId: string, framePath: string) {
     if (!prod) return;
     setErr(null);
     try {
-      const next = await window.cascade.promoteBoardHistory(prod.meta.id, shotId, framePath);
-      prodRef.current = next;
-      setProd(next);
+      const next = await window.cascade.selectGraphTake(prod.meta.id, shotId, { path: framePath });
+      applySnapshot(next);
       bustOne(shotId);
       void refreshList();
     } catch (e) {

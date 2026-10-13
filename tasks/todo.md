@@ -3741,3 +3741,283 @@ Verify: `app` typecheck clean; `app` tests **1489 passed + 1 skipped** (132
 files); `app` build clean; `core` **194 passed**. `CONTEXT.md` gained a
 "Generated-take external edits" bullet.
 
+---
+
+# Architecture hardening: one source of truth per responsibility
+
+Source: `Cascade Architecture Review.pdf` (2026-10-12, extracted to text). The
+brief: several parts of the app can describe the same state differently, then
+overwrite or "heal" one another later — generated media has too many addresses
+(paths in many fields), the node graph has parallel representations (ports,
+views, equality, materializer, connect, merge, submit can drift), the
+storyboard mirrors and the shot pipe's selected output can disagree, and
+busy/queue state is inferred locally per window. Direction: incremental
+migration toward a media registry, one stored graph as the canvas's sole read
+path, a main-process job ledger, one selected output per shot, intent commands
+instead of whole-project saves, and an ownership table with a test that fails
+on unclassified fields. Rollout order: lock down today's behavior with
+guardrail tests → introduce authoritative services behind compatibility layers
+→ narrow write paths → retire the mirrors. Do NOT rewrite the app.
+
+## Handoff scope (first three risk-reducing changes)
+
+### Workstream 1 — completeness guardrails (node registration + field ownership)
+
+- [ ] 1.1 Extract the per-type reconciliation `equal` chain from
+      `NodeGraphModal.tsx` (4208–4225) into a shared pure module
+      (`shared/graph/reconcile.ts`) so a test can import it; wire
+      `NodeGraphModal` to it (no behavior change).
+- [ ] 1.2 `shared/graph/kinds.ts`: a typed per-kind registration
+      (`kind → { canvasType (nodeTypes key, incl. the documented
+      `output`→`frame` alias), equality, submitChannels, structural? }`)
+      consumed by `NodeGraphModal`'s `nodeTypes` keys + equality chain +
+      submit dispatch where mechanical. `GraphNodeKind` stays the enum.
+- [ ] 1.3 Node-registration completeness test (`app/test/node-registry.test.ts`):
+      iterate every `GraphNodeKind` (derived from the type, not a hard-coded
+      array — the existing 15-kind vs 13-kind drift in `graph-ports.test.ts:22`
+      vs `graph-model.test.ts:58` is the bug class) and fail if any of these is
+      missing: `ports.TABLE` row (`nodeDecl`), a `nodeTypes` view, an equality
+      case, a `nodeKindForId` resolution for its canonical id, a materializer
+      emission (fixture shot with every domain field set → `materializeGraph`
+      emits the kind), a merge/normalize policy entry, and at least one
+      declared submit channel.
+- [ ] 1.4 `main/shot-ownership.ts`: machine-readable ownership table for
+      `ProductionShot` — a `Record<keyof ProductionShot, OwnershipEntry>`
+      (owner: main | renderer | command | derived | deprecated; update
+      mechanism; merge behavior). Include the ~70 fields (deprecated flat
+      `graphVideo*`/`graphEditVideo*` fields classified `deprecated`).
+- [ ] 1.5 Ownership test (`app/test/shot-ownership.test.ts`): the compile-time
+      `Record` fails the build when a new field appears unclassified; assert
+      the table matches reality — `mergeRendererShot`'s DENIED set + special
+      cases are generated/derived from the table (make the table the source,
+      `mergeRendererShot` imports it), and every currently flow-through field
+      (`audio`…`outdatedAt`, `graphOutputSource` family, node sub-fields) has
+      an explicit entry.
+- [ ] 1.6 Verify: `npm run typecheck`, `npm test`, `npm run build` (app).
+
+### Workstream 2 — one selected output per shot (visible interop fix)
+
+Today `shot.artwork`/`shot.videoPath` (storyboard/animatic/export read) and the
+pipe (`graphOutputSource` + node take selections; canvas reads) are two
+answers to "what is this shot showing?", kept in sync by `syncBoardOutputToPipe`
+at load/save/rebase plus ad-hoc renderer mirror writes in every pipe/unpipe/
+select handler (ProductionWorkspace 2519–2763, 3010–3082). Per the brief's
+transitional option: keep `artwork`/`videoPath` as derived read models, written
+by exactly one write-through function; arbitrary callers stop setting them.
+
+- [ ] 2.1 `shared/selected-output.ts`: pure `resolveSelectedOutput(shot)` —
+      one resolver over the pipe (imagegen/editgen/upscale/videogen/tween/ref)
+      returning the current media (path, kind, source node). Unit-test every
+      branch (the acceptance matrix: canvas select → storyboard, storyboard
+      promote → canvas, export uses the same).
+- [ ] 2.2 Main-side single write-through (`pipeline.ts`):
+      `setShotSelectedOutput(shot, selection)` = the ONE function that updates
+      the pipe fields AND re-derives `artwork`/`videoPath` (via
+      `syncBoardOutputToPipe`, which stays as the derive step). `selectBoardFrame`,
+      `recordBoardEdit`, `applyVideoOutput`, `applyRefToOutput`,
+      `hookImageGenToOutput`, `hookVideoGenToOutput`, `unstitchTween`,
+      `deleteReference`, `replaceVideoGenTake`, `importBoard*` route through it.
+- [ ] 2.3 New command `production:selectGraphTake` (IPC contract entry): a
+      narrow selection command (shot id + node kind/id + take index, or ref id)
+      used by canvas select/cycle AND storyboard promote/history-browse —
+      validates, calls `setShotSelectedOutput`, returns the updated production.
+- [ ] 2.4 Renderer: strip the ad-hoc `artwork`/`videoPath` mirror writes from
+      `pipeImageToOutput`/`pipeRefToOutput`/`pipeVideoToOutput`/`pipeTweenToOutput`/
+      `pipeEditToOutput`/`pipeUpscaleToOutput`/`unpipe*`/`selectGraphGen`/
+      `cycleGraphGen` — they patch pipe fields only; mirrors arrive from main
+      (via the returned production). Canvas output preview and any renderer
+      resolver read `resolveSelectedOutput`.
+- [ ] 2.5 Tests: canvas select older take → storyboard shows it immediately
+      (and vice versa); stale renderer save cannot clobber the selection;
+      `boardFrameHistory`/promote still correct; export (`assemblyPlan`) uses
+      exactly the shown output; reload + reopen agree. E2E fixture: generate →
+      select → save → reload → export.
+- [ ] 2.6 Verify: `npm run typecheck`, `npm test`, `npm run build` (app).
+
+### Workstream 3 — main-process job ledger (authoritative busy state)
+
+Today busy state is React-local per window (`genQueue`, busy Sets), cleared by
+promise resolution; main's `enqueueGeneration`/`generationQueues` chains are
+invisible; the detached window only sees a peer-published `CanvasBusySnapshot`
+relay that misses every non-canvas surface and can't recover a missed
+completion. A window opened mid-generation shows nothing running.
+
+- [ ] 3.1 `main/jobs.ts`: deep module — `createJobLedger()` with a job record
+      `{ id, productionId, shotId?, nodeId?, kind, state: queued|running|
+      succeeded|failed, attempts, startedAt/finishedAt, result?, error? }`,
+      `beginJob`/`finishJob`/`failJob`, `snapshot(productionId)`, and a
+      subscription emitter. Wrapped around the existing runners
+      (`runProductionStep`, `runProductionJob`, `runVideoJob`, recheck flows,
+      magic-prompt batches) so every real generation gets a record — no change
+      to scheduling.
+- [ ] 3.2 IPC: `production:jobsSnapshot` (invoke) + `production:jobsChanged`
+      (send, broadcast to ALL windows — not `safeSend` to the main window
+      only); the detached window requests the snapshot on
+      `did-finish-load`/open, then listens.
+- [ ] 3.3 Renderer: node/storyboard busy display = union of ledger `queued|
+      running` jobs for the production + the local `GenerationQueue` (UI
+      serialization stays renderer-side for now); remove reliance on
+      `canvas:busyChanged` peer mirroring for real jobs (keep the channel as a
+      fallback until all surfaces read the ledger).
+- [ ] 3.4 Crash reconciliation: a persisted ledger file (userData, per
+      production) so a `running` job at startup becomes `interrupted` and
+      surfaces as a visible recoverable state (paired with the existing
+      `pendingImageGen`/`pendingVideoGen` recheck affordances) — no indefinite
+      spinner, no silent drop.
+- [ ] 3.5 Tests (`app/test/job-ledger.test.ts` + wiring): reopen
+      mid-generation shows the current state; both windows agree without
+      renderer-to-renderer mirroring; completion clears both; a lost
+      completion event cannot leave a spinner (snapshot on subscribe);
+      crash-after-provider-return reconciles. Also pin the "no indefinite
+      spinner" invariant: every non-terminal job either exists in the ledger
+      or is in a visible recovery state.
+- [ ] 3.6 Verify: `npm run typecheck`, `npm test`, `npm run build` (app);
+      full restart of the packaged/dev app before testing (main-process
+      change).
+
+### Regression scenario to keep permanently (added in 2.5/3.5)
+
+Open a project in the main and detached windows. Start a generation, edit a
+prompt, move a node, and reorder the storyboard before the generation
+completes. Then select the new result, save, close, reopen, and export. The
+same output, graph layout, prompt, order, and terminal job state must appear
+everywhere. Success looks boring: a completed generation remains selected,
+every surface agrees, and unrelated edits cannot make it disappear.
+
+## Deferred (per the rollout plan — separate passes after the three above land)
+
+- Phase 2: media registry with stable media IDs (`videoPath`, `graphVideoGens`,
+  `graphEditVideoGens`, `graphTweenOutput`, tween blocks, artwork history →
+  media IDs behind one adoption/move/delete service); legacy normalization on
+  load.
+- Phase 3: typed intent commands for the highest-risk whole-document saves
+  (move/resize node, reorder shots, rename shot), `applyRendererState` as a
+  compatibility boundary; stored graph becomes the canvas's sole read path.
+- Phase 4: retire mirrored `artwork`/`videoPath` writes, convert
+  `syncBoardOutputToPipe` to one-time migration, shrink `applyRendererState`
+  to legacy import, remove renderer queue state duplication.
+
+## Review
+
+Done — all three starter workstreams landed, verified by typecheck + tests +
+build at each step.
+
+**WS1 — completeness guardrails.**
+- `shared/graph/reconcile.ts` + `shared/graph/kinds.ts`: the reconciliation
+  equality chain extracted verbatim from `NodeGraphModal` (per-canvas-type
+  rules + the unknown-type EQUAL fallback — the historical default), plus a
+  declarative `NODE_KIND_REGISTRY` per kind (canvas type incl. the
+  `output`→`frame` alias, shot state field, submit channels, canonical ids).
+  `NodeGraphModal`'s reconciliation now calls `nodeDataEqual` instead of its
+  inline `else if` chain.
+- `main/shot-ownership.ts`: every `ProductionShot` field classified
+  (owner × merge rule); the compile-time `Record<keyof ProductionShot, …>`
+  fails the build on an unclassified field. `mergeRendererShot`'s DENIED set
+  is now derived from the table (`SHOT_MERGE_DENIED_FIELDS` ∪
+  `SHOT_INDEX_FIELDS`) — the table and the merge can't drift. The derived set
+  adds three fields the renderer never writes (`graphTweenReencoded`,
+  `outdated`, `outdatedAt`) — a stale whole-document save can no longer
+  overwrite them (grep-verified the renderer only reads them).
+- `node-registry.test.ts` (7) iterates every kind: ports row, node view,
+  equality rule, `nodeKindForId` resolution per canonical id, materializer
+  emission from a fully-loaded fixture, ownership classification of each
+  kind's state field, and submit channels that exist in the live
+  `ipcContract`. `shot-ownership.test.ts` (6) pins the classify-everything
+  contract, the deny/index buckets, and an end-to-end
+  stale-save-cannot-overwrite-main-owned-state case.
+
+**WS2 — one selected output per shot.**
+- `shared/selected-output.ts`: `resolveSelectedOutput(shot)` — the one
+  resolver over the pipe (imagegen/editgen/upscale/videogen/tween/ref),
+  shared by renderer and main.
+- `pipeline.ts`: `setShotSelectedOutput(shot, sel)` — the single write-through
+  for the pipe + `artwork`/`videoPath` mirrors (derives via
+  `syncBoardOutputToPipe`, which now resolves through the shared resolver).
+  `selectBoardFrame`, `recordBoardEdit`, `hookImageGenToOutput`,
+  `hookVideoGenToOutput`, `unstitchTween`, `applyRefToOutput`,
+  `importBoardDataUrl`, `importBoardVideo`, and the classic `generateVideo`
+  flow all land there; the renderer's pipe/unpipe/select handlers dropped
+  their hand-written mirror logic (optimistic mirrors derive from the shared
+  resolver; main re-derives authoritatively on every save).
+- New `production:selectGraphTake` command (contract + schema validator +
+  preload + handler): storyboard Make Primary (`{path}`), canvas take
+  select/cycle (`{kind, nodeId, index}` — index moves, mirrors re-derive only
+  when the node feeds the output), and canvas unpipe (`{kind:"unpipe"}`) now
+  share one main-side write-through; both surfaces apply the returned
+  production.
+- `selected-output.test.ts` (14): every resolver branch, every write-through
+  kind, canvas↔storyboard interop (select → storyboard mirror, promote →
+  fixed point), and the end-to-end regression (generation lands mid-session →
+  selection → stale whole-document save → merge keeps selection → export
+  resolves the shown output).
+
+**WS3 — main-process job ledger.**
+- `main/jobs.ts` (`createJobLedger`, injected persist/load/now/newId seams) +
+  `shared/ipc/jobs.ts` (`JobRecord`/`JobSnapshot`, `jobForChannel`,
+  `jobLabel`, `jobsToCanvasBusy`). The `handle()` IPC wrapper records every
+  generation channel's job — begin on invoke, succeed/fail with the result —
+  so a generation cannot ship without a job record and no call site had to
+  opt in (29 runner call sites untouched).
+- `production:jobsSnapshot` (invoke) + `production:jobsChanged` (send,
+  broadcast to ALL windows, not just the main one). Non-terminal jobs persist
+  to `userData/jobs.json`; on startup a job that was running at crash time is
+  marked `interrupted` — a visible terminal state pairing with the existing
+  pending/recheck affordances, never an indefinite spinner.
+- Renderer: fetches the snapshot on open + subscribes; the canvas busy
+  display is now the union of the ledger's running jobs + the local
+  `GenerationQueue` + the legacy `canvas:busyChanged` peer snapshot (the
+  peer relay stays as a fallback), so the main and detached windows agree
+  from the ledger alone — the storyboard cards ride the same union through
+  the existing derived sets.
+- `job-ledger.test.ts` (11): lifecycle, per-production snapshots, failure
+  reasons, unsubscribe, terminal window, crash → interrupted → dismiss,
+  persist-only-running, the full channel map, and the canvas projection both
+  windows compute identically.
+
+**Known residuals (documented, deferred per the rollout plan):**
+- The same-arrays `takeGenIndex` rule still lets a whole-document save that
+  was captured before a command selection move the index back when the
+  histories agree (the diverged-histories case is fixed — fresh wins). Node
+  take selections on the sequence canvas still ride whole-document saves, so
+  the index rule can't blanket-flip yet — this is Phase 3's entity-revision
+  work.
+- `syncBoardOutputToPipe` remains the recurring derive step (load/save/
+  rebase); converting it to one-time migration and retiring the mirrors is
+  Phase 4.
+- Agent-tool-driven generations (the `ipcListeners` host path) bypass the
+  IPC wrapper and aren't ledger-recorded; the media registry (Phase 2) will
+  be the place to unify that too.
+- Workflow guardrail: the new IPC handlers (`production:selectGraphTake`,
+  `production:jobsSnapshot`/`jobsChanged`) and the `handle()` wrapper are
+  main-process changes — fully rebuild AND restart the app before testing.
+
+### Follow-up (user feedback)
+
+**Startup crash — fixed.** The contract-drift guard at the end of
+`registerIpc` throws when any declared channel has no handler, and
+`production:jobsChanged` (a main→renderer broadcast the renderer subscribes
+to in preload, never sends on) had none — so the app died at startup with
+"declared in the contract but has no handler". Fixed with the
+pattern-consistent no-op `on("production:jobsChanged", () => {})`
+registration (every other main→renderer send channel has one); the guard now
+passes and the bundle carries the registration.
+
+**Legacy projects — verified, no conversion needed.** No persisted shape
+changed across the three workstreams (`PRODUCTION_SCHEMA_VERSION` stays 3,
+all migrations untouched), so legacy documents keep opening through the
+existing on-load normalization (the brief's migration principle: normalize
+on load, write the new model on save). Added
+`productions.test.ts` → "legacy project end-to-end": a schema-v2 project
+(flat `graphVideo*` fields, artwork history, pending contingency, classic
+unpiped shot) opens and migrates to `vid0` + derived mirrors, survives a
+stale whole-document renderer save, accepts a promote through the new
+selection write-through, reopens identically (fixed point), and the export
+resolves exactly the shown output. A project from ANY older version is
+covered by the existing v1/unversioned migration tests plus this v2
+end-to-end case — if a doc is somehow too old (below the minimum), it fails
+loudly with the version named, per the existing guard.
+
+Verify (follow-up): `app` typecheck clean; `app` tests **1528 passed + 1
+skipped** (136 files); `app` build clean (the `jobsChanged` registration is
+in the main bundle).
+

@@ -20,6 +20,7 @@ import { setStyleEdge } from "../shared/graph/connect.js";
 import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
+import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
 
 export interface ProductionFile extends Production {}
@@ -405,22 +406,11 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     voiceoverPath?: unknown; transition?: unknown;
   };
   const incomingRec = incomingFields as unknown as Record<string, unknown>;
-  // Main-owned fields: never copied from the incoming snapshot.
-  const DENIED = new Set([
-    "id", "number",
-    "artworkHistory",
-    "graphImageGens", "graphVideoGens", "graphEditGens", "graphEditVideoGens",
-    "graphTweenOutput", "pendingImageGen", "pendingVideoGen", "graphMigrated",
-    "graphImageGenIndex", "graphVideoGenIndex", "graphEditVideoGenIndex",
-    // Legacy flat edit-video fields: `migrateEditVideoNodes` folds them into an
-    // `ev0` entry and its guard is "no edit-mode node present", so a stale
-    // snapshot re-introducing them could re-synthesize a node the user
-    // deleted. Main owns the migration (the fresh document is already folded),
-    // so they are never accepted from the renderer.
-    "graphEditVideoPrompt", "graphEditVideoModel", "graphEditVideoResolution",
-    "graphEditVideoParams", "graphEditVideoRefIds", "graphEditVideoSourceRefId",
-    "graphVideoToEditVideo",
-  ]);
+  // Main-owned fields: never copied from the incoming snapshot. The set is
+  // derived from the field-ownership table (shot-ownership.ts) — a field
+  // added to ProductionShot must be classified there or the ownership test
+  // fails, and its merge rule lands here automatically.
+  const DENIED = new Set<string>([...SHOT_MERGE_DENIED_FIELDS, ...SHOT_INDEX_FIELDS]);
   const merged: ProductionShot = { ...freshShot };
   const mergedRec = merged as unknown as Record<string, unknown>;
   // Legacy fields no longer used (single-VO model, cuts-only timeline) —

@@ -28,6 +28,7 @@ vi.mock("../src/main/scripting.js", () => ({
 import { applyRendererState, applyMagicPromptDelta, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
+import { assemblyPlan } from "../src/main/assembly.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
@@ -1219,5 +1220,88 @@ describe("shotSequences persistence", () => {
     const reloadedLegacy = loadProduction(legacy.meta.id)!;
     expect(reloadedLegacy.shotSequences![0].graph!.graphOutputSource).toBe("videogen");
     expect(reloadedLegacy.shotSequences![0].graph!.graphVideoNodes![0].gens).toHaveLength(1);
+  });
+});
+
+describe("legacy project end-to-end (architecture hardening)", () => {
+  it("a schema-v2 project opens, survives a renderer save, accepts a selection, and reopens identically", () => {
+    const folder = path.join(dataDir, "legacy-e2e");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    // The pre-v3 shape: flat video fields, artwork/history, no stored graph,
+    // a pending contingency, and a classic unpiped second shot.
+    const videoShot: ProductionShot = {
+      id: "shot1", number: "0100", audio: "line", visual: "wide",
+      artwork: "boards/0100/shot-0100-a.jpg",
+      artworkHistory: ["boards/0100/shot-0100-old.jpg"],
+      graphImageGens: [
+        { path: "boards/0100/shot-0100-a.jpg", prompt: "frame", model: "auto", at: "" },
+        { path: "boards/0100/shot-0100-old.jpg", prompt: "frame", model: "auto", at: "" },
+      ],
+      graphImageGenIndex: 0,
+      graphVideoGens: [{ path: "videos/shot-0100.mp4", prompt: "motion", model: "auto", at: "" }],
+      graphVideoGenIndex: 0,
+      graphVideoPrompt: "drift",
+      graphImageToVideo: true,
+      videoPath: "videos/shot-0100.mp4",
+      graphOutputSource: "videogen",
+      pendingImageGen: { prompt: "orphan", model: "auto", at: "" },
+    };
+    const classicShot: ProductionShot = {
+      id: "shot2", number: "0200", audio: "", visual: "classic",
+      artwork: "boards/0200/shot-0200-x.jpg",
+      artworkHistory: ["boards/0200/shot-0200-y.jpg"],
+    };
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "legacy-e2e", folder },
+      scenes: [{ number: 1, title: "S1", shots: [videoShot, classicShot] }],
+      schemaVersion: 2,
+    });
+    saveProduction(doc);
+
+    // First load migrates the flat video fields into vid0 and re-derives the
+    // mirrors — the storyboard/animatic/export all still resolve.
+    const first = loadProduction("legacy-e2e")!;
+    const shot1 = first.scenes[0].shots[0];
+    expect(shot1.graphVideoNodes![0]).toMatchObject({
+      id: "vid0", prompt: "drift", source: { kind: "imagegen" },
+    });
+    expect(shot1.graphVideoNodes![0].gens![0].path).toBe("videos/shot-0100.mp4");
+    expect(shot1.videoPath).toBe("videos/shot-0100.mp4");
+    expect(shot1.pendingImageGen).toBeDefined();
+    expect(syncBoardOutputToPipe(shot1)).toBe(false);
+
+    // A renderer whole-document save (with a stale, pre-migration echo of the
+    // legacy fields) cannot clobber main-owned state.
+    const stale = baseProduction({
+      meta: { ...baseProduction().meta, id: "legacy-e2e", folder },
+      scenes: [{ number: 1, title: "S1", shots: [{
+        ...videoShot,
+        audio: "edited line",
+        pendingImageGen: undefined,
+        videoPath: undefined,
+      }, classicShot] }],
+    });
+    const merged = applyRendererState(first, stale);
+    expect(merged.scenes[0].shots[0].audio).toBe("edited line");
+    expect(merged.scenes[0].shots[0].pendingImageGen).toBeDefined();
+    expect(merged.scenes[0].shots[0].videoPath).toBe("videos/shot-0100.mp4");
+
+    // The user promotes an older frame through the new selection write-through.
+    selectBoardFrame(merged.scenes[0].shots[0], "boards/0100/shot-0100-old.jpg");
+    expect(merged.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-old.jpg");
+    expect(merged.scenes[0].shots[0].graphOutputSource).toBe("imagegen");
+    saveProduction(merged);
+
+    // Second load opens identically — a fixed point, and export resolves the
+    // same output the storyboard shows.
+    const second = loadProduction("legacy-e2e")!;
+    expect(second.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-old.jpg");
+    expect(second.scenes[0].shots[0].graphImageGenIndex).toBe(1);
+    expect(syncBoardOutputToPipe(second.scenes[0].shots[0])).toBe(false);
+    const plan = assemblyPlan(second);
+    const shot1Event = plan.events.find((e) => e.number === "0100");
+    expect(shot1Event?.kind).toBe("still");
+    expect(shot1Event?.srcRel).toBe("boards/0100/shot-0100-old.jpg");
   });
 });

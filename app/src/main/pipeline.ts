@@ -35,6 +35,7 @@ import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } fr
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
 import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
+import { resolveSelectedOutput } from "../shared/selected-output.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
@@ -1664,14 +1665,11 @@ export function selectBoardFrame(shot: ProductionShot, rel: string): void {
   }
   if (editHit) {
     editHit.node.genIndex = editHit.index;
-    shot.graphOutputSource = "editgen";
-    shot.graphOutputEditNodeId = editHit.node.id;
+    setShotSelectedOutput(shot, { kind: "editgen", nodeId: editHit.node.id });
   } else if (upIndex >= 0 && shot.graphUpscale) {
     shot.graphUpscale.genIndex = upIndex;
-    shot.graphOutputSource = "upscale";
-    shot.graphOutputEditNodeId = undefined;
+    setShotSelectedOutput(shot, { kind: "upscale" });
   } else {
-    shot.graphOutputEditNodeId = undefined;
     if (imageIndex >= 0) {
       shot.graphImageGenIndex = imageIndex;
     } else {
@@ -1680,13 +1678,8 @@ export function selectBoardFrame(shot: ProductionShot, rel: string): void {
       gens.push({ path: rel, prompt: "", model: "", at: "" });
       shot.graphImageGenIndex = gens.length - 1;
     }
-    shot.graphOutputSource = "imagegen";
+    setShotSelectedOutput(shot, { kind: "imagegen" });
   }
-  // This shot now has an explicit node selection; the old migration must not reset it.
-  shot.graphMigrated = true;
-  shot.graphOutputRefId = undefined;
-  shot.videoPath = undefined;
-  recordBoardArtwork(shot, rel);
 }
 
 /** Delete a board frame's archived original when it shares the JPEG's tag.
@@ -2514,14 +2507,9 @@ export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: strin
   if (typeof resolution === "string" && resolution.trim()) target.resolution = resolution.trim();
   recordGraphEditGen(shot, target.id, rel, prompt, model);
   shot.graphEditPrompt = prompt;
-  shot.graphOutputSource = "editgen";
-  shot.graphOutputEditNodeId = target.id;
-  shot.graphOutputRefId = undefined;
-  shot.videoPath = undefined;
-  // An explicit node selection exists now; the classic migration must not
-  // sweep the new frame into the image node's history on the next load.
-  shot.graphMigrated = true;
-  recordBoardArtwork(shot, rel);
+  // The fresh edit becomes the output feed through the one write-through:
+  // pipe fields + artwork/videoPath mirrors derive there.
+  setShotSelectedOutput(shot, { kind: "editgen", nodeId: target.id });
   return target.id;
 }
 
@@ -2617,10 +2605,7 @@ export function unstitchTween(shot: ProductionShot): { changed: boolean; outputR
   const outputRel = shot.graphTweenOutput;
   const piped = shot.graphOutputSource === "tween";
   if (!outputRel && !piped) return { changed: false };
-  if (piped) {
-    shot.graphOutputSource = undefined;
-    shot.videoPath = undefined;
-  }
+  if (piped) setShotSelectedOutput(shot, { kind: "unpipe" });
   delete shot.graphTweenOutput;
   delete shot.graphTweenReencoded;
   return { changed: true, outputRel };
@@ -2667,9 +2652,13 @@ export function buildTweenConcatList(absPaths: string[]): string {
  *  When the shot has no primary artwork yet (the video was animated from a
  *  node-graph image pipe, not from the shot's own frame), the video's source
  *  frame — the image node's current output, or the piped `sourceFallback` —
- *  becomes the still, so the animatic timeline always has a frame to show. */
+ *  becomes the still, so the animatic timeline always has a frame to show.
+ *  The pipe binding is the caller's (`hookVideoGenToOutput` / the renderer's
+ *  pipe save / an existing tween or ref feed); this pins the clip mirror and
+ *  backfills the still only — the later pipe sync derives the same value once
+ *  the take is in its node's history. */
 export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string, nodeId?: string): void {
-  shot.videoPath = rel;
+  if (shot.videoPath !== rel) shot.videoPath = rel;
   if (!shot.artwork) {
     // The still comes from the node that fed the video's source input — the
     // edit-image node when the video node's source pipe is an edit node,
@@ -2697,8 +2686,7 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
     if (!shot.artwork && cur?.path) recordBoardArtwork(shot, cur.path);
     return;
   }
-  shot.graphOutputSource = "imagegen";
-  if (cur) recordBoardArtwork(shot, cur.path);
+  setShotSelectedOutput(shot, { kind: "imagegen" });
 }
 
 /** Bind a classic video generation as the output feed. Generating a video is
@@ -2706,9 +2694,7 @@ export function hookImageGenToOutput(shot: ProductionShot): void {
  *  storyboard mirrors it and the animatic plays it), so it always takes over
  *  the pipe; the displaced still lives on in its node's history. */
 export function hookVideoGenToOutput(shot: ProductionShot, nodeId?: string): void {
-  shot.graphOutputSource = "videogen";
-  shot.graphOutputRefId = undefined;
-  if (nodeId) shot.graphOutputVideoNodeId = nodeId;
+  setShotSelectedOutput(shot, { kind: "videogen", nodeId });
 }
 
 /** Re-anchor a generation node's selected index after a finished job's rebase
@@ -2770,7 +2756,7 @@ export function resolveOutputRefByPath(p: Production, relPath: string): OutputRe
  *  has no usable media. Does not save — callers own persistence. */
 export function applyRefToOutput(p: Production, shot: ProductionShot, ref: OutputRef): string | null {
   if (ref.media === "video" && ref.mediaPath) {
-    shot.videoPath = ref.mediaPath;
+    setShotSelectedOutput(shot, { kind: "ref", refId: ref.id, media: "clip", path: ref.mediaPath });
     return null;
   }
   const bytes: Buffer | null = ref.imagePath
@@ -2778,7 +2764,7 @@ export function applyRefToOutput(p: Production, shot: ProductionShot, ref: Outpu
     : ref.artwork ? (() => { const b = dataUrlToBytes(ref.artwork!); return b ? Buffer.from(b) : null; })() : null;
   if (!bytes || !bytes.length) throw new Error("This reference has no usable image — only image and video references can feed the output.");
   const { jpegRel } = writeBoardFrame(p, shot, bytes, "png");
-  recordBoardArtwork(shot, jpegRel);
+  setShotSelectedOutput(shot, { kind: "ref", refId: ref.id, media: "still", path: jpegRel });
   return jpegRel;
 }
 
@@ -2811,22 +2797,17 @@ export function refreshRefCopyFromFile(p: Production, shot: ProductionShot, srcR
  *  mirrors the graph's frame output node. A piped node whose selection changed,
  *  or whose apply raced a renderer save, can't leave a stale or missing frame —
  *  e.g. an edit-image node piped to the output whose selected edit never landed
- *  on `shot.artwork`. Returns true when anything changed. */
+ *  on `shot.artwork`. Resolution comes from the shared `resolveSelectedOutput`
+ *  (the ONE resolver both sides read). Returns true when anything changed. */
 export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
-  const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
-  const editSel = editNodeSelection(shot, shot.graphOutputEditNodeId);
-  const vidNode = getVideoNode(shot, shot.graphOutputVideoNodeId);
-  const vidSel = vidNode?.gens?.[vidNode.genIndex ?? 0];
-  switch (shot.graphOutputSource) {
+  const out = resolveSelectedOutput(shot);
+  switch (out.source) {
     case "imagegen":
     case "editgen":
     case "upscale": {
-      const sel = shot.graphOutputSource === "imagegen" ? imgSel
-        : shot.graphOutputSource === "editgen" ? editSel
-        : upscaleSelection(shot);
-      if (sel?.path) {
+      if (out.path) {
         let changed = false;
-        if (shot.artwork !== sel.path) { recordBoardArtwork(shot, sel.path); changed = true; }
+        if (shot.artwork !== out.path) { recordBoardArtwork(shot, out.path); changed = true; }
         if (shot.videoPath !== undefined) { shot.videoPath = undefined; changed = true; }
         return changed;
       }
@@ -2840,11 +2821,13 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
       return false;
     }
     case "videogen": {
-      if (vidSel?.path) {
+      if (out.path) {
         let changed = false;
-        if (shot.videoPath !== vidSel.path) { shot.videoPath = vidSel.path; changed = true; }
+        if (shot.videoPath !== out.path) { shot.videoPath = out.path; changed = true; }
         // The still mirror comes from whichever image node feeds the video
         // source (an edit node when the source pipe is one, else the image node).
+        const vidNode = getVideoNode(shot, shot.graphOutputVideoNodeId);
+        const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
         const feed = vidNode?.source?.kind === "editgen" ? editNodeSelection(shot, vidNode.source.nodeId) : imgSel;
         if (!shot.artwork && feed?.path && shot.artwork !== feed.path) { shot.artwork = feed.path; changed = true; }
         return changed;
@@ -2856,9 +2839,10 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
       // The tween feed is the stitched clip: re-derive videoPath from
       // graphTweenOutput. The storyboard still needs a frame, so backfill
       // artwork from the image node when the shot has none.
-      if (shot.graphTweenOutput) {
+      if (out.path) {
         let changed = false;
-        if (shot.videoPath !== shot.graphTweenOutput) { shot.videoPath = shot.graphTweenOutput; changed = true; }
+        if (shot.videoPath !== out.path) { shot.videoPath = out.path; changed = true; }
+        const imgSel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
         if (!shot.artwork && imgSel?.path && shot.artwork !== imgSel.path) { shot.artwork = imgSel.path; changed = true; }
         return changed;
       }
@@ -2868,6 +2852,83 @@ export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
     default:
       return false;
   }
+}
+
+/** A selection applied through the ONE output write-through. */
+export type ShotSelection =
+  | { kind: "imagegen" }
+  | { kind: "editgen"; nodeId: string }
+  | { kind: "upscale" }
+  | { kind: "videogen"; nodeId?: string }
+  | { kind: "tween" }
+  | { kind: "ref"; refId: string; media?: "still" | "clip"; path?: string }
+  | { kind: "unpipe" };
+
+/**
+ * The single write-through for the shot's selected output: update the pipe
+ * fields, then re-derive `artwork`/`videoPath` from the pipe. Every flow that
+ * changes what a shot is showing — canvas select, storyboard promote, pipe/
+ * unpipe, generation auto-apply, reference import — lands here, so the two
+ * mirror fields have exactly one writer and can't disagree with the pipe.
+ * The renderer sends selection intent (`production:selectGraphTake`) or pipe
+ * fields (whole-document save); main owns the mirrors.
+ */
+export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection): void {
+  switch (sel.kind) {
+    case "imagegen":
+      shot.graphOutputSource = "imagegen";
+      shot.graphOutputEditNodeId = undefined;
+      shot.graphOutputRefId = undefined;
+      break;
+    case "editgen":
+      shot.graphOutputSource = "editgen";
+      shot.graphOutputEditNodeId = sel.nodeId;
+      shot.graphOutputRefId = undefined;
+      break;
+    case "upscale":
+      shot.graphOutputSource = "upscale";
+      shot.graphOutputEditNodeId = undefined;
+      shot.graphOutputRefId = undefined;
+      break;
+    case "videogen":
+      shot.graphOutputSource = "videogen";
+      shot.graphOutputRefId = undefined;
+      if (sel.nodeId) shot.graphOutputVideoNodeId = sel.nodeId;
+      break;
+    case "tween":
+      shot.graphOutputSource = "tween";
+      shot.graphOutputRefId = undefined;
+      break;
+    case "ref": {
+      // A reference's media isn't derivable from the pipe (the production owns
+      // the file), so the caller resolves it and hands the resolved mirror in.
+      shot.graphOutputSource = "ref";
+      shot.graphOutputRefId = sel.refId;
+      shot.graphOutputEditNodeId = undefined;
+      if (sel.media === "clip") {
+        shot.videoPath = sel.path;
+        shot.artwork = undefined;
+      } else if (sel.media === "still" && sel.path) {
+        shot.videoPath = undefined;
+        recordBoardArtwork(shot, sel.path);
+      }
+      break;
+    }
+    case "unpipe": {
+      const was = shot.graphOutputSource;
+      shot.graphOutputSource = undefined;
+      shot.graphOutputRefId = undefined;
+      // Clear exactly the mirror the unpiped kind owned (a video unpipe must
+      // not blank a still, and vice versa).
+      if (was === "videogen" || was === "tween" || was === "editvideo") shot.videoPath = undefined;
+      else if (was === "imagegen" || was === "editgen" || was === "upscale") shot.artwork = undefined;
+      break;
+    }
+  }
+  // An explicit node selection exists now; the classic migration must not
+  // sweep the new frame into the image node's history on the next load.
+  shot.graphMigrated = true;
+  syncBoardOutputToPipe(shot);
 }
 
 /** One-time migration: MOVE the classic generations (current artwork +
@@ -3327,10 +3388,7 @@ export function importBoardDataUrl(
   // Board frame from the same bytes — mirrors the image branch of
   // `applyGraphRefOutput` (reference piped to output renders the frame).
   const { jpegRel } = writeBoardFrame(p, shot, bytes, ext);
-  recordBoardArtwork(shot, jpegRel);
-  shot.graphOutputSource = "ref";
-  shot.graphOutputRefId = refId;
-  shot.videoPath = undefined;
+  setShotSelectedOutput(shot, { kind: "ref", refId, media: "still", path: jpegRel });
   placeRefNode(shot, refId);
   markBoardsStatus(p);
   emit(`Shot ${shot.number}: imported ${base} as a reference image piped to the output.`);
@@ -3391,10 +3449,7 @@ export function importBoardVideo(
   const name = parsed.name.trim().replace(/\s+/g, " ").slice(0, 60) || "Dropped clip";
   const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   p.references = [...(p.references ?? []), { id: refId, name, media: "video" as const, mediaPath: rel, shotIds: [] }];
-  shot.graphOutputSource = "ref";
-  shot.graphOutputRefId = refId;
-  shot.artwork = undefined;
-  shot.videoPath = rel;
+  setShotSelectedOutput(shot, { kind: "ref", refId, media: "clip", path: rel });
   placeRefNode(shot, refId);
   emit(`Shot ${shot.number}: imported ${base} as a reference video piped to the output.`);
   return p;

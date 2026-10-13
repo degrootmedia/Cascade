@@ -106,6 +106,11 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("canvas:busyChanged", listener);
     return () => ipcRenderer.removeListener("canvas:busyChanged", listener);
   };
+  api.onJobsChanged = (cb: (snapshot: import("../shared/ipc.js").JobSnapshot) => void) => {
+    const listener = (_e: unknown, snapshot: import("../shared/ipc.js").JobSnapshot) => cb(snapshot);
+    ipcRenderer.on("production:jobsChanged", listener);
+    return () => ipcRenderer.removeListener("production:jobsChanged", listener);
+  };
   api.onDetachedClosed = (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on("window:detachedClosed", listener);

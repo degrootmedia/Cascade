@@ -10,6 +10,8 @@
  */
 import { memo, useRef, useState } from "react";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
+import { resolveShotDisplay } from "../../../../shared/selected-output.js";
+import { revOf } from "../../../../shared/snapshot-freshness.js";
 import { cascadeMedia } from "./animatic.js";
 import { refThumbUrl } from "./thumb-url.js";
 import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
@@ -24,9 +26,11 @@ interface Props {
  * Source for a panel's tile: the frame when it has one, else the clip path —
  * `?thumb=1` yields a compressed still (a video gets its middle-frame poster).
  * Inline data URLs and already-built cascade URLs pass through unchanged.
+ * Resolved through the shared display helper (pipe, else legacy mirrors).
  */
 function thumbUrl(prod: Production, shot: ProductionShot): string | null {
-  const rel = shot.artwork ?? shot.videoPath;
+  const display = resolveShotDisplay(shot);
+  const rel = display.media === "still" ? display.path : display.media === "clip" ? display.stillPath ?? display.path : undefined;
   if (!rel) return null;
   if (rel.startsWith("data:") || rel.startsWith("cascade-media://")) return refThumbUrl(rel);
   return refThumbUrl(cascadeMedia(prod.meta.id, rel));
@@ -34,12 +38,13 @@ function thumbUrl(prod: Production, shot: ProductionShot): string | null {
 
 /** Full-resolution media for the overlay: the frame, else the clip. */
 function fullMedia(prod: Production, shot: ProductionShot): { url: string; kind: "image" | "video"; rel: string } | null {
-  const rel = shot.artwork ?? shot.videoPath;
+  const display = resolveShotDisplay(shot);
+  const rel = display.media === "still" ? display.path : display.media === "clip" ? display.stillPath ?? display.path : undefined;
   if (!rel) return null;
   const url = rel.startsWith("data:") || rel.startsWith("cascade-media://")
     ? rel
     : cascadeMedia(prod.meta.id, rel);
-  return { url, kind: shot.artwork ? "image" : "video", rel };
+  return { url, kind: display.media === "clip" && rel === display.path ? "video" : "image", rel };
 }
 
 const OutdatedCard = memo(function OutdatedCard({
@@ -65,7 +70,7 @@ const OutdatedCard = memo(function OutdatedCard({
       >
         {src
           ? <img src={src} alt={`Outdated shot ${shot.number}`} loading="lazy" />
-          : <span className="prod-outdated-noframe">{shot.videoPath ? "Clip panel" : "No frame"}</span>}
+          : <span className="prod-outdated-noframe">{resolveShotDisplay(shot).media === "clip" ? "Clip panel" : "No frame"}</span>}
         <span className="prod-outdated-badge">Outdated</span>
       </button>
       <figcaption className="prod-outdated-meta">
@@ -83,7 +88,7 @@ const OutdatedCard = memo(function OutdatedCard({
           className="prod-btn danger"
           onClick={() => {
             if (confirm(`Delete outdated shot ${shot.number} and its preserved frames? This can't be undone.`)) {
-              onMutate(window.cascade.removeOutdatedShot(prod.meta.id, shot.id));
+              onMutate(window.cascade.removeOutdatedShot(prod.meta.id, shot.id, revOf(prod)));
             }
           }}
         >Delete</button>

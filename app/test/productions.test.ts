@@ -25,12 +25,13 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, applyMagicPromptDelta, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
+import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { assemblyPlan } from "../src/main/assembly.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 import { mediaEntryForPath } from "../src/shared/media-registry.js";
+import { resolveShotDisplay } from "../src/shared/selected-output.js";
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -402,9 +403,11 @@ describe("applyRendererState", () => {
     expect(merged.scenes[0].shots[0].audio).toBe("Keep talking");
   });
 
-  it("honours an explicit output unpipe from the renderer", () => {
-    // unpipeOutput sends source/artwork/videoPath as explicit nulls through
-    // the whole-document save — the storyboard frame must go blank.
+  it("applies a renderer pipe unbind while ignoring stale mirror nulls", () => {
+    // unpipeOutput clears the pipe fields; the explicit mirror nulls a
+    // whole-document save still carries are denied (command-owned) — the pipe
+    // unbind applies, the frozen mirrors stay. The real unpipe flows through
+    // the `selectGraphTake` command, which blanks main-side.
     const fresh = baseProduction({
       scenes: [{
         number: 1,
@@ -440,15 +443,17 @@ describe("applyRendererState", () => {
     });
     const merged = applyRendererState(fresh, incoming);
     expect(merged.scenes[0].shots[0].graphOutputSource).toBeUndefined();
-    expect(merged.scenes[0].shots[0].artwork).toBeUndefined();
-    expect(merged.scenes[0].shots[0].videoPath).toBeUndefined();
+    // The denied mirror nulls can't clear the frozen frame (the legacy read
+    // still sees it) — only the unpipe command blanks.
+    expect(merged.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-x.jpg");
     // The generation history itself survives the unpipe.
     expect(merged.scenes[0].shots[0].graphImageGens).toHaveLength(1);
   });
 
-  it("keeps an edit-video clip path the renderer selects", () => {
-    // An edit-mode video node owns the take history; the output pipe sync
-    // derives the shot's videoPath from the node's selected take.
+  it("keeps an edit-video clip selection on the pipe (the display resolves the node's take)", () => {
+    // An edit-mode video node owns the take history; the take selection rides
+    // the node merge, and the display resolves the clip from the pipe — no
+    // mirror ride-through needed anymore.
     const gens = [
       { path: "boards/0100/video/shot-0100-new.mp4", prompt: "e", model: "m", at: "" },
       { path: "boards/0100/video/shot-0100-old.mp4", prompt: "e", model: "m", at: "" },
@@ -486,7 +491,9 @@ describe("applyRendererState", () => {
       }],
     });
     const merged = applyRendererState(fresh, incoming);
-    expect(merged.scenes[0].shots[0].videoPath).toBe("boards/0100/video/shot-0100-new.mp4");
+    expect(resolveShotDisplay(merged.scenes[0].shots[0])).toMatchObject({
+      media: "clip", path: "boards/0100/video/shot-0100-new.mp4",
+    });
     expect(merged.scenes[0].shots[0].graphVideoNodes?.[0].genIndex).toBe(0);
   });
 
@@ -706,20 +713,21 @@ describe("applyRendererState", () => {
       graphOutputSource: "imagegen" as const,
     }];
     // A generation landed after the snapshot: the stale index 1 would select
-    // the wrong take on the fresh array, so the fresh index stands.
+    // the wrong take on the fresh array, so the fresh index stands — and the
+    // display resolves it (no mirror repair pass runs anymore).
     const diverged = applyRendererState(
       baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "n", prompt: "", model: "", at: "" }, { path: "o", prompt: "", model: "", at: "" }], 0) }] }),
       baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "o", prompt: "", model: "", at: "" }], 1) }] })
     );
     expect(diverged.scenes[0].shots[0].graphImageGenIndex).toBe(0);
-    expect(diverged.scenes[0].shots[0].artwork).toBe("n");
-    // Histories agree: the incoming selection applies and the frame follows it.
+    expect(resolveShotDisplay(diverged.scenes[0].shots[0])).toMatchObject({ media: "still", path: "n" });
+    // Histories agree: the incoming selection applies and the display follows it.
     const agreed = applyRendererState(
       baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "a", prompt: "", model: "", at: "" }, { path: "b", prompt: "", model: "", at: "" }], 0) }] }),
       baseProduction({ scenes: [{ number: 1, title: "S1", shots: shots([{ path: "a", prompt: "", model: "", at: "" }, { path: "b", prompt: "", model: "", at: "" }], 1) }] })
     );
     expect(agreed.scenes[0].shots[0].graphImageGenIndex).toBe(1);
-    expect(agreed.scenes[0].shots[0].artwork).toBe("b");
+    expect(resolveShotDisplay(agreed.scenes[0].shots[0])).toMatchObject({ media: "still", path: "b" });
   });
 
   it("strips legacy per-shot fields (single-VO model, cuts-only timeline)", () => {
@@ -801,10 +809,11 @@ describe("applyRendererState", () => {
     expect(merged.meta.name).toBe("Renamed");
   });
 
-  it("re-derives the storyboard frame from the output pipe when the renderer's save is stale", () => {
+  it("resolves the storyboard frame from the output pipe when the renderer's save is stale", () => {
     // The renderer sends the shot with the edit-image node piped to the output
     // but a stale/empty `artwork` (the apply raced its save). The pipe owns the
-    // frame, so the merged document must mirror the node graph's output node.
+    // frame: the merge keeps the pipe, and the shared display resolves it —
+    // no mirror repair pass runs anymore.
     const shot = {
       id: "shot1",
       number: "0100",
@@ -820,8 +829,7 @@ describe("applyRendererState", () => {
     const incoming = baseProduction({ scenes: [{ number: 1, title: "S1", shots: [structuredClone(shot)] }] });
     const merged = applyRendererState(fresh, incoming);
     const restored = merged.scenes[0].shots[0];
-    expect(restored.artwork).toBe("boards/0100/shot-0100-edit.jpg");
-    expect(restored.videoPath).toBeUndefined();
+    expect(resolveShotDisplay(restored)).toMatchObject({ media: "still", path: "boards/0100/shot-0100-edit.jpg" });
   });
 });
 
@@ -858,20 +866,19 @@ describe("board frame selection persistence", () => {
       meta: { ...incoming.meta },
       scenes: [{ number: 1, title: "S1", shots: [structuredClone(shot)] }],
     });
-    // A stale artwork mirror cannot replace the newly selected node output.
+    // A stale artwork mirror cannot replace the newly selected node output —
+    // the merge keeps the pipe + selection, and the display resolves it.
     shot.artwork = "boards/0100/current.jpg";
     shot.videoPath = "videos/clip.mp4";
     const merged = applyRendererState(fresh, incoming);
-    expect(merged.scenes[0].shots[0].artwork).toBe(rel);
-    expect(merged.scenes[0].shots[0].videoPath).toBeUndefined();
+    expect(resolveShotDisplay(merged.scenes[0].shots[0])).toMatchObject({ media: "still", path: rel });
     saveProduction(merged);
 
     for (let i = 0; i < 2; i++) {
       const loaded = loadProduction(incoming.meta.id);
       expect(loaded).not.toBeNull();
       const restored = loaded!.scenes[0].shots[0];
-      expect(restored.artwork).toBe(rel);
-      expect(restored.videoPath).toBeUndefined();
+      expect(resolveShotDisplay(restored)).toMatchObject({ media: "still", path: rel });
       expect(restored.graphOutputSource).toBe(kind === "edit" ? "editgen" : "imagegen");
       expect(restored.graphImageGenIndex).toBe(selected.graphImageGenIndex);
       expect(restored.graphEditNodes).toEqual(selected.graphEditNodes);
@@ -879,7 +886,6 @@ describe("board frame selection persistence", () => {
       expect(restored.graphVideoNodes?.[0]?.gens).toEqual(selected.graphVideoGens);
       expect(restored.graphVideoNodes?.[0]?.source).toEqual({ kind: "imagegen" });
       expect(boardFrameHistory(restored)).toEqual(history);
-      expect(syncBoardOutputToPipe(restored)).toBe(false);
       saveProduction(loaded!);
     }
   });
@@ -912,7 +918,7 @@ describe("board frame selection persistence", () => {
       saveProduction(merged);
       const loaded = loadProduction(incoming.meta.id)!;
       const restored = loaded.scenes[0].shots[0];
-      expect(restored.artwork).toBe(rel);
+      expect(resolveShotDisplay(restored)).toMatchObject({ media: "still", path: rel });
       expect(restored.graphOutputSource).toBe("editgen");
       const active = (restored.graphEditNodes ?? []).find((n) => n.id === restored.graphOutputEditNodeId)!;
       expect(active.genIndex).toBe(0);
@@ -1259,6 +1265,57 @@ describe("media registry (architecture hardening)", () => {
   });
 });
 
+describe("revision gating (phase 4: stale destructive edits are rejected, not silently applied)", () => {
+  it("passes when the caller names the current revision, and when it names none", () => {
+    const p = baseProduction() as ProductionFile;
+    p.rev = 7;
+    expect(() => assertFreshRevision(p, 7)).not.toThrow();
+    expect(() => assertFreshRevision(p, undefined)).not.toThrow();
+    expect(() => assertFreshRevision({ ...p, rev: undefined } as ProductionFile, 7)).not.toThrow();
+  });
+
+  it("rejects a stale base revision with the fresh revision attached", () => {
+    const p = baseProduction() as ProductionFile;
+    p.rev = 9;
+    let caught: unknown;
+    try {
+      assertFreshRevision(p, 7);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(String((caught as Error).message)).toMatch(/Stale edit:.*rev 7 → 9/);
+    expect((caught as { freshRev?: number }).freshRev).toBe(9);
+  });
+});
+
+describe("reorder vs stale whole-document save (phase 3)", () => {  it("keeps a fresh storyboard reorder while applying a stale layout edit", () => {
+    const layout = (x: number, y: number): ProductionShot["graphLayout"] => ({ positions: { composer: { x, y } } });
+    // The fresh document: storyboard reordered (B now first) via the
+    // `production:reorderShot` command.
+    const fresh = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [
+        { id: "b", number: "0100", audio: "", visual: "B" },
+        { id: "a", number: "0200", audio: "", visual: "A", graphLayout: layout(1, 1) },
+      ] }],
+    });
+    // A renderer snapshot captured before the reorder lands with a graph
+    // layout edit (a node drag) — in the OLD order.
+    const stale = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [
+        { id: "a", number: "0100", audio: "", visual: "A", graphLayout: layout(2, 2) },
+        { id: "b", number: "0200", audio: "", visual: "B" },
+      ] }],
+    });
+    const merged = applyRendererState(fresh, stale);
+    // The fresh order stands (main owns structure)…
+    expect(merged.scenes[0].shots.map((s) => s.id)).toEqual(["b", "a"]);
+    // …and the renderer-owned layout edit still lands on its shot.
+    const a = merged.scenes[0].shots.find((s) => s.id === "a")!;
+    expect(a.graphLayout).toEqual(layout(2, 2));
+  });
+});
+
 describe("legacy project end-to-end (architecture hardening)", () => {
   it("a schema-v2 project opens, survives a renderer save, accepts a selection, and reopens identically", () => {
     const folder = path.join(dataDir, "legacy-e2e");
@@ -1295,15 +1352,16 @@ describe("legacy project end-to-end (architecture hardening)", () => {
     });
     saveProduction(doc);
 
-    // First load migrates the flat video fields into vid0 and re-derives the
-    // mirrors — the storyboard/animatic/export all still resolve.
+    // First load migrates the flat video fields into vid0 and derives the
+    // legacy mirrors once (the migration still runs the pipe sync) — the
+    // storyboard/animatic/export all resolve through the shared display.
     const first = loadProduction("legacy-e2e")!;
     const shot1 = first.scenes[0].shots[0];
     expect(shot1.graphVideoNodes![0]).toMatchObject({
       id: "vid0", prompt: "drift", source: { kind: "imagegen" },
     });
     expect(shot1.graphVideoNodes![0].gens![0].path).toBe("videos/shot-0100.mp4");
-    expect(shot1.videoPath).toBe("videos/shot-0100.mp4");
+    expect(resolveShotDisplay(shot1)).toMatchObject({ media: "clip", path: "videos/shot-0100.mp4" });
     expect(shot1.pendingImageGen).toBeDefined();
     expect(syncBoardOutputToPipe(shot1)).toBe(false);
 
@@ -1321,20 +1379,19 @@ describe("legacy project end-to-end (architecture hardening)", () => {
     const merged = applyRendererState(first, stale);
     expect(merged.scenes[0].shots[0].audio).toBe("edited line");
     expect(merged.scenes[0].shots[0].pendingImageGen).toBeDefined();
-    expect(merged.scenes[0].shots[0].videoPath).toBe("videos/shot-0100.mp4");
+    expect(resolveShotDisplay(merged.scenes[0].shots[0])).toMatchObject({ media: "clip", path: "videos/shot-0100.mp4" });
 
     // The user promotes an older frame through the new selection write-through.
     selectBoardFrame(merged.scenes[0].shots[0], "boards/0100/shot-0100-old.jpg");
-    expect(merged.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-old.jpg");
+    expect(resolveShotDisplay(merged.scenes[0].shots[0])).toMatchObject({ media: "still", path: "boards/0100/shot-0100-old.jpg" });
     expect(merged.scenes[0].shots[0].graphOutputSource).toBe("imagegen");
     saveProduction(merged);
 
     // Second load opens identically — a fixed point, and export resolves the
     // same output the storyboard shows.
     const second = loadProduction("legacy-e2e")!;
-    expect(second.scenes[0].shots[0].artwork).toBe("boards/0100/shot-0100-old.jpg");
+    expect(resolveShotDisplay(second.scenes[0].shots[0])).toMatchObject({ media: "still", path: "boards/0100/shot-0100-old.jpg" });
     expect(second.scenes[0].shots[0].graphImageGenIndex).toBe(1);
-    expect(syncBoardOutputToPipe(second.scenes[0].shots[0])).toBe(false);
     const plan = assemblyPlan(second);
     const shot1Event = plan.events.find((e) => e.number === "0100");
     expect(shot1Event?.kind).toBe("still");

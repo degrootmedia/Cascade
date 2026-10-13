@@ -18,6 +18,7 @@ import type { VoiceStatusIpc, VoiceProgressIpc, WhisperModel } from "./voice.js"
 import type {
   GenParams,
   GraphLayout,
+  GraphLayoutPatch,
   Graph,
   GraphEditNode,
   GraphGenItem,
@@ -659,27 +660,27 @@ export interface CascadeApi {
    * the pending job and downloads/attaches the frame when it's ready.
    */
   recheckStyleFrame(productionId: string, styleId: string): Promise<Production>;
-  /** Insert a shot (mid-numbered) before the given position; returns updated production. */
-  insertShot(productionId: string, sceneNumber: number, index: number): Promise<Production>;
-  /** Remove a shot by its stable id. */
-  deleteShot(productionId: string, shotId: string): Promise<Production>;
+  /** Insert a shot (mid-numbered) before the given position; returns updated production. A caller-supplied `shotId` makes creation idempotent (a retry returns the existing shot). */
+  insertShot(productionId: string, sceneNumber: number, index: number, shotId?: string): Promise<Production>;
+  /** Remove a shot by its stable id. Idempotent: a retry after an uncertain response succeeds when the shot is already gone. A `baseRev` rejects a stale delete with a recoverable conflict instead of silently applying. */
+  deleteShot(productionId: string, shotId: string, baseRev?: number): Promise<Production>;
   /** Edit a shot's audio/visual text. */
   updateShot(productionId: string, shotId: string, patch: { audio?: string; visual?: string }): Promise<Production>;
   /** Manually set a shot's 4-digit number. Rejected when the number is malformed, below 0100, or already used by another shot; board files relocate with the number. */
   setShotNumber(productionId: string, shotId: string, number: string): Promise<Production>;
-  /** Move a shot before another shot (or to the end of the production when beforeShotId is null, or to the end of one scene when endSceneNumber is set). Re-numbers and relocates board files. */
-  reorderShot(productionId: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number): Promise<Production>;
+  /** Move a shot before another shot (or to the end of the production when beforeShotId is null, or to the end of one scene when endSceneNumber is set). Re-numbers and relocates board files. A `baseRev` rejects a stale reorder with a recoverable conflict. Repeating the same reorder is a no-op. */
+  reorderShot(productionId: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number, baseRev?: number): Promise<Production>;
   /** Bring an outdated panel (preserved from a previous script re-ingest) back into the active storyboard with a fresh number; its board files relocate with it. */
   restoreOutdatedShot(productionId: string, shotId: string): Promise<Production>;
-  /** Permanently delete an outdated panel and its preserved board files. */
-  removeOutdatedShot(productionId: string, shotId: string): Promise<Production>;
+  /** Permanently delete an outdated panel and its preserved board files. Idempotent (a retry succeeds when already gone); a `baseRev` rejects a stale delete with a recoverable conflict. */
+  removeOutdatedShot(productionId: string, shotId: string, baseRev?: number): Promise<Production>;
   /**
    * Delete a shot sequence. When the sequence has a generated video, the clip
    * is first copied into the references panel's "Shot Sequences" category (the
    * confirm dialog warns about this), so the generated work survives the
-   * span. Returns the updated production.
+   * span. Idempotent (a retry succeeds when already gone). Returns the updated production.
    */
-  deleteShotSequence(productionId: string, sequenceId: string): Promise<Production>;
+  deleteShotSequence(productionId: string, sequenceId: string, baseRev?: number): Promise<Production>;
   /**
    * Delete one stored take from a shot sequence's canvas (right-click a take).
    * The file is unlinked and the history entry dropped. Returns the updated
@@ -936,6 +937,14 @@ export interface CascadeApi {
    * never show different outputs.
    */
   selectGraphTake(productionId: string, shotId: string, req: SelectGraphTakeRequest): Promise<Production>;
+  /**
+   * Step 3 node graph: persist one shot's canvas state (node positions,
+   * sizes, collapsed ref tiles, viewport). The merge is per-key and deletions
+   * are explicit (a `remove` id list) — two windows moving different nodes
+   * fold together, and a stale whole-document save can't wholesale replace a
+   * newer layout. Returns the updated production.
+   */
+  updateGraphLayout(productionId: string, shotId: string, patch: GraphLayoutPatch): Promise<Production>;
   /**
    * The main job ledger's current state for one production — every
    * non-terminal generation job plus recently finished ones. Call on open,

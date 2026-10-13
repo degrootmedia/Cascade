@@ -17,6 +17,7 @@
 import type { GraphGenItem, GraphVideoNode, SequenceSegment } from "./graph.js";
 import type { ProductionShot } from "./production.js";
 import { refTagNames, removeRefTag } from "../prompt-grammar.js";
+import { resolveShotDisplay } from "../selected-output.js";
 
 /** One shot sequence. Renderer-owned (created/edited through `saveField`) with
  *  main-owned generation history (inside `graph`), merged per entry by
@@ -418,6 +419,13 @@ export function applyShotSequences(
         ? seq.durationSec
         : members.reduce((n, s) => n + (s.durationSec ?? 3), 0);
     const media = sequenceOutputMedia(seq, { shots: live, refs });
+    // Image output: the still is held for the window (and is the strip
+    // poster). Video output: the clip plays and the first member's frame is
+    // the poster (resolved through the shared display helper). Unbound: no
+    // poster — a pure slate block.
+    const poster = resolveShotDisplay(members[0] as ProductionShot).stillPath
+      ?? resolveShotDisplay(members[0] as ProductionShot).path
+      ?? members[0].artwork;
     at.set(idxs[0], {
       kind: "sequence",
       id: sequenceTimelineId(seq.id),
@@ -426,7 +434,7 @@ export function applyShotSequences(
       // Image output: the still is held for the window (and is the strip
       // poster). Video output: the clip plays and the first member's frame is
       // the poster. Unbound: no poster — a pure slate block.
-      artwork: media ? (media.kind === "image" ? media.rel : members[0].artwork) : undefined,
+      artwork: media ? (media.kind === "image" ? media.rel : poster) : undefined,
       videoPath: media?.kind === "video" ? media.rel : undefined,
       muted: seq.muted,
       videoOffsetSec: sanitizeVideoOffset(seq.videoOffsetSec),
@@ -443,13 +451,17 @@ export function applyShotSequences(
       return;
     }
     if (consumed.has(s.id)) return;
+    // The passthrough resolves through the shared display helper (the pipe
+    // when bound, the legacy mirrors otherwise). All callers pass full
+    // production shots, so the pipe fields are available at runtime.
+    const display = resolveShotDisplay(s as ProductionShot);
     out.push({
       kind: "shot",
       id: s.id,
       number: s.number,
       durationSec: s.durationSec ?? 3,
-      artwork: s.artwork,
-      videoPath: s.videoPath,
+      artwork: display.media === "still" ? display.path : display.stillPath,
+      videoPath: display.media === "clip" ? display.path : undefined,
       muted: s.muted,
       videoOffsetSec: sanitizeVideoOffset(s.videoOffsetSec),
       shotIds: [s.id],

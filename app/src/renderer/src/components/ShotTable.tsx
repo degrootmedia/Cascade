@@ -16,6 +16,8 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { Production, ProductionScene, ProductionShot } from "../../../shared/ipc.js";
 import { shotHasContent } from "../../../shared/ipc.js";
+import { revOf } from "../../../shared/snapshot-freshness.js";
+import { uid } from "./production/hex.js";
 import { AutoTextarea } from "./AutoTextarea.js";
 import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
@@ -42,7 +44,7 @@ export function ShotTable({ prod, onMutation, onToggleDisabled }: Props) {
 
   function handleReorder(shotId: string, beforeShotId: string | null, endSceneNumber?: number) {
     if (shotId === beforeShotId) return;
-    onMutation(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId, endSceneNumber));
+    onMutation(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId, endSceneNumber, revOf(prod)));
   }
 
   function onHandleDown(shotId: string, x: number, y: number) {
@@ -216,7 +218,7 @@ function SceneBlock({ scene, prod, occupied, onMutation, onToggleDisabled, dragI
         <button
           className="shot-insert scene"
           title="Insert a shot at the start of this scene"
-          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0))}
+          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0, uid("shot")))}
         >
           <PlusIcon size={13} />
           Shot
@@ -277,7 +279,7 @@ function SceneBlock({ scene, prod, occupied, onMutation, onToggleDisabled, dragI
               <button
                 className="shot-insert-gap"
                 title="Add a blank shot to this scene"
-                onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0))}
+                onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, 0, uid("shot")))}
               >
                 <PlusIcon size={12} />
               </button>
@@ -315,7 +317,7 @@ function ShotGap({ scene, prod, index, beforeId, endSceneNumber, dragging, activ
         <button
           className="shot-insert-gap"
           title="Insert a blank shot here"
-          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, index))}
+          onClick={() => onMutation(window.cascade.insertShot(prod.meta.id, scene.number, index, uid("shot")))}
         >
           <PlusIcon size={12} />
         </button>
@@ -488,7 +490,7 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
     if (shotHasContent(effective)) {
       if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
     }
-    onMutation(window.cascade.deleteShot(prod.meta.id, shot.id));
+    onMutation(window.cascade.deleteShot(prod.meta.id, shot.id, revOf(prod)));
   }
 
   return (

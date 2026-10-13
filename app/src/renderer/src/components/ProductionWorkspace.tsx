@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -39,8 +39,9 @@ import { getPromptTemplate, primePromptTemplates } from "./production/prompt-tem
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
-import { resolveSelectedOutput } from "../../../shared/selected-output.js";
+import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
+import { mergeGraphLayoutPatch } from "../../../shared/graph/layout.js";
 import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
@@ -275,9 +276,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [tweenBusyByShot, setTweenBusyByShot] = useState<Record<string, string>>({});
   /** Shot ids with a stitch/unstitch in flight. */
   const [tweenStitchingIds, setTweenStitchingIds] = useState<Set<string>>(new Set());
-  /** The sibling window's in-flight canvas jobs (Spec 03), mirrored via main so
-   *  "Generating…" shows whichever window hosts the graph. `null` = none. */
-  const [remoteCanvasBusy, setRemoteCanvasBusy] = useState<CanvasBusySnapshot | null>(null);
   // Step 3 storyboard-PDF export dialog (layout + version + logo options).
   const [pdfOpen, setPdfOpen] = useState(false);
   // Step 2 reference-image generation/edit modal. `refId` preselects edit mode
@@ -480,9 +478,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       if (i < 0) return;
       // Skip frameless shots: a blank panel has nothing to enlarge (its zoom
       // button is disabled), so stepping onto one would strand the lightbox.
+      // "Has a frame" resolves through the shared display (pipe, else legacy).
       for (let j = i + dir; j >= 0 && j < flat.length; j += dir) {
         const s = flat[j];
-        if (s.artwork || s.videoPath) { setBoardZoomId(s.id); return; }
+        if (resolveShotDisplay(s).path) { setBoardZoomId(s.id); return; }
       }
     },
   };
@@ -592,7 +591,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       try {
         const next = await window.cascade.loadProduction(e.productionId);
         if (next) {
-          const hit = next.scenes.flatMap((sc) => sc.shots).find((s) => s.artwork === e.jpegRel);
+          // Find the shot showing the edited frame (the display resolves the
+          // pipe; the legacy mirror covers ref/classic frames).
+          const hit = next.scenes.flatMap((sc) => sc.shots).find((s) => resolveShotDisplay(s).path === e.jpegRel || s.artwork === e.jpegRel);
           if (hit) bustOne(hit.id);
           else bustAll();
           prodRevRef.current = Math.max(prodRevRef.current, revOf(next));
@@ -1050,7 +1051,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     void window.cascade.getDetachedCanvasState().then((s) => { if (live) setDetachedWindow(s); }).catch(() => {});
     const off = window.cascade.onDetachedClosed(() => {
       setDetachedWindow({ open: false, productionId: null, target: null, frameId: null, sequenceId: null });
-      setRemoteCanvasBusy(null);
       const id = prodRef.current?.meta.id;
       if (id) void window.cascade.loadProduction(id).then((p) => { if (p) applySnapshot(p); }).catch(() => {});
     });
@@ -1072,21 +1072,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return () => { live = false; };
   }, [detached, graphShotId, seqCanvasId, showMoodboard]);
 
-  // ---- Cross-window in-flight canvas jobs (Spec 03) ----------------------
-  // Both windows mirror each other's busy sets through main so "Generating…"
-  // shows wherever the graph lives. This window publishes its LOCAL sets (never
-  // the mirrored ones — that would echo), and renders the union for display.
   const activeProdId = prod?.meta.id ?? "";
-  useEffect(() => {
-    if (typeof window.cascade.onCanvasBusy !== "function") return;
-    return window.cascade.onCanvasBusy((s) => setRemoteCanvasBusy(s));
-  }, []);
 
-  // ---- Main job ledger (architecture hardening WS3) -----------------------
-  // The ledger is the authoritative job state: every window requests the
-  // snapshot for the production on screen and then subscribes, so busy/result
-  // state is identical across windows and survives a reload — the peer busy
-  // relay above stays only as a fallback for pre-ledger surfaces.
+  // ---- Main job ledger (the ONLY cross-window busy source) ----------------
+  // Every window requests the ledger snapshot for the production on screen
+  // and then subscribes, so busy/result state is identical across windows
+  // and survives a reload. (Phase 4 removed the old peer `canvas:busyChanged`
+  // mirror — the ledger drives both windows, so no renderer-to-renderer
+  // state ever crosses.)
   const [ledgerJobs, setLedgerJobs] = useState<JobRecord[]>([]);
   useEffect(() => {
     if (!activeProdId || typeof window.cascade.jobsSnapshot !== "function") return;
@@ -1102,45 +1095,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       if (s.productionId === prodRef.current?.meta.id) setLedgerJobs(s.jobs);
     });
   }, []);
-  useEffect(() => {
-    if (!activeProdId || typeof window.cascade.canvasBusyChanged !== "function") return;
-    window.cascade.canvasBusyChanged({
-      productionId: activeProdId,
-      image: [...nodeImageBusyIds],
-      video: [...nodeVideoBusyIds],
-      editVideo: [...nodeEditVideoBusyIds],
-      editNodes: [...nodeEditBusyIds],
-      tween: { ...tweenBusyByShot },
-      stitching: [...tweenStitchingIds],
-      sequences: [...seqBusyIds],
-    });
-  }, [activeProdId, nodeImageBusyIds, nodeVideoBusyIds, nodeEditVideoBusyIds, nodeEditBusyIds, tweenBusyByShot, tweenStitchingIds, seqBusyIds]);
-  // The sibling's snapshot is only meaningful for the production on screen.
-  // The union ALSO folds in the main job ledger's running jobs — the ledger is
-  // authoritative, the peer snapshot the legacy fallback. Both windows derive
-  // this identically, so "Generating…" agrees everywhere without
-  // renderer-to-renderer mirroring for real jobs.
-  const ledgerCanvasBusy = useMemo(
+  // The ledger's running jobs, projected onto the canvas busy shape the node
+  // graph (and the storyboard cards, through the derived sets below) renders.
+  const remoteBusy = useMemo(
     () => (activeProdId ? jobsToCanvasBusy(activeProdId, ledgerJobs) : null),
     [activeProdId, ledgerJobs],
   );
-  const remoteBusy = useMemo(() => {
-    if (!activeProdId) return null;
-    const peer = remoteCanvasBusy && remoteCanvasBusy.productionId === activeProdId ? remoteCanvasBusy : null;
-    const led = ledgerCanvasBusy;
-    if (!peer && !led) return null;
-    const union = (a: string[] | undefined, b: string[] | undefined): string[] => [...new Set([...(a ?? []), ...(b ?? [])])];
-    return {
-      productionId: activeProdId,
-      image: union(peer?.image, led?.image),
-      video: union(peer?.video, led?.video),
-      editVideo: union(peer?.editVideo, led?.editVideo),
-      editNodes: union(peer?.editNodes, led?.editNodes),
-      tween: { ...(peer?.tween ?? {}), ...(led?.tween ?? {}) },
-      stitching: union(peer?.stitching, led?.stitching),
-      sequences: union(peer?.sequences, led?.sequences),
-    };
-  }, [activeProdId, remoteCanvasBusy, ledgerCanvasBusy]);
   /** `${sequenceId}:${nodeId}` generating here OR in the sibling window. */
   const seqBusyAll = useMemo(
     () => (remoteBusy ? new Set([...seqBusyIds, ...(remoteBusy.sequences ?? [])]) : seqBusyIds),
@@ -1178,11 +1138,23 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     [tweenStitchingIds, remoteBusy],
   );
 
-  /** Apply a mutation promise coming back from main with fresh state. */
+  /** Apply a mutation promise coming back from main with fresh state. A
+   *  revision conflict ("Stale edit: …") is recoverable: refresh to the fresh
+   *  document (named in the error) so the user sees current state and can
+   *  retry, instead of silently applying onto a moved document. */
   const apply = useCallback((p: Promise<Production>) => {
     setBusy(true); setErr(null);
     p.then((next) => { applySnapshot(next); void refreshList(); })
-      .catch((e) => setErr(String(e).replace(/^Error:\s*/, "")))
+      .catch(async (e) => {
+        const msg = String(e).replace(/^Error:\s*/, "");
+        if (msg.startsWith("Stale edit:") && prodRef.current) {
+          try {
+            const fresh = await window.cascade.loadProduction(prodRef.current.meta.id);
+            if (fresh) applySnapshot(fresh);
+          } catch { /* the message stands regardless */ }
+        }
+        setErr(msg);
+      })
       .finally(() => setBusy(false));
   }, [refreshList, applySnapshot]);
 
@@ -2549,36 +2521,24 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 node graph: pipe the image node's output into the output — binds
-   *  it as the feed and applies its currently selected generation. The
-   *  storyboard mirrors the output node: the optimistic mirrors derive from
-   *  the SHARED resolver (the same one main's write-through uses), so the two
-   *  sides can't disagree. */
+   *  it as the feed; the shared display helper shows its currently selected
+   *  generation on every surface (no mirror patch — the mirrors are retired). */
   function pipeImageToOutput(shotId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const pipe: Partial<ProductionShot> = { graphOutputSource: "imagegen", graphOutputRefId: undefined };
-    const out = resolveSelectedOutput({ ...shot, ...pipe });
-    saveGraphShotFields(shotId, {
-      ...pipe,
-      videoPath: undefined,
-      artwork: out.media === "still" ? out.path : undefined,
-    });
+    saveGraphShotFields(shotId, { graphOutputSource: "imagegen", graphOutputRefId: undefined });
   }
 
   /** Step 3 node graph: pipe a reference node into the output — binds it as
-   *  the feed and applies its media to the shot (image → boards, video →
-   *  videoPath). The storyboard mirrors the output node: the stale field of
-   *  the other kind is cleared. */
+   *  the feed; the `applyGraphRefOutput` command writes its media (the
+   *  ref-output store) and returns the updated production. */
   async function pipeRefToOutput(shotId: string, refId: string) {
     if (!prod) return;
     setErr(null);
-    const ref = promptRefsForShot(prod, shotId).find((r) => r.id === refId);
-    const isVideo = ref?.media === "video";
     saveGraphShotFields(shotId, {
       graphOutputSource: "ref",
       graphOutputRefId: refId,
-      ...(isVideo ? { artwork: undefined } : { videoPath: undefined }),
     });
     try {
       const next = await window.cascade.applyGraphRefOutput(prod.meta.id, shotId, refId);
@@ -2588,29 +2548,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 node graph: pipe a video node's output into the output — binds it
-   *  as the feed and applies its currently selected clip. The optimistic
-   *  mirrors derive from the shared resolver (main's write-through derives the
-   *  same values authoritatively on the save). */
+   *  as the feed; the display resolves its currently selected clip (no mirror
+   *  patch — the mirrors are retired). */
   function pipeVideoToOutput(shotId: string, nodeId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const pipe: Partial<ProductionShot> = {
+    saveGraphShotFields(shotId, {
       graphOutputSource: "videogen",
       graphOutputVideoNodeId: nodeId,
       graphOutputRefId: undefined,
-    };
-    const out = resolveSelectedOutput({ ...shot, ...pipe });
-    saveGraphShotFields(shotId, {
-      ...pipe,
-      artwork: undefined,
-      ...(out.media === "clip" && out.path ? { videoPath: out.path } : { videoPath: undefined }),
     });
   }
 
   /** Step 3 node graph: unbind the image node's output feed (and the output
-   *  feed if it was routed there). The storyboard frame comes from the pipe,
-   *  so unpiping leaves it blank. */
+   *  feed if it was routed there). The display updates from the pipe — no
+   *  mirror patch (the mirrors are retired). */
   function unpipeImageGen(shotId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
@@ -2626,7 +2579,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       ...(videoNodes.some((n, i) => n !== (shot.graphVideoNodes ?? [])[i]) ? { graphVideoNodes: videoNodes } : {}),
       ...(editNodes.some((n, i) => n !== (shot.graphEditNodes ?? [])[i]) ? { graphEditNodes: editNodes } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
-      ...(out.source === "imagegen" ? { graphOutputSource: undefined, artwork: undefined } : {}),
+      ...(out.source === "imagegen" ? { graphOutputSource: undefined } : {}),
     });
   }
 
@@ -2636,7 +2589,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (resolveSelectedOutput(shot).source === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputVideoNodeId: undefined, videoPath: undefined });
+    if (resolveSelectedOutput(shot).source === "videogen") saveGraphShotFields(shotId, { graphOutputSource: undefined, graphOutputVideoNodeId: undefined });
   }
 
   /** Step 3 in-betweener: replace the ordered keyframe ref ids. Blocks are
@@ -2647,19 +2600,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 in-betweener: pipe the stitched continuous clip into the output —
-   *  binds the tween as the feed and applies the stitch. The optimistic
-   *  mirrors derive from the shared resolver (main re-derives authoritatively). */
+   *  binds the tween as the feed; the display resolves the stitch (no mirror
+   *  patch — the mirrors are retired). */
   function pipeTweenToOutput(shotId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const pipe: Partial<ProductionShot> = { graphOutputSource: "tween", graphOutputRefId: undefined };
-    const out = resolveSelectedOutput({ ...shot, ...pipe });
-    saveGraphShotFields(shotId, {
-      ...pipe,
-      artwork: undefined,
-      ...(out.media === "clip" && out.path ? { videoPath: out.path } : { videoPath: undefined }),
-    });
+    saveGraphShotFields(shotId, { graphOutputSource: "tween", graphOutputRefId: undefined });
   }
 
   /** Step 3 in-betweener: unbind the tween output feed (the stitched clip and
@@ -2668,7 +2615,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    if (resolveSelectedOutput(shot).source === "tween") saveGraphShotFields(shotId, { graphOutputSource: undefined, videoPath: undefined });
+    if (resolveSelectedOutput(shot).source === "tween") saveGraphShotFields(shotId, { graphOutputSource: undefined });
   }
 
   /** Step 3 in-betweener: generate one action block's clip (prompt = the
@@ -2752,22 +2699,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3 node graph: pipe one edit-image node's output into the output —
-   *  binds it as the feed and applies its currently selected edit. The
-   *  optimistic mirrors derive from the shared resolver. */
+   *  binds it as the feed; the display resolves its currently selected edit
+   *  (no mirror patch — the mirrors are retired). */
   function pipeEditToOutput(shotId: string, nodeId: string) {
     if (!prod) return;
     const shot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
-    const pipe: Partial<ProductionShot> = {
+    saveGraphShotFields(shotId, {
       graphOutputSource: "editgen",
       graphOutputEditNodeId: nodeId,
       graphOutputRefId: undefined,
-    };
-    const out = resolveSelectedOutput({ ...shot, ...pipe });
-    saveGraphShotFields(shotId, {
-      ...pipe,
-      videoPath: undefined,
-      artwork: out.media === "still" ? out.path : undefined,
     });
   }
 
@@ -2788,7 +2729,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       ...(shot.graphEditToVideo && shot.graphVideoSourceEditNodeId === nodeId ? { graphEditToVideo: undefined, graphVideoSourceEditNodeId: undefined } : {}),
       ...(videoNodes.some((n, i) => n !== (shot.graphVideoNodes ?? [])[i]) ? { graphVideoNodes: videoNodes } : {}),
       ...(tweenRefIds.length !== (shot.graphTweenRefIds ?? []).length ? { graphTweenRefIds: tweenRefIds } : {}),
-      ...(out.source === "editgen" && shot.graphOutputEditNodeId === nodeId ? { graphOutputSource: undefined, graphOutputEditNodeId: undefined, artwork: undefined } : {}),
+      ...(out.source === "editgen" && shot.graphOutputEditNodeId === nodeId ? { graphOutputSource: undefined, graphOutputEditNodeId: undefined } : {}),
     });
   }
 
@@ -2911,8 +2852,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       } else if (src?.kind === "video") {
         const other = (cur?.graphVideoNodes ?? []).find((n) => n.id === src.nodeId);
         sourcePath = other?.gens?.[other.genIndex ?? 0]?.path;
-      } else {
-        sourcePath = cur?.videoPath;
+      } else if (cur) {
+        const display = resolveShotDisplay(cur);
+        sourcePath = display.media === "clip" ? display.path : undefined;
       }
       if (!sourcePath) { setErr("The edit-video node needs a source video — wire a clip into its source socket or generate one first."); return; }
       const editParams = params ?? node?.params;
@@ -3118,19 +3060,31 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3: persist the node graph's canvas state for a shot (node positions
-   *  and/or viewport), merged into whatever was saved before. Reads
-   *  `prodRef.current` (not the render closure) — a graph mutation (adding an
-   *  edit node) saves its shot fields just before the layout save, and a stale
-   *  `prod` here would clobber the new node. */
-  function saveGraphLayout(shotId: string, layout: GraphLayout) {
+   *  and/or viewport, deleted-node ids). Routes through the ONE layout
+   *  write-through (`production:updateGraphLayout`): optimistic per-key apply
+   *  (the shared merge — the renderer and main compute the same next layout),
+   *  then the authoritative snapshot on response. Reads `prodRef.current` (not
+   *  the render closure) — a graph mutation (adding an edit node) saves its
+   *  shot fields just before the layout save, and a stale `prod` here would
+   *  clobber the new node. */
+  async function saveGraphLayout(shotId: string, layout: GraphLayoutPatch) {
     const current = prodRef.current;
     if (!current) return;
-    saveField({
+    const next = {
+      ...current,
       scenes: current.scenes.map((sc) => ({
         ...sc,
-        shots: sc.shots.map((s) => s.id === shotId ? { ...s, graphLayout: { ...s.graphLayout, ...layout } } : s),
+        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, graphLayout: mergeGraphLayoutPatch(s.graphLayout, layout) } : s)),
       })),
-    });
+    };
+    prodRef.current = next;
+    setProd(next);
+    try {
+      const merged = await window.cascade.updateGraphLayout(current.meta.id, shotId, layout);
+      applySnapshot(merged);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
   }
 
   async function setBrandForShot(shotId: string, include: boolean) {
@@ -3294,7 +3248,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   function reorderShot(shotId: string, beforeShotId: string | null) {
     if (!prod || shotId === beforeShotId) return;
-    apply(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId));
+    apply(window.cascade.reorderShot(prod.meta.id, shotId, beforeShotId, undefined, revOf(prod)));
     // Bust board thumbnails after reorder (numbers and folders changed)
     bustAll();
     setBoardDragId(null);
@@ -3303,17 +3257,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Step 3: insert a blank shot between two board cards (or at the very end
-   *  after the last one). Uses the same main-side numbering as Step 1. */
+   *  after the last one). Uses the same main-side numbering as Step 1. The
+   *  caller-supplied id makes creation idempotent (a retry after an uncertain
+   *  response returns the existing shot instead of duplicating it). */
   function insertBlankShot(flat: { sc: Production["scenes"][number]; shot: ProductionShot }[], i: number) {
     if (!prod) return;
     const next = flat[i + 1];
     if (next) {
       const idx = next.sc.shots.findIndex((s) => s.id === next.shot.id);
-      apply(window.cascade.insertShot(prod.meta.id, next.sc.number, Math.max(0, idx)));
+      apply(window.cascade.insertShot(prod.meta.id, next.sc.number, Math.max(0, idx), uid("shot")));
     } else {
       const last = prod.scenes[prod.scenes.length - 1];
       if (!last) return;
-      apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length));
+      apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length, uid("shot")));
     }
   }
 
@@ -3322,14 +3278,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod) return;
     const last = prod.scenes[prod.scenes.length - 1];
     if (!last) return;
-    apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length));
+    apply(window.cascade.insertShot(prod.meta.id, last.number, last.shots.length, uid("shot")));
   }
 
   /** Step 3: delete a shot from the storyboard (right-click menu). The
    *  BoardCard confirms first when the shot has content. */
   function deleteBoardShot(shotId: string) {
     if (!prod) return;
-    apply(window.cascade.deleteShot(prod.meta.id, shotId));
+    apply(window.cascade.deleteShot(prod.meta.id, shotId, revOf(prod)));
   }
 
   /** Storyboard + script table: exclude a shot from the animatic/export
@@ -3402,7 +3358,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const warn = sequenceSelectedTake(seq) ? DELETE_SEQUENCE_VIDEO_WARNING : DELETE_SEQUENCE_WARNING;
     if (!window.confirm(warn)) return;
     if (seqCanvasId === sequenceId) setSeqCanvasId(null);
-    apply(window.cascade.deleteShotSequence(current.meta.id, sequenceId));
+    apply(window.cascade.deleteShotSequence(current.meta.id, sequenceId, revOf(current)));
   }
 
   /** Step 3: patch a shot sequence's canvas state (`seq.graph`, the same
@@ -3773,7 +3729,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
-  const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => s.artwork || s.graphImageGens?.length).length;
+  const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => resolveShotDisplay(s).path || s.graphImageGens?.length).length;
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = applyShotSequences(prod.scenes.flatMap((s) => s.shots), prod.shotSequences ?? [], prod.references).reduce((n, item) => n + item.durationSec, 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older

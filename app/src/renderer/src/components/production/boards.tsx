@@ -11,6 +11,7 @@ import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { findGeneration } from "../../../../shared/generations.js";
 import { mediaEntryForPath } from "../../../../shared/media-registry.js";
+import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
@@ -140,6 +141,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // race to the screen) AND for the card to near the viewport, then takes
   // one of 4 queue slots — N cards no longer slam N parallel IPC resizes at
   // mount while icons are still decoding.
+  // What this shot is showing — the shared display helper reads the pipe when
+  // bound, the legacy mirrors otherwise. Every frame/clip read below goes
+  // through it; no surface hand-reads the mirrors.
+  const display = resolveShotDisplay(shot);
+  const clipRel = display.media === "clip" ? display.path : undefined;
+  const stillRel = display.media === "still" ? display.path : display.stillPath;
   const cardRef = useRef<HTMLElement>(null);
   useEffect(() => {
     let live = true;
@@ -147,7 +154,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     setHistoryPath(null);
     setHistCache({});
     setVideoFailed(false);
-    if (!shot.artwork) return () => { live = false; };
+    if (!display.path) return () => { live = false; };
     const load = () => {
       if (!live) return;
       void afterFirstPaint().then(() => {
@@ -173,7 +180,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     }
     load();
     return () => { live = false; };
-  }, [prod.meta.id, shot.id, shot.artwork, shot.videoPath, bust]);
+  }, [prod.meta.id, shot.id, display.path, display.stillPath, bust]);
 
   // Lazily load the history frame being viewed.
   useEffect(() => {
@@ -198,15 +205,15 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     if (!expanded) return;
     setExpandedImg(null);
     setExpandedVideo(null);
-    if (histPath === null && shot.videoPath && !videoFailed) {
-      setExpandedVideo(cascadeMedia(prod.meta.id, shot.videoPath));
+    if (histPath === null && clipRel && !videoFailed) {
+      setExpandedVideo(cascadeMedia(prod.meta.id, clipRel));
       return;
     }
     let live = true;
     void window.cascade.boardImageFull(prod.meta.id, shot.id, histPath ?? undefined)
       .then((full) => { if (live && full) setExpandedImg(full); });
     return () => { live = false; };
-  }, [expanded, histPath, prod.meta.id, shot.id, shot.videoPath, videoFailed]);
+  }, [expanded, histPath, prod.meta.id, shot.id, clipRel, videoFailed]);
 
   // Left/right arrows step the enlarged frame through the storyboard; Escape
   // (like a click) closes it. Only the card hosting the lightbox listens.
@@ -222,17 +229,17 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   }, [expanded, shot.id, onZoomChange, onZoomNavigate]);
 
   // Right-click → native image menu, with the full-res file pinned for "Edit externally".
-  const relForExternal = histPath ?? shot.artwork;
+  const relForExternal = histPath ?? stillRel;
   const nativeSrc = relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined);
   // The card can show the shot's video instead of a frame — "Open file folder"
   // reveals whichever file is actually on screen.
-  const relForFolder = histIdx === null && shot.videoPath && !videoFailed ? shot.videoPath : relForExternal;
+  const relForFolder = histIdx === null && clipRel && !videoFailed ? clipRel : relForExternal;
   /** The card is currently showing the shot's clip rather than a frame — the
    *  suite (image editing) must not be offered for a video. */
-  const showingVideo = histIdx === null && !!shot.videoPath && !videoFailed;
+  const showingVideo = histIdx === null && !!clipRel && !videoFailed;
   // The generation actually on screen — a browsed history frame, the shot's
   // video, or the current frame — is what "Save as reference" copies.
-  const saveableRel = relForFolder ?? shot.artwork;
+  const saveableRel = relForFolder ?? stillRel;
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
@@ -433,11 +440,11 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             Make Primary
           </button>
         )}
-        {histIdx === null && shot.videoPath && !videoFailed ? (
+        {histIdx === null && clipRel && !videoFailed ? (
           <video
             ref={boardVideoRef}
             className="prod-board-frame-video"
-            src={`cascade-media://${prod.meta.id}/${encodeURIComponent(shot.videoPath)}`}
+            src={`cascade-media://${prod.meta.id}/${encodeURIComponent(clipRel)}`}
             muted
             loop
             playsInline
@@ -489,9 +496,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             />
           </>
         ) : (
-          <span className="prod-board-empty">{shot.artwork ? "…" : pending ? "pending…" : "no frame"}</span>
+          <span className="prod-board-empty">{display.path ? "…" : pending ? "pending…" : "no frame"}</span>
         )}
-        {histIdx === null && shot.videoPath && !videoFailed && (
+        {histIdx === null && clipRel && !videoFailed && (
           <span
             className="prod-board-video-badge"
             title="This shot has a video clip — hover the frame to preview it"
@@ -523,7 +530,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             video pending
           </span>
         )}
-        {!pending && !videoPending && shot.artwork && mediaEntryForPath(prod.media, shot.artwork)?.state === "missing" && (
+        {!pending && !videoPending && stillRel && mediaEntryForPath(prod.media, stillRel)?.state === "missing" && (
           <span
             className="prod-board-pending prod-board-missing"
             title="The file for this frame is missing on disk — regenerate it, or use Repair links to re-link it"
@@ -533,8 +540,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
         )}
         <button
           className="prod-board-zoom"
-          title={histPath === null && shot.videoPath ? "Play this shot's video" : "Enlarge this frame"}
-          disabled={!shownImg && !(histPath === null && shot.videoPath)}
+          title={histPath === null && clipRel ? "Play this shot's video" : "Enlarge this frame"}
+          disabled={!shownImg && !(histPath === null && clipRel)}
           onClick={(e) => { e.stopPropagation(); onZoomChange?.(shot.id); }}
         ><MagnifyIcon size={12} /></button>
         <div className="prod-board-actions">
@@ -557,7 +564,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
           </button>
           <button
             className="prod-board-video"
-            title={shot.videoPath ? "Replace this shot's video" : "Generate a video from this frame"}
+            title={clipRel ? "Replace this shot's video" : "Generate a video from this frame"}
             disabled={regenerating || !img}
             onClick={(e) => { e.stopPropagation(); onVideo(shot.id); }}
           >
@@ -634,8 +641,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             ) : null}
             <figcaption>
               Shot {shot.number} — use ← → to move between shots · click anywhere to close
-              {expandedVideo && shot.videoPath && onVideoStillSaved && (
-                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={shot.videoPath} getTime={() => expandedVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); onZoomChange?.(null); }} /></>
+              {expandedVideo && clipRel && onVideoStillSaved && (
+                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={clipRel} getTime={() => expandedVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); onZoomChange?.(null); }} /></>
               )}
             </figcaption>
           </figure>
@@ -880,7 +887,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
           </div>
           <span className="prod-video-frame-label">
             Source frame — the full-resolution version is sent as the video's primary reference.
-            {shot.videoPath ? " This shot already has a video; generating replaces it." : ""}
+            {resolveShotDisplay(shot).media === "clip" ? " This shot already has a video; generating replaces it." : ""}
           </span>
         </div>
         <label className="prod-label">Model</label>

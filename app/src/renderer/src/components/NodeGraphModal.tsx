@@ -34,7 +34,7 @@ gridRectFromPoints, touchedPanelIndices, unionGridRects, insetGridRect, normaliz
 removeCameraGridRefAt, type CameraGridData, type CameraGridPanel, type CameraGridGenOptions, type 
 CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type UpscaleData, type ImageGenAspectRatio, 
 type CliModelSchema, type GenParams, type Graph, type GraphEditNode, type GraphGenItem, type GraphVideoNode, type 
-GraphLayout, type OpenArtModelChoice, type Production, type ProductionShot, type ProductionStyle, type TweenBlock, 
+  GraphLayout, GraphLayoutPatch, type OpenArtModelChoice, type Production, type ProductionShot, type ProductionStyle, type TweenBlock, 
 type VideoModelOptions } from "../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceTotalDuration, DRAFT_RESOLUTION, isSeedance25Model, isDraftOnlyModel, type SequenceSegment } from "../../../shared/ipc.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
@@ -64,6 +64,7 @@ import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
 import { canConnect, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
 import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
+import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../../../shared/graph/render.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
 import { GraphHistoryModal, type GraphHistoryItem, type GraphHistoryTarget } from "./graph/history-modal.js";
@@ -2834,7 +2835,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Unbind whatever feeds the output. */
   onUnpipeOutput: () => void;
   /** Persist part of the canvas state (positions and/or viewport). */
-  onSaveLayout: (layout: GraphLayout) => void;
+  onSaveLayout: (layout: GraphLayoutPatch) => void;
   onClose: () => void;
   /** The graph is being edited in the detached canvas window — show a banner
    *  and block canvas interaction here to prevent concurrent lost updates. */
@@ -2941,15 +2942,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, lightbox]);
 
-  // Output thumbnail: fetched lazily, refetched when the frame changes.
+  // Output thumbnail: fetched lazily, refetched when the frame changes. The
+  // thumbnail resolves through the shared display (the pipe when bound), so
+  // the guard keys on the resolved path, not the retired mirror.
   useEffect(() => {
     let live = true;
     setThumbnail(null);
-    if (shot.artwork) {
+    if (resolveShotDisplay(shot).path) {
       window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => { if (live) setThumbnail(d ?? null); }).catch(() => {});
     }
     return () => { live = false; };
-  }, [prod.meta.id, shot.id, shot.artwork, bust]);
+  }, [prod.meta.id, shot.id, shot.graphOutputSource, shot.graphImageGens, shot.graphImageGenIndex, shot.graphEditNodes, shot.graphVideoNodes, shot.graphUpscale, shot.graphTweenOutput, shot.artwork, shot.videoPath, bust]);
 
   // Displayed prompt texts render shared sections AND reference tags from the
   // stored graph (step 05): the stored fields hold content only. Tag edits and
@@ -3556,12 +3559,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (src?.kind === "ref") {
       sourceRefId = src.refId;
     } else if (src?.kind === "imagegen") {
-      sourcePath = (shot.graphImageGens ?? [])[shot.graphImageGenIndex ?? 0]?.path ?? shot.artwork;
+      sourcePath = (shot.graphImageGens ?? [])[shot.graphImageGenIndex ?? 0]?.path ?? resolveShotDisplay(shot).stillPath;
     } else if (src?.kind === "editgen") {
       const other = (shot.graphEditNodes ?? []).find((n) => n.id === src.nodeId);
       sourcePath = (other?.gens ?? [])[other?.genIndex ?? 0]?.path;
     } else {
-      sourcePath = shot.artwork;
+      const display = resolveShotDisplay(shot);
+      sourcePath = display.media === "still" ? display.path : display.stillPath;
     }
     const allowed = new Set(upscaleModelIds ?? []);
     return {
@@ -3790,12 +3794,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (src?.kind === "ref") {
       sourceRefId = src.refId;
     } else if (src?.kind === "imagegen") {
-      sourcePath = (shot.graphImageGens ?? [])[shot.graphImageGenIndex ?? 0]?.path ?? shot.artwork;
+      sourcePath = (shot.graphImageGens ?? [])[shot.graphImageGenIndex ?? 0]?.path ?? resolveShotDisplay(shot).stillPath;
     } else if (src?.kind === "editgen") {
       const other = (shot.graphEditNodes ?? []).find((n) => n.id === src.nodeId);
       sourcePath = (other?.gens ?? [])[other?.genIndex ?? 0]?.path;
     } else {
-      sourcePath = shot.artwork;
+      const display = resolveShotDisplay(shot);
+      sourcePath = display.media === "still" ? display.path : display.stillPath;
     }
     return [
       {
@@ -3958,13 +3963,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
   }, [editNodes, videoNodes, allVideoNodes, hasTweenTool, hasCameraGridTool, hasUpscaleTool, upscaleUnavailable, videoEditUnavailable, showHint, editPair, videoPair, tweenNode, editVideoPairFor, cameraGridNode, upscaleNode]);
 
-  // Wiring truth: the stored graph. Pre-migration shots have no graph until
-  // the ensure effect persists one — materialize in memory so the first paint
-  // already matches, with no flash of an empty canvas.
-  const fallbackGraph = useMemo(() => {
-    if (shot.graph) return null;
-    return normalizeGraph(materializeGraph(shot, references)).graph;
-  }, [shot, references]);
+  // Wiring truth: the stored graph. The open-time normalized graph below is the
+  // ONE derivation the canvas ever reads when the stored graph is absent (a
+  // shot created mid-session, before the ensure effect persists it): connect/
+  // detach handlers read the same object instead of re-materializing, so the
+  // stored graph is the sole read path after that one normalization. Main's
+  // load guarantee (`ensureShotGraphs`) means loaded projects never take this
+  // branch at all.
+  const fallbackGraph = useMemo(
+    () => shot.graph ?? normalizeGraph(materializeGraph(shot, references)).graph,
+    [shot, references]
+  );
   const wiringGraph = shot.graph ?? fallbackGraph;
   // A reference is "sourced" when it feeds a generation input rather than a
   // prompt reference socket: a source frame/clip, a tween keyframe, or the
@@ -4060,37 +4069,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         // the default width (the CSS min keeps the blank state legible).
         style: sizeStyle(initialLayout, "output", 300),
         data: (() => {
-          // The output mirrors ONLY its pipe: the bound node's selected
-          // generation, or the piped reference's own media. Nothing is piped
-          // in yet → blank + hint.
-          if (shot.graphOutputSource === "videogen") {
-            const outNode = allVideoNodes.find((n) => n.id === shot.graphOutputVideoNodeId) ?? videoNodes[0];
-            const sel = outNode?.gens?.[outNode.genIndex ?? 0];
-            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "video" as const, bound: true };
-          }
-          if (shot.graphOutputSource === "imagegen") {
-            const sel = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
-            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "image" as const, bound: true };
-          }
-          if (shot.graphOutputSource === "editgen") {
-            const node = editNodes.find((n) => n.id === shot.graphOutputEditNodeId) ?? editNodes[0];
-            const sel = node?.gens?.[node.genIndex ?? 0];
-            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "image" as const, bound: true };
-          }
-          if (shot.graphOutputSource === "tween") {
-            // The tween feed shows the stitched continuous clip; before the
-            // first stitch the frame stays blank like any empty pipe.
-            if (shot.graphTweenOutput) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, shot.graphTweenOutput), previewKind: "video" as const, bound: true };
-          }
-          if (shot.graphOutputSource === "upscale") {
-            const up = shot.graphUpscale;
-            const sel = up?.gens?.[up.genIndex ?? 0];
-            if (sel) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, sel.path), previewKind: "image" as const, bound: true };
-          }
-          if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) {
+          // The output mirrors ONLY its pipe: the shared resolver names the
+          // bound node's selected take (or the piped reference's own media).
+          // Nothing is piped in yet → blank + hint.
+          const out = resolveSelectedOutput(shot);
+          if (out.source === "ref" && shot.graphOutputRefId) {
             const ref = references.find((r) => r.id === shot.graphOutputRefId);
             if (ref?.media === "video" && ref.mediaPath) return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, ref.mediaPath), previewKind: "video" as const, bound: true };
             if (ref?.artwork) return { shotNumber: shot.number, previewUrl: ref.artwork, previewKind: "image" as const, bound: true };
+          } else if (out.path) {
+            return { shotNumber: shot.number, previewUrl: graphMediaUrl(prod.meta.id, out.path), previewKind: out.media === "clip" ? "video" as const : "image" as const, bound: true };
           }
           return { shotNumber: shot.number, previewUrl: null, previewKind: null, bound: false };
         })(),
@@ -4399,7 +4387,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       setPlacedTools((prev) => { const n = new Set(prev); n.delete("upscale"); return n; });
       // Drop the node's wiring/picks and the output feed so it doesn't
       // resurrect on the next build.
-      cb.current.onGraphField({ graphUpscale: undefined, ...(cb.current.graphOutputSource === "upscale" ? { graphOutputSource: undefined, artwork: undefined } : {}) });
+      cb.current.onGraphField({ graphUpscale: undefined, ...(cb.current.graphOutputSource === "upscale" ? { graphOutputSource: undefined } : {}) });
     }
     if (removedEditIds.size > 0) {
       // Drop the node, clear every pipe that pointed at it (output, video
@@ -4411,7 +4399,6 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (cb.current.graphOutputSource === "editgen" && removedEditIds.has(cb.current.graphOutputEditNodeId ?? "")) {
         patch.graphOutputSource = undefined;
         patch.graphOutputEditNodeId = undefined;
-        patch.artwork = undefined;
       }
       if (cb.current.graphEditToVideo && removedEditIds.has(cb.current.graphVideoSourceEditNodeId ?? "")) {
         patch.graphEditToVideo = undefined;
@@ -4435,7 +4422,6 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (cb.current.graphOutputSource === "videogen" && gone.has(cb.current.graphOutputVideoNodeId ?? "")) {
         patch.graphOutputSource = undefined;
         patch.graphOutputVideoNodeId = undefined;
-        patch.videoPath = undefined;
       }
       cb.current.onGraphField(patch);
     }
@@ -4516,7 +4502,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const resized = changes.some((c) => c.type === "dimensions" || (c as { type: string }).type === "resize");
     if (dragStop || removed.length > 0 || toolNodeIds.size > 0 || resized) {
       // One save per drag gesture. The state only ever contains live nodes,
-      // so no pruning is needed for deleted references.
+      // so no pruning is needed for deleted references. Deleted nodes are
+      // named explicitly (`remove`) — a per-key merge can't express a delete
+      // by absence, and a stale snapshot must never drop a live node.
       const sizes: Record<string, { width: number; height: number }> = {};
       const savedSizes = cb.current.initialLayout?.sizes ?? {};
       for (const n of final) {
@@ -4539,6 +4527,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       saveLayoutRef.current({
         positions: Object.fromEntries(final.map((n) => [n.id, n.position])),
         ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
+        ...(removed.length > 0 ? { remove: removed.map((c) => c.id) } : {}),
       });
     }
   }, [shot, videoGenActive, tweenActive, cameraGridActive, showHint, flushPosChanges]);
@@ -4723,7 +4712,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     // Stored wire (same positional scheme as ref→prompt).
     {
-      const cur = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+      const cur = cb.current.graph ?? fallbackGraph;
       const op = connectionToEdge({ source, target, targetHandle: handle }, cur);
       if (op) saveGraph(applyConnection(cur, op));
     }
@@ -4751,7 +4740,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const refNodeId = `ref:${saved.id}`;
     // Stored wire first (mirrors a shelf-ref connect): ref → prompt ref socket.
     {
-      const cur = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+      const cur = cb.current.graph ?? fallbackGraph;
       const op = connectionToEdge({ source: refNodeId, target, targetHandle: handle }, cur);
       if (op) saveGraph(applyConnection(cur, op));
     }
@@ -4807,7 +4796,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     {
       // The ensure effect guarantees a stored graph; fall back to a
       // materialized one so a connect can never be lost (it persists).
-      const cur = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+      const cur = cb.current.graph ?? fallbackGraph;
       const source = canonicalNodeId(conn.source);
       const target = canonicalNodeId(conn.target);
       const slot = TWEEN_SOCKET_RE.exec(conn.targetHandle ?? "");
@@ -4903,7 +4892,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const cur = normalizeCameraGridData(cb.current.graphCameraGrid);
         const refIds = placeCameraGridRef(cur?.refIds ?? [], rid, slot ? Number(slot[1]) : undefined);
         stable.onCameraGridSave({ refIds });
-        const g = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+        const g = cb.current.graph ?? fallbackGraph;
         saveGraph(applyCameraGridRefs(g, refIds));
         return;
       }
@@ -5273,7 +5262,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const cur = normalizeCameraGridData(cb.current.graphCameraGrid);
         const refIds = removeCameraGridRefAt(cur?.refIds ?? [], Number(m[1]));
         stable.onCameraGridSave({ refIds: refIds.length ? refIds : undefined });
-        const g = cb.current.graph ?? normalizeGraph(materializeGraph(shot, cb.current.references)).graph;
+        const g = cb.current.graph ?? fallbackGraph;
         saveGraph(applyCameraGridRefs(g, refIds));
         return;
       }

@@ -1,4 +1,5 @@
 import type { ProductionShot } from "./ipc.js";
+import { resolveShotDisplay } from "./selected-output.js";
 
 /** All selectable stills, including node generations that were never primary. */
 export function boardFrameHistory(shot: ProductionShot): string[] {
@@ -15,10 +16,14 @@ export function boardFrameHistory(shot: ProductionShot): string[] {
       if (!Number.isFinite(bTime)) return -1;
       return bTime - aTime;
     });
+  const display = resolveShotDisplay(shot);
   const paths = [
     ...generations.map((g) => g.path),
     ...(shot.artworkHistory ?? []),
-    ...(shot.videoPath && shot.artwork ? [shot.artwork] : []),
+    // The still beside a clip (the pipe-resolved feed, or the legacy/ref
+    // copy) stays browsable; the primary still never lists itself.
+    ...(display.stillPath ? [display.stillPath] : []),
   ];
-  return [...new Set(paths.filter((rel) => rel && (shot.videoPath || rel !== shot.artwork)))];
+  const primary = display.media === "still" ? display.path : undefined;
+  return [...new Set(paths.filter((rel) => rel && rel !== primary))];
 }

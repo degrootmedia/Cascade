@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GenParams, GraphLayout, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceSelectedTake, sequenceSegmentLine, sequenceTotalDuration } from "../../../../shared/ipc.js";
+import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import {
   removeRefTag,
   refTagNames,
@@ -34,16 +35,19 @@ import { getPromptTemplate } from "./prompt-templates.js";
 export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand"] as const;
 
 /** The sequence's member frames as locked reference inputs: image nodes exactly
- *  like reference nodes, live-linked to each shot's current output frame. */
+ *  like reference nodes, live-linked to each shot's current output frame
+ *  (resolved through the shared display helper — pipe, else legacy). */
 export function sequenceFrameRefs(prod: Production, seq: ShotSequence): GraphRef[] {
   const shots = [...prod.scenes.flatMap((s) => s.shots), ...(prod.outdatedShots ?? [])];
   return seq.shotIds.flatMap((id) => {
     const shot = shots.find((s) => s.id === id);
     if (!shot) return [];
+    const display = resolveShotDisplay(shot);
+    const frame = display.media === "still" ? display.path : display.stillPath;
     return [{
       id: `seqframe:${id}`,
       name: `Shot ${shot.number}`,
-      artwork: shot.artwork ? cascadeMedia(prod.meta.id, shot.artwork) : "",
+      artwork: frame ? cascadeMedia(prod.meta.id, frame) : "",
       locked: true,
     }];
   });

@@ -3884,14 +3884,205 @@ same output, graph layout, prompt, order, and terminal job state must appear
 everywhere. Success looks boring: a completed generation remains selected,
 every surface agrees, and unrelated edits cannot make it disappear.
 
-## Deferred (per the rollout plan — separate passes after the three above land)
+## Deferred (per the rollout plan — Phase 4 active, the finale)
 
-- Phase 3: typed intent commands for the highest-risk whole-document saves
-  (move/resize node, reorder shots, rename shot), `applyRendererState` as a
-  compatibility boundary; stored graph becomes the canvas's sole read path.
 - Phase 4: retire mirrored `artwork`/`videoPath` writes, convert
   `syncBoardOutputToPipe` to one-time migration, shrink `applyRendererState`
-  to legacy import, remove renderer queue state duplication.
+  to legacy import, remove renderer queue state duplication. Plus the
+  remainder: entity-revision conflict gating (stale-delete rejection),
+  idempotency pins for the intent commands.
+
+---
+
+# Phase 4: retire the compatibility code
+
+End state: the node pipe is the only writer of "what a shot shows";
+`artwork`/`videoPath` survive only as the ref-output store (a ref-piped
+frame has no node history to live in) plus the legacy read for unpiped
+classic docs. Every surface resolves through the shared resolver instead
+of hand-reading mirrors.
+
+## Plan
+
+- [ ] 4.1 Shared reader: `resolveShotDisplay(shot)` — pipe set → live pipe
+      resolution (`resolveSelectedOutput` + feed still); pipe unset →
+      legacy mirrors (classic docs + existing fixtures keep working).
+      Switch readers: storyboard card, `boardFrameHistory` current entry,
+      animatic projection, `assemblyPlan`, outdated panels, thumbnail guard,
+      `generationInUse` output check, `chainSourceForEdit`, ref-refresh
+      target, `replaceVideoGenTake` dead write.
+- [ ] 4.2 Writers stop: `setShotSelectedOutput` sets pipe fields only;
+      `applyVideoOutput` loses its pin/backfill (clip lives in history,
+      still resolves from the feed); `production:applyGraphOutput` video
+      branch becomes validate+bind; ref-import paths keep recording their
+      rendered frame (their only take store); renderer drops mirror patches
+      from ALL pipe/unpipe/select handlers; `deleteReference`/`removeVideo`
+      go through the pipe (no mirror surgery).
+- [ ] 4.3 `syncBoardOutputToPipe` → one-time migration only (kept in
+      `migrateBoardArtwork`); removed from merge, rebase, and the
+      write-through. `mergeRendererShot` drops the explicit-null
+      artwork/videoPath branches (renderer stops sending them).
+- [ ] 4.4 Queue-state removal: drop the `canvas:busyChanged` peer publish +
+      main relay (the ledger drives both windows); keep the contract entry.
+- [ ] 4.5 Entity revisions: optional `baseRev` on destructive structural
+      commands (`deleteShot`, `reorderShot`, `removeOutdatedShot`) — mismatch
+      rejects with the fresh rev (recoverable conflict); idempotency pins
+      (repeat a command after an uncertain response → same document) for
+      layout/select/text/reorder/insert/delete.
+- [ ] 4.6 Shrink `applyRendererState` to the legacy boundary (dead mirror
+      branches removed; documented), full census of the remaining whole-doc
+      surface.
+- [ ] 4.7 Tests + verify (`typecheck`, `test`, `build`), `CONTEXT.md`, review.
+
+## Review
+
+Done — the compatibility layer is retired. The node pipe is the only writer
+of "what a shot shows"; `artwork`/`videoPath` survive only as the ref-output
+store (a ref-piped frame has no node history to live in) plus the legacy read
+for unpiped classic docs.
+
+**Readers (4.1).** New shared `resolveShotDisplay(shot)` — pipe set → live
+pipe resolution (clip + feed still); pipe unset → legacy mirrors. Switched:
+`boardFrameHistory` (current entry via display), storyboard card (frame/
+clip/badge/lightbox/zoom/menus/video-modal all display-resolved), outdated
+panels, animatic/export projection fill (`applyShotSequences` shot items +
+sequence posters), `assemblyPlan` per-shot events, thumbnail + full-image
+guards, `generationInUse` output check, `chainSourceForEdit`,
+`useShotAsStyleFrame`, classic/edit-video submit fallbacks, sequence member
+frame refs, canvas output preview (`buildDerived`), node source-frame
+fallbacks, zoom navigation, external-edit matching, boards-done count,
+`videoUrl`.
+
+**Writers stop (4.2).** `setShotSelectedOutput` sets pipe fields only;
+`applyVideoOutput` deleted (6 call sites: validate+bind for
+`applyGraphOutput`, nothing elsewhere — the recorded take + bind resolve);
+`hookImageGenToOutput` backfill, `replaceVideoGenTake` mirror re-point, and
+`production:removeVideo`'s mirror delete all removed (removeVideo unlinks via
+the service + unbinds video pipes through the write-through); renderer
+dropped mirror patches from ALL pipe/unpipe/select/delete gestures (pipe
+fields only — the display updates optimistically from the pipe itself).
+
+**Migration-only sync + merge cleanup (4.3).** `syncBoardOutputToPipe`
+removed from the merge, the job rebase, and the write-through; kept in
+`migrateBoardArtwork` only (docstring says so). `mergeRendererShot` dropped
+the explicit-null artwork/videoPath branches + the legacy editvideo
+ride-through; `artwork`/`videoPath` flipped to command-owned + denied in the
+ownership table (the derived skip set follows automatically).
+
+**Queue-state removal (4.4).** Deleted the `canvas:busyChanged` peer publish
+effect + the main relay (+ `lastMainCanvasBusy` + `remoteCanvasBusy` state);
+the union is ledger-only. Legacy channel entries stay for the contract guard.
+
+**Revisions + idempotency (4.5).** `assertFreshRevision` (pure, in
+productions.ts) gates `mutateShots(id, mutate, baseRev?)`; destructive
+structural commands take an optional trailing `baseRev` (`deleteShot`,
+`reorderShot`, `removeOutdatedShot`, `deleteShotSequence`) — mismatch throws
+naming the fresh rev, and the renderer's `apply` refreshes to the fresh
+document on conflict (recoverable, never silent). Deletes are idempotent
+no-ops when already gone (`shotter.removeShotById`, outdated/sequence
+presence checks); `insertShotAt` takes a caller id (renderer passes
+`uid("shot")`) so a retry returns the existing shot; layout/select/reorder
+repeats pinned as fixed points. Schema validators cover the new args.
+
+**applyRendererState (4.6).** Shrunk to the legacy boundary: mirror branches
+gone, docstrings updated. Remaining whole-doc surface (by grep census):
+51 `saveField` (design/admin fields), ~23 `saveGraphShotFields` (node
+wiring/prompts/membership), 30 `onGraphField` (graph object), 6 direct
+saves — full removal waits on edge/node commands, now explicitly out of
+scope.
+
+**Tests.** Converted ~40 mirror assertions to display assertions across
+pipeline/productions/selected-output/assembly/board-history/board-frames/
+tween/shot-table; new: layout repeat + select repeat + insert/reorder/delete
+idempotency + `assertFreshRevision` accept/reject + reorder-vs-stale-layout
+race + unknown-future-node survival + load guarantee. Two self-caught
+during the pass: the primary is excluded from history by design (my first
+history expectation was wrong), and rapid same-millisecond generation
+timestamps tie in sort order (stable node order wins — deterministic, not
+flaky).
+
+Verify: `app` typecheck clean; `app` tests **1559 passed + 1 skipped** (138
+files); `app` build clean. `core` untouched. Main-process + IPC change —
+fully rebuild AND restart the app before testing.
+
+---
+
+# Phase 3: narrow the write paths + stored graph as the sole canvas read
+
+Inventory (whole-document save census, renderer side): 51 `saveField(`
+call sites (styles, references, characters, categories, brand, VO/music
+volumes, animatic config, sequences, scenes), 23 `saveGraphShotFields(` (shot
+pipes, node wiring/prompts, tween edits — selection/pipe now mostly
+commands), 30 `onGraphField(` (graph object + node params/prompts/wiring/
+membership), 6 direct `saveProduction(` calls. Already commands before this
+pass: `updateBoardPrompt`, `selectGraphTake`, `updateShot` (shot audio/visual
+text), `reorderShot`/`insertShot`/`deleteShot`, all generation submits.
+
+## Plan
+
+- [ ] 3.1 Inventory whole-doc saves + the canvas's inline materialize
+      fallbacks.
+- [ ] 3.2 `production:updateGraphLayout` — per-key layout merge (concurrent
+      moves of different nodes fold together; node deletes named explicitly
+      via `remove` so a stale snapshot can't delete by absence), shared merge
+      in `shared/graph/layout.ts` (renderer optimistic apply + main handler
+      compute the same next layout), schema-validated payload, renderer
+      `saveGraphLayout` routes through it (one save per drag gesture, as
+      before).
+- [ ] 3.3 Race test: fresh storyboard reorder + stale whole-doc layout save
+      → order keeps, layout edit still lands.
+- [ ] 3.4 Stored graph as the sole canvas read: `ensureShotGraphs` runs the
+      flag→graph normalization for every shot lacking wiring at load (both
+      load paths — scenes, outdated bucket, sequence facades, so shots
+      created after their document's migration are covered); the modal's
+      open-time normalized graph is the single derivation shared by all
+      connect/detach handlers (inline per-handler re-materialization
+      removed); unknown future nodes + their wiring survive normalization
+      unvalidated (normalize keeps unknown-kind edges; `migrateShotGraph`
+      carries the nodes) instead of being dropped.
+- [ ] 3.5 Tests: layout merge (fold/remove/viewport/empty), payload
+      validation, reorder-vs-stale-layout race, load guarantee (v3 graphless
+      shot gains a graph; second load a fixed point), unknown future node
+      survival.
+- [ ] 3.6 Verify: `npm run typecheck`, `npm test`, `npm run build`;
+      `CONTEXT.md` rows; census recorded here.
+
+## Review
+
+Done.
+
+- `shared/graph/layout.ts`: `mergeGraphLayoutPatch` — per-key fold of
+  positions/sizes/collapsed, explicit `remove` ids, outright viewport
+  replace, absent sections untouched. Read by both the main
+  `production:updateGraphLayout` handler and the renderer's optimistic apply,
+  so the two compute the same next layout. Payload validated at the IPC
+  boundary (`updateGraphLayout` schema entry: finite coordinates, key length
+  caps, viewport shape, string-array `remove`).
+- The renderer's `saveGraphLayout` is now async-with-applySnapshot (same as
+  the selection command): optimistic per-key apply, then the authoritative
+  returned snapshot. Node deletes send their removed ids (the modal's
+  drag-end save names them) — a stale snapshot that merely lacks a node can
+  never delete it. Sequence-canvas layouts stay whole-doc via `onGraphField`
+  (out of scope).
+- Stored graph: `ensureShotGraphs(p)` fills missing wiring for scene shots,
+  outdated shots, and sequence facades on every load (both paths, on the
+  cached doc before the clone); the seven inline `?? materializeGraph`
+  fallbacks in `NodeGraphModal` collapsed onto the one open-time normalized
+  graph (`fallbackGraph`), which is null-branch-free for every loaded
+  document; unknown future nodes/edges carried through `migrateShotGraph`
+  and kept unvalidated by `normalizeGraph`.
+- Race test: a fresh reorder survives a stale whole-doc save that still
+  applies its layout edit (main owns structure, renderer owns layout).
+
+Known remainder (Phase 4): edge/node add/delete commands, entity-revision
+conflict gating (explicit stale-delete rejection), retiring the
+`artwork`/`videoPath` mirrors + `syncBoardOutputToPipe`-as-migration, and
+the remaining whole-doc save surface above.
+
+Verify: `app` typecheck clean; `app` tests **1552 passed + 1 skipped** (138
+files; +6 graph-commands, +2 graph-migration, +1 productions race);
+`app` build clean. `core` untouched. Main-process change — fully restart
+the app before testing.
 
 ## Review
 

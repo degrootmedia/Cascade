@@ -29,6 +29,14 @@ function checkOptionalPathString(v: unknown, what: string, max = 4096): string |
   return checkPathString(v, what, max);
 }
 
+/** An optional caller-supplied base revision for structural commands. */
+function checkOptionalRev(v: unknown): void {
+  if (v === null || v === undefined) return;
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new Error("IPC validation: baseRev must be a finite number");
+  }
+}
+
 /** Generic guard applied to every channel: no NUL bytes in strings. */
 function checkNoNul(v: unknown, depth = 0): void {
   if (depth > 10) return;
@@ -97,6 +105,58 @@ const validators: Record<string, (args: unknown[]) => void> = {
     }
     throw new Error("IPC validation: selectGraphTake request shape invalid");
   },
+  "production:updateGraphLayout": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "shotId");
+    const patch = args[2];
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+      throw new Error("IPC validation: updateGraphLayout patch must be an object");
+    }
+    const p = patch as Record<string, unknown>;
+    const xyMap = (v: unknown, what: string): void => {
+      if (v === undefined) return;
+      if (!v || typeof v !== "object" || Array.isArray(v)) {
+        throw new Error(`IPC validation: updateGraphLayout ${what} must be an object`);
+      }
+      for (const [k, pt] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof k !== "string" || k.length === 0 || k.length > 256) {
+          throw new Error(`IPC validation: updateGraphLayout ${what} key must be 1..256 chars`);
+        }
+        if (!pt || typeof pt !== "object" || Array.isArray(pt)) {
+          throw new Error(`IPC validation: updateGraphLayout ${what} values must be point/size objects`);
+        }
+        for (const coord of Object.values(pt as Record<string, unknown>)) {
+          if (typeof coord !== "number" || !Number.isFinite(coord) || Math.abs(coord) > 100000) {
+            throw new Error(`IPC validation: updateGraphLayout ${what} coordinates must be finite numbers`);
+          }
+        }
+      }
+    };
+    xyMap(p.positions, "positions");
+    xyMap(p.sizes, "sizes");
+    if (p.collapsed !== undefined) {
+      if (!p.collapsed || typeof p.collapsed !== "object" || Array.isArray(p.collapsed)) {
+        throw new Error("IPC validation: updateGraphLayout collapsed must be an object");
+      }
+      for (const [k, v] of Object.entries(p.collapsed as Record<string, unknown>)) {
+        if (typeof k !== "string" || k.length === 0 || k.length > 256 || typeof v !== "boolean") {
+          throw new Error("IPC validation: updateGraphLayout collapsed must map ids to booleans");
+        }
+      }
+    }
+    if (p.viewport !== undefined) {
+      const v = p.viewport as Record<string, unknown>;
+      if (!v || typeof v !== "object" || typeof v.x !== "number" || typeof v.y !== "number" || typeof v.zoom !== "number" ||
+        !Number.isFinite(v.x) || !Number.isFinite(v.y) || !Number.isFinite(v.zoom)) {
+        throw new Error("IPC validation: updateGraphLayout viewport must be {x,y,zoom} numbers");
+      }
+    }
+    if (p.remove !== undefined) {
+      if (!Array.isArray(p.remove) || p.remove.some((x) => typeof x !== "string")) {
+        throw new Error("IPC validation: updateGraphLayout remove must be a string array");
+      }
+    }
+  },
   "production:import": (args) => {
     checkPathString(args[0], "folder");
   },
@@ -145,6 +205,41 @@ const validators: Record<string, (args: unknown[]) => void> = {
   "suite:deleteEntry": (args) => {
     checkPathString(args[0], "productionId", 256);
     checkPathString(args[1], "entryId", 256);
+  },
+  // Structural shot commands: an optional trailing base revision rejects a
+  // stale destructive edit with a recoverable conflict (Phase 4). Insert
+  // takes an optional caller-supplied shot id for retry-safe creation.
+  "production:deleteShot": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    checkPathString(args[1], "shotId", 256);
+    checkOptionalRev(args[2]);
+  },
+  "production:reorderShot": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    checkPathString(args[1], "shotId", 256);
+    if (args[2] !== null && typeof args[2] !== "string") {
+      throw new Error("IPC validation: reorderShot beforeShotId must be a string or null");
+    }
+    if (args[3] !== undefined && (typeof args[3] !== "number" || !Number.isFinite(args[3]))) {
+      throw new Error("IPC validation: reorderShot endSceneNumber must be a finite number");
+    }
+    checkOptionalRev(args[4]);
+  },
+  "production:removeOutdatedShot": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    checkPathString(args[1], "shotId", 256);
+    checkOptionalRev(args[2]);
+  },
+  "production:deleteShotSequence": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    checkPathString(args[1], "sequenceId", 256);
+    checkOptionalRev(args[2]);
+  },
+  "production:insertShot": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    if (args[3] !== undefined && (typeof args[3] !== "string" || (args[3] as string).length > 256)) {
+      throw new Error("IPC validation: insertShot shotId must be a string up to 256 chars");
+    }
   },
   "suite:exportEntry": (args) => {
     checkPathString(args[0], "productionId", 256);

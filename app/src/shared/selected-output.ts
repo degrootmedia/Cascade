@@ -23,7 +23,7 @@ export type OutputSource = "imagegen" | "editgen" | "upscale" | "videogen" | "tw
  *  nothing is piped or the piped node has no selection yet. */
 export interface SelectedOutput {
   /** Which pipe owns the selection (undefined = nothing piped). */
-  source?: OutputSource;
+  source?: "imagegen" | "editgen" | "upscale" | "videogen" | "tween" | "ref";
   /** The owning node id when the source is a per-node kind. */
   nodeId?: string;
   /** The reference id when the source is a reference. */
@@ -31,6 +31,10 @@ export interface SelectedOutput {
   media: "still" | "clip" | "none";
   /** Workspace-relative path of the selected media (absent when "none"). */
   path?: string;
+  /** The still beside a clip: the feed frame for piped clips (the image
+   *  node's selection, or the edit node's when the video source is an
+   *  edit). Absent for stills (their path IS the still). */
+  stillPath?: string;
 }
 
 /** The selected take of an edit node (find by id, else the first node). */
@@ -45,6 +49,17 @@ function videoSelection(shot: ProductionShot, nodeId?: string): { nodeId?: strin
   const nodes = shot.graphVideoNodes ?? videoNodesFor(shot);
   const node = nodeId ? nodes.find((n) => n.id === nodeId) : nodes[0];
   return { nodeId: node?.id, take: node?.gens?.[node.genIndex ?? 0] };
+}
+
+/** The still beside a clip: the frame the clip was animated from — the edit
+ *  node's selection when the video pipe sources an edit node, else the image
+ *  node's selection (the same feed the old mirror backfill used). */
+function feedStillPath(shot: ProductionShot): string | undefined {
+  const nodes = shot.graphVideoNodes ?? videoNodesFor(shot);
+  const vid = nodes.find((n) => n.id === (shot.graphOutputVideoNodeId ?? "vid0")) ?? nodes[0];
+  const src = vid?.source;
+  if (src?.kind === "editgen") return editSelection(shot, src.nodeId).take?.path;
+  return shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
 }
 
 /** Resolve the shot's selected output from the pipe (pure, read-only). */
@@ -71,12 +86,12 @@ export function resolveSelectedOutput(shot: ProductionShot): SelectedOutput {
     case "videogen": {
       const sel = videoSelection(shot, shot.graphOutputVideoNodeId);
       return sel.take?.path
-        ? { source: "videogen", nodeId: sel.nodeId, media: "clip", path: sel.take.path }
+        ? { source: "videogen", nodeId: sel.nodeId, media: "clip", path: sel.take.path, stillPath: feedStillPath(shot) }
         : { source: "videogen", nodeId: sel.nodeId, media: "none" };
     }
     case "tween": {
       return shot.graphTweenOutput
-        ? { source: "tween", media: "clip", path: shot.graphTweenOutput }
+        ? { source: "tween", media: "clip", path: shot.graphTweenOutput, stillPath: shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path }
         : { source: "tween", media: "none" };
     }
     case "ref": {
@@ -102,3 +117,40 @@ export type SelectGraphTakeRequest =
   | { path: string }
   | { kind: "imagegen" | "editgen" | "upscale" | "videogen"; nodeId?: string; index: number }
   | { kind: "unpipe" };
+
+/**
+ * What a shot is showing, for every surface that paints it (storyboard card,
+ * animatic projection, export plan, outdated panel, thumbnail guard). Pipe
+ * set → the live pipe resolution; pipe unset → the legacy mirrors (classic
+ * docs whose state never had a pipe, plus the existing fixtures). Exactly one
+ * read helper — no surface hand-rolls a second resolution.
+ */
+export interface ShotDisplay {
+  media: "still" | "clip" | "none";
+  /** The shown media path (a clip, a still, or nothing). */
+  path?: string;
+  /** The still beside a clip (the feed frame; the poster when the clip can't
+   *  play; the lightbox still). */
+  stillPath?: string;
+  /** Which pipe owns the selection (undefined = legacy mirrors). */
+  source?: SelectedOutput["source"];
+  nodeId?: string;
+  refId?: string;
+  /** True when resolved from the legacy mirrors (no pipe). */
+  legacy?: boolean;
+}
+
+export function resolveShotDisplay(shot: ProductionShot): ShotDisplay {
+  const out = resolveSelectedOutput(shot);
+  if (out.source) {
+    if (out.media === "clip") {
+      // The live feed still wins; the legacy/ref copy is the fallback (a
+      // ref-piped clip's still is its recorded copy).
+      return { ...out, stillPath: out.stillPath ?? shot.artwork ?? undefined };
+    }
+    return out;
+  }
+  if (shot.videoPath) return { media: "clip", path: shot.videoPath, stillPath: shot.artwork, legacy: true };
+  if (shot.artwork) return { media: "still", path: shot.artwork, legacy: true };
+  return { media: "none", legacy: true };
+}

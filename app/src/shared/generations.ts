@@ -11,6 +11,7 @@
  */
 import type { GraphGenItem, ProductionShot } from "./ipc.js";
 import { TWEEN_KEY_IMGGEN, editNodeKeyframe } from "./ipc.js";
+import { resolveShotDisplay } from "./selected-output.js";
 
 export type GenerationKind = "image" | "video" | "edit" | "editvideo" | "tween" | "upscale";
 
@@ -68,8 +69,11 @@ function selectedPath(arr: GraphGenItem[] | undefined, index: number | undefined
  */
 export function generationInUse(shot: ProductionShot, gen: GenerationRef): string | null {
   const rel = gen.rel;
-  if (shot.artwork === rel) return "the storyboard's current frame";
-  if (shot.videoPath === rel) return "the shot's current clip";
+  // The storyboard/animatic output resolves through the shared display (the
+  // pipe when bound, the legacy mirrors otherwise) — a generation feeding it
+  // can't be deleted. Nothing else hand-reads the mirrors.
+  const display = resolveShotDisplay(shot);
+  if (display.path === rel) return display.media === "clip" ? "the shot's current clip" : "the storyboard's current frame";
   if (gen.kind === "image") {
     if (selectedPath(shot.graphImageGens, shot.graphImageGenIndex) !== rel) return null;
     if (shot.graphImageToVideo) return "the video node's source frame";

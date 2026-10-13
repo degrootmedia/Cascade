@@ -26,9 +26,8 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { resolveSelectedOutput } from "../src/shared/selected-output.js";
+import { resolveSelectedOutput, resolveShotDisplay } from "../src/shared/selected-output.js";
 import {
-  applyVideoOutput,
   hookImageGenToOutput,
   hookVideoGenToOutput,
   recordBoardArtwork,
@@ -118,17 +117,16 @@ describe("resolveSelectedOutput", () => {
 });
 
 describe("setShotSelectedOutput (the one write-through)", () => {
-  it("binds imagegen, derives artwork, clears a stale clip, and marks the shot migrated", () => {
-    const shot = makeShot({ graphImageGens: [take("b/f.jpg")], graphImageGenIndex: 0, videoPath: "v/stale.mp4" });
+  it("binds imagegen and marks the shot migrated (the display resolves the take — no mirrors written)", () => {
+    const shot = makeShot({ graphImageGens: [take("b/f.jpg")], graphImageGenIndex: 0 });
     setShotSelectedOutput(shot, { kind: "imagegen" });
     expect(shot.graphOutputSource).toBe("imagegen");
     expect(shot.graphOutputRefId).toBeUndefined();
     expect(shot.graphMigrated).toBe(true);
-    expect(shot.artwork).toBe("b/f.jpg");
-    expect(shot.videoPath).toBeUndefined();
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "b/f.jpg" });
   });
 
-  it("binds videogen, derives the clip, and backfills the still from the source pipe", () => {
+  it("binds videogen and names the node (the clip + feed still resolve live)", () => {
     const shot = makeShot({
       graphImageGens: [take("b/src.jpg")],
       graphImageGenIndex: 0,
@@ -137,15 +135,18 @@ describe("setShotSelectedOutput (the one write-through)", () => {
     setShotSelectedOutput(shot, { kind: "videogen", nodeId: "vid0" });
     expect(shot.graphOutputSource).toBe("videogen");
     expect(shot.graphOutputVideoNodeId).toBe("vid0");
-    expect(shot.videoPath).toBe("v/clip.mp4");
-    expect(shot.artwork).toBe("b/src.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({
+      media: "clip", path: "v/clip.mp4", stillPath: "b/src.jpg",
+    });
   });
 
-  it("unpipe clears exactly the mirror of the unpiped kind", () => {
+  it("unpipe clears the pipe so the display goes blank (legacy/ref mirrors cleared for their kind)", () => {
     const clip = makeShot({ graphOutputSource: "videogen", videoPath: "v/clip.mp4", artwork: "b/still.jpg" });
     setShotSelectedOutput(clip, { kind: "unpipe" });
     expect(clip.graphOutputSource).toBeUndefined();
-    expect(clip.videoPath).toBeUndefined();
+    // The clip mirror is cleared; the frozen still survives as the legacy
+    // fallback (the pre-cutover unpipe showed the still too).
+    expect(resolveShotDisplay(clip)).toMatchObject({ media: "still", path: "b/still.jpg", legacy: true });
     expect(clip.artwork).toBe("b/still.jpg"); // a still survives a clip unpipe
 
     const still = makeShot({ graphOutputSource: "imagegen", artwork: "b/f.jpg", videoPath: "v/old.mp4" });
@@ -153,7 +154,7 @@ describe("setShotSelectedOutput (the one write-through)", () => {
     expect(still.artwork).toBeUndefined();
   });
 
-  it("ref still and clip selections set the mirrors directly (the production owns the file)", () => {
+  it("ref still and clip selections record the rendered frame (their only take store)", () => {
     const still = makeShot({ artwork: "b/prev.jpg" });
     setShotSelectedOutput(still, { kind: "ref", refId: "r1", media: "still", path: "b/ref.jpg" });
     expect(still.graphOutputSource).toBe("ref");
@@ -170,18 +171,17 @@ describe("setShotSelectedOutput (the one write-through)", () => {
 });
 
 describe("selection interop (canvas and storyboard share one write-through)", () => {
-  it("selecting an older image take re-derives the storyboard mirror", () => {
+  it("selecting an older image take changes what the storyboard shows", () => {
     const shot = makeShot({
       graphImageGens: [take("b/new.jpg"), take("b/older.jpg")],
       graphImageGenIndex: 0,
       graphOutputSource: "imagegen",
-      artwork: "b/new.jpg",
       graphMigrated: true,
     });
+    expect(resolveShotDisplay(shot).path).toBe("b/new.jpg");
     shot.graphImageGenIndex = 1;
     setShotSelectedOutput(shot, { kind: "imagegen" });
-    expect(shot.artwork).toBe("b/older.jpg");
-    expect(shot.artworkHistory).toContain("b/new.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "b/older.jpg" });
   });
 
   it("a selection on an UNBOUND node moves the index without touching the output", () => {
@@ -190,51 +190,49 @@ describe("selection interop (canvas and storyboard share one write-through)", ()
       graphImageGenIndex: 0,
       graphOutputSource: "videogen",
       graphVideoNodes: [{ id: "vid0", prompt: "", gens: [take("v/clip.mp4")], genIndex: 0 }],
-      videoPath: "v/clip.mp4",
     });
     shot.graphVideoNodes![0].genIndex = 0;
     // (the command sets the index and skips the write-through when unbound)
-    expect(shot.videoPath).toBe("v/clip.mp4");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "clip", path: "v/clip.mp4" });
     expect(shot.graphOutputSource).toBe("videogen");
   });
 
-  it("storyboard promote settles at a fixed point (sync is a no-op afterwards)", () => {
+  it("storyboard promote binds the owning node (the display follows the pipe)", () => {
     const shot = makeShot({
       graphImageGens: [take("b/new.jpg"), take("b/older.jpg")],
       graphImageGenIndex: 0,
-      artwork: "b/new.jpg",
       artworkHistory: [],
       graphMigrated: true,
     });
     selectBoardFrame(shot, "b/older.jpg");
     expect(shot.graphOutputSource).toBe("imagegen");
     expect(shot.graphImageGenIndex).toBe(1);
-    expect(shot.artwork).toBe("b/older.jpg");
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "b/older.jpg" });
   });
 
   it("classic edit and video auto-apply route through the write-through", () => {
     const edit = makeShot({ graphImageGens: [take("b/src.jpg")], graphImageGenIndex: 0, graphEditNodes: [{ id: "edit0", prompt: "" }] });
     hookImageGenToOutput(edit);
     expect(edit.graphOutputSource).toBe("imagegen");
-    expect(edit.artwork).toBe("b/src.jpg");
+    expect(resolveShotDisplay(edit)).toMatchObject({ media: "still", path: "b/src.jpg" });
     recordGraphEditGen(edit, "edit0", "b/edit.jpg", "fix", "auto");
     setShotSelectedOutput(edit, { kind: "editgen", nodeId: "edit0" });
     expect(edit.graphOutputSource).toBe("editgen");
-    expect(edit.artwork).toBe("b/edit.jpg");
+    expect(resolveShotDisplay(edit)).toMatchObject({ media: "still", path: "b/edit.jpg" });
 
     const vid = makeShot({ artwork: "b/still.jpg" });
     recordGraphVideoGen(vid, "vid0", "v/clip.mp4", "drift", "auto");
     hookVideoGenToOutput(vid, "vid0");
-    applyVideoOutput(vid, "v/clip.mp4");
     expect(vid.graphOutputSource).toBe("videogen");
-    expect(vid.videoPath).toBe("v/clip.mp4");
-    expect(vid.artwork).toBe("b/still.jpg"); // unchanged still survives
+    // The display resolves the recorded take + its pipe (the retired mirror
+    // pin); the pre-existing still is untouched (ref/legacy store only).
+    expect(resolveShotDisplay(vid)).toMatchObject({ media: "clip", path: "v/clip.mp4" });
+    expect(vid.artwork).toBe("b/still.jpg"); // legacy store value frozen
 
     const hooked = makeShot({ graphVideoNodes: [{ id: "vid0", prompt: "", gens: [take("v/clip.mp4")], genIndex: 0 }] });
     hookVideoGenToOutput(hooked, "vid0");
     expect(hooked.graphOutputSource).toBe("videogen");
-    expect(hooked.videoPath).toBe("v/clip.mp4");
+    expect(resolveShotDisplay(hooked)).toMatchObject({ media: "clip", path: "v/clip.mp4" });
   });
 });
 
@@ -248,14 +246,13 @@ describe("end-to-end regression: generate → select → stale save → reload �
       graphMigrated: true,
     });
     setShotSelectedOutput(shot, { kind: "imagegen" });
-    expect(shot.artwork).toBe("b/new.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "b/new.jpg" });
 
     // The user then selects the older take in the canvas — the command moves
-    // the index and re-derives the storyboard mirror.
+    // the index; the display follows the pipe.
     shot.graphImageGenIndex = 1;
     setShotSelectedOutput(shot, { kind: "imagegen" });
-    expect(shot.artwork).toBe("b/old.jpg");
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "b/old.jpg" });
 
     // A whole-document renderer save captured BEFORE the generation lands
     // now: its history predates the new take.
@@ -270,11 +267,10 @@ describe("end-to-end regression: generate → select → stale save → reload �
     const incoming = makeProduction([stale]);
     const merged = applyRendererState(fresh, incoming);
     const mergedShot = merged.scenes[0].shots[0];
-    // The diverged history keeps the fresh selection, and the pipe re-derives
-    // the mirrors so the storyboard and the canvas agree.
+    // The diverged history keeps the fresh selection, and the display
+    // resolves it — the storyboard and the canvas agree.
     expect(mergedShot.graphImageGenIndex).toBe(1);
-    expect(mergedShot.artwork).toBe("b/old.jpg");
-    expect(syncBoardOutputToPipe(mergedShot)).toBe(false);
+    expect(resolveShotDisplay(mergedShot)).toMatchObject({ media: "still", path: "b/old.jpg" });
 
     // Export resolves exactly the shown output.
     const plan = assemblyPlan(merged);

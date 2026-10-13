@@ -137,7 +137,7 @@ describe("ShotTable drag wiring", () => {
     expect(trailing.classList.contains("active")).toBe(true);
 
     act(() => { firePointer(bHandle, "pointerup", 60, 60); });
-    expect(reorderCalls).toEqual([["p1", "b", "c", undefined]]);
+    expect(reorderCalls).toEqual([["p1", "b", "c", undefined, 0]]);
     expect(table.className).not.toContain("dragging");
   });
 
@@ -152,7 +152,7 @@ describe("ShotTable drag wiring", () => {
     act(() => { firePointer(bHandle, "pointermove", 60, 60); });
     expect(beforeA.classList.contains("active")).toBe(true);
     act(() => { firePointer(bHandle, "pointerup", 60, 60); });
-    expect(reorderCalls).toEqual([["p1", "b", "a", undefined]]);
+    expect(reorderCalls).toEqual([["p1", "b", "a", undefined, 0]]);
   });
 
   it("refuses the production-final shot's boundary line instead of accepting a no-op", () => {

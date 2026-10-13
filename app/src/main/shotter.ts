@@ -61,14 +61,25 @@ export function renumber(scenes: ProductionScene[]): void {
  * neighbours leave room ("0100"/"0200" -> "0150"). When there's no room — or
  * the insert is at the very front — the whole show is renumbered on the
  * 100-grid (ids keep everything stable through it). Mutates `scenes`.
+ *
+ * Idempotent creation: pass the caller's `shotId` and a repeated call after
+ * an uncertain response returns the already-created shot instead of
+ * duplicating it.
  */
 export function insertShotAt(
   scenes: ProductionScene[],
   sceneNumber: number,
   index: number,
   audio = "",
-  visual = ""
+  visual = "",
+  shotId?: string
 ): ProductionShot {
+  if (shotId) {
+    for (const scene of scenes) {
+      const existing = scene.shots.find((s) => s.id === shotId);
+      if (existing) return existing;
+    }
+  }
   const scene = scenes.find((s) => s.number === sceneNumber);
   if (!scene) throw new Error(`Scene ${sceneNumber} not found`);
   const at = Math.max(0, Math.min(index, scene.shots.length));
@@ -91,9 +102,27 @@ export function insertShotAt(
   else number = insertMid(prev, next) ?? "";
 
   const shot = newShot(number || "0000", audio, visual);
+  if (shotId) shot.id = shotId;
   scene.shots.splice(at, 0, shot);
   if (!number || prev === null) renumber(scenes); // gap exhausted / front insert
   return shot;
+}
+
+/**
+ * Delete a shot by stable id. Returns true when a shot was removed, false
+ * when it was already gone — the delete command is idempotent, so a retry
+ * after an uncertain response succeeds without changing the document instead
+ * of failing loudly. Mutates `scenes`.
+ */
+export function removeShotById(scenes: ProductionScene[], shotId: string): boolean {
+  for (const scene of scenes) {
+    const i = scene.shots.findIndex((s) => s.id === shotId);
+    if (i !== -1) {
+      scene.shots.splice(i, 1); // numbers keep their gaps — standard practice
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

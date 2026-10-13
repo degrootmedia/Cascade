@@ -35,7 +35,7 @@ import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } fr
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
 import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
-import { resolveSelectedOutput } from "../shared/selected-output.js";
+import { resolveSelectedOutput, resolveShotDisplay } from "../shared/selected-output.js";
 import { createMediaService, type MediaService } from "./media.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
@@ -1625,7 +1625,8 @@ export function replaceVideoGenTake(shot: ProductionShot, nodeId: string, rel: s
   if (!node || !node.gens || idx < 0) return null;
   const item = node.gens[idx];
   node.gens[idx] = { path: nextRel, prompt: item.prompt, model: item.model, at: new Date().toISOString() };
-  if (shot.videoPath === rel) shot.videoPath = nextRel;
+  // The display resolves the take from the pipe, so no mirror re-point is
+  // needed (the old videoPath write is retired with the mirrors).
   return item.path;
 }
 
@@ -1674,7 +1675,13 @@ export function chainSourceForEdit(shot: ProductionShot): GraphEditNode["source"
   }
   if (shot.graphOutputSource === "imagegen") return { kind: "imagegen" };
   if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) return { kind: "ref", refId: shot.graphOutputRefId };
-  const imageIndex = shot.artwork ? shot.graphImageGens?.findIndex((g) => g.path === shot.artwork) ?? -1 : -1;
+  // The current frame resolves through the shared display (the pipe when
+  // bound, the legacy mirrors otherwise): the still beside a clip is the
+  // feed frame, the frozen copy the fallback. When it is an image-node take,
+  // point the node's selection at it and wire image→node.
+  const frame = resolveShotDisplay(shot);
+  const still = frame.media === "still" ? frame.path : frame.stillPath ?? shot.artwork;
+  const imageIndex = still ? shot.graphImageGens?.findIndex((g) => g.path === still) ?? -1 : -1;
   if (imageIndex >= 0) {
     shot.graphImageGenIndex = imageIndex;
     return { kind: "imagegen" };
@@ -2718,42 +2725,16 @@ export function buildTweenConcatList(absPaths: string[]): string {
   return absPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n";
 }
 
-/** Apply a video clip as the shot's output AND guarantee it has a still frame.
- *  When the shot has no primary artwork yet (the video was animated from a
- *  node-graph image pipe, not from the shot's own frame), the video's source
- *  frame — the image node's current output, or the piped `sourceFallback` —
- *  becomes the still, so the animatic timeline always has a frame to show.
- *  The pipe binding is the caller's (`hookVideoGenToOutput` / the renderer's
- *  pipe save / an existing tween or ref feed); this pins the clip mirror and
- *  backfills the still only — the later pipe sync derives the same value once
- *  the take is in its node's history. */
-export function applyVideoOutput(shot: ProductionShot, rel: string, sourceFallback?: string, nodeId?: string): void {
-  if (shot.videoPath !== rel) shot.videoPath = rel;
-  if (!shot.artwork) {
-    // The still comes from the node that fed the video's source input — the
-    // edit-image node when the video node's source pipe is an edit node,
-    // otherwise the image node — or the piped source path itself.
-    const node = getVideoNode(shot, nodeId ?? shot.graphOutputVideoNodeId);
-    const src = node?.source;
-    const sourceNode = src?.kind === "editgen"
-      ? editNodeSelection(shot, src.nodeId)?.path
-      : shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path;
-    const source = sourceNode ?? sourceFallback;
-    if (source) shot.artwork = source;
-  }
-}
-
 /** Auto-hook a classic image generation into the node graph: when nothing is
  *  piped into the output yet, bind the image node as the feed and apply its
  *  newest frame so the storyboard AND the node view both show the result.
  *  When the image node is already piped, the new frame still auto-applies;
  *  a deliberate videogen/tween/ref pipe is never displaced. */
 export function hookImageGenToOutput(shot: ProductionShot): void {
-  const cur = shot.graphImageGens?.[shot.graphImageGenIndex ?? 0];
   // Additive only: never displace a deliberate videogen/tween/editgen/ref
-  // pipe, but always ensure artwork is set from the new generation when empty.
+  // pipe. The newest frame shows through the pipe (or the live feed's still
+  // beside a clip) — the display resolves it, so no mirror backfill is needed.
   if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "ref") {
-    if (!shot.artwork && cur?.path) recordBoardArtwork(shot, cur.path);
     return;
   }
   setShotSelectedOutput(shot, { kind: "imagegen" });
@@ -2861,14 +2842,15 @@ export function refreshRefCopyFromFile(p: Production, shot: ProductionShot, srcR
   return true;
 }
 
-/** The node-graph output pipe is the source of truth for the shot's primary
- *  frame/clip. Re-derive `artwork`/`videoPath` from the piped generation node's
- *  selected output so the storyboard (which reads `shot.artwork`) always
- *  mirrors the graph's frame output node. A piped node whose selection changed,
- *  or whose apply raced a renderer save, can't leave a stale or missing frame —
- *  e.g. an edit-image node piped to the output whose selected edit never landed
- *  on `shot.artwork`. Resolution comes from the shared `resolveSelectedOutput`
- *  (the ONE resolver both sides read). Returns true when anything changed. */
+/** LEGACY one-time migration (Phase 4): the node-graph output pipe is the
+ *  source of truth for the shot's primary frame/clip — re-derive the
+ *  `artwork`/`videoPath` legacy mirrors from the piped generation node's
+ *  selected output. Runs only inside `migrateBoardArtwork` for old documents
+ *  (so a pre-write-through project opens with correct mirrors for the legacy
+ *  read paths); the merge, the job rebase, and the write-through no longer
+ *  call it — live surfaces resolve the pipe through `resolveShotDisplay`
+ *  instead. Resolution comes from the shared `resolveSelectedOutput` (the ONE
+ *  resolver both sides read). Returns true when anything changed. */
 export function syncBoardOutputToPipe(shot: ProductionShot): boolean {
   const out = resolveSelectedOutput(shot);
   switch (out.source) {
@@ -2936,12 +2918,12 @@ export type ShotSelection =
 
 /**
  * The single write-through for the shot's selected output: update the pipe
- * fields, then re-derive `artwork`/`videoPath` from the pipe. Every flow that
- * changes what a shot is showing — canvas select, storyboard promote, pipe/
- * unpipe, generation auto-apply, reference import — lands here, so the two
- * mirror fields have exactly one writer and can't disagree with the pipe.
- * The renderer sends selection intent (`production:selectGraphTake`) or pipe
- * fields (whole-document save); main owns the mirrors.
+ * fields. The `artwork`/`videoPath` storyboard mirrors are NOT maintained
+ * here anymore (Phase 4) — every surface resolves the pipe live through the
+ * shared `resolveShotDisplay`, so the mirrors can't disagree with it. The two
+ * exceptions: a ref-piped output's rendered frame has no node history to live
+ * in, so the ref branch records it as the shot's frame (the ref take's only
+ * store); and unpipe blanks the output so the display goes blank.
  */
 export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection): void {
   switch (sel.kind) {
@@ -2988,8 +2970,10 @@ export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection):
       const was = shot.graphOutputSource;
       shot.graphOutputSource = undefined;
       shot.graphOutputRefId = undefined;
-      // Clear exactly the mirror the unpiped kind owned (a video unpipe must
-      // not blank a still, and vice versa).
+      // Clear exactly the mirror the unpiped kind owned so the display goes
+      // blank (a video unpipe must not blank a still, and vice versa). Node
+      // pipes no longer maintain mirrors, so these clears only affect the
+      // ref store and legacy mirrors.
       if (was === "videogen" || was === "tween" || was === "editvideo") shot.videoPath = undefined;
       else if (was === "imagegen" || was === "editgen" || was === "upscale") shot.artwork = undefined;
       break;
@@ -2998,7 +2982,6 @@ export function setShotSelectedOutput(shot: ProductionShot, sel: ShotSelection):
   // An explicit node selection exists now; the classic migration must not
   // sweep the new frame into the image node's history on the next load.
   shot.graphMigrated = true;
-  syncBoardOutputToPipe(shot);
 }
 
 /** One-time migration: MOVE the classic generations (current artwork +

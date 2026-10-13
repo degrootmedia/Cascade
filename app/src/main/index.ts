@@ -15,11 +15,12 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { findGeneration } from "../shared/generations.js";
 import { createJobLedger } from "./jobs.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
@@ -55,8 +56,9 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, JobSnapshot } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
+import { resolveShotDisplay } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
@@ -245,12 +247,15 @@ function boardThumbSet(cacheKey: string, fileKey: string, dataUrl: string): void
   }
 }
 /** Resolve + validate a board frame request. Returns null for unknown shots
- *  or paths outside the shot's history (same guard as the single handler). */
+ *  or paths outside the shot's history (same guard as the single handler).
+ *  The default frame resolves through the shared display helper (the pipe
+ *  when bound, the legacy mirrors otherwise) — never a hand-rolled mirror. */
 function resolveBoardFrame(p: productions.ProductionFile, shotId: string, framePath?: string): { rel: string; abs: string } | null {
   const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
   if (!shot) return null;
-  const rel = framePath ?? shot.artwork;
-  if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+  const display = resolveShotDisplay(shot);
+  const rel = framePath ?? display.path;
+  if (!rel || (rel !== display.path && !boardFrameHistory(shot).includes(rel))) return null;
   return { rel, abs: assetPath(p, rel) };
 }
 function renderBoardThumb(abs: string): string | null {
@@ -410,7 +415,7 @@ function handleExternalRefChanges(productionId: string, changes: RefChange[]): v
       if (shot.graphOutputSource !== "ref" || shot.graphOutputRefId !== change.id) continue;
       if (!refreshRefCopyFromFile(p, shot, change.rel)) continue;
       touched = true;
-      if (shot.artwork) shotIds.push(shot.id);
+      if (resolveShotDisplay(shot).path) shotIds.push(shot.id);
     }
     safeSend("references:externalUpdate", {
       productionId,
@@ -1172,25 +1177,11 @@ function registerIpc() {
   handle("window:detachedState", () => detached!.state());
   on("canvas:selectionChanged", (_e, frameId: string | null) => detached?.selectionChanged(frameId ?? null));
 
-  // Cross-window in-flight canvas jobs (Spec 03): whichever window publishes
-  // its local busy snapshot has it relayed to its sibling, so "Generating…"
-  // survives the graph living in the other window. The main window's latest
-  // snapshot is cached and replayed to the detached window on its first
-  // publish (a job started before the pop-out must still show there).
-  let lastMainCanvasBusy: CanvasBusySnapshot | null = null;
-  on("canvas:busyChanged", (event, raw: unknown) => {
-    let snapshot: CanvasBusySnapshot;
-    try { snapshot = normalizeCanvasBusy(raw); } catch { return; }
-    const fromMain = !!win && !win.isDestroyed() && event.sender.id === win.webContents.id;
-    if (fromMain) lastMainCanvasBusy = snapshot;
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed() || w.webContents.id === event.sender.id) continue;
-      w.webContents.send("canvas:busyChanged", snapshot);
-    }
-    if (!fromMain && lastMainCanvasBusy) {
-      event.sender.send("canvas:busyChanged", lastMainCanvasBusy);
-    }
-  });
+  // Cross-window in-flight canvas jobs (Spec 03, retired Phase 4): the main
+  // job ledger drives both windows' busy display, so no renderer-to-renderer
+  // mirroring crosses here anymore. The no-op listener keeps the
+  // contract-drift guard happy (every declared channel must be handled).
+  on("canvas:busyChanged", () => {});
 
   /** Run one user turn on a chat through the normal agent path (approval gate
    *  and all). Shared by `chat:send` and goal auto-continuation. */
@@ -2345,7 +2336,10 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    const srcRel = shot.artwork;
+    // Lock the shot's CURRENT frame (the pipe when bound — a videogen-piped
+    // shot contributes its feed still).
+    const frame = resolveShotDisplay(shot);
+    const srcRel = frame.media === "still" ? frame.path : frame.stillPath;
     if (!srcRel) throw new Error("That shot has no frame yet — generate it first.");
     const target = (p.styles ?? []).find((s) => s.id === (styleId || shot.style)) ?? p.styles?.[0];
     if (!target) throw new Error("No style to attach the frame to.");
@@ -2366,10 +2360,14 @@ function registerIpc() {
 
   const mutateShots = (
     id: string,
-    mutate: (p: Production) => void
+    mutate: (p: Production) => void,
+    baseRev?: number
   ): Production => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
+    // A stale destructive edit is rejected with a recoverable conflict
+    // instead of being silently applied (the caller refreshes and retries).
+    productions.assertFreshRevision(p, baseRev);
     mutate(p);
     // Keep the human-readable two-column markdown in sync with every edit.
     if (p.scenes.some((s) => s.shots.length)) {
@@ -2383,16 +2381,19 @@ function registerIpc() {
     return p;
   };
 
-  handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number) =>
+  handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number, shotId?: string) =>
     // Serialized per production (Fix B): insert/delete/prompt saves each
     // return whole-Production snapshots, so production order must match
     // request order — otherwise a prompt-save response produced before a
     // structural edit can resolve after it and overwrite newer state.
+    // A caller-supplied shot id makes creation idempotent: repeating the call
+    // after an uncertain response returns the already-created shot instead of
+    // duplicating it.
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
         const oldNumbers = new Map<string, string>();
         for (const scene of p.scenes) for (const shot of scene.shots) oldNumbers.set(shot.id, shot.number);
-        shotter.insertShotAt(p.scenes, sceneNumber, index);
+        shotter.insertShotAt(p.scenes, sceneNumber, index, "", "", typeof shotId === "string" && shotId ? shotId : undefined);
         // A front insert (or an exhausted mid-number gap) re-derives the whole
         // 100-grid; relocate board folders so files follow their shots.
         relocateBoardsForRenumber(p, oldNumbers);
@@ -2400,22 +2401,18 @@ function registerIpc() {
     )
   );
 
-  handle("production:deleteShot", (_e, id: string, shotId: string) =>
+  handle("production:deleteShot", (_e, id: string, shotId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
-        for (const scene of p.scenes) {
-          const i = scene.shots.findIndex((s) => s.id === shotId);
-          if (i !== -1) {
-            scene.shots.splice(i, 1); // numbers keep their gaps — standard practice
-            // A shot sequence never outlives its span: dissolve any sequence
-            // this was the last member of (its clip is preserved as a
-            // reference, exactly like an explicit sequence delete).
-            removeShotsFromSequences(p, [shotId]);
-            return;
-          }
+        // Idempotent delete: a retry after an uncertain response finds nothing
+        // and succeeds without changing the document instead of failing loudly.
+        if (shotter.removeShotById(p.scenes, shotId)) {
+          // A shot sequence never outlives its span: dissolve any sequence
+          // this was the last member of (its clip is preserved as a
+          // reference, exactly like an explicit sequence delete).
+          removeShotsFromSequences(p, [shotId]);
         }
-        throw new Error("Shot not found.");
-      })
+      }, baseRev)
     )
   );
 
@@ -2440,11 +2437,11 @@ function registerIpc() {
     })
   );
 
-  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number) =>
+  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number, baseRev?: number) =>
     mutateShots(id, (p) => {
       const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId, endSceneNumber);
       relocateBoardsForRenumber(p, oldNumbers);
-    })
+    }, baseRev)
   );
 
   // Outdated panels (preserved from a previous script re-ingest). Restore pulls
@@ -2460,13 +2457,17 @@ function registerIpc() {
     )
   );
 
-  handle("production:removeOutdatedShot", (_e, id: string, shotId: string) =>
+  handle("production:removeOutdatedShot", (_e, id: string, shotId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
-        removeOutdatedShot(p, shotId);
-        // Permanent removal also drops the shot from any sequence span.
-        removeShotsFromSequences(p, [shotId]);
-      })
+        // Idempotent delete: a retry after an uncertain response finds
+        // nothing and succeeds without changing the document.
+        if ((p.outdatedShots ?? []).some((s) => s.id === shotId)) {
+          removeOutdatedShot(p, shotId);
+          // Permanent removal also drops the shot from any sequence span.
+          removeShotsFromSequences(p, [shotId]);
+        }
+      }, baseRev)
     )
   );
 
@@ -2474,9 +2475,12 @@ function registerIpc() {
   // video is preserved as a "Shot Sequences" reference first — the confirm
   // dialog warns about this. Thin wiring — the preserve/drop lives in
   // pipeline.removeShotSequence.
-  handle("production:deleteShotSequence", (_e, id: string, sequenceId: string) =>
+  handle("production:deleteShotSequence", (_e, id: string, sequenceId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
+        // Idempotent delete: a retry after an uncertain response finds
+        // nothing and succeeds without changing the document.
+        if (!(p.shotSequences ?? []).some((s) => s.id === sequenceId)) return;
         const { seq, saved } = removeShotSequence(p, sequenceId);
         productionEmit(
           id,
@@ -2485,7 +2489,7 @@ function registerIpc() {
             : `Deleted ${seq.name}.`,
           "done"
         );
-      })
+      }, baseRev)
     )
   );
 
@@ -2623,12 +2627,9 @@ function registerIpc() {
           prevUp.gens, prevUp.genIndex, shot.graphUpscale.gens, shot.graphUpscale.genIndex, nextUp.gens, nextUp.genIndex,
         );
       }
-      // The copied artwork/videoPath came from the job's snapshot while the
-      // indices above may have been re-anchored to a mid-job user selection —
-      // re-derive the primary frame/clip from the final pipe so the two can't
-      // disagree (a new take that briefly shows then reverts on the next save
-      // looked like the generation never applied until an unplug/replug).
-      syncBoardOutputToPipe(shot);
+      // (Phase 4: the artwork/videoPath mirrors are no longer re-derived
+      // after the re-anchor — every surface resolves the pipe live, so the
+      // committed pipe + take selections are the whole truth.)
     }
     // Shot sequences hold their video-node histories like the shot graph does
     // (a sequence generation commits its takes through here): copy only the
@@ -2980,10 +2981,10 @@ function registerIpc() {
         hookVideoGenToOutput(shot, "vid0");
       } else if (target?.kind === "editVideoNode") {
         // Legacy pending record (flat edit-video node): land it on the migrated
-        // ev0 entry and bind it, like a direct edit-video generation.
+        // ev0 entry and bind it, like a direct edit-video generation. The
+        // recorded take + pipe bind resolve the clip; no mirror pin needed.
         recordGraphVideoGen(shot, "ev0", rel, pending.prompt, pending.model);
         hookVideoGenToOutput(shot, "ev0");
-        applyVideoOutput(shot, rel, target.sourcePath, "ev0");
       } else if (target?.kind === "tween") {
         syncTweenBlocks(p, shot);
         const block = (shot.graphTweenBlocks ?? []).find((b) => b.id === target.blockId);
@@ -2995,7 +2996,6 @@ function registerIpc() {
         const nodeId = target?.kind === "videoNode" ? (target.nodeId ?? "vid0") : "vid0";
         recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model, pending.draftJobId);
         hookVideoGenToOutput(shot, nodeId);
-        applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
       }
       // The original submit never reached its generation recorder (the wait
       // timed out or the download failed), so the cost was unbilled. Bill it
@@ -3718,8 +3718,9 @@ function registerIpc() {
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) return null;
-    const rel = framePath ?? shot.artwork;
-    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+    const display = resolveShotDisplay(shot);
+    const rel = framePath ?? display.path;
+    if (!rel || (rel !== display.path && !boardFrameHistory(shot).includes(rel))) return null;
     try {
       const buf = fs.readFileSync(assetPath(p, rel));
       const img = nativeImage.createFromBuffer(buf);
@@ -3813,9 +3814,14 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    if (shot.artwork) {
-      try { fs.unlinkSync(assetPath(p, shot.artwork)); } catch { /* missing file is already removed */ }
-      delete shot.artwork;
+    // (No renderer caller — kept for compatibility.) Deletes the displayed
+    // still's file and unbinds a still pipe so the display goes blank; the
+    // take entry stays in history (now missing, therefore recoverable).
+    const display = resolveShotDisplay(shot);
+    const still = display.media === "still" ? display.path : display.stillPath;
+    if (still) mediaFiles.removeFile(p, still);
+    if (display.source === "imagegen" || display.source === "editgen" || display.source === "upscale") {
+      setShotSelectedOutput(shot, { kind: "unpipe" });
     }
     productions.saveProduction(p);
     return p;
@@ -3904,7 +3910,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     runVideoJob(id, `Generating a video for a shot`, async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
-      if (!shot.artwork) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
+      // The video animates the shot's current frame (the pipe when bound).
+      const frame = resolveShotDisplay(shot);
+      const frameRel = frame.media === "still" ? frame.path : frame.stillPath;
+      if (!frameRel) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
@@ -3925,7 +3934,12 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoPath" };
         throw e;
       }
-      if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
+      // The finished clip replaces any clip the shot showed before (the old
+      // file is unlinked; the recorded take + pipe bind resolve the new one).
+      const showing = resolveShotDisplay(shot);
+      if (showing.media === "clip" && showing.path && showing.path !== rel) {
+        mediaFiles.removeFile(p, showing.path);
+      }
       recordGraphVideoGen(shot, "vid0", rel, clean.prompt, clean.model);
       hookVideoGenToOutput(shot, "vid0");
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
@@ -3936,8 +3950,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot?.videoPath) return null;
-    return `cascade-media://${p.meta.id}/${encodeURIComponent(shot.videoPath)}`;
+    const clip = shot ? resolveShotDisplay(shot) : undefined;
+    if (!shot || clip?.media !== "clip" || !clip.path) return null;
+    return `cascade-media://${p.meta.id}/${encodeURIComponent(clip.path)}`;
   });
 
   // Step 3 node graph: generate one frame from a custom prompt (the prompt
@@ -4052,9 +4067,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // bind it as the output feed at once so the clip shows without an
       // unplug/replug round-trip (a stale renderer save re-deriving the pipe
       // from the old node reverted the new clip). The prior feed survives in
-      // its node's history.
+      // its node's history. The recorded take + bind resolve the clip.
       hookVideoGenToOutput(shot, nodeId);
-      applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );
@@ -4128,9 +4142,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const inputs: { name: string; dataUrl: string; imageRel?: string }[] = [];
       for (const iid of inputIds) {
         const shot = shots.find((s) => s.id === iid);
-        if (shot?.artwork) {
-          const data = refArtworkDataUrl(p, { imagePath: shot.artwork });
-          if (data) inputs.push({ name: `Shot ${shot.number}`, dataUrl: data, imageRel: shot.artwork });
+        // Member frames resolve through the shared display (the pipe when
+        // bound): a clip member contributes its feed still.
+        const frame = shot ? resolveShotDisplay(shot) : undefined;
+        const frameRel = frame?.media === "still" ? frame.path : frame?.stillPath;
+        if (frameRel) {
+          const data = refArtworkDataUrl(p, { imagePath: frameRel });
+          if (data) inputs.push({ name: `Shot ${shot!.number}`, dataUrl: data, imageRel: frameRel });
           continue;
         }
         const ref = (p.references ?? []).find((r) => r.id === iid);
@@ -4241,7 +4259,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
           sourcePath = other?.gens?.[other.genIndex ?? 0]?.path;
         }
       }
-      if (!sourcePath) sourcePath = shot.videoPath;
+      if (!sourcePath) {
+        const display = resolveShotDisplay(shot);
+        if (display.media === "clip") sourcePath = display.path;
+      }
       if (!sourcePath) throw new Error("The edit-video node needs a source video — pipe a clip in, pick a video reference, or generate a clip first. Nothing was submitted.");
       const provider = mediaFor(clean.model);
       if (!provider.generateVideoEdit) {
@@ -4262,9 +4283,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
       // An explicit edit-video generation binds its fresh take as the output
-      // at once so the clip shows without an unplug/replug round-trip.
+      // at once so the clip shows without an unplug/replug round-trip. The
+      // recorded take + bind resolve the clip (no mirror pin needed).
       hookVideoGenToOutput(shot, nodeId);
-      applyVideoOutput(shot, rel, sourcePath, nodeId);
       emit(`Shot ${shot.number}: edited video ready.`, "done");
     })
   );
@@ -4347,7 +4368,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const resolvedSource = resolveGraphSourceImage(args.p, args.shot, args.source);
     let dataUrl = resolvedSource?.dataUrl;
     const sourceName = resolvedSource?.name ?? `Shot ${args.shot.number} frame`;
-    if (!dataUrl && args.shot.artwork) dataUrl = fileDataUrl(args.p, args.shot.artwork) ?? undefined;
+    // Fall back to the shot's current frame (resolved through the shared
+    // display) when the wired source didn't resolve to bytes.
+    const fallbackFrame = resolveShotDisplay(args.shot);
+    const fallbackRel = fallbackFrame.media === "still" ? fallbackFrame.path : fallbackFrame.stillPath;
+    if (!dataUrl && fallbackRel) dataUrl = fileDataUrl(args.p, fallbackRel) ?? undefined;
     if (!dataUrl) throw new Error("No source image — wire a frame or reference in, or generate a frame first.");
     const { resolved, extras } = resolvePromptRefs(args.p, args.prompt, 1);
     const refs = [{ name: sourceName, dataUrl }, ...(args.extraRefs ?? []), ...extras];
@@ -4472,10 +4497,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         try { fs.unlinkSync(listPath); } catch { /* temp file already gone */ }
       }
       if (shot.graphTweenOutput && shot.graphTweenOutput !== rel) {
-        try { fs.unlinkSync(assetPath(p, shot.graphTweenOutput)); } catch { /* old stitch already gone */ }
+        mediaFiles.removeFile(p, shot.graphTweenOutput);
       }
       shot.graphTweenOutput = rel;
-      if (shot.graphOutputSource === "tween") applyVideoOutput(shot, rel);
+      mediaFiles.register(p, rel, "video", "generated");
       emit(`Shot ${shot.number}: continuous shot ready.`, "done");
     })
   );
@@ -4566,8 +4591,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!shot) throw new Error("Shot not found.");
     const rel = typeof opts?.path === "string" ? opts.path.trim() : "";
     if (!rel) throw new Error("No output selected — generate something first.");
-    if (opts?.kind === "video") applyVideoOutput(shot, rel);
-    else selectBoardFrame(shot, rel);
+    if (opts?.kind === "video") {
+      // The clip must be a stored video take (the pipe names the node; the
+      // display resolves it) — never an arbitrary path.
+      const gen = findGeneration(shot, rel);
+      if (!gen || gen.kind !== "video") throw new Error("That clip isn't a stored video generation — nothing to apply.");
+      if (shot.graphOutputSource !== "videogen") setShotSelectedOutput(shot, { kind: "videogen", nodeId: gen.nodeId });
+    } else selectBoardFrame(shot, rel);
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: node output applied (${opts?.kind === "video" ? "video" : "frame"}).`);
     return p;
@@ -4603,7 +4633,14 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!shot) throw new Error("Shot not found.");
     if (shot.videoPath) {
       mediaFiles.removeFile(p, shot.videoPath);
+      // The file is gone — no mirror may keep pointing at it. When the video
+      // fed the output, unbind through the write-through so the storyboard
+      // falls back to the still (the take history keeps the entry for
+      // re-fetch/recover).
       delete shot.videoPath;
+      if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editvideo") {
+        setShotSelectedOutput(shot, { kind: "unpipe" });
+      }
       productions.saveProduction(p);
       productionEmit(id, `Shot ${shot.number}: video removed.`);
     }
@@ -4685,6 +4722,22 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // live job immediately instead of guessing from its own local state.
   handle("production:jobsSnapshot", (_e, productionId: string): JobSnapshot => {
     return jobLedger.snapshot(typeof productionId === "string" ? productionId : undefined);
+  });
+
+  // Step 3: persist one shot's canvas state through the ONE layout write-
+  // through. The merge is per-key (positions/sizes/collapsed fold node by
+  // node; deletions are explicit), so two windows moving different nodes fold
+  // together instead of last-write-wins on the whole layout object — and a
+  // stale whole-document save carrying an older layout can't wholesale
+  // replace the fresher one.
+  handle("production:updateGraphLayout", (_e, id: string, shotId: string, patch: GraphLayoutPatch): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    shot.graphLayout = productions.mergeGraphLayoutPatch(shot.graphLayout, patch);
+    productions.saveProduction(p);
+    return p;
   });
 
   // Per-model video options for the generation modal/node: read the model's
@@ -4868,8 +4921,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const resolvedSource = resolveGraphSourceImage(p, shot, node.source);
       let dataUrl = resolvedSource?.dataUrl;
       const sourceName = resolvedSource?.name ?? `Shot ${shot.number} frame`;
-      if (!dataUrl && shot.artwork) {
-        dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
+      const editFallback = resolveShotDisplay(shot);
+      const editFallbackRel = editFallback.media === "still" ? editFallback.path : editFallback.stillPath;
+      if (!dataUrl && editFallbackRel) {
+        dataUrl = fileDataUrl(p, editFallbackRel) ?? undefined;
       }
       if (!dataUrl) throw new Error("Generate or import a frame for this shot first - there's nothing to edit.");
       emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}...`);

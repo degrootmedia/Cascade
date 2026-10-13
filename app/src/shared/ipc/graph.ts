@@ -26,6 +26,21 @@ export interface GraphLayout {
   viewport?: { x: number; y: number; zoom: number };
 }
 
+/** A partial canvas-state update for the `production:updateGraphLayout`
+ *  command. Layout is renderer-owned, so the merge is per-key — two windows
+ *  moving different nodes fold together instead of last-write-wins on the
+ *  whole object. */
+export interface GraphLayoutPatch {
+  positions?: Record<string, { x: number; y: number }>;
+  sizes?: Record<string, { width: number; height: number }>;
+  collapsed?: Record<string, boolean>;
+  viewport?: { x: number; y: number; zoom: number };
+  /** Node ids whose positions/sizes/collapsed entries should be dropped
+   *  (the node was deleted — absence alone can't express a delete in a
+   *  per-key merge). */
+  remove?: string[];
+}
+
 export type GraphNodeKind =
   | "composer"
   | "style"

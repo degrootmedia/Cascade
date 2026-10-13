@@ -75,8 +75,11 @@ describe("boardFrameHistory", () => {
       graphVideoGens: [{ path: "clip.mp4", prompt: "p", model: "m", at: "" }],
     });
     expect(boardFrameHistory(shot)).toEqual(["current.jpg", "older.jpg"]);
+    // Clearing the legacy clip mirror alone doesn't unbind the stored take
+    // (the synthesized video node still resolves it) — the history follows
+    // takes, not mirrors.
     shot.videoPath = undefined;
-    expect(boardFrameHistory(shot)).toEqual(["older.jpg"]);
+    expect(boardFrameHistory(shot)).toEqual(["current.jpg", "older.jpg"]);
   });
 
   it("also exposes an untracked current legacy still when the output is video", () => {

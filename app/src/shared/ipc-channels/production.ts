@@ -92,6 +92,7 @@ export const productionChannels = {
   "production:applyGraphOutput": { method: "applyGraphOutput", kind: "invoke" },
   "production:applyGraphRefOutput": { method: "applyGraphRefOutput", kind: "invoke" },
   "production:selectGraphTake": { method: "selectGraphTake", kind: "invoke" },
+  "production:updateGraphLayout": { method: "updateGraphLayout", kind: "invoke" },
   "production:videoUrl": { method: "videoUrl", kind: "invoke" },
   "production:removeVideo": { method: "removeVideo", kind: "invoke" },
   "production:videoModelOptions": { method: "videoModelOptions", kind: "invoke" },

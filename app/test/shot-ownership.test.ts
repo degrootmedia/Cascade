@@ -128,11 +128,13 @@ describe("shot field ownership", () => {
     );
   });
 
-  it("classifies the pipe mirrors as derived (never a bare copy)", () => {
-    expect(SHOT_FIELD_OWNERSHIP.artwork.owner).toBe("derived");
-    expect(SHOT_FIELD_OWNERSHIP.videoPath.owner).toBe("derived");
-    expect(SHOT_FIELD_OWNERSHIP.artwork.merge).toBe("special");
-    expect(SHOT_FIELD_OWNERSHIP.videoPath.merge).toBe("special");
+  it("classifies the retired output mirrors as command-owned (never a bare copy)", () => {
+    // Phase 4: node-piped selection never writes the mirrors — they survive
+    // only as the ref-output store + the legacy read, both main-side.
+    expect(SHOT_FIELD_OWNERSHIP.artwork.owner).toBe("command");
+    expect(SHOT_FIELD_OWNERSHIP.videoPath.owner).toBe("command");
+    expect(SHOT_FIELD_OWNERSHIP.artwork.merge).toBe("deny");
+    expect(SHOT_FIELD_OWNERSHIP.videoPath.merge).toBe("deny");
   });
 
   it("classifies the generator node lists with dedicated merge rules", () => {
@@ -143,8 +145,18 @@ describe("shot field ownership", () => {
 
   it("derives the special-case skip set exactly (the merge and the table can't drift)", () => {
     expect([...SHOT_SPECIAL_FIELDS].sort()).toEqual(
-      ["artwork", "videoPath", "graphVideoNodes", "graphEditNodes", "graphTweenBlocks", "graphUpscale", "graphCameraGrid"].sort()
+      ["graphVideoNodes", "graphEditNodes", "graphTweenBlocks", "graphUpscale", "graphCameraGrid"].sort()
     );
+  });
+
+  it("classifies the retired output mirrors as command-owned and denied", () => {
+    // Phase 4: node-piped selection never writes the mirrors (every surface
+    // resolves the pipe live); they survive only as the ref-output store +
+    // the legacy read, written main-side — never accepted from a save.
+    for (const key of ["artwork", "videoPath"] as const) {
+      expect(SHOT_FIELD_OWNERSHIP[key].owner, key).toBe("command");
+      expect(SHOT_MERGE_DENIED_FIELDS, key).toContain(key);
+    }
   });
 
   it("keeps main-owned shot state over a stale whole-document save", () => {

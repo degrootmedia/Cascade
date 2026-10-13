@@ -297,7 +297,12 @@ describe("BoardCard history", () => {
   });
 
   it("zooms the browsed still rather than the shot's video, then restores video zoom at current", async () => {
-    await render(makeShot({ videoPath: VIDEO, graphOutputSource: "videogen" }));
+    // The clip lives as a stored video take (the display resolves it); the
+    // legacy videoPath mirror alone no longer shows a video.
+    await render(makeShot({
+      videoPath: VIDEO, graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0",
+      graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: VIDEO, prompt: "", model: "", at: "" }], genIndex: 0 }],
+    }));
     const videoSrc = `cascade-media://prod1/${encodeURIComponent(VIDEO)}`;
     expect(host.querySelector(".prod-board-frame-video")?.getAttribute("src")).toBe(videoSrc);
     expect(button(".prod-board-zoom").title).toBe("Play this shot's video");
@@ -333,10 +338,15 @@ describe("BoardCard history", () => {
     expect(onPromoteHistory.mock.calls).toEqual([["shot1", EDIT]]);
 
     // Also cover an external primary change where the browsed edit stays in history.
+    // The new primary resolves through the pipe (a stored take on the bound
+    // node), not the artwork mirror.
     const newPrimary = source === "editgen" ? EDIT : GENERATED;
     await render({
       ...shot, artwork: newPrimary, graphOutputSource: source,
       graphImageGenIndex: source === "imagegen" ? 1 : 0, graphEditGenIndex: 0,
+      ...(source === "editgen"
+        ? { graphOutputEditNodeId: "edit0", graphEditNodes: [{ id: "edit0", prompt: "", gens: [{ path: EDIT, prompt: "e", model: "m", at: "" }], genIndex: 0 }] }
+        : {}),
       artworkHistory: [PRIMARY],
     });
     expectFrame(newPrimary);

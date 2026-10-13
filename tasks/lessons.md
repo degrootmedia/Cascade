@@ -192,6 +192,22 @@
 
 # Lessons
 
+## 2026-10-13 — the primary is excluded from history by design; ties in sort order are stable, not flaky
+
+- Symptom (during Phase 4 test conversion): rewrote the classic-edit history
+  expectation to include the just-created edit take — wrong. `boardFrameHistory`
+  deliberately excludes the CURRENT primary (it is shown as the frame, not
+  browsed), so the newest take never appears in its own history list.
+- Related: two `recordGraphEditGen` calls in the same millisecond produce
+  identical `at` timestamps; the newest-first sort ties and V8's stable sort
+  keeps node order. That is deterministic (not flaky) — but an expectation of
+  strict newest-first across two rapid generations is wrong. Prefer
+  distinct timestamps in fixtures when order matters, or assert set-wise.
+- Rule: when converting assertions across a representation change, re-derive
+  each expectation from the new semantics instead of mechanically mapping
+  old-field → new-field. A quick throwaway vitest run that prints the actual
+  structure beats theorizing about sort ties.
+
 ## 2026-10-13 — every contract channel must have a handler, including main→renderer broadcasts
 
 - Symptom: the app died at startup with `unhandledRejection: IPC channel

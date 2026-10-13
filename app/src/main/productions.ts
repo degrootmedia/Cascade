@@ -10,16 +10,22 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { CameraGridData, Graph, GraphEditNode, GraphVideoNode, Production, ProductionMeta, ProductionShot, ShotSequence, TweenBlock, UpscaleData }
 from "../shared/ipc.js";
+import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
+import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
+export { mergeGraphLayoutPatch };
 import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
-relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath }
+relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs }
 from "./pipeline.js";
+import { normalizeMediaRegistry } from "../shared/media-registry.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
 import { normalizeGraph } from "../shared/graph/normalize.js";
 import { setStyleEdge } from "../shared/graph/connect.js";
+import { nodeDecl } from "../shared/graph/ports.js";
 import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
+import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
 
 export interface ProductionFile extends Production {}
@@ -95,6 +101,10 @@ function normalize(p: ProductionFile): ProductionFile {
     const liveRefIds = new Set((p.references ?? []).map((r) => r.id));
     p.shotSequences = normalizeShotSequences(p.shotSequences, liveIds, liveRefIds);
   }
+  // The media registry is read-repaired: dedupe by path, drop terminal
+  // `deleted` entries. (The present/missing disk sweep runs in
+  // `loadProduction`'s bootstrap, after the migrations settle the paths.)
+  p.media = normalizeMediaRegistry(p.media);
   return p;
 }
 
@@ -143,6 +153,12 @@ export const PRODUCTION_SCHEMA_VERSION = 3;
  *  of silently dropping fields. (v1 and unversioned legacy docs migrate.) */
 export const MIN_PRODUCTION_SCHEMA_VERSION = 1;
 
+/** Folder-only lookup for media serving: the production's folder without
+ *  loading, cloning, migrating, or media-bootstrapping the document. */
+export function productionFolder(id: string): string | null {
+  return getProductionMeta(id)?.folder ?? null;
+}
+
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
@@ -168,15 +184,112 @@ export function loadProduction(id: string): ProductionFile | null {
   // still skips the JSON.parse on hits.
   // Perf 1.2: post-migration loads skip the full-board walk entirely. The
   // >= keeps a downgrade from silently stamping a newer document down.
-  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) return structuredClone(p);
-  // One-time migrations (legacy PNGs → JPEGs; classic generations seed the
-  // node-graph generation nodes). Persist in place so the very next read
-  // sees the new layout. Always stamp, even when the walk reports no change,
-  // so the next load hits the fast path.
-  migrateBoardArtwork(p);
-  p.schemaVersion = PRODUCTION_SCHEMA_VERSION;
-  store.save(p);
-  return structuredClone(p);
+  if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) {
+    // The media registry bootstraps on every load: upsert an entry per
+    // referenced path, mark present/missing from disk (the storyboard's
+    // explicit "Missing file" badge reads it), and prune entries no field
+    // references. It bootstraps on the CACHED document (before the clone), so
+    // ids stay stable across loads — a move re-points the path, never the id.
+    // Same pattern for the stored node graphs: every canvas must own its
+    // wiring at load so the canvas reads stored nodes/edges only.
+    mediaFiles.bootstrap(p, productionMediaRefs(p));
+    backfillGenerationMediaIds(p);
+    ensureShotGraphs(p);
+    return structuredClone(p);
+  }
+  // One-time migrations run on a COPY: validate the result, keep a
+  // recoverable pre-migration backup, and only then replace the file.
+  // A failing step leaves the original document untouched (the cached
+  // object included) and names the step that failed. Always stamp, even
+  // when the walk reports no change, so the next load hits the fast path
+  // and a second load changes nothing.
+  const fromVersion = typeof p.schemaVersion === "number" && Number.isFinite(p.schemaVersion) ? p.schemaVersion : 1;
+  const working = structuredClone(p);
+  try {
+    migrateBoardArtwork(working);
+  } catch (e) {
+    throw new Error(`Migration failed during board/graph migration from schema ${fromVersion}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  working.schemaVersion = PRODUCTION_SCHEMA_VERSION;
+  mediaFiles.bootstrap(working, productionMediaRefs(working));
+  backfillGenerationMediaIds(working);
+  ensureShotGraphs(working);
+  validateMigratedProduction(working);
+  writePreMigrationBackup(p.meta.id, fromVersion, p);
+  store.save(working);
+  return structuredClone(working);
+}
+
+/** Check the migrated document before it may replace the original:
+ *  unique shot ids, every shot owns a stored graph with unique node ids
+ *  and edges that land on real nodes, and output picks that name nodes
+ *  which exist. Unknown node kinds and extra fields are preserved, never
+ *  rejected. Throws naming the failing shot. */
+/** Attach stable media-registry ids to generation takes (by their path's
+ *  registry entry, created by the bootstrap just before this runs). Paths
+ *  remain as compatibility data; consumers may resolve a take by id so a
+ *  file move cannot orphan it. Idempotent: an existing id is kept. */
+export function backfillGenerationMediaIds(p: Production): void {
+  const media = p.media ?? [];
+  if (!media.length) return;
+  const byPath = new Map(media.map((e) => [e.path, e.id]));
+  const attach = (gens: { path: string; mediaId?: string }[] | undefined): void => {
+    for (const g of gens ?? []) {
+      if (g.mediaId) continue;
+      const id = byPath.get(g.path);
+      if (id) g.mediaId = id;
+    }
+  };
+  const shots = [...(p.scenes ?? []).flatMap((s) => s.shots ?? []), ...(p.outdatedShots ?? [])];
+  for (const shot of shots) {
+    attach(shot.graphImageGens);
+    attach(shot.graphVideoGens);
+    attach(shot.graphEditGens);
+    for (const n of shot.graphVideoNodes ?? []) attach(n.gens);
+    for (const n of shot.graphEditNodes ?? []) attach(n.gens);
+    attach(shot.graphUpscale?.gens);
+    for (const b of shot.graphTweenBlocks ?? []) attach(b.gens);
+  }
+}
+
+export function validateMigratedProduction(p: Production): void {
+  const seenShots = new Set<string>();
+  const allShots = [...(p.scenes ?? []).flatMap((s) => s.shots ?? []), ...(p.outdatedShots ?? [])];
+  {
+    for (const shot of allShots) {
+      const fail = (why: string): never => { throw new Error(`Migration validation failed for shot ${shot.id ?? "(missing id)"}: ${why}`); };
+      if (!shot.id || seenShots.has(shot.id)) fail("duplicate or missing shot id");
+      seenShots.add(shot.id);
+      if (!shot.graph) fail("no stored graph after migration");
+      const nodeIds = new Set<string>();
+      for (const n of shot.graph!.nodes ?? []) {
+        if (!n.id || nodeIds.has(n.id)) fail(`duplicate or missing graph node id "${n.id ?? ""}"`);
+        nodeIds.add(n.id);
+      }
+      for (const e of shot.graph!.edges ?? []) {
+        if (!nodeIds.has(e.from?.node) || !nodeIds.has(e.to?.node)) fail(`graph edge "${e.id ?? ""}" lands on a missing node`);
+      }
+      if (shot.graphOutputVideoNodeId && !(shot.graphVideoNodes ?? []).some((n) => n.id === shot.graphOutputVideoNodeId)) {
+        fail(`selected video node "${shot.graphOutputVideoNodeId}" does not exist`);
+      }
+      if (shot.graphOutputEditNodeId && !(shot.graphEditNodes ?? []).some((n) => n.id === shot.graphOutputEditNodeId)) {
+        fail(`selected edit node "${shot.graphOutputEditNodeId}" does not exist`);
+      }
+    }
+  }
+}
+
+/** Keep the pre-migration document recoverable: one backup per starting
+ *  version, written before the migrated file replaces the original and
+ *  never overwritten by a retry, so the earliest original survives. */
+export function writePreMigrationBackup(id: string, fromVersion: number, original: ProductionFile): string {
+  const dir = path.join(store.dir(), "pre-migration");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${id}-v${fromVersion}.json`);
+  try {
+    fs.writeFileSync(file, JSON.stringify(original, null, 2), { encoding: "utf8", flag: "wx" });
+  } catch { /* an earlier backup for this version already exists — keep it */ }
+  return file;
 }
 
 /** Absolute paths of every artwork-bearing reference — reference images
@@ -221,6 +334,25 @@ function takeGenIndex(
   if (incomingIdx === undefined) return freshIdx;
   const same = JSON.stringify(incomingGens ?? []) === JSON.stringify(freshGens ?? []);
   return same ? incomingIdx : freshIdx;
+}
+
+/**
+ * Reject a stale destructive edit with a recoverable conflict (Phase 4):
+ * when the caller names the revision it built on (`baseRev`) and the
+ * document moved since, throw naming the fresh revision instead of silently
+ * applying — the caller refreshes and retries. An absent `baseRev` (or a
+ * document without a revision yet) applies unconditionally, so older callers
+ * keep working.
+ */
+export function assertFreshRevision(p: ProductionFile, baseRev?: number): void {
+  if (typeof baseRev !== "number" || !Number.isFinite(baseRev)) return;
+  if (typeof p.rev === "number" && p.rev !== baseRev) {
+    const err = new Error(
+      `Stale edit: this production changed since (rev ${baseRev} → ${p.rev}). Refresh and retry.`
+    );
+    (err as { freshRev?: number }).freshRev = p.rev;
+    throw err;
+  }
 }
 
 /** Merge the camera-grid node: the fresh document owns the generated sheet,
@@ -405,22 +537,11 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
     voiceoverPath?: unknown; transition?: unknown;
   };
   const incomingRec = incomingFields as unknown as Record<string, unknown>;
-  // Main-owned fields: never copied from the incoming snapshot.
-  const DENIED = new Set([
-    "id", "number",
-    "artworkHistory",
-    "graphImageGens", "graphVideoGens", "graphEditGens", "graphEditVideoGens",
-    "graphTweenOutput", "pendingImageGen", "pendingVideoGen", "graphMigrated",
-    "graphImageGenIndex", "graphVideoGenIndex", "graphEditVideoGenIndex",
-    // Legacy flat edit-video fields: `migrateEditVideoNodes` folds them into an
-    // `ev0` entry and its guard is "no edit-mode node present", so a stale
-    // snapshot re-introducing them could re-synthesize a node the user
-    // deleted. Main owns the migration (the fresh document is already folded),
-    // so they are never accepted from the renderer.
-    "graphEditVideoPrompt", "graphEditVideoModel", "graphEditVideoResolution",
-    "graphEditVideoParams", "graphEditVideoRefIds", "graphEditVideoSourceRefId",
-    "graphVideoToEditVideo",
-  ]);
+  // Main-owned fields: never copied from the incoming snapshot. The set is
+  // derived from the field-ownership table (shot-ownership.ts) — a field
+  // added to ProductionShot must be classified there or the ownership test
+  // fails, and its merge rule lands here automatically.
+  const DENIED = new Set<string>([...SHOT_MERGE_DENIED_FIELDS, ...SHOT_INDEX_FIELDS]);
   const merged: ProductionShot = { ...freshShot };
   const mergedRec = merged as unknown as Record<string, unknown>;
   // Legacy fields no longer used (single-VO model, cuts-only timeline) —
@@ -429,8 +550,10 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   delete mergedRec.transition;
   for (const [key, value] of Object.entries(incomingRec)) {
     if (DENIED.has(key)) continue;
-    if (key === "artwork" || key === "videoPath") continue; // explicit-null / editvideo rules below
-    if (key === "graphEditNodes" || key === "graphVideoNodes" || key === "graphTweenBlocks" || key === "graphUpscale") continue; // merged by id / pair / state below
+    // The pipe mirrors (artwork/videoPath) and the per-node/block state have
+    // dedicated merge rules below — skip them here. The list derives from the
+    // ownership table (`SHOT_SPECIAL_FIELDS`).
+    if (SHOT_SPECIAL_FIELDS.includes(key as keyof ProductionShot)) continue;
     mergedRec[key] = value;
   }
   merged.graphImageGenIndex = takeGenIndex(
@@ -448,24 +571,39 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
   merged.graphVideoNodes = mergeGraphNodes(freshShot.graphVideoNodes, incoming.graphVideoNodes);
   merged.graphTweenBlocks = mergeTweenBlocks(freshShot.graphTweenBlocks, incoming.graphTweenBlocks);
   // The singleton tool nodes carry their deletion as an explicit undefined
-  // (like the artwork/videoPath clears below): a plain absent value keeps the
-  // fresh main-written sheet/output, but an explicit clear means "deleted".
-  const clearedCameraGrid = "graphCameraGrid" in incomingRec && (incoming as { graphCameraGrid?: unknown }).graphCameraGrid == null;
-  const clearedUpscale = "graphUpscale" in incomingRec && (incoming as { graphUpscale?: unknown }).graphUpscale == null;
+  // (an absent value keeps the fresh main-written sheet/output, but an
+  // explicit clear means "deleted").
+  const clearedCameraGrid = "graphCameraGrid" in incomingRec && (incoming as { graphCameraGrid?: unknown }).graphCameraGrid == null;  const clearedUpscale = "graphUpscale" in incomingRec && (incoming as { graphUpscale?: unknown }).graphUpscale == null;
   merged.graphCameraGrid = mergeCameraGrid(freshShot.graphCameraGrid, incoming.graphCameraGrid, clearedCameraGrid);
   merged.graphUpscale = mergeUpscale(freshShot.graphUpscale, incoming.graphUpscale, clearedUpscale);
-  // Explicit clears ride the whole-document save (unpipe flows send
-  // artwork/videoPath as explicit nulls). A stale echo carries paths, never
-  // nulls, so honouring nulls cannot resurrect or cross-wire frames.
-  if ("artwork" in incomingFields && (incoming as { artwork?: unknown }).artwork == null) merged.artwork = undefined;
-  if ("videoPath" in incomingFields && (incoming as { videoPath?: unknown }).videoPath == null) merged.videoPath = undefined;
-  if (
-    merged.graphOutputSource === "editvideo"
-    && typeof incoming.videoPath === "string" && incoming.videoPath
-  ) {
-    merged.videoPath = incoming.videoPath;
-  }
+  // (Phase 4: the artwork/videoPath explicit-clear + legacy editvideo
+  // ride-through are retired — the renderer no longer sends mirror values,
+  // and every surface resolves the pipe live. The ref-output store still
+  // writes through its command path, never the merge.)
   return merged;
+}
+
+/**
+ * Apply a narrow graph-field patch to the freshest shot (the
+ * production:updateGraphShotFields command). Only allow-listed
+ * renderer-owned fields are taken from the patch; everything else on the
+ * shot comes from the fresh document, and the per-node merges inside
+ * mergeRendererShot keep each surviving node generation history
+ * main-owned. A generation that landed after the renderer snapshot
+ * therefore survives an unrelated graph edit.
+ */
+export function applyGraphShotPatch(
+  freshShot: ProductionShot,
+  patch: Partial<ProductionShot>
+): ProductionShot {
+  const allowed = pickGraphShotPatch(patch as Record<string, unknown>) as Partial<ProductionShot>;
+  const incoming: ProductionShot = { ...freshShot, ...allowed };
+  for (const key of Object.keys(allowed)) {
+    if ((allowed as Record<string, unknown>)[key] === undefined) {
+      (incoming as unknown as Record<string, unknown>)[key] = undefined;
+    }
+  }
+  return mergeRendererShot(freshShot, incoming);
 }
 
 /**
@@ -476,16 +614,17 @@ function mergeRendererShot(freshShot: ProductionShot, incoming: ProductionShot):
  * first — the classic case is a shot drag-reorder (new order, new numbers,
  * relocated board folders) racing an in-flight graph/text save. Copying the
  * incoming scenes wholesale would revert the order, reattach stale numbers,
- * and point artwork at another shot's folder; the pipe sync would then
- * "heal" the artwork from the wrong selection, visibly swapping pure and
- * edited frames.
+ * and cross-wire frames between shots (pre-Phase-4 the pipe sync would then
+ * "heal" the artwork from the wrong selection).
  *
  * So the fresh document owns everything structural — scene membership and
  * order, shot numbers, and all path-bearing fields — matched per shot by
  * stable id (a shot moved across scenes is found in its new scene). The
- * incoming snapshot contributes only the fields the renderer edits. Shots the
- * fresh document no longer has (deleted after the snapshot) stay deleted;
- * the save's edits to surviving shots still apply.
+ *  incoming snapshot contributes only the fields the renderer edits. Shots the
+ *  fresh document no longer has (deleted after the snapshot) stay deleted;
+ *  the save's edits to surviving shots still apply. (Phase 4: the output
+ *  mirrors are no longer re-derived here — every surface resolves the pipe
+ *  live, so a stale save can't diverge them by construction.)
  */
 function mergeRendererScenes(fresh: ProductionFile, incoming: Production): void {
   if (!Array.isArray(incoming.scenes)) return;
@@ -504,16 +643,15 @@ function mergeRendererScenes(fresh: ProductionFile, incoming: Production): void 
   }
   for (const shot of fresh.scenes.flatMap((s) => s.shots)) {
     // Fold any legacy single-edit fields from a stale renderer payload into
-    // the edit-node list before the output pipe is re-derived from it.
+    // the edit-node list before the merge below reads it.
     migrateEditNodes(shot);
     // Same for the legacy single video-generation node, then the legacy
     // single edit-video node (which folds into the video-node list).
     migrateVideoNodes(shot);
     migrateEditVideoNodes(shot);
-    // The output pipe is authoritative: re-derive artwork/videoPath so a
-    // renderer save with a stale or missing frame can't diverge from the
-    // graph's frame output node (e.g. an edit-image node piped to output).
-    syncBoardOutputToPipe(shot);
+    // (Phase 4: the output mirrors are no longer re-derived here — every
+    // surface resolves the pipe live through the shared display helper, so a
+    // renderer save can't diverge them by construction.)
     // Tween keyframes must point at live references — prune deleted refs so
     // a stale save can't leave phantom action blocks behind.
     syncTweenBlocks(fresh, shot);
@@ -552,6 +690,12 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // a reorder.
   fresh.promptOverrides =
     fresh.promptOverrides && typeof fresh.promptOverrides === "object" ? { ...fresh.promptOverrides } : {};
+  // The media registry is main-owned (like promptOverrides): the media
+  // service maintains it, and a stale renderer snapshot — captured before a
+  // move/registration — must never revert an entry's path or state. It is
+  // deliberately absent from the copy list above, so the fresh document's
+  // registry always wins.
+  fresh.media = normalizeMediaRegistry(fresh.media);
   fresh.characters = Array.isArray(p.characters) ? p.characters : [];
   fresh.products = Array.isArray(p.products) ? p.products : [];
   fresh.references = Array.isArray(p.references) ? p.references : [];
@@ -715,6 +859,29 @@ function migrateBoardArtwork(p: Production): boolean {
 export function migrateShotGraph(p: Production, shot: ProductionShot): boolean {
   if (shot.graph?.migrated) return false;
   let { graph } = normalizeGraph(materializeGraph(shot, graphRefViews(p)));
+  // Unknown future nodes survive normalization: the materializer only emits
+  // registered kinds, so carry forward any stored node the registry doesn't
+  // know — with its stored edges (normalize keeps unknown-kind edges
+  // unvalidated) — instead of dropping its serialized data. A KNOWN kind the
+  // materializer didn't emit is materializer-owned (a removed tool, healed
+  // wiring) and is deliberately not carried.
+  {
+    const knownIds = new Set(graph.nodes.map((n) => n.id));
+    for (const n of shot.graph?.nodes ?? []) {
+      if (!n || typeof n.id !== "string" || knownIds.has(n.id) || nodeDecl(n.kind)) continue;
+      knownIds.add(n.id);
+      graph.nodes.push(n);
+    }
+    const edgeKeys = new Set(graph.edges.map((e) => e.id));
+    const nodeIds = new Set(graph.nodes.map((n) => n.id));
+    for (const e of shot.graph?.edges ?? []) {
+      if (!e || typeof e.id !== "string" || edgeKeys.has(e.id)) continue;
+      if (!e.from || !e.to || !nodeIds.has(e.from.node) || !nodeIds.has(e.to.node)) continue;
+      edgeKeys.add(e.id);
+      graph.edges.push(e);
+    }
+    graph = normalizeGraph(graph).graph;
+  }
   // Mirroring heal: the sidepanel shows a style (explicit pick or master
   // fallback) but materialize only knows the explicit pick — an implicit
   // master selection would otherwise open unwired. None never heals.
@@ -725,6 +892,31 @@ export function migrateShotGraph(p: Production, shot: ProductionShot): boolean {
   graph.migrated = true;
   shot.graph = graph;
   return true;
+}
+
+/**
+ * Guarantee every canvas owns a stored graph at load: run the flag→graph
+ * normalization for any shot (or sequence facade) whose stored wiring is
+ * absent. The one-time `migrateBoardArtwork` walk only covers documents below
+ * the schema stamp — shots created afterwards (insertShot, script re-ingest,
+ * sequence creation) skip it, and today the canvas re-derives their wiring
+ * live from prompt text until the first-open ensure persists it. With this
+ * in place the canvas reads the stored graph (open-time ensure first view,
+ * stored afterwards) instead of live derivation. Idempotent and additive:
+ * settled shots are untouched.
+ */
+export function ensureShotGraphs(p: ProductionFile): void {
+  for (const scene of p.scenes ?? []) {
+    for (const shot of scene.shots ?? []) {
+      if (!shot.graph) migrateShotGraph(p, shot);
+    }
+  }
+  for (const shot of p.outdatedShots ?? []) {
+    if (!shot.graph) migrateShotGraph(p, shot);
+  }
+  for (const seq of p.shotSequences ?? []) {
+    if (seq.graph && !seq.graph.graph) migrateShotGraph(p, seq.graph);
+  }
 }
 
 /** Drop shared-text copies covered by the freshly materialized edges. */

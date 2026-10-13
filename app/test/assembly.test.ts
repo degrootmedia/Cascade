@@ -181,12 +181,20 @@ describe("assemblyPlan", () => {
   });
 
   it("flags a still as suspicious when the production shows a video generation", () => {
+    // A still shows while a video job is pending/expected (the clip never
+    // registered): the export ships the frame but flags it loudly instead of
+    // silently freezing. (A videogen pipe with no takes resolves to blank in
+    // the new world — a stale artwork mirror can no longer mask it.)
+    const stillShot = (over: Partial<import("../src/shared/ipc.js").ProductionShot> = {}) => makeShot({
+      number: "0200",
+      graphImageGens: [{ path: "boards/0200/shot-0200-def.jpg", prompt: "", model: "", at: "" }],
+      graphImageGenIndex: 0,
+      graphOutputSource: "imagegen" as const,
+      pendingVideoGen: { prompt: "drift", model: "auto", at: "" },
+      ...over,
+    });
     const p = makeProduction({
-      scenes: [
-        makeScene([
-          makeShot({ number: "0200", artwork: "boards/0200/shot-0200-def.jpg", graphOutputSource: "videogen" }),
-        ]),
-      ],
+      scenes: [makeScene([stillShot()])],
     });
     const plan = assemblyPlan(p);
     expect(plan.events[0].kind).toBe("still");
@@ -305,7 +313,13 @@ describe("buildManifest", () => {
     const p = makeProduction({
       scenes: [
         makeScene([
-          makeShot({ number: "0200", artwork: "boards/0200/shot-0200-def.jpg", graphOutputSource: "videogen" }),
+          makeShot({
+            number: "0200",
+            graphImageGens: [{ path: "boards/0200/shot-0200-def.jpg", prompt: "", model: "", at: "" }],
+            graphImageGenIndex: 0,
+            graphOutputSource: "imagegen" as const,
+            pendingVideoGen: { prompt: "drift", model: "auto", at: "" },
+          }),
         ]),
       ],
     });

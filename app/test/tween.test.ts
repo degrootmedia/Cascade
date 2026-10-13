@@ -509,7 +509,7 @@ describe("assembly tween expansion", () => {
     expect(edl).not.toContain("stitched");
   });
 
-  it("falls back to the single-clip path when blocks are unready", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-asm2-"));
+  it("falls back to the single-clip path for a legacy clip mirror when blocks are unready", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-tween-asm2-"));
     const videos = path.join(dir, "videos");
     fs.mkdirSync(videos, { recursive: true });
     fs.writeFileSync(path.join(videos, "stitched.mp4"), "stitched");
@@ -524,7 +524,6 @@ describe("assembly tween expansion", () => {
         shots: [shot({
           number: "0100",
           videoPath: "videos/stitched.mp4",
-          graphOutputSource: "tween",
           graphTweenRefIds: ["a", "b"],
           graphTweenBlocks: [block({ startRefId: "a", endRefId: "b" })],
         })],
@@ -537,6 +536,32 @@ describe("assembly tween expansion", () => {
     const plan = assemblyPlan(p);
     expect(plan.events).toHaveLength(1);
     expect(plan.events[0].srcRel).toBe("videos/stitched.mp4");
+  });
+
+  it("emits a blank when a tween pipe has no stitch yet", () => {
+    const p: Production = {
+      meta: { id: "p", name: "P", folder: "/tmp/nowhere", createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+      currentStep: 5,
+      visualStyle: "",
+      styles: [],
+      scenes: [{
+        number: 1,
+        title: "S",
+        shots: [shot({
+          number: "0100",
+          graphOutputSource: "tween",
+          graphTweenRefIds: ["a", "b"],
+          graphTweenBlocks: [block({ startRefId: "a", endRefId: "b" })],
+        })],
+      }],
+      characters: [],
+      products: [],
+      status: {},
+      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+    };
+    const plan = assemblyPlan(p);
+    expect(plan.events).toHaveLength(1);
+    expect(plan.events[0].kind).toBe("blank");
   });
 });
 

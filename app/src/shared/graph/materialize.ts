@@ -21,6 +21,7 @@ import type { Graph, GraphEdge, GraphNode, GraphVideoNode, ProductionShot } from
 import { TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
 import { hasBrandParagraph, refTagNames } from "../prompt-grammar.js";
 import { editVideoEdgeId, videoEdgeId, videoNodeCanvasId, tweenKeyToNode } from "./connect.js";
+import { normalizeGraph } from "./normalize.js";
 
 /** Minimal reference view the materializer needs: identity, name (tag match), media, artwork. */
 export interface GraphRefView {
@@ -387,4 +388,17 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   }
 
   return { version: 1, nodes, edges };
+}
+
+/**
+ * The canvas read model: the stored graph when one exists (normalized
+ * only), otherwise the one-time materialization from legacy fields.
+ * After migration the stored graph is the sole read path — re-deriving
+ * from flat fields on every open would flatten branches the flat fields
+ * cannot express.
+ */
+export function storedOrMaterializedGraph(shot: ProductionShot, refs: GraphRefView[]): Graph {
+  return shot.graph
+    ? normalizeGraph(shot.graph).graph
+    : normalizeGraph(materializeGraph(shot, refs)).graph;
 }

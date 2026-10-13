@@ -168,6 +168,20 @@ function edgesInto(graph: Graph, toNode: string, toPort: string): GraphEdge[] {
   return graph.edges.filter((e) => e.to.node === toNode && e.to.port === toPort);
 }
 
+/** Make the stored graph's Frame Output wire match a selection: exactly
+ *  one edge into output/in-out, from `sourceNodeId` (or none when null).
+ *  Returns the same graph when already matching, so callers can run it on
+ *  every selection write without churning saved state. */
+export function syncOutputEdge(graph: Graph, sourceNodeId: string | null, edgeId?: string): Graph {
+  const current = edgesInto(graph, "output", "in-out");
+  const want = sourceNodeId && graph.nodes.some((n) => n.id === sourceNodeId) ? sourceNodeId : null;
+  if (want === null && current.length === 0) return graph;
+  if (want !== null && current.length === 1 && current[0].from.node === want) return graph;
+  const edges = graph.edges.filter((e) => !(e.to.node === "output" && e.to.port === "in-out"));
+  if (want !== null) edges.push(mkEdge(edgeId ?? "e-out", want, "out", "output", "in-out"));
+  return { ...graph, edges };
+}
+
 /** Count ref→prompt edges on a prompt node (append-slot index). Only the
  *  positional reference sockets (`in-ref-N`) count — a sequence prompt node
  *  also carries structural member-frame edges (`in-frame-N`) from

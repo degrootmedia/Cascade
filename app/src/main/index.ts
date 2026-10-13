@@ -15,11 +15,14 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, applyVideoOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, syncBoardOutputToPipe, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile } from "./pipeline.js";
+import { assetPathInFolder } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { findGeneration } from "../shared/generations.js";
+import { createJobLedger, runWithJobLedger } from "./jobs.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
@@ -54,7 +57,10 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot } from "../shared/ipc.js";
+import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
+import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
+import { jobForChannel, jobLabel } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -223,7 +229,9 @@ function sendAgentEvent(sessionId: string, event: AgentEventIpc): void {
  *  re-generated frame naturally misses. Bounded LRU (~1k entries of tens-of-KB
  *  base64) — repeat paints become string returns with no disk decode/resize. */
 const BOARD_THUMB_CACHE_MAX = 1000;
+const BOARD_THUMB_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const boardThumbCache = new Map<string, { key: string; dataUrl: string }>();
+let boardThumbCacheBytes = 0;
 function boardThumbGet(cacheKey: string, fileKey: string): string | null {
   const hit = boardThumbCache.get(cacheKey);
   if (!hit || hit.key !== fileKey) return null;
@@ -233,21 +241,32 @@ function boardThumbGet(cacheKey: string, fileKey: string): string | null {
   return hit.dataUrl;
 }
 function boardThumbSet(cacheKey: string, fileKey: string, dataUrl: string): void {
+  const prev = boardThumbCache.get(cacheKey);
+  if (prev) boardThumbCacheBytes -= prev.dataUrl.length;
   boardThumbCache.delete(cacheKey);
   boardThumbCache.set(cacheKey, { key: fileKey, dataUrl });
-  while (boardThumbCache.size > BOARD_THUMB_CACHE_MAX) {
+  boardThumbCacheBytes += dataUrl.length;
+  // Bound by count AND estimated bytes (base64 length tracks byte size):
+  // large thumbnails vary too much for count alone to control memory.
+  while (boardThumbCache.size > BOARD_THUMB_CACHE_MAX || boardThumbCacheBytes > BOARD_THUMB_CACHE_MAX_BYTES) {
     const oldest = boardThumbCache.keys().next().value;
     if (oldest === undefined) break;
+    const evicted = boardThumbCache.get(oldest);
     boardThumbCache.delete(oldest);
+    if (evicted) boardThumbCacheBytes -= evicted.dataUrl.length;
   }
 }
 /** Resolve + validate a board frame request. Returns null for unknown shots
- *  or paths outside the shot's history (same guard as the single handler). */
-function resolveBoardFrame(p: productions.ProductionFile, shotId: string, framePath?: string): { rel: string; abs: string } | null {
-  const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+ *  or paths outside the shot's history (same guard as the single handler).
+ *  The default frame resolves through the shared display helper (the pipe
+ *  when bound, the legacy mirrors otherwise) — never a hand-rolled mirror. */
+function resolveBoardFrame(p: productions.ProductionFile, shotId: string, framePath?: string, knownShot?: ProductionShot): { rel: string; abs: string } | null {
+  const shot = knownShot ?? p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
   if (!shot) return null;
-  const rel = framePath ?? shot.artwork;
-  if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
+  const display = resolveShotDisplay(shot);
+  // A clip's thumbnail/full still is its feed still, never the clip file.
+  const rel = framePath ?? (display.media === "still" ? display.path : display.stillPath);
+  if (!rel || (rel !== display.path && rel !== display.stillPath && !boardFrameHistory(shot).includes(rel))) return null;
   return { rel, abs: assetPath(p, rel) };
 }
 function renderBoardThumb(abs: string): string | null {
@@ -309,10 +328,12 @@ function registerMediaProtocol(): void {
     let thumb = false;
     try {
       const url = new URL(req.url);
-      const p = productions.loadProduction(url.hostname);
-      if (!p) return new Response("Unknown production", { status: 404 });
+      // Folder-only resolution: one media request must not load, clone,
+      // or media-bootstrap the whole production document.
+      const folder = productions.productionFolder(url.hostname);
+      if (!folder) return new Response("Unknown production", { status: 404 });
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-      abs = assetPath(p, rel);
+      abs = assetPathInFolder(folder, rel);
       thumb = url.searchParams.get("thumb") === "1";
     } catch {
       return new Response("Forbidden", { status: 403 });
@@ -407,7 +428,7 @@ function handleExternalRefChanges(productionId: string, changes: RefChange[]): v
       if (shot.graphOutputSource !== "ref" || shot.graphOutputRefId !== change.id) continue;
       if (!refreshRefCopyFromFile(p, shot, change.rel)) continue;
       touched = true;
-      if (shot.artwork) shotIds.push(shot.id);
+      if (resolveShotDisplay(shot).path) shotIds.push(shot.id);
     }
     safeSend("references:externalUpdate", {
       productionId,
@@ -1070,6 +1091,47 @@ function registerIpc() {
   // agent tools) can invoke a production operation directly without a renderer
   // round-trip or the sender/schema gate. Only mapped channels are reachable.
   const ipcListeners = new Map<string, (event: any, ...args: any[]) => unknown>();
+
+  // ---- Main job ledger (architecture hardening WS3) -----------------------
+  // One authoritative lifecycle for every generation job. Every generation
+  // channel passing through `handle` is recorded here (queued → running →
+  // succeeded/failed); renderers subscribe to snapshots so busy/result state
+  // is identical across windows and survives a reload. Non-terminal jobs are
+  // persisted to userData so a crash leaves them as `interrupted` — visible and
+  // recoverable (paired with the pending*/recheck affordances), never a
+  // silent drop or an indefinite spinner.
+  const jobLedgerFile = path.join(app.getPath("userData"), "jobs.json");
+  const jobLedger = createJobLedger({
+    persist(active) {
+      try {
+        const tmp = `${jobLedgerFile}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(active), "utf8");
+        fs.renameSync(tmp, jobLedgerFile);
+      } catch { /* persistence is best-effort; losing it only loses recovery metadata */ }
+    },
+    loadPersisted() {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(jobLedgerFile, "utf8"));
+        return Array.isArray(parsed) ? (parsed as JobSnapshot["jobs"]) : [];
+      } catch {
+        return [];
+      }
+    },
+  });
+  // The recovered (interrupted) jobs are no longer "running" — clear the file
+  // so a second crash can't re-mark them.
+  if (jobLedger.interrupted.length) {
+    try { fs.writeFileSync(jobLedgerFile, "[]", "utf8"); } catch { /* best-effort */ }
+  }
+  const broadcastJobs = (snapshot: JobSnapshot): void => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        if (!w.isDestroyed()) w.webContents.send("production:jobsChanged", snapshot);
+      } catch { /* a destroyed window must not break the broadcast */ }
+    }
+  };
+  jobLedger.subscribe(broadcastJobs);
+
   function handle(channel: string, listener: (event: import("electron").IpcMainInvokeEvent, ...args: any[]) => unknown): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
     ipcHandlers.add(channel);
@@ -1077,7 +1139,9 @@ function registerIpc() {
     ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
       if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
       validateIpcArgs(channel, args);
-      return await listener(event, ...args);
+      // Record generation jobs on the ledger — the wrapper, not the call
+      // site, so a generation can't ship without a job record.
+      return await runWithJobLedger(jobLedger, channel, args, () => listener(event, ...args));
     });
   }
   function on(channel: string, listener: (event: import("electron").IpcMainEvent, ...args: any[]) => void): void {
@@ -1100,6 +1164,12 @@ function registerIpc() {
     });
   }
 
+  // `production:jobsChanged` is a main→renderer broadcast (the ledger emits;
+  // renderers subscribe in preload) — the renderer never sends on it. The
+  // no-op listener keeps the contract-drift guard happy (every declared
+  // channel must be handled).
+  on("production:jobsChanged", () => {});
+
   // Detached canvas window (Spec 03): a single window, retargeted on reopen.
   // `detached` is assigned in `whenReady` before registerIpc() runs, so these
   // handlers always have a controller by the time the renderer can invoke them.
@@ -1108,25 +1178,11 @@ function registerIpc() {
   handle("window:detachedState", () => detached!.state());
   on("canvas:selectionChanged", (_e, frameId: string | null) => detached?.selectionChanged(frameId ?? null));
 
-  // Cross-window in-flight canvas jobs (Spec 03): whichever window publishes
-  // its local busy snapshot has it relayed to its sibling, so "Generating…"
-  // survives the graph living in the other window. The main window's latest
-  // snapshot is cached and replayed to the detached window on its first
-  // publish (a job started before the pop-out must still show there).
-  let lastMainCanvasBusy: CanvasBusySnapshot | null = null;
-  on("canvas:busyChanged", (event, raw: unknown) => {
-    let snapshot: CanvasBusySnapshot;
-    try { snapshot = normalizeCanvasBusy(raw); } catch { return; }
-    const fromMain = !!win && !win.isDestroyed() && event.sender.id === win.webContents.id;
-    if (fromMain) lastMainCanvasBusy = snapshot;
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed() || w.webContents.id === event.sender.id) continue;
-      w.webContents.send("canvas:busyChanged", snapshot);
-    }
-    if (!fromMain && lastMainCanvasBusy) {
-      event.sender.send("canvas:busyChanged", lastMainCanvasBusy);
-    }
-  });
+  // Cross-window in-flight canvas jobs (Spec 03, retired Phase 4): the main
+  // job ledger drives both windows' busy display, so no renderer-to-renderer
+  // mirroring crosses here anymore. The no-op listener keeps the
+  // contract-drift guard happy (every declared channel must be handled).
+  on("canvas:busyChanged", () => {});
 
   /** Run one user turn on a chat through the normal agent path (approval gate
    *  and all). Shared by `chat:send` and goal auto-continuation. */
@@ -2281,7 +2337,10 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    const srcRel = shot.artwork;
+    // Lock the shot's CURRENT frame (the pipe when bound — a videogen-piped
+    // shot contributes its feed still).
+    const frame = resolveShotDisplay(shot);
+    const srcRel = frame.media === "still" ? frame.path : frame.stillPath;
     if (!srcRel) throw new Error("That shot has no frame yet — generate it first.");
     const target = (p.styles ?? []).find((s) => s.id === (styleId || shot.style)) ?? p.styles?.[0];
     if (!target) throw new Error("No style to attach the frame to.");
@@ -2302,10 +2361,14 @@ function registerIpc() {
 
   const mutateShots = (
     id: string,
-    mutate: (p: Production) => void
+    mutate: (p: Production) => void,
+    baseRev?: number
   ): Production => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
+    // A stale destructive edit is rejected with a recoverable conflict
+    // instead of being silently applied (the caller refreshes and retries).
+    productions.assertFreshRevision(p, baseRev);
     mutate(p);
     // Keep the human-readable two-column markdown in sync with every edit.
     if (p.scenes.some((s) => s.shots.length)) {
@@ -2319,16 +2382,19 @@ function registerIpc() {
     return p;
   };
 
-  handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number) =>
+  handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number, shotId?: string) =>
     // Serialized per production (Fix B): insert/delete/prompt saves each
     // return whole-Production snapshots, so production order must match
     // request order — otherwise a prompt-save response produced before a
     // structural edit can resolve after it and overwrite newer state.
+    // A caller-supplied shot id makes creation idempotent: repeating the call
+    // after an uncertain response returns the already-created shot instead of
+    // duplicating it.
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
         const oldNumbers = new Map<string, string>();
         for (const scene of p.scenes) for (const shot of scene.shots) oldNumbers.set(shot.id, shot.number);
-        shotter.insertShotAt(p.scenes, sceneNumber, index);
+        shotter.insertShotAt(p.scenes, sceneNumber, index, "", "", typeof shotId === "string" && shotId ? shotId : undefined);
         // A front insert (or an exhausted mid-number gap) re-derives the whole
         // 100-grid; relocate board folders so files follow their shots.
         relocateBoardsForRenumber(p, oldNumbers);
@@ -2336,22 +2402,18 @@ function registerIpc() {
     )
   );
 
-  handle("production:deleteShot", (_e, id: string, shotId: string) =>
+  handle("production:deleteShot", (_e, id: string, shotId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
-        for (const scene of p.scenes) {
-          const i = scene.shots.findIndex((s) => s.id === shotId);
-          if (i !== -1) {
-            scene.shots.splice(i, 1); // numbers keep their gaps — standard practice
-            // A shot sequence never outlives its span: dissolve any sequence
-            // this was the last member of (its clip is preserved as a
-            // reference, exactly like an explicit sequence delete).
-            removeShotsFromSequences(p, [shotId]);
-            return;
-          }
+        // Idempotent delete: a retry after an uncertain response finds nothing
+        // and succeeds without changing the document instead of failing loudly.
+        if (shotter.removeShotById(p.scenes, shotId)) {
+          // A shot sequence never outlives its span: dissolve any sequence
+          // this was the last member of (its clip is preserved as a
+          // reference, exactly like an explicit sequence delete).
+          removeShotsFromSequences(p, [shotId]);
         }
-        throw new Error("Shot not found.");
-      })
+      }, baseRev)
     )
   );
 
@@ -2376,11 +2438,11 @@ function registerIpc() {
     })
   );
 
-  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number) =>
+  handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number, baseRev?: number) =>
     mutateShots(id, (p) => {
       const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId, endSceneNumber);
       relocateBoardsForRenumber(p, oldNumbers);
-    })
+    }, baseRev)
   );
 
   // Outdated panels (preserved from a previous script re-ingest). Restore pulls
@@ -2396,13 +2458,17 @@ function registerIpc() {
     )
   );
 
-  handle("production:removeOutdatedShot", (_e, id: string, shotId: string) =>
+  handle("production:removeOutdatedShot", (_e, id: string, shotId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
-        removeOutdatedShot(p, shotId);
-        // Permanent removal also drops the shot from any sequence span.
-        removeShotsFromSequences(p, [shotId]);
-      })
+        // Idempotent delete: a retry after an uncertain response finds
+        // nothing and succeeds without changing the document.
+        if ((p.outdatedShots ?? []).some((s) => s.id === shotId)) {
+          removeOutdatedShot(p, shotId);
+          // Permanent removal also drops the shot from any sequence span.
+          removeShotsFromSequences(p, [shotId]);
+        }
+      }, baseRev)
     )
   );
 
@@ -2410,9 +2476,12 @@ function registerIpc() {
   // video is preserved as a "Shot Sequences" reference first — the confirm
   // dialog warns about this. Thin wiring — the preserve/drop lives in
   // pipeline.removeShotSequence.
-  handle("production:deleteShotSequence", (_e, id: string, sequenceId: string) =>
+  handle("production:deleteShotSequence", (_e, id: string, sequenceId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
+        // Idempotent delete: a retry after an uncertain response finds
+        // nothing and succeeds without changing the document.
+        if (!(p.shotSequences ?? []).some((s) => s.id === sequenceId)) return;
         const { seq, saved } = removeShotSequence(p, sequenceId);
         productionEmit(
           id,
@@ -2421,7 +2490,7 @@ function registerIpc() {
             : `Deleted ${seq.name}.`,
           "done"
         );
-      })
+      }, baseRev)
     )
   );
 
@@ -2559,12 +2628,9 @@ function registerIpc() {
           prevUp.gens, prevUp.genIndex, shot.graphUpscale.gens, shot.graphUpscale.genIndex, nextUp.gens, nextUp.genIndex,
         );
       }
-      // The copied artwork/videoPath came from the job's snapshot while the
-      // indices above may have been re-anchored to a mid-job user selection —
-      // re-derive the primary frame/clip from the final pipe so the two can't
-      // disagree (a new take that briefly shows then reverts on the next save
-      // looked like the generation never applied until an unplug/replug).
-      syncBoardOutputToPipe(shot);
+      // (Phase 4: the artwork/videoPath mirrors are no longer re-derived
+      // after the re-anchor — every surface resolves the pipe live, so the
+      // committed pipe + take selections are the whole truth.)
     }
     // Shot sequences hold their video-node histories like the shot graph does
     // (a sequence generation commits its takes through here): copy only the
@@ -2819,8 +2885,7 @@ function registerIpc() {
         throw e;
       }
       const { jpegRel } = writeBoardFrame(p, shot, buf, "png");
-      recordGraphImageGen(shot, jpegRel, pending.prompt, pending.model);
-      hookImageGenToOutput(shot);
+      completeImageGeneration(shot, jpegRel, pending.prompt, pending.model, pending.surface === "node" ? "node" : "classic");
       // The original submit never reached its generation recorder (the wait
       // timed out), so the cost was unbilled. Bill it now, once, using the
       // submit-time resolution/aspect kept on the pending record. Higgsfield
@@ -2912,14 +2977,12 @@ function registerIpc() {
       if (target?.kind === "videoPath") {
         if (shot.videoPath && shot.videoPath !== rel) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old clip already gone */ } }
         shot.videoPath = rel;
-        recordGraphVideoGen(shot, "vid0", rel, pending.prompt, pending.model, pending.draftJobId);
-        hookVideoGenToOutput(shot, "vid0");
+        completeVideoGeneration(shot, "vid0", rel, pending.prompt, pending.model, pending.draftJobId, "classic");
       } else if (target?.kind === "editVideoNode") {
         // Legacy pending record (flat edit-video node): land it on the migrated
-        // ev0 entry and bind it, like a direct edit-video generation.
-        recordGraphVideoGen(shot, "ev0", rel, pending.prompt, pending.model);
-        hookVideoGenToOutput(shot, "ev0");
-        applyVideoOutput(shot, rel, target.sourcePath, "ev0");
+        // ev0 entry and bind it, like a direct edit-video generation. The
+        // recorded take + pipe bind resolve the clip; no mirror pin needed.
+        completeVideoGeneration(shot, "ev0", rel, pending.prompt, pending.model, undefined, "node");
       } else if (target?.kind === "tween") {
         syncTweenBlocks(p, shot);
         const block = (shot.graphTweenBlocks ?? []).find((b) => b.id === target.blockId);
@@ -2929,9 +2992,7 @@ function registerIpc() {
         // bind the recovered take like a direct generation so it shows
         // without an unplug/replug round-trip.
         const nodeId = target?.kind === "videoNode" ? (target.nodeId ?? "vid0") : "vid0";
-        recordGraphVideoGen(shot, nodeId, rel, pending.prompt, pending.model, pending.draftJobId);
-        hookVideoGenToOutput(shot, nodeId);
-        applyVideoOutput(shot, rel, target?.kind === "videoNode" ? target.sourcePath : undefined, nodeId);
+        completeVideoGeneration(shot, nodeId, rel, pending.prompt, pending.model, pending.draftJobId, "node");
       }
       // The original submit never reached its generation recorder (the wait
       // timed out or the download failed), so the cost was unbilled. Bill it
@@ -3647,25 +3708,6 @@ function registerIpc() {
     return p;
   });
 
-  // Board thumbnails for the contact sheet — the PNGs live in the production
-  // folder; the renderer gets a small data URL (like chat image thumbs).
-  handle("production:boardImage", (_e, id: string, shotId: string, framePath?: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) return null;
-    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot) return null;
-    const rel = framePath ?? shot.artwork;
-    if (!rel || (rel !== shot.artwork && !boardFrameHistory(shot).includes(rel))) return null;
-    try {
-      const buf = fs.readFileSync(assetPath(p, rel));
-      const img = nativeImage.createFromBuffer(buf);
-      const thumb = img && !img.isEmpty() && img.getSize().width > 640 ? img.resize({ width: 640 }) : img;
-      return thumb && !thumb.isEmpty() ? thumb.toDataURL() : null;
-    } catch {
-      return null;
-    }
-  });
-
   // Full-resolution board frame for the zoom lightbox. Perf 2.5: returns a
   // cascade-media:// URL (streamed + range-capable by media-protocol.ts),
   // not a re-encoded base64 blob — no synchronous file read, no ~33% base64
@@ -3710,9 +3752,12 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) return {};
     const out: Record<string, string> = {};
     const ids = Array.isArray(shotIds) ? shotIds.slice(0, 200) : [];
+    // One shot lookup for the whole batch (was a full scan per thumbnail).
+    const shotById = new Map<string, ProductionShot>();
+    for (const sc of p.scenes) for (const s of sc.shots) if (!shotById.has(s.id)) shotById.set(s.id, s);
     for (const shotId of ids) {
       if (typeof shotId !== "string" || !shotId) continue;
-      const resolved = resolveBoardFrame(p, shotId);
+      const resolved = resolveBoardFrame(p, shotId, undefined, shotById.get(shotId));
       if (!resolved) continue;
       const cacheKey = `${id}:${shotId}:`;
       try {
@@ -3749,9 +3794,14 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
-    if (shot.artwork) {
-      try { fs.unlinkSync(assetPath(p, shot.artwork)); } catch { /* missing file is already removed */ }
-      delete shot.artwork;
+    // (No renderer caller — kept for compatibility.) Deletes the displayed
+    // still's file and unbinds a still pipe so the display goes blank; the
+    // take entry stays in history (now missing, therefore recoverable).
+    const display = resolveShotDisplay(shot);
+    const still = display.media === "still" ? display.path : display.stillPath;
+    if (still) mediaFiles.removeFile(p, still);
+    if (display.source === "imagegen" || display.source === "editgen" || display.source === "upscale") {
+      setShotSelectedOutput(shot, { kind: "unpipe" });
     }
     productions.saveProduction(p);
     return p;
@@ -3840,7 +3890,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     runVideoJob(id, `Generating a video for a shot`, async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
-      if (!shot.artwork) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
+      // The video animates the shot's current frame (the pipe when bound).
+      const frame = resolveShotDisplay(shot);
+      const frameRel = frame.media === "still" ? frame.path : frame.stillPath;
+      if (!frameRel) throw new Error("Generate or import a frame for this shot first — the frame is the video's source.");
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
@@ -3861,10 +3914,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoPath" };
         throw e;
       }
-      if (shot.videoPath) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old file already gone */ } }
-      shot.videoPath = rel;
-      recordGraphVideoGen(shot, "vid0", rel, clean.prompt, clean.model);
-      hookVideoGenToOutput(shot, "vid0");
+      // The finished clip replaces any clip the shot showed before (the old
+      // file is unlinked; the recorded take + pipe bind resolve the new one).
+      const showing = resolveShotDisplay(shot);
+      if (showing.media === "clip" && showing.path && showing.path !== rel) {
+        mediaFiles.removeFile(p, showing.path);
+      }
+      completeVideoGeneration(shot, "vid0", rel, clean.prompt, clean.model, undefined, "classic");
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
     })
   );
@@ -3873,8 +3929,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) return null;
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
-    if (!shot?.videoPath) return null;
-    return `cascade-media://${p.meta.id}/${encodeURIComponent(shot.videoPath)}`;
+    const clip = shot ? resolveShotDisplay(shot) : undefined;
+    if (!shot || clip?.media !== "clip" || !clip.path) return null;
+    return `cascade-media://${p.meta.id}/${encodeURIComponent(clip.path)}`;
   });
 
   // Step 3 node graph: generate one frame from a custom prompt (the prompt
@@ -3894,14 +3951,19 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // References: the @[name] tags the composer prompt actually cites.
       const { resolved, extras } = resolvePromptRefs(p, prompt, 0);
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
-      const png = await gen(resolved, extras, shot, opts?.params);
+      let png: Buffer;
+      try {
+        png = await gen(resolved, extras, shot, opts?.params);
+      } catch (e) {
+        // A timed-out node-view job is reclaimed later: remember it
+        // started here so the reclaim stays local to the node.
+        if (shot.pendingImageGen) shot.pendingImageGen.surface = "node";
+        throw e;
+      }
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordGraphImageGen(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto");
-      // A node-graph generation is an explicit user action on this node — bind
-      // its fresh take as the storyboard frame at once (like selectBoardFrame),
-      // so the result shows without an unplug/replug round-trip. The prior
-      // feed survives in its node's history.
-      selectBoardFrame(shot, jpegRel);
+      // Node-view generation: record on the node only — Frame Output
+      // never changes until the user wires this node explicitly.
+      completeImageGeneration(shot, jpegRel, prompt, typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto", "node");
       emit(`Shot ${shot.number}: node frame ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -3984,14 +4046,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
         throw e;
       }
-      recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model, draftJobId);
-      // A node-graph video generation is an explicit user action on this node —
-      // bind it as the output feed at once so the clip shows without an
-      // unplug/replug round-trip (a stale renderer save re-deriving the pipe
-      // from the old node reverted the new clip). The prior feed survives in
-      // its node's history.
-      hookVideoGenToOutput(shot, nodeId);
-      applyVideoOutput(shot, rel, sourcePath, nodeId);
+      // Node-view generation: record on the node only — Frame Output
+      // never changes until the user wires this node explicitly.
+      completeVideoGeneration(shot, nodeId, rel, clean.prompt, clean.model, draftJobId, "node");
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );
@@ -4065,9 +4122,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const inputs: { name: string; dataUrl: string; imageRel?: string }[] = [];
       for (const iid of inputIds) {
         const shot = shots.find((s) => s.id === iid);
-        if (shot?.artwork) {
-          const data = refArtworkDataUrl(p, { imagePath: shot.artwork });
-          if (data) inputs.push({ name: `Shot ${shot.number}`, dataUrl: data, imageRel: shot.artwork });
+        // Member frames resolve through the shared display (the pipe when
+        // bound): a clip member contributes its feed still.
+        const frame = shot ? resolveShotDisplay(shot) : undefined;
+        const frameRel = frame?.media === "still" ? frame.path : frame?.stillPath;
+        if (frameRel) {
+          const data = refArtworkDataUrl(p, { imagePath: frameRel });
+          if (data) inputs.push({ name: `Shot ${shot!.number}`, dataUrl: data, imageRel: frameRel });
           continue;
         }
         const ref = (p.references ?? []).find((r) => r.id === iid);
@@ -4178,7 +4239,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
           sourcePath = other?.gens?.[other.genIndex ?? 0]?.path;
         }
       }
-      if (!sourcePath) sourcePath = shot.videoPath;
+      if (!sourcePath) {
+        const display = resolveShotDisplay(shot);
+        if (display.media === "clip") sourcePath = display.path;
+      }
       if (!sourcePath) throw new Error("The edit-video node needs a source video — pipe a clip in, pick a video reference, or generate a clip first. Nothing was submitted.");
       const provider = mediaFor(clean.model);
       if (!provider.generateVideoEdit) {
@@ -4197,11 +4261,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
         throw e;
       }
-      recordGraphVideoGen(shot, nodeId, rel, clean.prompt, clean.model);
-      // An explicit edit-video generation binds its fresh take as the output
-      // at once so the clip shows without an unplug/replug round-trip.
-      hookVideoGenToOutput(shot, nodeId);
-      applyVideoOutput(shot, rel, sourcePath, nodeId);
+      // Node-view generation: record on the node only — Frame Output
+      // never changes until the user wires this node explicitly.
+      completeVideoGeneration(shot, nodeId, rel, clean.prompt, clean.model, undefined, "node");
       emit(`Shot ${shot.number}: edited video ready.`, "done");
     })
   );
@@ -4284,7 +4346,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const resolvedSource = resolveGraphSourceImage(args.p, args.shot, args.source);
     let dataUrl = resolvedSource?.dataUrl;
     const sourceName = resolvedSource?.name ?? `Shot ${args.shot.number} frame`;
-    if (!dataUrl && args.shot.artwork) dataUrl = fileDataUrl(args.p, args.shot.artwork) ?? undefined;
+    // Fall back to the shot's current frame (resolved through the shared
+    // display) when the wired source didn't resolve to bytes.
+    const fallbackFrame = resolveShotDisplay(args.shot);
+    const fallbackRel = fallbackFrame.media === "still" ? fallbackFrame.path : fallbackFrame.stillPath;
+    if (!dataUrl && fallbackRel) dataUrl = fileDataUrl(args.p, fallbackRel) ?? undefined;
     if (!dataUrl) throw new Error("No source image — wire a frame or reference in, or generate a frame first.");
     const { resolved, extras } = resolvePromptRefs(args.p, args.prompt, 1);
     const refs = [{ name: sourceName, dataUrl }, ...(args.extraRefs ?? []), ...extras];
@@ -4409,10 +4475,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         try { fs.unlinkSync(listPath); } catch { /* temp file already gone */ }
       }
       if (shot.graphTweenOutput && shot.graphTweenOutput !== rel) {
-        try { fs.unlinkSync(assetPath(p, shot.graphTweenOutput)); } catch { /* old stitch already gone */ }
+        mediaFiles.removeFile(p, shot.graphTweenOutput);
       }
       shot.graphTweenOutput = rel;
-      if (shot.graphOutputSource === "tween") applyVideoOutput(shot, rel);
+      mediaFiles.register(p, rel, "video", "generated");
       emit(`Shot ${shot.number}: continuous shot ready.`, "done");
     })
   );
@@ -4462,8 +4528,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       });
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       node.prompt = text;
-      recordGraphEditGen(shot, node.id, jpegRel, text, modelId ?? "auto");
-      selectBoardFrame(shot, jpegRel);
+      // Node-view generation: record on the node only — Frame Output
+      // never changes until the user wires this node explicitly.
+      completeEditGeneration(shot, node.id, jpegRel, text, modelId ?? "auto", "node");
       emit(`Shot ${shot.number}: node edit ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -4487,9 +4554,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         describeSource: (sourceName) => `Shot ${shot.number}: upscaling ${sourceName}${modelId ? ` via ${modelId}` : ""}…`,
       });
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
-      recordGraphUpscaleGen(shot, jpegRel, modelId ?? "auto");
+      completeUpscaleGeneration(shot, jpegRel, modelId ?? "auto", "node");
       shot.graphUpscale = { ...(shot.graphUpscale ?? {}), generation: { provider: providerId, model: modelId ?? "auto" } };
-      selectBoardFrame(shot, jpegRel);
       emit(`Shot ${shot.number}: upscaled frame ready.`, "done");
     }, { needsApiKey: false })
   );
@@ -4503,8 +4569,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!shot) throw new Error("Shot not found.");
     const rel = typeof opts?.path === "string" ? opts.path.trim() : "";
     if (!rel) throw new Error("No output selected — generate something first.");
-    if (opts?.kind === "video") applyVideoOutput(shot, rel);
-    else selectBoardFrame(shot, rel);
+    if (opts?.kind === "video") {
+      // The clip must be a stored video take (the pipe names the node; the
+      // display resolves it) — never an arbitrary path.
+      const gen = findGeneration(shot, rel);
+      if (!gen || gen.kind !== "video") throw new Error("That clip isn't a stored video generation — nothing to apply.");
+      if (shot.graphOutputSource !== "videogen") setShotSelectedOutput(shot, { kind: "videogen", nodeId: gen.nodeId });
+    } else selectBoardFrame(shot, rel);
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: node output applied (${opts?.kind === "video" ? "video" : "frame"}).`);
     return p;
@@ -4539,12 +4610,133 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
     if (shot.videoPath) {
-      try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* missing file is already removed */ }
+      mediaFiles.removeFile(p, shot.videoPath);
+      // The file is gone — no mirror may keep pointing at it. When the video
+      // fed the output, unbind through the write-through so the storyboard
+      // falls back to the still (the take history keeps the entry for
+      // re-fetch/recover).
       delete shot.videoPath;
+      if (shot.graphOutputSource === "videogen" || shot.graphOutputSource === "tween" || shot.graphOutputSource === "editvideo") {
+        setShotSelectedOutput(shot, { kind: "unpipe" });
+      }
       productions.saveProduction(p);
       productionEmit(id, `Shot ${shot.number}: video removed.`);
     }
     return p;
+  });
+
+  // Step 3: select a shot's output take through the ONE write-through — the
+  // storyboard's Make Primary (by stored path) and the canvas's take
+  // select/cycle (by node kind + index) share this command, so both surfaces
+  // always resolve the same selected output. Main validates, applies the
+  // selection via `setShotSelectedOutput` (the only writer of the artwork/
+  // videoPath mirrors), and returns the updated production.
+  handle("production:selectGraphTake", (_e, id: string, shotId: string, req: SelectGraphTakeRequest): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    if ("path" in req) {
+      selectBoardFrame(shot, req.path);
+    } else if (req.kind === "unpipe") {
+      // The canvas's unpipeOutput clears the whole output binding: pipe ids
+      // and BOTH mirrors (the storyboard goes blank regardless of which kind
+      // was piped).
+      shot.graphOutputVideoNodeId = undefined;
+      shot.graphOutputEditNodeId = undefined;
+      setShotSelectedOutput(shot, { kind: "unpipe" });
+      shot.artwork = undefined;
+      shot.videoPath = undefined;
+    } else {
+      const checkIndex = (gens: GraphGenItem[] | undefined): void => {
+        if (req.index >= (gens ?? []).length) throw new Error("That take no longer exists.");
+      };
+      switch (req.kind) {
+        case "imagegen": {
+          checkIndex(shot.graphImageGens);
+          shot.graphImageGenIndex = req.index;
+          // Re-derive the mirrors only when this node feeds the output — a
+          // selection on an unbound node moves the index alone.
+          if (shot.graphOutputSource === "imagegen") setShotSelectedOutput(shot, { kind: "imagegen" });
+          break;
+        }
+        case "editgen": {
+          const node = getEditNode(shot, req.nodeId);
+          if (!node) throw new Error("That edit node no longer exists.");
+          checkIndex(node.gens);
+          node.genIndex = req.index;
+          if (shot.graphOutputSource === "editgen" && shot.graphOutputEditNodeId === node.id) {
+            setShotSelectedOutput(shot, { kind: "editgen", nodeId: node.id });
+          }
+          break;
+        }
+        case "upscale": {
+          if (!shot.graphUpscale) throw new Error("The upscale node no longer exists.");
+          checkIndex(shot.graphUpscale.gens);
+          shot.graphUpscale.genIndex = req.index;
+          if (shot.graphOutputSource === "upscale") setShotSelectedOutput(shot, { kind: "upscale" });
+          break;
+        }
+        case "videogen": {
+          const node = getVideoNode(shot, req.nodeId);
+          if (!node) throw new Error("That video node no longer exists.");
+          checkIndex(node.gens);
+          node.genIndex = req.index;
+          const boundId = shot.graphOutputVideoNodeId ?? "vid0";
+          if (shot.graphOutputSource === "videogen" && boundId === node.id) {
+            setShotSelectedOutput(shot, { kind: "videogen", nodeId: node.id });
+          }
+          break;
+        }
+      }
+    }
+    // The stored graph wire follows the selection, whichever surface moved it.
+    syncShotGraphOutput(shot);
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // The main job ledger's current state for one production. A renderer calls
+  // this on open (and after a reload), then listens to `production:jobsChanged`
+  // — the ledger is authoritative, so a window opened mid-generation shows the
+  // live job immediately instead of guessing from its own local state.
+  handle("production:jobsSnapshot", (_e, productionId: string): JobSnapshot => {
+    return jobLedger.snapshot(typeof productionId === "string" ? productionId : undefined);
+  });
+
+  // Step 3: persist one shot's canvas state through the ONE layout write-
+  // through. The merge is per-key (positions/sizes/collapsed fold node by
+  // node; deletions are explicit), so two windows moving different nodes fold
+  // together instead of last-write-wins on the whole layout object — and a
+  // stale whole-document save carrying an older layout can't wholesale
+  // replace the fresher one.
+  handle("production:updateGraphLayout", (_e, id: string, shotId: string, patch: GraphLayoutPatch): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    shot.graphLayout = productions.mergeGraphLayoutPatch(shot.graphLayout, patch);
+    productions.saveProduction(p);
+    return p;
+  });
+  // Narrow graph-field edit for one shot: the patch is applied onto the
+  // freshest document (never a renderer whole-project snapshot), with only
+  // allow-listed renderer-owned fields taken and per-node generation
+  // history kept main-owned by the shared merge. This replaces the old
+  // saveGraphShotFields whole-project save for node moves of field data,
+  // parameter edits, and pipe/selection changes.
+  handle("production:updateGraphShotFields", (_e, id: string, shotId: string, patch: Partial<ProductionShot>): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    for (const scene of p.scenes) {
+      const idx = scene.shots.findIndex((s) => s.id === shotId);
+      if (idx >= 0) {
+        scene.shots[idx] = productions.applyGraphShotPatch(scene.shots[idx], patch ?? {});
+        productions.saveProduction(p);
+        return p;
+      }
+    }
+    throw new Error("Shot not found.");
   });
 
   // Per-model video options for the generation modal/node: read the model's
@@ -4728,8 +4920,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const resolvedSource = resolveGraphSourceImage(p, shot, node.source);
       let dataUrl = resolvedSource?.dataUrl;
       const sourceName = resolvedSource?.name ?? `Shot ${shot.number} frame`;
-      if (!dataUrl && shot.artwork) {
-        dataUrl = fileDataUrl(p, shot.artwork) ?? undefined;
+      const editFallback = resolveShotDisplay(shot);
+      const editFallbackRel = editFallback.media === "still" ? editFallback.path : editFallback.stillPath;
+      if (!dataUrl && editFallbackRel) {
+        dataUrl = fileDataUrl(p, editFallbackRel) ?? undefined;
       }
       if (!dataUrl) throw new Error("Generate or import a frame for this shot first - there's nothing to edit.");
       emit(`Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}...`);
@@ -5117,6 +5311,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         try { fs.unlinkSync(assetPath(p, prev.sheetPath)); } catch { /* old sheet already gone */ }
       }
       fs.writeFileSync(assetPath(p, rel), buf);
+      // Register the sheet before exposing it (the brief's rule).
+      mediaFiles.register(p, rel, "image", "generated");
       // Carry the node's wiring + picks forward; replace only the sheet. A
       // fresh generation supersedes any manually imported grid image. The
       // geometry follows the generated size (panels/labels re-derive from it).
@@ -5204,6 +5400,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
     );
     p.references = [...(p.references ?? []), ...result.refs];
+    // Register the exported panels before exposing them.
+    for (const rel of result.paths) mediaFiles.register(p, rel, "image", "generated");
     productions.saveProduction(p);
     productionEmit(req.productionId, `Exported ${result.refs.length} camera-grid panel${result.refs.length === 1 ? "" : "s"} as references.`, "done");
     return { refs: result.refs, production: p };
@@ -5462,7 +5660,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         const gen = ipcListeners.get("production:generateMagicPrompts");
         const setEnabled = ipcListeners.get("production:setMagicEnabled");
         if (!gen || !setEnabled) throw new Error(`Production operation "generateMagicPrompts" is unavailable.`);
-        await gen(undefined, id);
+        await runWithJobLedger(jobLedger, "production:generateMagicPrompts", [id], async () => { await gen(undefined, id); });
         // Magic prompts only take effect while Magic mode is on — mirror the
         // UI's toggle so the fresh prompts (and their @[Name] citations) are
         // what the next storyboard run renders and attaches.
@@ -5479,11 +5677,12 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         // Style/Brand are rendered from the shot's style system here, mirroring
         // the renderer's submit-time render; content (@[Name] tags included)
         // stays as the agent authored it.
-        return await listener(undefined, id, shotId, { ...opts, prompt: composeVideoPrompt(p, shot, opts.prompt) });
+        return await runWithJobLedger(jobLedger, "production:generateVideo", [id, shotId, opts], () => listener(undefined, id, shotId, { ...opts, prompt: composeVideoPrompt(p, shot, opts.prompt) }));
       }
       const listener = ipcListeners.get(PRODUCTION_OP_CHANNEL[op]);
       if (!listener) throw new Error(`Production operation "${op}" is unavailable.`);
-      return await listener(undefined, ...args);
+      // Same ledger lifecycle as the IPC door (see runWithJobLedger).
+      return await runWithJobLedger(jobLedger, PRODUCTION_OP_CHANNEL[op], args, () => listener(undefined, ...args));
     },
     list: () => productions.listProductions(),
     load: (id) => productions.loadProduction(id),

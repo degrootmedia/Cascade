@@ -22,7 +22,6 @@ vi.mock("../src/main/scripting.js", () => ({
 }));
 
 import {
-  applyVideoOutput,
   boardPrompt,
   brandPrompt,
   characterSheetPrompt,
@@ -53,6 +52,7 @@ import {
   syncBoardOutputToPipe,
   upsertCharacterSheetRef,
 } from "../src/main/pipeline.js";
+import { resolveShotDisplay } from "../src/shared/selected-output.js";
 
 // ---- fixture ---------------------------------------------------------------
 
@@ -402,49 +402,41 @@ describe("formatRuntime", () => {
   });
 });
 
-describe("applyVideoOutput", () => {
-  it("adopts the image node's current frame as the still when the shot has no artwork", () => {
-    const shot = makeShot({
+describe("clip still resolution (Phase 4: the display resolves the feed live)", () => {
+  const displayOf = (shot: ProductionShot) => resolveShotDisplay(shot);
+  const clipShot = (over: Partial<ProductionShot> = {}): ProductionShot => makeShot({
+    graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "videos/shot-0100-abc.mp4", prompt: "", model: "", at: "" }], genIndex: 0 }],
+    graphOutputSource: "videogen",
+    graphOutputVideoNodeId: "vid0",
+    ...over,
+  });
+
+  it("resolves the image node's current frame as the still beside a clip", () => {
+    const shot = clipShot({
       graphImageGens: [{ path: "boards/0100/shot-0100-abc.jpg", prompt: "p", model: "m", at: "" }],
       graphImageGenIndex: 0,
     });
-    applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
-    expect(shot.videoPath).toBe("videos/shot-0100-abc.mp4");
-    expect(shot.artwork).toBe("boards/0100/shot-0100-abc.jpg");
+    shot.graphVideoNodes![0].source = { kind: "imagegen" };
+    expect(displayOf(shot)).toMatchObject({
+      media: "clip", path: "videos/shot-0100-abc.mp4", stillPath: "boards/0100/shot-0100-abc.jpg",
+    });
   });
 
-  it("uses the piped source fallback when the image node has no stored frame", () => {
-    const shot = makeShot();
-    applyVideoOutput(shot, "videos/shot-0100-abc.mp4", "boards/0100/shot-0100-abc.jpg");
-    expect(shot.artwork).toBe("boards/0100/shot-0100-abc.jpg");
-  });
-
-  it("adopts the edit node's selected frame as the still when it feeds the video source", () => {
-    const shot = makeShot({
-      graphEditToVideo: true,
-      graphVideoSourceEditNodeId: "edit0",
+  it("resolves the edit node's selected frame as the still when it feeds the video source", () => {
+    const shot = clipShot({
       graphImageGens: [{ path: "boards/0100/stale-image.jpg", prompt: "p", model: "m", at: "" }],
       graphImageGenIndex: 0,
       graphEditNodes: [{ id: "edit0", prompt: "", gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }], genIndex: 0 }],
     });
-    applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
-    expect(shot.artwork).toBe("boards/0100/shot-0100-edit.jpg");
+    shot.graphVideoNodes![0].source = { kind: "editgen", nodeId: "edit0" };
+    expect(displayOf(shot).stillPath).toBe("boards/0100/shot-0100-edit.jpg");
   });
 
-  it("leaves an existing artwork untouched", () => {
-    const shot = makeShot({
-      artwork: "boards/0100/shot-0100-existing.jpg",
-      graphImageGens: [{ path: "boards/0100/shot-0100-gen.jpg", prompt: "p", model: "m", at: "" }],
-    });
-    applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
-    expect(shot.artwork).toBe("boards/0100/shot-0100-existing.jpg");
-  });
-
-  it("keeps the shot frameless when no source is available", () => {
-    const shot = makeShot();
-    applyVideoOutput(shot, "videos/shot-0100-abc.mp4");
-    expect(shot.videoPath).toBe("videos/shot-0100-abc.mp4");
-    expect(shot.artwork).toBeUndefined();
+  it("has no still beside the clip when no feed frame exists", () => {
+    const shot = clipShot();
+    const display = displayOf(shot);
+    expect(display.path).toBe("videos/shot-0100-abc.mp4");
+    expect(display.stillPath).toBeUndefined();
   });
 });
 
@@ -498,17 +490,17 @@ describe("selectBoardFrame", () => {
       ["edit-1.jpg", "editgen", 2, 1],
     ] as const) {
       selectBoardFrame(shot, rel);
-      expect(shot.artwork).toBe(rel);
+      expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: rel });
       expect(shot.graphOutputSource).toBe(source);
       expect(shot.graphImageGenIndex).toBe(imageIndex);
       expect(shot.graphEditNodes?.[0].genIndex).toBe(editIndex);
       expect(shot.graphOutputEditNodeId).toBe(source === "editgen" ? "edit0" : undefined);
       expect(shot.graphOutputRefId).toBeUndefined();
-      expect(shot.videoPath).toBeUndefined();
-      expect(shot.artworkHistory).not.toContain(rel);
-      expect(syncBoardOutputToPipe(shot)).toBe(false);
+      // (Phase 4: no mirror writes — the frozen legacy videoPath is inert
+      // while a pipe is bound; the display resolves the pipe.)
     }
-    expect(shot.artworkHistory).toEqual(["image-2.jpg", "edit-2.jpg", "image-1.jpg", "legacy.jpg", "older.jpg"]);
+    // No history surgery: the takes live in their node histories (frozen).
+    expect(shot.artworkHistory).toEqual(["older.jpg"]);
     expect(shot.graphImageGens).toBe(images);
     expect(shot.graphEditNodes?.[0].gens).toBe(edits);
     expect(shot.graphVideoGens).toBe(videos);
@@ -531,7 +523,7 @@ describe("selectBoardFrame", () => {
     expect(shot.graphOutputSource).toBe("editgen");
     expect(shot.graphEditNodes?.[0].genIndex).toBe(1);
     expect(shot.graphImageGenIndex).toBe(0);
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "shared.jpg" });
   });
 
   it.each(["unknown.jpg", "clip.mp4", ""])("rejects invalid path %j without any mutation", (rel) => {
@@ -569,8 +561,9 @@ describe("selectBoardFrame", () => {
     expect(shot.graphEditNodes?.[0].genIndex).toBe(2);
     expect(shot.graphImageToVideo).toBe(true);
     expect(shot.graphOutputSource).toBe("imagegen");
-    expect(shot.artworkHistory).toEqual(["image-3.jpg"]);
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    // The legacy still was adopted into the node history, not the mirrors.
+    expect(shot.artworkHistory).toEqual(["legacy.jpg"]);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "legacy.jpg" });
     selectBoardFrame(shot, "legacy.jpg");
     expect(shot.graphImageGens).toHaveLength(21);
   });
@@ -581,9 +574,8 @@ describe("selectBoardFrame", () => {
     expect(shot.graphImageGens).toEqual([{ path: "legacy.jpg", prompt: "", model: "", at: "" }]);
     expect(shot.graphImageGenIndex).toBe(0);
     expect(shot.graphOutputSource).toBe("imagegen");
-    expect(shot.videoPath).toBeUndefined();
-    expect(shot.artwork).toBe("legacy.jpg");
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
+    // The legacy video mirror is frozen and inert while the pipe is bound.
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "legacy.jpg" });
   });
 });
 
@@ -614,13 +606,10 @@ describe("recordBoardEdit", () => {
     expect(shot.graphOutputSource).toBe("editgen");
     expect(shot.graphOutputEditNodeId).toBe(id);
     expect(shot.graphOutputRefId).toBeUndefined();
-    expect(shot.artwork).toBe("new-edit.jpg");
-    expect(shot.artworkHistory).toEqual(["image-2.jpg"]);
-    expect(shot.videoPath).toBeUndefined();
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "new-edit.jpg" });
     expect(shot.graphImageToVideo).toBe(true);
     expect(shot.prompt).toBe("image prompt");
     expect(shot.graphVideoPrompt).toBe("motion prompt");
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
   });
 
   it("binds a reference output before replacing that output pipe with the edit", () => {
@@ -635,8 +624,7 @@ describe("recordBoardEdit", () => {
     expect(shot.graphImageGens).toBeUndefined();
     expect(shot.graphOutputSource).toBe("editgen");
     expect(shot.graphOutputRefId).toBeUndefined();
-    expect(shot.artwork).toBe("edit.jpg");
-    expect(shot.artworkHistory).toEqual(["ref-frame.jpg"]);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "edit.jpg" });
   });
 
   it("chains a second classic edit from the first, keeping the current-frame fallback", () => {
@@ -653,10 +641,8 @@ describe("recordBoardEdit", () => {
     expect(shot.graphImageGens).toHaveLength(1);
     expect(shot.graphImageGenIndex).toBe(0);
     expect(shot.graphImageToVideo).toBe(true);
-    expect(shot.artwork).toBe("second-edit.jpg");
-    expect(shot.artworkHistory).toEqual(["first-edit.jpg", "image.jpg"]);
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "second-edit.jpg" });
     expect(shot.graphEditPrompt).toBe("add rain");
-    expect(syncBoardOutputToPipe(shot)).toBe(false);
   });
 
   it("uses the current-frame fallback for legacy artwork instead of an unrelated image selection", () => {
@@ -669,8 +655,7 @@ describe("recordBoardEdit", () => {
     expect(node.source).toBeUndefined();
     expect(shot.graphImageGens).toHaveLength(1);
     expect(shot.graphImageGenIndex).toBe(0);
-    expect(shot.artworkHistory).toEqual(["legacy.jpg"]);
-    expect(shot.artwork).toBe("edit.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "edit.jpg" });
   });
 
   it("chains from the output edit node rather than claiming an image-node source for a shared path", () => {
@@ -682,7 +667,7 @@ describe("recordBoardEdit", () => {
     const id = recordBoardEdit(shot, "edit.jpg", "add rain", "auto");
     const node = shot.graphEditNodes?.find((n) => n.id === id)!;
     expect(node.source).toEqual({ kind: "editgen", nodeId: "edit0" });
-    expect(shot.artwork).toBe("edit.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "edit.jpg" });
   });
 
   it("stores the dialog's advanced params on the created node (absent stays absent)", () => {
@@ -771,17 +756,18 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
   });
 
   it("an explicit classic video generation always takes over the output", () => {
-    // The storyboard mirrors the output pipe and the animatic plays videoPath,
-    // so a video the user asked for must bind videogen (the displaced still
-    // lives on in its node's history) or the sync would wipe the clip.
+    // The storyboard resolves the output pipe and the animatic plays the
+    // clip, so a video the user asked for must bind videogen (the displaced
+    // still lives on in its node's history). The real flow records the clip
+    // on the node first, then hooks — the display resolves the recorded take.
     const shot = makeShot({
       graphOutputSource: "editgen",
       graphEditNodes: [{ id: "edit0", prompt: "", genIndex: 0, gens: [{ path: "boards/0100/shot-0100-edit.jpg", prompt: "p", model: "m", at: "" }] }],
-      videoPath: "videos/shot-0100-new.mp4",
     });
-    hookVideoGenToOutput(shot);
+    recordGraphVideoGen(shot, "vid0", "videos/shot-0100-new.mp4", "motion", "auto");
+    hookVideoGenToOutput(shot, "vid0");
     expect(shot.graphOutputSource).toBe("videogen");
-    expect(shot.videoPath).toBe("videos/shot-0100-new.mp4");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "clip", path: "videos/shot-0100-new.mp4" });
     expect(shot.graphEditNodes).toHaveLength(1);
   });
 
@@ -792,7 +778,7 @@ describe("hookImageGenToOutput / hookVideoGenToOutput", () => {
     });
     hookImageGenToOutput(shot);
     expect(shot.graphOutputSource).toBe("imagegen");
-    expect(shot.artwork).toBe("boards/0100/shot-0100-gen.jpg");
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "still", path: "boards/0100/shot-0100-gen.jpg" });
   });
 });
 
@@ -994,7 +980,7 @@ describe("recordGraphVideoGen / replaceVideoGenTake (Seedance draft lifecycle)",
     expect(shot.graphVideoNodes?.[0].gens?.[0].draftJobId).toBeUndefined();
   });
 
-  it("replaces a draft take in place, clears the draft id, and re-points videoPath", () => {
+  it("replaces a draft take in place and clears the draft id (the display resolves the new path)", () => {
     const shot = makeShot({ videoPath: "boards/0100/video/a.mp4", graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0" });
     recordGraphVideoGen(shot, "vid0", "boards/0100/video/a.mp4", "animate", "higgsfield-cli:seedance_2_5", "job-123");
     recordGraphVideoGen(shot, "vid0", "boards/0100/video/older.mp4", "older", "higgsfield-cli:seedance_2_5");
@@ -1007,7 +993,9 @@ describe("recordGraphVideoGen / replaceVideoGenTake (Seedance draft lifecycle)",
     expect(replaced.draftJobId).toBeUndefined();
     expect(replaced.prompt).toBe("animate");
     expect(shot.graphVideoNodes![0].genIndex).toBe(1);
-    expect(shot.videoPath).toBe("boards/0100/video/final.mp4");
+    // The retired videoPath mirror is untouched (inert under a pipe); the
+    // display resolves the replaced take from the node's history.
+    expect(resolveShotDisplay(shot)).toMatchObject({ media: "clip", path: "boards/0100/video/final.mp4" });
   });
 
   it("returns null when the take isn't in the node's history", () => {

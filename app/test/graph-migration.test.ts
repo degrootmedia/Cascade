@@ -209,3 +209,77 @@ describe("migration fixtures: migrate and render identically (step 10 T2/T3)", (
     expect(JSON.stringify(twice.scenes)).toBe(JSON.stringify(once.scenes));
   });
 });
+
+describe("stored graph: the canvas's sole read path (phase 3)", () => {
+  it("a v3 shot created without a graph gains one at load (no live derivation needed)", () => {
+    const doc = {
+      meta: { id: "pguarantee", name: "Guarantee", folder: "C:/workspace/g", createdAt: "", updatedAt: "", stepDone: 0, shotCount: 1 },
+      currentStep: 3,
+      visualStyle: "",
+      styles: [],
+      scenes: [{ id: "sc1", ordinal: 1, shots: [shot({ prompt: "A hero walks" })] }],
+      characters: [],
+      products: [],
+      references: [],
+      openArt: { model: "auto", resolution: "1k" },
+      status: {},
+      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+      schemaVersion: 3,
+    } as unknown as Production;
+    saveProduction(doc);
+    const loaded = loadProduction("pguarantee")!;
+    const g = loaded.scenes[0].shots[0].graph;
+    expect(g).toBeDefined();
+    expect(g!.migrated).toBe(true);
+    expect(g!.nodes.map((n) => n.id)).toContain("composer");
+    // Second load is a fixed point (no re-materialization churn).
+    saveProduction(loaded);
+    const again = loadProduction("pguarantee")!;
+    expect(JSON.stringify(again.scenes)).toBe(JSON.stringify(loaded.scenes));
+  });
+
+  it("an unknown future node survives normalization with its serialized data", () => {
+    const futureNode = {
+      id: "futurewidget", kind: "futurewidget", pos: { x: 1, y: 2 }, data: { custom: "keep-me" },
+    };
+    const futureEdge = {
+      id: "e-future", from: { node: "composer", port: "out" }, to: { node: "futurewidget", port: "in-future" },
+    };
+    const doc = {
+      meta: { id: "pfuture", name: "Future", folder: "C:/workspace/f", createdAt: "", updatedAt: "", stepDone: 0, shotCount: 1 },
+      currentStep: 3,
+      visualStyle: "",
+      styles: [],
+      scenes: [{ id: "sc1", ordinal: 1, shots: [shot({
+        prompt: "A hero walks",
+        // A stored graph from a future build: a kind today's registry doesn't
+        // know, plus an edge into it.
+        graph: normalizeGraph({
+          version: 1,
+          nodes: [
+            { id: "composer", kind: "composer", pos: { x: 0, y: 0 } },
+            { ...futureNode },
+          ],
+          edges: [futureEdge],
+        } as unknown as Parameters<typeof normalizeGraph>[0]).graph,
+      })] }],
+      characters: [],
+      products: [],
+      references: [],
+      openArt: { model: "auto", resolution: "1k" },
+      status: {},
+      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+      schemaVersion: 1,
+    } as unknown as Production;
+    saveProduction(doc);
+    const loaded = loadProduction("pfuture")!;
+    const g = loaded.scenes[0].shots[0].graph!;
+    // The unknown node AND its data survive the migration (the materializer
+    // never emits it, so it must be carried, not rebuilt).
+    const carried = g.nodes.find((n) => n.id === "futurewidget");
+    expect(carried).toMatchObject({ kind: "futurewidget", pos: { x: 1, y: 2 }, data: { custom: "keep-me" } });
+    // Its wiring survives too (kept unvalidated — today's ports can't judge
+    // a future kind, but dropping it would lose serialized data).
+    expect(g.edges.some((e) => e.id === "e-future")).toBe(true);
+  });
+});

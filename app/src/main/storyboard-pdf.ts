@@ -21,6 +21,7 @@
 import { PDFDocument, StandardFonts, rgb, grayscale, pushGraphicsState, popGraphicsState, rectangle, clip, endPath, type PDFFont, type PDFPage, type PDFImage } from "pdf-lib";
 import type { Production, ProductionShot } from "../shared/ipc.js";
 import { assetPath, originalForJpegRel } from "./pipeline.js";
+import { resolveShotDisplay } from "../shared/selected-output.js";
 
 // Soft dependency: re-encoding PNG→JPEG needs Electron's nativeImage, but this
 // module must also load outside Electron (test harness). Without it, PNGs embed
@@ -134,13 +135,18 @@ function tryReadImage(readFile: ReadFileFn, p: Production, rel: string): Storybo
  * frame or nothing embeddable exists.
  */
 export function loadPanelImage(p: Production, shot: ProductionShot, readFile: ReadFileFn): StoryboardPdfImage | null {
-  if (!shot.artwork) return null;
-  const originalRel = originalForJpegRel(p, shot.artwork);
+  // Same selected-output resolver as the storyboard and canvas: a shot
+  // whose frame exists only in the pipe (no legacy artwork mirror) still
+  // exports its panel; a clip contributes its feed still.
+  const display = resolveShotDisplay(shot);
+  const stillRel = display.media === "still" ? display.path : display.stillPath;
+  if (!stillRel) return null;
+  const originalRel = originalForJpegRel(p, stillRel);
   if (originalRel) {
     const img = tryReadImage(readFile, p, originalRel);
     if (img) return img;
   }
-  return tryReadImage(readFile, p, shot.artwork);
+  return tryReadImage(readFile, p, stillRel);
 }
 
 /** Resolve the stored production logo (`storyboardPdf.logoRel`), if any. */

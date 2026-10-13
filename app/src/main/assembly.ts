@@ -18,6 +18,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Production, ProductionAssembly, ProductionShot } from "../shared/ipc.js";
 import { applyShotSequences, sanitizeVideoOffset } from "../shared/ipc.js";
+import { resolveShotDisplay } from "../shared/selected-output.js";
 import { assetPath, formatRuntime, originalForJpegRel, tweenSelectedClips } from "./pipeline.js";
 
 export type AssemblyEmit = (message: string, level?: "info" | "error" | "done") => void;
@@ -180,8 +181,13 @@ export function assemblyPlan(p: Production): AssemblyPlan {
     if (!shot) continue;
     {
       const dur = Math.max(0.1, shot.durationSec ?? 3);
-      const clipRel = shot.videoPath || undefined;
-      const stillRel = shot.artwork ? originalForJpegRel(p, shot.artwork) ?? shot.artwork : undefined;
+      // The export resolves exactly what the storyboard shows: the shared
+      // display helper reads the pipe when bound, the legacy mirrors when
+      // the shot never had a pipe (classic docs).
+      const display = resolveShotDisplay(shot);
+      const clipRel = display.media === "clip" ? display.path : undefined;
+      const stillFrame = display.media === "still" ? display.path : display.stillPath;
+      const stillRel = stillFrame ? originalForJpegRel(p, stillFrame) ?? stillFrame : undefined;
 
       // In-betweener shots lay their ORIGINAL per-block clips back-to-back —
       // never the stitched preview (which may be a re-encode). Each block

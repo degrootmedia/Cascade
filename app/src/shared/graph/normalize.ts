@@ -55,8 +55,16 @@ export function normalizeGraph(graph: Graph): NormalizedGraph {
       continue;
     }
     if (!portDecl(fromNode.kind, "out", e.from.port) || !portDecl(toNode.kind, "in", e.to.port)) {
-      issues.push(`dropped edge "${e.id}" touching an undeclared port`);
-      continue;
+      // An unknown future node kind can't be validated against the ports
+      // table — only edges BOTH of whose kinds are registered can be judged.
+      // Unknown-kind edges survive with their nodes (see the unknown-node
+      // carry-forward in `migrateShotGraph`) so a future node's wiring isn't
+      // silently dropped by today's build.
+      if (nodeDecl(fromNode.kind) && nodeDecl(toNode.kind)) {
+        issues.push(`dropped edge "${e.id}" touching an undeclared port`);
+        continue;
+      }
+      issues.push(`kept edge "${e.id}" touching an unknown node kind (unvalidated)`);
     }
     const key = edgeKey(e);
     if (seenEdges.has(key)) {

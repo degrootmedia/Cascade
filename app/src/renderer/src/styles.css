@@ -960,6 +960,8 @@ body {
 .prod-brand-toggle input:checked::before { transform: translateX(14px); background: white; }
 @media (max-width: 900px) { .prod-storyboard-layout { grid-template-columns: 1fr; } .prod-prompt-sidepanel { position: static; min-height: 320px; } }
 .prod-board { position: relative; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+/* No content-visibility on board cards: its paint containment clips the
+   selection ring and the insert button that overhang the card box. */
 .prod-board.dragging { opacity: 0.38; filter: saturate(0.6); }
 .prod-board.drop-target { outline: none; }
 .prod-board.drop-target .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 6px 20px color-mix(in srgb, var(--accent) 25%, transparent); }
@@ -1205,6 +1207,12 @@ body {
   filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.65));
 }
 .prod-board-frame:hover .prod-board-video-badge { opacity: 0; }
+.prod-board-origin {
+  position: absolute; bottom: 6px; right: 6px; z-index: 6; pointer-events: auto;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.05em; line-height: 1;
+  padding: 3px 5px; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55); color: rgba(255, 255, 255, 0.92);
+}
 .prod-boards-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
 /* Storyboard frame overlay buttons. The zoom/enlarge button sits alone in the
    top-left; the action row (Regenerate Â· Edit Â· Movie Â· Import) is centered at
@@ -4013,6 +4021,16 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 /* A video job outlived its wait — its badge/fetch row sits below the frame one,
    both still anchored upper-right. */
 .prod-board-pending-video { top: 38px; left: auto; right: 38px; }
+
+/* Explicit missing-media state (media registry) — the brief's rule: never a
+   silently blank frame. */
+.prod-board-missing {
+  top: 38px;
+  left: auto;
+  right: 38px;
+  border-color: var(--danger);
+  color: var(--danger);
+}
 .prod-board-recheck-video { top: 38px; right: 6px; }
 
 /* Disabled shot: faded in the storyboard, excluded from the animatic/export.

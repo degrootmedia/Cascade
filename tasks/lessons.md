@@ -192,6 +192,61 @@
 
 # Lessons
 
+## 2026-10-13 — the primary is excluded from history by design; ties in sort order are stable, not flaky
+
+- Symptom (during Phase 4 test conversion): rewrote the classic-edit history
+  expectation to include the just-created edit take — wrong. `boardFrameHistory`
+  deliberately excludes the CURRENT primary (it is shown as the frame, not
+  browsed), so the newest take never appears in its own history list.
+- Related: two `recordGraphEditGen` calls in the same millisecond produce
+  identical `at` timestamps; the newest-first sort ties and V8's stable sort
+  keeps node order. That is deterministic (not flaky) — but an expectation of
+  strict newest-first across two rapid generations is wrong. Prefer
+  distinct timestamps in fixtures when order matters, or assert set-wise.
+- Rule: when converting assertions across a representation change, re-derive
+  each expectation from the new semantics instead of mechanically mapping
+  old-field → new-field. A quick throwaway vitest run that prints the actual
+  structure beats theorizing about sort ties.
+
+## 2026-10-13 — every contract channel must have a handler, including main→renderer broadcasts
+
+- Symptom: the app died at startup with `unhandledRejection: IPC channel
+  "production:jobsChanged" is declared in the contract but has no handler`.
+  The drift guard at the end of `registerIpc` (index.ts) iterates the WHOLE
+  `ipcContract` and throws on any channel with no registration — and a
+  main→renderer broadcast channel (renderers subscribe in preload, never
+  send on it) has no `on()` handler, so the guard treats it as drift.
+- Rule: adding a `kind: "send"` channel that main only broadcasts still
+  needs a registration — the pattern-consistent one is a documented no-op
+  `on(channel, () => {})` next to the broadcast wiring (that's how the guard
+  stays satisfied for every other broadcast-only channel). Verify the
+  startup path after adding any channel: grep the built `out/main/index.js`
+  for the channel name (it should appear in the contract check AND the
+  registration), and remember the guard runs at app boot, so a missed
+  handler is a fatal startup error, not a lazy failure.
+
+## 2026-10-12 — extracting a refactored chain: preserve the early-exit, then run the heavy suite
+
+- Symptom: after replacing `NodeGraphModal`'s inline per-type equality chain
+  with a call into the new `shared/graph/reconcile.ts`, `graph-shelf.test.ts`
+  hung forever at the RUN banner — no test even started. The `Edit` oldString
+  ended at `if (equal) return old;` and the newString didn't include it, so
+  `changed = true` ran unconditionally and every reconciliation pass rebuilt
+  every node → `setNodes` → re-render → infinite loop. It looked like a
+  module-load problem; it was a dropped two-line early-exit.
+- Rules:
+  1. When a refactor deletes or moves a block, diff the control flow, not
+     just the text: enumerate every early-return/break the old block had and
+     confirm the new one has it (the missing `if (equal) return old;` was the
+     ONLY semantic difference in a 40-line replacement).
+  2. An infinite render loop in React shows up as "the test runner hangs at
+     the banner" — diagnose with a git-stash A/B (original runs, modified
+     hangs) before touching anything else. `git worktree add` needs a fresh
+     node_modules; stashing tracked changes in the same checkout is faster.
+  3. Extract-then-wire refactors keep full semantics: the unknown-canvas-type
+     case must stay EQUAL (the historical reuse-the-old-node default), not
+     become unequal or throw.
+
 No session-specific lessons yet.
 
 - Storyboard history must derive from the generation nodes, including edits. Promoting a frame must update the owning node's selected index and output pipe, not just `artwork`, or read-time reconciliation will undo the selection. Test promotion followed by save/load, and ensure storyboard edits use the edit-node recorder.

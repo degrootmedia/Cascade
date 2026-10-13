@@ -252,6 +252,26 @@ describe("loadPanelImage", () => {
     const p = makeProduction();
     expect(loadPanelImage(p, makeShot({ artwork: rel }), readFile)?.kind).toBe("png");
   });
+  it("exports a piped-only frame (no legacy artwork mirror)", () => {
+    const rel = "boards/0100/shot-0100-piped.jpg";
+    fs.mkdirSync(path.join(prodFolder, "boards/0100"), { recursive: true });
+    fs.writeFileSync(path.join(prodFolder, rel), FAKE_JPG);
+    const p = makeProduction();
+    const shot = makeShot({ graphOutputSource: "imagegen", graphImageGens: [{ path: rel, prompt: "", model: "", at: "" }], graphImageGenIndex: 0 });
+    expect(loadPanelImage(p, shot, readFile)?.kind).toBe("jpg");
+  });
+  it("exports the feed still of a video-piped shot", () => {
+    const rel = "boards/0100/shot-0100-feed.jpg";
+    fs.mkdirSync(path.join(prodFolder, "boards/0100"), { recursive: true });
+    fs.writeFileSync(path.join(prodFolder, rel), FAKE_JPG);
+    const p = makeProduction();
+    const shot = makeShot({
+      graphOutputSource: "videogen", graphOutputVideoNodeId: "vid0",
+      graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "boards/0100/clip.mp4", prompt: "", model: "", at: "" }], genIndex: 0 }],
+      graphImageGens: [{ path: rel, prompt: "", model: "", at: "" }], graphImageGenIndex: 0,
+    });
+    expect(loadPanelImage(p, shot, readFile)?.kind).toBe("jpg");
+  });
   it("skips a non-embeddable original and uses the preview", () => {
     const rel = "boards/0100/shot-0100-a.jpg";
     fs.mkdirSync(path.join(prodFolder, "boards/0100/originals"), { recursive: true });

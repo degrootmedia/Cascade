@@ -12,6 +12,7 @@ import {
   insertScene,
   insertShotAt,
   nextNumber,
+  removeShotById,
   reorderShot,
   renumber,
   setShotNumber,
@@ -197,5 +198,34 @@ describe("numbering primitives", () => {
     const scenes = [scene(1, ["0400"]), scene(2, ["0420", "9999"])];
     renumber(scenes);
     expect(scenes.flatMap((s) => s.shots.map((x) => x.number))).toEqual(["0100", "0200", "0300"]);
+  });
+});
+
+describe("idempotent structural commands (phase 4)", () => {
+  it("insertShotAt with a caller id returns the existing shot instead of duplicating", () => {
+    const scenes = [scene(1, ["0100", "0200"])];
+    const first = insertShotAt(scenes, 1, 1, "", "", "client-1");
+    const count = scenes[0].shots.length;
+    const second = insertShotAt(scenes, 1, 1, "", "", "client-1");
+    expect(second).toBe(first);
+    expect(scenes[0].shots.length).toBe(count);
+  });
+
+  it("removeShotById deletes once and reports absence afterwards", () => {
+    const scenes = [scene(1, ["0100", "0200"])];
+    expect(removeShotById(scenes, "id-0100")).toBe(true);
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0200"]);
+    // A retry after an uncertain response succeeds without changing anything.
+    expect(removeShotById(scenes, "id-0100")).toBe(false);
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0200"]);
+  });
+
+  it("reorderShot repeated with the same args is a fixed point", () => {
+    const scenes = [scene(1, ["0100", "0200", "0300"])];
+    reorderShot(scenes, "id-0300", "id-0100");
+    const once = JSON.stringify(scenes);
+    reorderShot(scenes, "id-0300", "id-0100");
+    expect(JSON.stringify(scenes)).toBe(once);
+    expect(scenes[0].shots.map((s) => s.id)).toEqual(["id-0300", "id-0100", "id-0200"]);
   });
 });

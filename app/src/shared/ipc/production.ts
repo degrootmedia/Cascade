@@ -19,6 +19,7 @@ import type {
   UpscaleData,
 } from "./graph.js";
 import type { ShotSequence } from "./shot-sequence.js";
+import type { MediaEntry } from "../media-registry.js";
 
 export interface ProductionMeta {
   id: string;
@@ -732,6 +733,17 @@ export interface Production {
    * generation history (see `applyRendererState`).
    */
   shotSequences?: ShotSequence[];
+  /**
+   * The media registry (architecture hardening, brief recommendation 1):
+   * one stable identity per generated/adopted/imported media file — its
+   * current workspace-relative path, kind, origin, and lifecycle state
+   * (present/missing/deleted). MAIN-OWNED (fresh-wins in the renderer save
+   * merge, like `promptOverrides`); maintained by the media service
+   * (`main/media.ts`) and re-bootstrapped from the referenced fields on load.
+   * Optional/additive — older documents open with an empty registry and it
+   * fills on the first load.
+   */
+  media?: MediaEntry[];
   assets: { scriptMd: string; boardsDir: string; voiceoverDir: string; musicDir: string; outDir: string; referencesDir: string; assemblyDir: string; modelsDir: string; /** @deprecated Legacy flat video folder; clips now live in each shot's board folder under `video/`. Read only by the one-time relocation migration. */ videosDir?: string };
   /** Schema version gating the one-time board-artwork migrations (perf 1.2):
    *  when >= PRODUCTION_SCHEMA_VERSION, loadProduction skips the board walk

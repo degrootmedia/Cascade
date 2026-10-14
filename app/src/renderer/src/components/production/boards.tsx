@@ -10,7 +10,10 @@ import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { findGeneration, frameOrigin } from "../../../../shared/generations.js";
+import { confirmDestructive } from "../ConfirmDialog.js";
 import { mediaEntryForId, mediaEntryForPath } from "../../../../shared/media-registry.js";
+import { useExternalEditorLabel } from "../../use-external-editor-label.js";
+import { MEDIA_MENU_LABELS } from "../../../../shared/menu-labels.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { closestResolution } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
@@ -144,6 +147,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // What this shot is showing — the shared display helper reads the pipe when
   // bound, the legacy mirrors otherwise. Every frame/clip read below goes
   // through it; no surface hand-reads the mirrors.
+  const editorLabel = useExternalEditorLabel();
   const display = resolveShotDisplay(shot);
   const clipRel = display.media === "clip" ? display.path : undefined;
   const stillRel = display.media === "still" ? display.path : display.stillPath;
@@ -228,7 +232,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     return () => window.removeEventListener("keydown", onKey);
   }, [expanded, shot.id, onZoomChange, onZoomNavigate]);
 
-  // Right-click → native image menu, with the full-res file pinned for "Edit externally".
+  // Right-click → native image menu, with the full-res file pinned for "Edit in <editor>".
   const relForExternal = histPath ?? stillRel;
   const nativeSrc = relForExternal ? cascadeMedia(prod.meta.id, relForExternal) : (shownImg ?? undefined);
   // The card can show the shot's video instead of a frame — "Open file folder"
@@ -275,12 +279,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY });
   }
-  function confirmDeleteShot() {
+  async function confirmDeleteShot() {
     setMenu(null);
     // Include uncommitted card drafts: typed-but-unblurred direction counts.
     const effective = { ...shot, audio, visual };
     if (shotHasContent(effective)) {
-      if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
+      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content and deleting it can't be undone.", confirmLabel: "Delete" }))) return;
     }
     onDelete?.(shot.id);
   }
@@ -292,10 +296,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     setMenu(null);
     if (histPath && onDeleteGeneration) onDeleteGeneration(shot.id, histPath);
   }
-  function clearMenuPending(kind: "image" | "video") {
+  async function clearMenuPending(kind: "image" | "video") {
     setMenu(null);
     const label = kind === "video" ? "video" : "frame";
-    if (!window.confirm(`Clear the pending ${label} job for Shot ${shot.number}? The vendor job can't be reclaimed afterwards — regenerate to try again.`)) return;
+    if (!(await confirmDestructive({ title: `Clear the pending ${label} job for Shot ${shot.number}?`, body: "The vendor job can't be reclaimed afterwards — regenerate to try again.", confirmLabel: "Clear pending" }))) return;
     onClearPending?.(shot.id, kind);
   }
   function saveMenuImage() {
@@ -672,19 +676,19 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
                     className="ctx-item"
                     onClick={saveMenuImage}
                   >
-                    Save image as…
+                    {MEDIA_MENU_LABELS.saveImageAs}
                   </button>
                   <button
                     className="ctx-item"
                     onClick={copyMenuImage}
                   >
-                    Copy image
+                    {MEDIA_MENU_LABELS.copyImage}
                   </button>
                   <button
                     className="ctx-item"
                     onClick={editMenuImageExternally}
                   >
-                    Edit externally
+                    {editorLabel}
                   </button>
                 </>
               )}
@@ -693,7 +697,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
                   className="ctx-item"
                   onClick={openMenuFolder}
                 >
-                  Open file folder
+                  {MEDIA_MENU_LABELS.openFolder}
                 </button>
               )}
               <div className="ctx-sep" />
@@ -704,7 +708,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               className="ctx-item"
               onClick={saveMenuReference}
             >
-              Save as reference
+              {MEDIA_MENU_LABELS.saveAsReference}
             </button>
           )}
           {saveableRel && !showingVideo && (
@@ -712,7 +716,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               className="ctx-item"
               onClick={editMenuInSuite}
             >
-              Edit in Suite
+              {MEDIA_MENU_LABELS.editInSuite}
             </button>
           )}
           {histPath && onDeleteGeneration && findGeneration(shot, histPath) && (
@@ -720,7 +724,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               className="ctx-item danger"
               onClick={deleteMenuGeneration}
             >
-              Delete generation…
+              {MEDIA_MENU_LABELS.deleteGeneration}
             </button>
           )}
           {pending && onClearPending && (

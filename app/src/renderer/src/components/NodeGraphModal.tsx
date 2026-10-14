@@ -67,6 +67,7 @@ import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../../../shared/graph/render.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
+import { confirmDestructive } from "./ConfirmDialog.js";
 import { GraphHistoryModal, type GraphHistoryItem, type GraphHistoryTarget } from "./graph/history-modal.js";
 import { EditIcon, EditVideoIcon, EyeIcon, EyeOffIcon, FilmStripIcon, InbetweenIcon, MagicIcon, MagnifyIcon, RegenerateIcon } from "./icons.js";
 
@@ -4275,7 +4276,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [magicActive, prompt, shot.graph, magicRefIds]);
 
-  const onNodesChange = useCallback<OnNodesChange<GraphNode>>((changes) => {
+  const onNodesChange = useCallback<OnNodesChange<GraphNode>>(async (changes) => {
     // Canonical controlled flow: apply every change (position, select,
     // dimension) to the persistent node state in one pass so React Flow's
     // internal selection bookkeeping and our state never diverge.
@@ -4315,7 +4316,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const removedVidEditIds = new Set<string>();
     if (removed.length > 0) {
       const risky = removed.filter((c) => toolNodeDeleteSummary(c.id, shot) !== "");
-      if (risky.length > 0 && typeof window !== "undefined" && !window.confirm(toolDeleteWarning(risky.map((c) => c.id), shot))) {
+      if (risky.length > 0 && !(await confirmDestructive({ title: "Delete these nodes?", body: toolDeleteWarning(risky.map((c) => c.id), shot), confirmLabel: "Delete" }))) {
         const keep = new Set(risky.map((c) => c.id));
         removed = removed.filter((c) => !keep.has(c.id));
         changes = changes.filter((c) => c.type !== "remove" || !keep.has(c.id));

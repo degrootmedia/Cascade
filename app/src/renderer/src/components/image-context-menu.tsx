@@ -2,7 +2,7 @@
  *  as… / Copy image / Edit externally) via the `image:showMenu` IPC. The menu
  *  is built once in main (`popImageContextMenu`), so every image — chat, board,
  *  reference, node-graph — gets the same three options with the same wording.
- *  `productionId`+`relPath` (or `dataUrl`) pin the full-res "Edit externally"
+ *  `productionId`+`relPath` (or `dataUrl`) pin the full-res "Edit in <editor>"
  *  target when the displayed src is a thumbnail that main can't resolve. */
 export function useImageContextMenu(opts: {
   src?: string;

@@ -75,6 +75,7 @@ export function SuiteCompare({
         <span className="suite-compare-tag left">{a.label}</span>
         <span className="suite-compare-tag right">{b.label}</span>
       </div>
+      <p className="suite-compare-legend">Showing {a.label} on the left and {b.label} on the right — drag the line to compare.</p>
       <label className="suite-compare-slider">
         Wipe
         <input type="range" min={0} max={100} value={Math.round(split)} onChange={(e) => setSplit(Number(e.target.value))} />

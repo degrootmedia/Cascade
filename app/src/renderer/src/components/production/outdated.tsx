@@ -13,6 +13,7 @@ import type { Production, ProductionShot } from "../../../../shared/ipc.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { revOf } from "../../../../shared/snapshot-freshness.js";
 import { cascadeMedia } from "./animatic.js";
+import { confirmDestructive } from "../ConfirmDialog.js";
 import { refThumbUrl } from "./thumb-url.js";
 import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
 
@@ -86,8 +87,8 @@ const OutdatedCard = memo(function OutdatedCard({
         >Restore</button>
         <button
           className="prod-btn danger"
-          onClick={() => {
-            if (confirm(`Delete outdated shot ${shot.number} and its preserved frames? This can't be undone.`)) {
+          onClick={async () => {
+            if (await confirmDestructive({ title: `Delete outdated shot ${shot.number}?`, body: "This deletes the shot and its preserved frames, and can't be undone.", confirmLabel: "Delete" })) {
               onMutate(window.cascade.removeOutdatedShot(prod.meta.id, shot.id, revOf(prod)));
             }
           }}

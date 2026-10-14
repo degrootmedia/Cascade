@@ -76,7 +76,7 @@ export function SuiteHistoryRail({
                 <span className="suite-rail-meta">{entry.model || "auto"} · {entry.resolution}</span>
               </button>
               <div className="suite-rail-actions">
-                <button className="suite-rail-btn danger" title="Delete this entry (removes its file)" onClick={() => onDelete(entry.id)}>✕</button>
+                <button className="suite-rail-btn danger" title="Delete this image" aria-label="Delete this image" onClick={() => onDelete(entry.id)}>✕</button>
               </div>
             </div>
           );

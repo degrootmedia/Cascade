@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AgentMeta, ModelInfo } from "../../../shared/ipc.js";
 import { AgentHoverCard } from "./AgentIdCard.js";
+import { confirmDestructive } from "./ConfirmDialog.js";
 import { AutoTextarea } from "./AutoTextarea.js";
 import { ImportIcon, PlusIcon } from "./icons.js";
 
@@ -132,8 +133,8 @@ export function AgentsPanel({ onClose, models }: { onClose: () => void; models: 
                   const url2 = URL.createObjectURL(blob2);
                   const a2 = document.createElement("a"); a2.href = url2; a2.download = `${a.name.replace(/[^a-z0-9_-]/gi, "_")}.md`; a2.click(); URL.revokeObjectURL(url2);
                 }}>Export</button>
-                <button onClick={async () => { if (!confirm(`Archive "${a.name}"?`)) return; await window.cascade.removeAgent(a.id, "archive"); void refresh(); }}>Archive</button>
-                <button className="danger" onClick={async () => { if (!confirm(`Delete "${a.name}" permanently?`)) return; await window.cascade.removeAgent(a.id, "delete"); void refresh(); }}>Delete</button>
+                <button onClick={async () => { if (!(await confirmDestructive({ title: `Archive "${a.name}"?`, body: "The agent leaves the active list.", confirmLabel: "Archive" }))) return; await window.cascade.removeAgent(a.id, "archive"); void refresh(); }}>Archive</button>
+                <button className="danger" onClick={async () => { if (!(await confirmDestructive({ title: `Delete "${a.name}" permanently?`, body: "This can't be undone.", confirmLabel: "Delete" }))) return; await window.cascade.removeAgent(a.id, "delete"); void refresh(); }}>Delete</button>
               </div>
             </div>
           ))}

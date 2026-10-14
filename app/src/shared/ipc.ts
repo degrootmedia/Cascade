@@ -438,7 +438,7 @@ export interface CascadeApi {
   saveImage(src: string): Promise<void>;
   /** Copy the image under the given page coords to the clipboard (same as the native menu's "Copy image"). */
   copyImage(x: number, y: number): Promise<void>;
-  /** Open an image in the external editor (same as the native menu's "Edit externally"). */
+  /** Open an image in the external editor (same as the native menu's "Edit in <editor>"). */
   editImageExternally(opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Reveal a production image/video file in the OS file manager. Accepts an
    *  explicit `productionId`+`relPath` or a `cascade-media://` src. */

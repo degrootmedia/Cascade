@@ -33,6 +33,7 @@ export function SuitePromptPanel({
   submitting,
   queued,
   error,
+  notice,
   providerName,
   providerAvailable,
   upscaleUnavailable = false,
@@ -55,6 +56,7 @@ export function SuitePromptPanel({
   /** Extra submits queued behind the running one. */
   queued?: number;
   error: string | null;
+  notice?: string | null;
   providerName: string;
   providerAvailable: boolean;
   /** The active provider has no upscale path (OpenArt MCP) — Upscale mode is
@@ -234,6 +236,7 @@ export function SuitePromptPanel({
         <p className="error-text">The active media provider ({providerName}) isn't available — connect it in Settings, or switch providers.</p>
       )}
       {error && <p className="error-text">{error}</p>}
+      {notice && <p className="suite-notice">{notice}</p>}
 
       <button
         className="prod-btn prod-edit-go"

@@ -8,10 +8,11 @@
  * stubbed here (jsdom returns zeroed rects) — two columns, two rows.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+import { ConfirmHost } from "../src/renderer/src/components/ConfirmDialog.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
@@ -112,7 +113,7 @@ async function renderWorkspace(): Promise<{ host: HTMLElement; root: Root }> {
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(createElement(ProductionWorkspace, {}));
+    root.render(createElement(Fragment, null, createElement(ProductionWorkspace, {}), createElement(ConfirmHost)));
     await new Promise((r) => setTimeout(r, 0));
   });
   const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
@@ -249,6 +250,11 @@ describe("shot sequence storyboard flow", () => {
       (host.querySelector(".seq-bar-delete") as HTMLButtonElement).click();
       await new Promise((r) => setTimeout(r, 0));
     });
+    // The in-app confirm dialog asks first; nothing is deleted yet.
+    expect(deletedSequenceIds).toEqual([]);
+    const confirmBtn = [...document.body.querySelectorAll(".modal-actions button")]
+      .find((b) => b.textContent && b.textContent !== "Cancel") as HTMLButtonElement;
+    await act(async () => { confirmBtn.click(); await new Promise((r) => setTimeout(r, 0)); });
     expect(deletedSequenceIds).toEqual([seqId]);
     expect(sequencesOnDisk()).toHaveLength(0);
     expect(host.querySelector(".seq-bar")).toBeNull();

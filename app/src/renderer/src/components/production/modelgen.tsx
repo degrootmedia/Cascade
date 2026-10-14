@@ -13,6 +13,7 @@
 import { useEffect, useState, type CSSProperties, type DetailedHTMLProps, type HTMLAttributes, type DragEvent } from "react";
 import type { Model3dGenOptions, Model3dViewImage, Model3dViewType, Production, ProductionModel } from "../../../../shared/ipc.js";
 import { cascadeMedia } from "./animatic.js";
+import { confirmDestructive } from "../ConfirmDialog.js";
 
 /** model-viewer is a custom element; declare it for JSX. */
 declare global {
@@ -231,7 +232,7 @@ export function ModelGenSection({ prod, onGenerated }: {
   };
 
   const remove = async (m: ProductionModel) => {
-    if (!confirm(`Delete ${m.glbPath}? This removes the .glb from the production folder.`)) return;
+    if (!(await confirmDestructive({ title: `Delete ${m.glbPath}?`, body: "This removes the .glb from the production folder.", confirmLabel: "Delete" }))) return;
     try {
       const next = await window.cascade.delete3dModel(prod.meta.id, m.id);
       onGenerated(next);

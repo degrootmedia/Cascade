@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useClampedMenuStyle } from "./menu-position.js";
+import { useExternalEditorLabel } from "../use-external-editor-label.js";
+import { MEDIA_MENU_LABELS } from "../../../shared/menu-labels.js";
 
 /** A generated take targeted by a right-click: viewport point + its
  *  workspace-relative path (the identity `findGeneration`/copy operations use).
@@ -31,7 +33,7 @@ function targetIsVideo(t: GenerationMenuTarget): boolean {
  * detached canvas overlay (200) so the menu still shows inside a popped-out
  * node graph. When the target carries a
  * `src`, it leads with the same native media actions every other image in the
- * app gets (Save as… / Copy image / Edit externally / Open file folder);
+ * app gets (Save as… / Copy image / the external-editor action / Open file folder);
  * "Save as reference" is offered whenever the caller can act on it; "Delete
  * generation…" appears only where deletion is already wired.
  */
@@ -50,6 +52,7 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
   extra?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const editorLabel = useExternalEditorLabel();
   const menuStyle = useClampedMenuStyle(menu, ref);
   useEffect(() => {
     if (!menu) return;
@@ -81,7 +84,7 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
       {src && (
         <>
           <button className="ctx-item" onClick={() => { onClose(); void window.cascade.saveImage(src); }}>
-            {isVideo ? "Save video as…" : "Save image as…"}
+            {isVideo ? MEDIA_MENU_LABELS.saveVideoAs : MEDIA_MENU_LABELS.saveImageAs}
           </button>
           {!isVideo && (
             <button
@@ -94,28 +97,28 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
                 requestAnimationFrame(() => { void window.cascade.copyImage(x, y); });
               }}
             >
-              Copy image
+              {MEDIA_MENU_LABELS.copyImage}
             </button>
           )}
           {!isVideo && (
             <button className="ctx-item" onClick={() => { onClose(); void window.cascade.editImageExternally({ src, relPath: menu.rel }); }}>
-              Edit externally
+              {editorLabel}
             </button>
           )}
           <button className="ctx-item" onClick={() => { onClose(); void window.cascade.showInFolder({ src, relPath: menu.rel }); }}>
-            Open file folder
+            {MEDIA_MENU_LABELS.openFolder}
           </button>
           <div className="ctx-sep" />
         </>
       )}
       {onSaveAsReference && (
         <button className="ctx-item" onClick={() => { onSaveAsReference(menu.rel); onClose(); }}>
-          Save as reference
+          {MEDIA_MENU_LABELS.saveAsReference}
         </button>
       )}
       {onEditInSuite && !isVideo && (
         <button className="ctx-item" onClick={() => { onEditInSuite(menu.rel); onClose(); }}>
-          Edit in Suite
+          {MEDIA_MENU_LABELS.editInSuite}
         </button>
       )}
       {onRefresh && (
@@ -124,12 +127,12 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
           title="Re-fetch this take from disk — use if it was edited outside Cascade and the automatic update didn't land"
           onClick={() => { onClose(); onRefresh(menu.rel); }}
         >
-          {isVideo ? "Refresh clip" : "Refresh image"}
+          {isVideo ? MEDIA_MENU_LABELS.refreshClip : MEDIA_MENU_LABELS.refreshImage}
         </button>
       )}
       {onDelete && (
         <button className="ctx-item danger" onClick={() => { onDelete(menu.rel); onClose(); }}>
-          Delete generation…
+          {MEDIA_MENU_LABELS.deleteGeneration}
         </button>
       )}
     </div>,

@@ -27,6 +27,7 @@ import { primeModelParamDefaults, seedModelOptionValues } from "../../components
 import { pruneModelOptionValues } from "../../components/ModelOptionsForm.js";
 import { isQuotableCostModel, useGenerationCost } from "../../components/production/generation-cost.js";
 import { SuiteHistoryRail } from "./SuiteHistoryRail.js";
+import { confirmDestructive } from "../../components/ConfirmDialog.js";
 import { SuiteCanvas } from "./SuiteCanvas.js";
 import { SuitePromptPanel } from "./SuitePromptPanel.js";
 import { resolveSuiteCompare, seedSourceFrame } from "./suite-compare.js";
@@ -68,6 +69,7 @@ export function ImageSuite({
   const gen = useGenStatus(genKeys.suite(prodId));
   const busy = gen.running;
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [branchParentId, setBranchParentId] = useState<string | null>(null);
   /** True once the on-disk session for the current production has loaded —
    *  persistence stays off until then so a handoff can't clobber stored
@@ -146,6 +148,9 @@ export function ImageSuite({
     }));
     if (isSourceHandoff) {
       setBranchParentId(null);
+      setNotice(seed.sourcePath
+        ? `Editing from ${seed.sourcePath.split(/[\\/]/).pop() ?? "the handed-off frame"}.`
+        : "Editing from the selected reference.");
     }
     onSeedConsumed();
   }, [seed, onSeedConsumed]);
@@ -239,7 +244,12 @@ export function ImageSuite({
   useEffect(() => {
     if (!surfacePool.length) return;
     const resolved = resolveSuiteModel(draft.model, surfacePool);
-    if (resolved && resolved !== draft.model) patchDraft({ model: resolved });
+    if (resolved && resolved !== draft.model) {
+      if (draft.model) setNotice(`Model changed to ${resolved} for this provider.`);
+      patchDraft({ model: resolved });
+    } else if (resolved) {
+      setNotice((n) => (n && n.startsWith("Model changed to") ? null : n));
+    }
   }, [surfacePool, draft.model, patchDraft]);
 
   // If the provider switches to one without an upscale path while Upscale mode
@@ -310,6 +320,11 @@ export function ImageSuite({
   }, [patchDraft]);
 
   const deleteEntry = useCallback(async (id: string) => {
+    const entry = sessionRef.current.entries.find((e) => e.id === id);
+    const what = entry?.prompt?.trim()
+      ? `"${entry.prompt.trim().slice(0, 80)}"`
+      : "This image";
+    if (!(await confirmDestructive({ title: "Delete this image?", body: `${what} and its saved prompt/model will be removed from the suite. It can't be undone.`, confirmLabel: "Delete" }))) return;
     try {
       const next = await window.cascade.deleteSuiteEntry(prodId, id);
       setSession(next);
@@ -361,6 +376,7 @@ export function ImageSuite({
         submitting={busy}
         queued={gen.pending}
         error={error}
+        notice={notice}
         providerName={providerName}
         providerAvailable={providerAvailable}
         upscaleUnavailable={upscaleUnavailable}

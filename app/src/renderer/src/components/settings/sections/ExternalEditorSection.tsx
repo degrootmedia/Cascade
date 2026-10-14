@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { useSettings } from "../context.js";
 import { SettingField } from "../SettingField.js";
+import { refreshExternalEditorLabel } from "../../../use-external-editor-label.js";
 
 export async function resetExternalEditor(): Promise<void> {
   await window.cascade.setExternalEditor(null);
+  refreshExternalEditorLabel(null);
 }
 
-/** Path to the external image editor used by "Edit externally" everywhere. */
+/** Path to the external image editor used by the external-editor menu action everywhere. */
 export function ExternalEditorSection() {
   const { view, setError } = useSettings();
   const [editor, setEditor] = useState(view.externalEditor);
@@ -16,7 +18,7 @@ export function ExternalEditorSection() {
   async function pickExternalEditor() {
     try {
       const picked = await window.cascade.pickExternalEditor();
-      if (picked) setEditor(picked);
+      if (picked) { setEditor(picked); refreshExternalEditorLabel(picked); }
     } catch (e) {
       setError(String(e));
     }
@@ -26,6 +28,7 @@ export function ExternalEditorSection() {
     try {
       await window.cascade.setExternalEditor(null);
       setEditor(null);
+      refreshExternalEditorLabel(null);
     } catch (e) {
       setError(String(e));
     }
@@ -37,6 +40,7 @@ export function ExternalEditorSection() {
     try {
       await window.cascade.setExternalEditor(trimmed);
       setEditor(trimmed);
+      refreshExternalEditorLabel(trimmed);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -48,7 +52,7 @@ export function ExternalEditorSection() {
       label="External image editor"
       help={
         <>
-          Photoshop, Affinity, etc. Right-click any reference or generated frame and choose “Edit externally” to open it here.
+          Photoshop, Affinity, etc. Right-click any reference or generated frame and choose the “Edit in …” menu action to open it here.
           Windows Store apps (e.g. <code>...\WindowsApps\Affinity.exe</code>) are ACL-locked — the file picker can't enter that folder, so paste the full path above. It will be launched elevated (UAC) automatically.
         </>
       }

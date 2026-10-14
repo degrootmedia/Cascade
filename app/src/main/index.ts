@@ -23,6 +23,8 @@ import { assetPathInFolder } from "./pipeline.js";
 import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
 import { createJobLedger, runWithJobLedger } from "./jobs.js";
+import { externalEditorLabel } from "../shared/editor-label.js";
+import { MEDIA_MENU_LABELS } from "../shared/menu-labels.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
 import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
@@ -574,24 +576,19 @@ function popMediaContextMenu(win: BrowserWindow, opts: { media: "image" | "video
   const src = opts.src;
   const isVideo = opts.media === "video";
   const canEditExternally = !isVideo && (!!opts.edit || src.startsWith("cascade-media://") || src.startsWith("data:image/") || /^https?:\/\//.test(src));
-  const editorLabel = (() => {
-    const ed = settings.getExternalEditor();
-    if (!ed) return "Edit externally";
-    const base = path.basename(ed).replace(/\.[^.]+$/, "");
-    return `Edit in ${base}`;
-  })();
+  const editorLabel = externalEditorLabel(settings.getExternalEditor());
   const fileTarget = opts.edit && "relPath" in opts.edit
     ? { productionId: opts.edit.productionId, relPath: opts.edit.relPath }
     : resolveProductionFile({ src });
   const template: Electron.MenuItemConstructorOptions[] = [
     {
-      label: isVideo ? "Save video as…" : "Save image as…",
+      label: isVideo ? MEDIA_MENU_LABELS.saveVideoAs : MEDIA_MENU_LABELS.saveImageAs,
       click: () => win.webContents.downloadURL(src), // triggers the native save dialog
     },
   ];
   if (!isVideo) {
     template.push({
-      label: "Copy image",
+      label: MEDIA_MENU_LABELS.copyImage,
       click: () => win.webContents.copyImageAt(opts.x, opts.y),
     });
   }
@@ -605,7 +602,7 @@ function popMediaContextMenu(win: BrowserWindow, opts: { media: "image" | "video
   }
   if (fileTarget) {
     template.push({ type: "separator" }, {
-      label: "Open file folder",
+      label: MEDIA_MENU_LABELS.openFolder,
       click: () => revealProductionFile(fileTarget),
     });
   }

@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 import { BoardCard } from "../src/renderer/src/components/production/boards.js";
+import { ConfirmHost } from "../src/renderer/src/components/ConfirmDialog.js";
 import { resetBoardThumbSchedulerForTests } from "../src/renderer/src/components/production/board-thumbs.js";
 
 type BoardCardProps = Parameters<typeof BoardCard>[0];
@@ -101,7 +102,7 @@ describe("BoardCard pending clear", () => {
 
   async function renderCard(props: BoardCardProps) {
     await act(async () => {
-      root.render(createElement(BoardCard, props));
+      root.render(createElement("div", null, createElement(BoardCard, props), createElement(ConfirmHost)));
       await new Promise((r) => setTimeout(r, 20));
     });
   }
@@ -141,17 +142,22 @@ describe("BoardCard pending clear", () => {
     const item = menuItem("Clear pending frame…");
     expect(item, "Clear pending frame menu item").not.toBeNull();
     await act(async () => { item!.click(); });
+    const confirmBtn = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Clear pending");
+    expect(confirmBtn, "confirm dialog button").not.toBeNull();
+    await act(async () => { confirmBtn!.click(); });
     expect(onClearPending).toHaveBeenCalledWith("shot1", "image");
   });
 
   it("cancelling the confirm leaves the pending job alone", async () => {
-    confirmFn = () => false;
     const onClearPending = vi.fn();
     await renderCard(baseProps(makeShot(), { pending: true, onClearPending }));
     openMenu();
     const item = menuItem("Clear pending frame…");
     expect(item, "Clear pending frame menu item").not.toBeNull();
     await act(async () => { item!.click(); });
+    const cancelBtn = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Cancel");
+    expect(cancelBtn, "confirm dialog cancel").not.toBeNull();
+    await act(async () => { cancelBtn!.click(); });
     expect(onClearPending).not.toHaveBeenCalled();
   });
 
@@ -164,6 +170,9 @@ describe("BoardCard pending clear", () => {
     const item = menuItem("Clear pending video…");
     expect(item, "Clear pending video menu item").not.toBeNull();
     await act(async () => { item!.click(); });
+    const confirmBtn = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Clear pending");
+    expect(confirmBtn, "confirm dialog button").not.toBeNull();
+    await act(async () => { confirmBtn!.click(); });
     expect(onClearPending).toHaveBeenCalledWith("shot1", "video");
   });
 

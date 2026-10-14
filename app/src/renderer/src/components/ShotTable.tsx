@@ -21,6 +21,7 @@ import { uid } from "./production/hex.js";
 import { AutoTextarea } from "./AutoTextarea.js";
 import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
+import { confirmDestructive } from "./ConfirmDialog.js";
 
 interface Props {
   prod: Production;
@@ -484,11 +485,11 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
 
   const isDragging = dragId === shot.id;
 
-  function handleDelete() {
+  async function handleDelete() {
     // Include uncommitted drafts: typed-but-unblurred text still counts as content.
     const effective = { ...shot, audio, visual };
     if (shotHasContent(effective)) {
-      if (!window.confirm(`Delete Shot ${shot.number}? This shot has content and deleting it can't be undone.`)) return;
+      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content and deleting it can't be undone.", confirmLabel: "Delete" }))) return;
     }
     onMutation(window.cascade.deleteShot(prod.meta.id, shot.id, revOf(prod)));
   }

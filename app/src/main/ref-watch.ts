@@ -2,7 +2,7 @@
  * Reference external-edit watcher.
  *
  * A reference image (character / product / custom) can be edited outside
- * Cascade — through the "Edit externally" context menu, or by saving over the
+ * Cascade — through the "Edit in <editor>" context menu, or by saving over the
  * file from another app. The node canvas reads the live reference, but the
  * Design grid, node shelf, and moodboard paint a cached bitmap, and a
  * reference piped to a shot's frame output is a *copy* in the boards dir —

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { confirmDestructive } from "./ConfirmDialog.js";
 import type { McpStatusIpc } from "../../../shared/ipc.js";
 import {
   argsToLines,
@@ -205,7 +206,7 @@ export function McpSection() {
   }
 
   async function removeServer(name: string) {
-    if (!window.confirm(`Remove MCP server “${name}”?`)) return;
+    if (!(await confirmDestructive({ title: `Remove MCP server “${name}”?`, body: "Its tools stop being available to Cascade.", confirmLabel: "Remove" }))) return;
     if (draft?.originalName === name) setDraft(null);
     await commit(removeMcpServer(file, name));
   }

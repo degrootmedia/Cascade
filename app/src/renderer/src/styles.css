@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #111417;
   --bg-panel: #191d21;
   --bg-raised: #22272c;
@@ -2039,7 +2039,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   opacity: 0.8;
   pointer-events: none;
 }
-.prod-animatic-block { z-index: 1; }
+.prod-animatic-block { cursor: grab; z-index: 1; }
 .prod-animatic-block .prod-timeline-thumb { opacity: 0.88; }
 .prod-animatic-playhead {
   position: absolute;
@@ -2063,7 +2063,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   background: var(--accent);
   border-radius: 50%;
 }
-.prod-animatic-block {
+.prod-animatic-block { cursor: grab;
   position: absolute;
   top: 0;
   bottom: 0;
@@ -5320,6 +5320,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .suite-compare-tag { position: absolute; top: 8px; font-size: 0.7rem; line-height: 1.6; background: rgba(0,0,0,0.6); color: #fff; padding: 2px 7px; border-radius: 5px; }
 .suite-compare-tag.left { left: 8px; }
 .suite-compare-tag.right { right: 8px; }
+.suite-compare-legend { margin: 6px 0 0; font-size: 0.78rem; color: var(--text-dim); }
+.suite-notice { margin: 6px 0 0; font-size: 0.8rem; color: var(--text-dim); }
 .suite-compare-slider { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: 0.78rem; }
 .suite-compare-slider input { width: 220px; }
 

@@ -9,6 +9,7 @@ import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "..
 import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
+import { confirmDestructive } from "./ConfirmDialog.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
@@ -3369,13 +3370,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Step 3: delete a sequence. The confirm warns that a generated video is
    *  preserved as a "Shot Sequences" reference; the copy + drop is one
    *  main-side op so the reference and the list can't drift apart. */
-  function deleteSequence(sequenceId: string) {
+  async function deleteSequence(sequenceId: string) {
     const current = prodRef.current;
     if (!current) return;
     const seq = (current.shotSequences ?? []).find((s) => s.id === sequenceId);
     if (!seq) return;
     const warn = sequenceSelectedTake(seq) ? DELETE_SEQUENCE_VIDEO_WARNING : DELETE_SEQUENCE_WARNING;
-    if (!window.confirm(warn)) return;
+    if (!(await confirmDestructive({ title: `Delete sequence "${seq.name}"?`, body: warn, confirmLabel: "Delete" }))) return;
     if (seqCanvasId === sequenceId) setSeqCanvasId(null);
     apply(window.cascade.deleteShotSequence(current.meta.id, sequenceId, revOf(current)));
   }
@@ -3454,7 +3455,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Step 3: permanently delete one stored generation (right-click on a board
    *  history frame, a node-graph take, or a tween take). Blocks while the take
    *  still feeds the storyboard/animatic/a pipe, then confirms before unlinking. */
-  function deleteGeneration(shotId: string, rel: string) {
+  async function deleteGeneration(shotId: string, rel: string) {
     const current = prodRef.current;
     if (!current) return;
     const shot = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
@@ -3463,7 +3464,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!gen) return;
     const reason = generationInUse(shot, gen);
     if (reason) { setErr(generationInUseMessage(reason)); return; }
-    if (!window.confirm(DELETE_GENERATION_WARNING)) return;
+    if (!(await confirmDestructive({ title: "Delete generation?", body: DELETE_GENERATION_WARNING, confirmLabel: "Delete" }))) return;
     apply(window.cascade.deleteGeneration(current.meta.id, shotId, rel));
   }
 

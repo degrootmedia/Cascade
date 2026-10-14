@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatBalance, SessionMeta } from "../../../shared/ipc.js";
 import { PlusIcon, SearchIcon, TokenIcon } from "./icons.js";
 import { useClampedMenuStyle } from "./menu-position.js";
+import { confirmDestructive } from "./ConfirmDialog.js";
 
 type BucketKey = "today" | "yesterday" | "week" | "month" | "older";
 
@@ -247,8 +248,8 @@ export function Sidebar({
           </button>
           <button
             className="ctx-item danger"
-            onClick={() => {
-              if (window.confirm(`Permanently delete "${menu.session.title}"? This can't be undone.`)) {
+            onClick={async () => {
+              if (await confirmDestructive({ title: `Permanently delete "${menu.session.title}"?`, body: "This can't be undone.", confirmLabel: "Delete" })) {
                 onRemove(menu.session.id, "delete");
               }
               setMenu(null);

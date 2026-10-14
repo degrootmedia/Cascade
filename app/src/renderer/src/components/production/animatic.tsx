@@ -294,6 +294,7 @@ export function AnimaticTimeline({
   // own length is overlaid on the strip as a waveform at its true scale.
   const total = sumDur;
   const [playing, setPlaying] = useState(false);
+  const [animaticMuted, setAnimaticMuted] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [editingTotal, setEditingTotal] = useState(false);
   const [totalDraft, setTotalDraft] = useState("");
@@ -488,8 +489,8 @@ export function AnimaticTimeline({
   const startedHeadRef = useRef(0);
 
   // Keep hidden players in sync with slider volumes and src changes.
-  useEffect(() => { if (voAudioRef.current) voAudioRef.current.volume = Math.max(0, Math.min(1, voiceoverVolume)); }, [voiceoverVolume, voUrl]);
-  useEffect(() => { if (musicAudioRef.current) musicAudioRef.current.volume = Math.max(0, Math.min(1, musicVolume)); }, [musicVolume, musicUrl]);
+  useEffect(() => { if (voAudioRef.current) voAudioRef.current.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, voiceoverVolume)); }, [voiceoverVolume, voUrl, animaticMuted]);
+  useEffect(() => { if (musicAudioRef.current) musicAudioRef.current.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, musicVolume)); }, [musicVolume, musicUrl, animaticMuted]);
   useEffect(() => {
     if (voAudioRef.current) voAudioRef.current.src = voUrl ?? "";
     if (voAudioRef.current && !voUrl) { try { voAudioRef.current.pause(); } catch {} }
@@ -541,7 +542,7 @@ export function AnimaticTimeline({
       if (!pastEnd) {
         // Known duration: clamp to the playhead; unknown: best-effort seek and play anyway.
         try { voEl.currentTime = voDur > 0 ? Math.max(0, Math.min(head, voDur)) : Math.max(0, head); } catch {}
-        voEl.volume = Math.max(0, Math.min(1, voiceoverVolume));
+        voEl.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, voiceoverVolume));
         toPlay.push(voEl.play().catch(() => {}));
       } else {
         // Playhead is past the end of the voiceover — keep it silent and let
@@ -554,7 +555,7 @@ export function AnimaticTimeline({
         const d = muEl.duration;
         muEl.currentTime = Number.isFinite(d) && d > 0 ? head % d : head;
       } catch { try { muEl.currentTime = head; } catch {} }
-      muEl.volume = Math.max(0, Math.min(1, musicVolume));
+      muEl.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, musicVolume));
       muEl.loop = true;
       toPlay.push(muEl.play().catch(() => {}));
     }
@@ -580,7 +581,7 @@ export function AnimaticTimeline({
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [playing, playhead, voUrl, musicUrl, voBuffer, total, stop, voiceoverVolume, musicVolume]);
+  }, [playing, playhead, voUrl, musicUrl, voBuffer, total, stop, voiceoverVolume, musicVolume, animaticMuted]);
 
   useEffect(() => () => stop(), [stop]);
 
@@ -1109,7 +1110,7 @@ export function AnimaticTimeline({
         className="prod-animatic-preview"
         ref={previewRef}
         style={{ height: `${previewHeight}px` }}
-        title={activeShot?.videoPath || activeShot?.artwork ? "Right-click for save, copy, edit, reference, or delete options" : undefined}
+        title={activeShot?.videoPath || activeShot?.artwork ? "Right-click for save, copy, edit, or reference options" : undefined}
         onContextMenu={(e) => {
           // The shared take menu is shot-addressed (delete/save name a shot);
           // a sequence's takes are managed on its own canvas instead.
@@ -1193,6 +1194,7 @@ export function AnimaticTimeline({
           {playing ? "❚❚" : <PlayButtonIcon size={15} />}
         </button>
         <button onClick={() => { stop(); setPlayhead(0); }} title="Stop and rewind"><StopButtonIcon size={15} /></button>
+        <button onClick={() => setAnimaticMuted((m) => !m)} title={animaticMuted ? "Unmute animatic audio" : "Mute animatic audio"} aria-label={animaticMuted ? "Unmute animatic audio" : "Mute animatic audio"}>{animaticMuted ? "Unmute" : "Mute"}</button>
         <div
           className="prod-animatic-scrub"
           ref={scrubRef}

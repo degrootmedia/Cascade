@@ -19,7 +19,7 @@ import { refThumbUrl } from "../production/thumb-url.js";
 import { EyeIcon, EyeOffIcon, MagnifyIcon } from "../icons.js";
 
 /** Split a `cascade-media://` URL into the production id + workspace-relative
- *  path main needs to resolve the full-res file (e.g. "Edit externally").
+ *  path main needs to resolve the full-res file (e.g. "Edit in <editor>").
  *  Returns null for inline data URLs and anything else. */
 export function parseGraphMediaUrl(url: string): { productionId: string; relPath: string } | null {
   if (!url.startsWith("cascade-media://")) return null;
@@ -95,7 +95,7 @@ export type RefFlowNode = Node<RefData, "ref">;
 
 export const RefNodeView = memo(function RefNodeView({ id, data, selected }: NodeProps<RefFlowNode>) {
   // Disk-backed artwork is a cascade-media URL: hand main the production id +
-  // relative path so "Edit externally" resolves the full-res file. Legacy
+  // relative path so "Edit in <editor>" resolves the full-res file. Legacy
   // inline artwork has no path and rides the dataUrl branch. Passing the
   // cascade-media URL as a dataUrl (as before) made main try to decode it as a
   // data URL and fail.

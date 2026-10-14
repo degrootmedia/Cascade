@@ -7,10 +7,11 @@
  *   is in use (stored generations/pipes/prompt) is present even without a drag.
  */
 import { describe, it, expect } from "vitest";
-import { createElement, useState } from "react";
+import { createElement, Fragment, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
+import { ConfirmHost } from "../src/renderer/src/components/ConfirmDialog.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as any).ResizeObserver = ROStub;
@@ -112,7 +113,7 @@ function renderModal(opts: { initial?: string; shotPatch?: Record<string, unknow
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
-  act(() => { root.render(createElement(Harness, opts)); });
+  act(() => { root.render(createElement(Fragment, null, createElement(Harness, opts), createElement(ConfirmHost))); });
   return { root, host };
 }
 
@@ -121,6 +122,14 @@ async function openShelf(host: HTMLDivElement): Promise<void> {
   const rail = host.querySelector(".prod-graph-shelf-rail") as HTMLButtonElement | null;
   if (!rail) return;
   await act(async () => { rail.click(); await new Promise((r) => setTimeout(r, 0)); });
+}
+
+/** Click a button in the in-app confirm dialog (portaled to body). */
+async function clickConfirmButton(label: string): Promise<void> {
+  const btn = [...document.body.querySelectorAll(".modal-actions button")]
+    .find((b) => b.textContent === label) as HTMLButtonElement | undefined;
+  expect(btn).toBeTruthy();
+  await act(async () => { btn!.click(); await new Promise((r) => setTimeout(r, 0)); });
 }
 
 function dropOnCanvas(host: HTMLDivElement, type: string, data: string): void {
@@ -649,7 +658,6 @@ describe("node-graph delete key", () => {
   });
 
   it("asks before deleting a data-holding tool, then deletes on confirm", async () => {
-    gWin.confirm = () => true;
     const { root, host } = renderModal({
       shotPatch: {
         graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
@@ -662,6 +670,11 @@ describe("node-graph delete key", () => {
     await pressDeleteKey(host);
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
+    // The in-app confirm dialog asks first; the node is still there.
+    expect(document.body.querySelector(".modal")?.textContent).toContain("Delete these nodes?");
+    expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeTruthy();
+    await clickConfirmButton("Delete");
+
     // Confirmed → the node (and its clip) are gone.
     expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeNull();
 
@@ -670,7 +683,6 @@ describe("node-graph delete key", () => {
   });
 
   it("keeps a data-holding tool when the delete confirm is declined", async () => {
-    gWin.confirm = () => false;
     const { root, host } = renderModal({
       shotPatch: {
         graphVideoGens: [{ path: "videos/clip1.mp4", prompt: "motion", model: "auto", at: "2026-01-01T00:00:00.000Z" }],
@@ -681,6 +693,8 @@ describe("node-graph delete key", () => {
     await pressDeleteKey(host);
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
+    // Declined in the in-app dialog → the node stays.
+    await clickConfirmButton("Cancel");
     expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeTruthy();
 
     await act(async () => { root.unmount(); });

@@ -8,6 +8,7 @@ import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ModelOptionsForm, pruneModelOptionValues } from "../src/renderer/src/components/ModelOptionsForm.js";
 import type { CliModelSchema } from "../src/shared/ipc.js";
+import { OWNED_FLAGS } from "../src/main/providers/model-schema.js";
 
 const schema: CliModelSchema = {
   jobType: "gpt_image_2_5",
@@ -69,6 +70,26 @@ describe("ModelOptionsForm", () => {
       variantSelect.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(changes.at(-1)).toMatchObject({ variant: "sunburst" });
+  });
+
+  it("hides a resolutionTier field when resolution is excluded (one resolution control)", () => {
+    // GPT Image 2.5 on OpenArt spells its resolution param resolutionTier;
+    // the dedicated 1k/2k/4k dropdown already owns it (resolutionAssign),
+    // so exclude:["resolution"] must hide the tier field too.
+    const tierSchema: CliModelSchema = {
+      ...schema,
+      fields: [
+        { name: "resolutiontier", flag: "resolutionTier", aliases: [], kind: "enum", group: "core", values: ["1K", "2K", "4K"], default: "1K", emit: "value", source: "parameters" },
+        { name: "variant", flag: "variant", aliases: [], kind: "enum", group: "core", values: ["flare", "sunburst"], default: "flare", emit: "value", source: "parameters" },
+      ],
+    };
+    const { container } = mount(
+      createElement(ModelOptionsForm, { schema: tierSchema, value: {}, onChange: () => {}, exclude: ["resolution"] })
+    );
+    const opts = Array.from(container.querySelectorAll("option")).map((o) => o.value);
+    expect(opts).not.toContain("4K");
+    expect(opts).toContain("sunburst");
+    expect(OWNED_FLAGS.has("resolutiontier")).toBe(true);
   });
 
   it("honors exclude for fields a dedicated control owns", () => {

@@ -74,15 +74,21 @@ export function jobsToCanvasBusy(productionId: string, jobs: JobRecord[]): Canva
   const tween: Record<string, string> = {};
   const stitching = new Set<string>();
   const sequences = new Set<string>();
+  const cameraGrid = new Set<string>();
+  const upscale = new Set<string>();
   for (const job of jobs) {
     if (job.state !== "running") continue;
     const shot = job.shotId;
     switch (job.kind) {
       case "frameNode":
       case "boardRecheck":
-      case "upscale":
-      case "cameraGrid":
         if (shot) image.add(shot);
+        break;
+      case "cameraGrid":
+        if (shot) cameraGrid.add(shot);
+        break;
+      case "upscale":
+        if (shot) upscale.add(shot);
         break;
       case "editNode":
         if (shot) editNodes.add(job.nodeId ? `${shot}:${job.nodeId}` : shot);
@@ -117,6 +123,8 @@ export function jobsToCanvasBusy(productionId: string, jobs: JobRecord[]): Canva
     tween,
     stitching: [...stitching],
     sequences: [...sequences],
+    cameraGrid: [...cameraGrid],
+    upscale: [...upscale],
   };
 }
 

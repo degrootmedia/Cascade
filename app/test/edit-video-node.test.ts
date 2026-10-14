@@ -39,7 +39,7 @@ function makeProd(shot: Partial<ProductionShot>): Production {
   } as unknown as Production;
 }
 
-function renderModal(shot: Partial<ProductionShot>, onCycleGraphGen: (kind: string, dir: 1 | -1, nodeId?: string) => void) {
+function renderModal(shot: Partial<ProductionShot>, onCycleGraphGen: (kind: string, dir: 1 | -1, nodeId?: string) => void, extra?: { videoModels?: unknown[]; onGraphField?: (patch: Record<string, unknown>) => void; onRunEditVideo?: (...args: unknown[]) => Promise<void> }) {
   const prod = makeProd(shot);
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -55,7 +55,7 @@ function renderModal(shot: Partial<ProductionShot>, onCycleGraphGen: (kind: stri
       styleValue: "",
       includeBrand: false,
       imageModels: [],
-      videoModels: [],
+      videoModels: extra?.videoModels ?? [],
       defaultImageModel: "auto",
       defaultImageResolution: "1k",
       onPromptChange: () => {},
@@ -66,10 +66,10 @@ function renderModal(shot: Partial<ProductionShot>, onCycleGraphGen: (kind: stri
       onRunImageGen: async () => {},
       onRunVideoGen: async () => {},
       onRunEditGen: async () => {},
-      onRunEditVideo: async () => {},
+      onRunEditVideo: extra?.onRunEditVideo ?? (async () => {}),
       onSelectGraphGen: () => {},
       onCycleGraphGen,
-      onGraphField: () => {},
+      onGraphField: extra?.onGraphField ?? (() => {}),
       onPipeImageToVideo: () => {},
       onPipeImageToOutput: () => {},
       onPipeVideoToOutput: () => {},
@@ -122,8 +122,67 @@ describe("edit-video node (multi-instance graphVideoNodes)", () => {
         { id: "ev0", mode: "edit", prompt: "grade", gens: [gen("a.mp4"), gen("b.mp4")], genIndex: 1 },
       ],
     }, () => {});
-    // 2 takes selected at index 1 → "2 / 2".
+    // 2 takes selected at index 1 -> "2 / 2".
     expect(host.querySelector(".prod-graph-editvideo .prod-graph-gen-cycle")?.textContent).toContain("2 / 2");
     act(() => { root.unmount(); });
+  });
+
+  it("offers the model's resolution and duration choices and submits them", async () => {
+    const cascade = gWin.cascade as Record<string, unknown>;
+    const prevEdit = cascade.videoEditModels;
+    const prevOpts = cascade.videoModelOptions;
+    cascade.videoEditModels = async () => ["hf:genjutsu_multi"];
+    cascade.videoModelOptions = async () => ({ resolutions: ["720p", "1080p"], durations: [5, 10] });
+    const graphPatches: Array<Record<string, unknown>> = [];
+    const runs: unknown[][] = [];
+    try {
+      const { host, root } = renderModal(
+        { graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "grade it" }] },
+        () => {},
+        {
+          videoModels: [{ id: "hf:genjutsu_multi", displayName: "Genjutsu", description: "", imageInput: true, videoInput: true, cost: null }],
+          onGraphField: (patch) => { graphPatches.push(patch); },
+          onRunEditVideo: async (...args: unknown[]) => { runs.push(args); },
+        }
+      );
+      // Model-id probe + per-model options resolve asynchronously.
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); });
+
+      const node = host.querySelector(".prod-graph-node.prod-graph-editvideo")!;
+      expect(node).toBeTruthy();
+      const selects = Array.from(node.querySelectorAll("select"));
+      const resSelect = selects.find((s) => Array.from(s.options).some((o) => o.value === "1080p")) as HTMLSelectElement | undefined;
+      const durSelect = selects.find((s) => Array.from(s.options).some((o) => o.textContent === "10s")) as HTMLSelectElement | undefined;
+      expect(resSelect, "resolution select").toBeTruthy();
+      expect(durSelect, "duration select").toBeTruthy();
+      // Both default to Auto (source timing / provider default), not a forced pick.
+      expect(resSelect!.value).toBe("");
+      expect(durSelect!.value).toBe("0");
+
+      const setSelect = async (sel: HTMLSelectElement, value: string) => {
+        await act(async () => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+          setter?.call(sel, value);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+          await new Promise((r) => setTimeout(r, 0));
+        });
+      };
+      await setSelect(resSelect!, "1080p");
+      await setSelect(durSelect!, "10");
+      const savedNodes = graphPatches.flatMap((p) => (p.graphVideoNodes as Array<Record<string, unknown>> | undefined) ?? []);
+      expect(savedNodes.some((n) => n.resolution === "1080p")).toBe(true);
+      expect(savedNodes.some((n) => n.durationSec === 10)).toBe(true);
+
+      const go = Array.from(node.querySelectorAll("button")).find((b) => b.textContent?.includes("Edit video")) as HTMLButtonElement;
+      expect(go.disabled).toBe(false);
+      await act(async () => { go.click(); await new Promise((r) => setTimeout(r, 0)); });
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toContain("1080p");
+      expect(runs[0]).toContain(10);
+      act(() => { root.unmount(); });
+    } finally {
+      cascade.videoEditModels = prevEdit;
+      cascade.videoModelOptions = prevOpts;
+    }
   });
 });

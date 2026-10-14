@@ -249,6 +249,23 @@ describe("connectionToEdge: generation→video-prompt direct wires (no saved ref
     expect(keysOf(g2)).not.toContain("e-imagegen-videoprompt-0");
   });
 
+  it("imagegen/editgen→editvideoprompt wires directly like the video prompt", () => {
+    const g = materializeGraph(
+      shot({ graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "Grade it" }], graphEditNodes: [{ id: "edit0", prompt: "Fix" }] }),
+      REFS
+    );
+    expect(normalizeGraph(g).issues).toEqual([]);
+    const op = connectionToEdge(conn("imagegen", "editvideoprompt", "in-ref-open"), g)!;
+    expect(op).not.toBeNull();
+    expect(op.edge.id).toBe("e-imagegen-editvideoprompt-0");
+    expect(op.edge.to.port).toBe("in-ref-0");
+    const next = applyConnection(g, op);
+    expect(normalizeGraph(next).issues).toEqual([]);
+    const g2 = connect(next, conn("editgen:edit0", "editvideoprompt", "in-ref-0"));
+    expect(keysOf(g2)).toContain("e-editgen:edit0-editvideoprompt-0");
+    expect(keysOf(g2)).not.toContain("e-imagegen-editvideoprompt-0");
+  });
+
   it("generation→composer/editprompt carries no direct wire (still saved as reference)", () => {
     const g = baseGraph();
     expect(connectionToEdge(conn("imagegen", "composer", "in-ref-open"), g)).toBeNull();
@@ -562,5 +579,82 @@ describe("applySequenceFrames", () => {
     // Re-applying with fewer segments drops the stale wire (positional rebuild).
     const g2 = applySequenceFrames(g, [{ shotId: "s2" }]);
     expect(g2.edges.filter((e) => /^in-frame-/.test(e.to.port)).map((e) => e.to.port)).toEqual(["in-frame-0"]);
+  });
+});
+
+describe("prompt reference sockets stay compact (positional invariant)", () => {
+  const REFS3 = [
+    { id: "r1", name: "Gondola", artwork: "g.png" },
+    { id: "r2", name: "Marco", artwork: "m.png" },
+    { id: "r3", name: "Third", artwork: "t.png" },
+    { id: "r4", name: "Fourth", artwork: "f.png" },
+  ];
+  /** Composer tagged Gondola(0), Marco(1), Third(2). */
+  function threeRefGraph(): Graph {
+    const g = materializeGraph(shot({ prompt: "Scene @[Gondola] @[Marco] @[Third]" }), REFS3);
+    expect(normalizeGraph(g).issues).toEqual([]);
+    return g;
+  }
+  const refEdgesInto = (g: Graph, target: string) =>
+    g.edges
+      .filter((e) => e.to.node === target && /^in-ref-\d+$/.test(e.to.port))
+      .map((e) => [e.from.node, e.to.port, e.id] as const)
+      .sort((a, b) => a[1].localeCompare(b[1]));
+
+  it("deleting the middle ref wire renumbers the wires after it", () => {
+    const g = threeRefGraph();
+    expect(refEdgesInto(g, "composer")).toEqual([
+      ["ref:r1", "in-ref-0", "e-ref:r1-composer-0"],
+      ["ref:r2", "in-ref-1", "e-ref:r2-composer-1"],
+      ["ref:r3", "in-ref-2", "e-ref:r3-composer-2"],
+    ]);
+    const next = removeGraphEdge(g, "e-ref:r2-composer-1");
+    expect(refEdgesInto(next, "composer")).toEqual([
+      ["ref:r1", "in-ref-0", "e-ref:r1-composer-0"],
+      ["ref:r3", "in-ref-1", "e-ref:r3-composer-1"],
+    ]);
+    expect(normalizeGraph(next).issues).toEqual([]);
+  });
+
+  it("dragging the first wire off its socket renumbers the rest", () => {
+    const g = threeRefGraph();
+    const ctx = { tweenKeys: [], editIds: new Set<string>(), refNodeIds: new Set(["ref:r1", "ref:r2", "ref:r3"]) };
+    const next = graphEdgesForDetach(g, { type: "target", nodeId: "composer", handleId: "in-ref-0" }, ctx)!;
+    expect(refEdgesInto(next, "composer")).toEqual([
+      ["ref:r2", "in-ref-0", "e-ref:r2-composer-0"],
+      ["ref:r3", "in-ref-1", "e-ref:r3-composer-1"],
+    ]);
+  });
+
+  it("appending after a removal never collides on a socket", () => {
+    const g = removeGraphEdge(threeRefGraph(), "e-ref:r2-composer-1");
+    const placed = addGraphNode(g, { id: "ref:r4", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Fourth" } });
+    const next = connect(placed, conn("ref:r4", "composer", "in-ref-open"));
+    const edges = refEdgesInto(next, "composer");
+    expect(edges.map((e) => e[1])).toEqual(["in-ref-0", "in-ref-1", "in-ref-2"]);
+    expect(new Set(edges.map((e) => e[2])).size).toBe(3);
+    expect(edges.find((e) => e[0] === "ref:r4")?.[1]).toBe("in-ref-2");
+  });
+
+  it("deleting a ref node renumbers its prompt's remaining wires", () => {
+    const next = removeGraphNode(threeRefGraph(), "ref:r1");
+    expect(refEdgesInto(next, "composer")).toEqual([
+      ["ref:r2", "in-ref-0", "e-ref:r2-composer-0"],
+      ["ref:r3", "in-ref-1", "e-ref:r3-composer-1"],
+    ]);
+  });
+
+  it("compaction is scoped per prompt node (fan-out into two prompts)", () => {
+    let g = materializeGraph(
+      shot({ prompt: "Scene @[Gondola] @[Marco]", graphVideoNodes: [{ id: "vid0", prompt: "Move @[Marco] @[Third]" }] }),
+      REFS3
+    );
+    g = removeGraphEdge(g, "e-ref:r1-composer-0");
+    expect(refEdgesInto(g, "composer")).toEqual([["ref:r2", "in-ref-0", "e-ref:r2-composer-0"]]);
+    // The video prompt's wires are untouched.
+    expect(refEdgesInto(g, "videoprompt")).toEqual([
+      ["ref:r2", "in-ref-0", "e-ref:r2-videoprompt-0"],
+      ["ref:r3", "in-ref-1", "e-ref:r3-videoprompt-1"],
+    ]);
   });
 });

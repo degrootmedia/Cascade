@@ -60,6 +60,8 @@ describe("canvas busy snapshot (Spec 03 cross-window relay)", () => {
       tween: {},
       stitching: [],
       sequences: [],
+      cameraGrid: [],
+      upscale: [],
     });
   });
   it("keeps valid entries", () => {

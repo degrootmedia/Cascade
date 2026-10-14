@@ -178,6 +178,8 @@ describe("canvas busy projection", () => {
       { id: "d", productionId: "p1", kind: "tweenBlock", state: "running", label: "", shotId: "s4", nodeId: "tw0", startedAt: "" },
       { id: "e", productionId: "p1", kind: "stitch", state: "running", label: "", shotId: "s5", startedAt: "" },
       { id: "f", productionId: "p1", kind: "sequenceVideo", state: "running", label: "", shotId: "seq1", nodeId: "vid0", startedAt: "" },
+      { id: "h", productionId: "p1", kind: "cameraGrid", state: "running", label: "", shotId: "s6", startedAt: "" },
+      { id: "i", productionId: "p1", kind: "upscale", state: "running", label: "", shotId: "s7", startedAt: "" },
       { id: "g", productionId: "p1", kind: "frameNode", state: "succeeded", label: "", shotId: "s9", startedAt: "" },
     ];
     expect(jobsToCanvasBusy("p1", running)).toEqual({
@@ -189,6 +191,10 @@ describe("canvas busy projection", () => {
       tween: { s4: "tw0" },
       stitching: ["s5"],
       sequences: ["seq1:vid0"],
+      // Camera-grid / upscale runs report in their OWN buckets: sharing the
+      // image bucket lit the plain image node's Generating state for them.
+      cameraGrid: ["s6"],
+      upscale: ["s7"],
     });
   });
 

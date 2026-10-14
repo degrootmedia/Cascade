@@ -379,15 +379,23 @@ function mergeCameraGrid(
   if (!freshGrid) return incomingGrid;
   const freshAt = typeof freshGrid.sheetAt === "string" ? freshGrid.sheetAt : "";
   const incomingAt = typeof incomingGrid.sheetAt === "string" ? incomingGrid.sheetAt : "";
+  // Geometry (cols/rows + the panels/labels cut from them) is renderer-owned:
+  // the node's size dropdown writes it, so the incoming value wins. The one
+  // exception is a STALE renderer snapshot that predates the fresh sheet
+  // write (older sheetAt): its geometry must not revert the size the sheet
+  // was just generated/imported at, so the fresh geometry stands there.
+  const geometry = incomingAt < freshAt ? freshGrid : incomingGrid;
   const merged: CameraGridData = {
     ...freshGrid,
     ...incomingGrid,
-    cols: freshGrid.cols,
-    rows: freshGrid.rows,
-    ...(freshGrid.panels ? { panels: freshGrid.panels } : {}),
-    ...(freshGrid.panelLabels ? { panelLabels: freshGrid.panelLabels } : {}),
+    cols: geometry.cols,
+    rows: geometry.rows,
     ...(freshGrid.generation ? { generation: freshGrid.generation } : {}),
   };
+  if (geometry.panels) merged.panels = geometry.panels;
+  else delete merged.panels;
+  if (geometry.panelLabels) merged.panelLabels = geometry.panelLabels;
+  else delete merged.panelLabels;
   // The sheet (path + write timestamp) follows the newer write, whichever side
   // produced it — a generation (main) or a grid-image import (renderer).
   const sheet = incomingAt > freshAt ? incomingGrid : freshGrid;

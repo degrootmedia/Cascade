@@ -18,7 +18,7 @@ import {
   OPENART_CLI_ID_PREFIX,
 } from "../src/main/providers/openart-cli.js";
 import type { CliRun } from "../src/main/providers/cli-run.js";
-import type { Production, ProductionShot } from "../src/shared/ipc.js";
+import type { PendingImageGen, Production, ProductionShot } from "../src/shared/ipc.js";
 
 type FakeRun = CliRun;
 
@@ -299,6 +299,39 @@ describe("OpenArtCliProvider.imageGenFn", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("records the pending job at submission (before the wait ends) and clears it on success", async () => {
+    const seen: (PendingImageGen | null)[] = [];
+    let atWait: PendingImageGen | undefined;
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const { run } = fakeRun(
+      baseHandler({
+        "generate image": () => ok(JSON.stringify({ historyId: "h-fast" })),
+        "creation wait": () => {
+          atWait = shot.pendingImageGen;
+          return ok(JSON.stringify({ historyId: "h-fast", status: "SUCCEEDED", url: "https://example.invalid/fast.png" }));
+        },
+      })
+    );
+    const p = provider(run);
+    const gen = p.imageGenFn(makeProduction())!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([9]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      const out = await gen("A castle", [], shot, undefined, (rec) => { seen.push(rec); });
+      expect(out).toEqual(Buffer.from([9]));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(atWait).toMatchObject({ historyId: "h-fast", prompt: "A castle" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ historyId: "h-fast" });
+    expect(seen[1]).toBeNull();
+    expect(shot.pendingImageGen).toBeUndefined();
   });
 
   it("rejects foreign and stale explicit picks instead of billing the wrong model", async () => {

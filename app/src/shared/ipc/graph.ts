@@ -462,6 +462,13 @@ export interface PendingVideoGen {
   at: string;
 }
 
+/** Which node a pending image job belongs to (mirrors PendingVideoTarget). */
+export type PendingImageTarget =
+  | { kind: "imagegen" }
+  | { kind: "editgen"; nodeId: string }
+  | { kind: "cameragrid" }
+  | { kind: "upscale" };
+
 /** An OpenArt async image job that outlived the generating call — the wait
  *  timed out or the finished image couldn't be downloaded, but the job keeps
  *  rendering server-side. Kept on the shot so the finished frame can be
@@ -497,6 +504,10 @@ export interface PendingImageGen {
    *  local on reclaim, exactly as a direct completion would. Absent =
    *  classic (every pre-existing record). */
   surface?: "classic" | "node";
+  /** Which node submitted the job, so a reclaimed frame lands on THAT node
+   *  (an edit node's frame must not surface on the image node). Tagged by
+   *  the call site; absent on pre-existing records (surface routing then). */
+  target?: PendingImageTarget;
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }

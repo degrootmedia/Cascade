@@ -2794,6 +2794,55 @@ export function completeUpscaleGeneration(shot: ProductionShot, rel: string, mod
   if (surface === "classic") setShotSelectedOutput(shot, { kind: "upscale" });
 }
 
+/**
+ * Record a reclaimed pending frame (its wait outlived the generating call)
+ * on the node that SUBMITTED it, tagged on `PendingImageGen.target` — an
+ * edit node's frame must not surface on the image node. Camera-grid sheets
+ * are excluded (the recheck handler writes the sheet itself). Legacy
+ * records without a target keep their `surface` routing; a target whose
+ * edit node was deleted meanwhile falls back to the image node, staying
+ * node-local either way.
+ */
+export function completePendingImageGeneration(shot: ProductionShot, rel: string, pending: PendingImageGen): void {
+  const target = pending.target;
+  if (target?.kind === "editgen") {
+    if (getEditNode(shot, target.nodeId)) {
+      completeEditGeneration(shot, target.nodeId, rel, pending.prompt, pending.model, "node");
+      return;
+    }
+    completeImageGeneration(shot, rel, pending.prompt, pending.model, "node");
+    return;
+  }
+  if (target?.kind === "upscale") {
+    completeUpscaleGeneration(shot, rel, pending.model, "node");
+    return;
+  }
+  completeImageGeneration(shot, rel, pending.prompt, pending.model, pending.surface === "node" || target ? "node" : "classic");
+}
+
+/**
+ * Copy the shot fields a finished job changed onto the freshest document
+ * (the generation rebase). Changed keys copy over; keys the job DELETED
+ * (present before, absent after — e.g. a cleared pending record) are
+ * deleted too, or the fresh document would keep them forever. Untouched
+ * keys keep their fresher on-disk values.
+ */
+export function applyJobShotChanges(
+  prev: ProductionShot,
+  next: ProductionShot,
+  fresh: ProductionShot
+): void {
+  const p = prev as unknown as Record<string, unknown>;
+  const n = next as unknown as Record<string, unknown>;
+  const f = fresh as unknown as Record<string, unknown>;
+  for (const key of Object.keys(n)) {
+    if (JSON.stringify(p[key]) !== JSON.stringify(n[key])) f[key] = n[key];
+  }
+  for (const key of Object.keys(p)) {
+    if (!(key in n)) delete f[key];
+  }
+}
+
 /** Re-anchor a generation node's selected index after a finished job's rebase
  *  copied a changed generation array over a concurrent selection change
  *  (storyboard Make Primary / node cycling happen mid-job; the FIFO only
@@ -2816,6 +2865,90 @@ export function rebaseGenIndex(
   const at = path ? nextArr.findIndex((g) => g.path === path) : -1;
   return at >= 0 ? at : nextIdx;
 }
+
+/** The node-list fields a finished generation job may land on the freshest
+ *  disk state: ONLY the generation histories (gens + selection). Every other
+ *  node field — prompt (including `@[ref]` tags), source wiring, reference
+ *  lists, model picks — is renderer-owned, and the disk copy is fresher than
+ *  the job's snapshot for all of them: the user may have rewired a node while
+ *  the job ran. Node membership is three-way: a node present at job start but
+ *  absent on disk was deleted mid-job (stays deleted); a node only the job
+ *  has was created by the job (classic edit chain — kept whole); a node only
+ *  the disk has was added mid-job (kept whole). */
+export interface JobNodeMerge {
+  graphEditNodes?: GraphEditNode[];
+  graphVideoNodes?: GraphVideoNode[];
+  graphUpscale?: UpscaleData;
+}
+
+type JobNode = { id: string; gens?: GraphGenItem[]; genIndex?: number };
+
+function mergeJobNodeLists<T extends JobNode>(
+  prev: T[] | undefined,
+  fresh: T[] | undefined,
+  next: T[] | undefined
+): T[] | undefined {
+  if (!fresh && !next) return undefined;
+  const prevIds = new Set((prev ?? []).map((n) => n.id));
+  const prevById = new Map((prev ?? []).map((n) => [n.id, n]));
+  const freshById = new Map((fresh ?? []).map((n) => [n.id, n]));
+  const out: T[] = [];
+  const seen = new Set<string>();
+  for (const jn of next ?? []) {
+    if (seen.has(jn.id)) continue;
+    seen.add(jn.id);
+    const fn = freshById.get(jn.id);
+    if (!fn) {
+      if (!prevIds.has(jn.id)) out.push(jn);
+      continue;
+    }
+    const pn = prevById.get(jn.id);
+    out.push({
+      ...fn,
+      gens: jn.gens,
+      genIndex: rebaseGenIndex(pn?.gens, pn?.genIndex, fn.gens, fn.genIndex, jn.gens, jn.genIndex),
+    });
+  }
+  for (const fn of fresh ?? []) {
+    if (seen.has(fn.id) || prevIds.has(fn.id)) continue;
+    seen.add(fn.id);
+    out.push(fn);
+  }
+  return out;
+}
+
+/** Merge a finished job's node histories onto the freshest disk shot (the
+ *  commit step of `rebaseProduction`). `prev`/`next` are the job's start/end
+ *  copies; `fresh` is what is on disk now. Returns only the fields that
+ *  exist on either side, so callers can assign unconditionally by key. */
+export function mergeJobShotNodes(
+  prev: ProductionShot,
+  fresh: ProductionShot,
+  next: ProductionShot
+): JobNodeMerge {
+  const out: JobNodeMerge = {};
+  const edit = mergeJobNodeLists(prev.graphEditNodes, fresh.graphEditNodes, next.graphEditNodes);
+  if (edit !== undefined) out.graphEditNodes = edit;
+  const video = mergeJobNodeLists(prev.graphVideoNodes, fresh.graphVideoNodes, next.graphVideoNodes);
+  if (video !== undefined) out.graphVideoNodes = video;
+  if (fresh.graphUpscale || next.graphUpscale) {
+    if (fresh.graphUpscale && next.graphUpscale) {
+      out.graphUpscale = {
+        ...fresh.graphUpscale,
+        gens: next.graphUpscale.gens,
+        genIndex: rebaseGenIndex(
+          prev.graphUpscale?.gens, prev.graphUpscale?.genIndex,
+          fresh.graphUpscale.gens, fresh.graphUpscale.genIndex,
+          next.graphUpscale.gens, next.graphUpscale.genIndex
+        ),
+      };
+    } else {
+      out.graphUpscale = next.graphUpscale ?? fresh.graphUpscale;
+    }
+  }
+  return out;
+}
+
 
 /** A character/product/custom reference in the shape the output pipe needs. */
 export interface OutputRef {
@@ -3258,7 +3391,7 @@ export type ImageGenFn = (
   refs: GenerationRef[],
   shot?: ProductionShot,
   params?: Record<string, string | number | boolean | string[]>,
-  onPending?: (rec: PendingImageGen) => void
+  onPending?: (rec: PendingImageGen | null) => void
 ) => Promise<Buffer>;
 
 /**
@@ -3271,7 +3404,7 @@ export async function generateBoards(
   p: Production,
   generate: ImageGenFn,
   emit: EmitFn,
-  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number; providerName?: string; lookClause?: string } = {}
+  opts: { maxShots?: number; regenerateAll?: boolean; onlyShotId?: string; shotIds?: string[]; concurrency?: number; providerName?: string; lookClause?: string; onPending?: (shot: ProductionShot, rec: PendingImageGen | null) => void } = {}
 ): Promise<Production> {
   const max = Math.max(1, Math.min(opts.maxShots ?? 50, 200));
   const all = p.scenes.flatMap((s) => s.shots);
@@ -3312,7 +3445,7 @@ export async function generateBoards(
         ? [{ name: `Look — ${frameStyle!.name || "style"}`.slice(0, 80), dataUrl: frameDataUrl }, ...refs]
         : refs;
       const genPrompt = openArtPrompt(p, shot, opts.lookClause);
-      const png = await generate(genPrompt, genRefs, shot);
+      const png = await generate(genPrompt, genRefs, shot, undefined, (rec) => opts.onPending?.(shot, rec));
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       // Classic flow: hook the image node in so the new frame shows in
       // the storyboard AND the node view (never displaces a pipe).

@@ -20,7 +20,8 @@
 import type { Graph, GraphEdge, GraphNode, GraphVideoNode, ProductionShot } from "../ipc.js";
 import { TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
 import { hasBrandParagraph, refTagNames } from "../prompt-grammar.js";
-import { editVideoEdgeId, videoEdgeId, videoNodeCanvasId, tweenKeyToNode } from "./connect.js";
+import { compactPromptRefEdges, editVideoEdgeId, videoEdgeId, videoNodeCanvasId, tweenKeyToNode } from "./connect.js";
+import { REF_SOCKET_RE } from "./ports.js";
 import { normalizeGraph } from "./normalize.js";
 
 /** Minimal reference view the materializer needs: identity, name (tag match), media, artwork. */
@@ -264,11 +265,11 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   for (const n of editNodes) refEdges(refTagNames(n.prompt ?? ""), editPromptId(n.id));
   for (const n of drawEditVidNodes) refEdges(refTagNames(n.prompt ?? ""), editVideoPromptNodeId(n.id));
 
-  // Direct generation → video-prompt reference wires (no saved reference):
-  // rebuilt from the video node's gen-ref sentinels in `refIds`, continuing
-  // the socket indices past the tag edges so the two never collide.
-  for (const n of drawVideoNodes) {
-    const target = videoPromptNodeId(n.id);
+  // Direct generation → video/edit-video-prompt reference wires (no saved
+  // reference): rebuilt from the node's gen-ref sentinels in `refIds`,
+  // continuing the socket indices past the tag edges so the two never collide.
+  for (const n of [...drawVideoNodes, ...drawEditVidNodes]) {
+    const target = n.mode === "edit" ? editVideoPromptNodeId(n.id) : videoPromptNodeId(n.id);
     const base = refTagNames(n.prompt ?? "").length;
     (n.refIds ?? []).filter((id) => isVideoGenRef(id)).forEach((genId, g) => {
       const idx = base + g;
@@ -398,7 +399,12 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
  * cannot express.
  */
 export function storedOrMaterializedGraph(shot: ProductionShot, refs: GraphRefView[]): Graph {
-  return shot.graph
-    ? normalizeGraph(shot.graph).graph
-    : normalizeGraph(materializeGraph(shot, refs)).graph;
+  if (!shot.graph) return normalizeGraph(materializeGraph(shot, refs)).graph;
+  // Heal positional reference sockets in graphs saved before compaction:
+  // gaps/collisions renumber to a compact run (the open-time ensure pass
+  // persists the result when it differs).
+  let graph = normalizeGraph(shot.graph).graph;
+  const targets = new Set(graph.edges.filter((e) => REF_SOCKET_RE.test(e.to.port)).map((e) => e.to.node));
+  for (const target of targets) graph = compactPromptRefEdges(graph, target);
+  return graph;
 }

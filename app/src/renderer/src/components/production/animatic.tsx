@@ -3,6 +3,7 @@ import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
 import { applyShotSequences, type Production, type ProductionShot, type SequenceTimelineItem, type ShotSequence } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
+import { usePersistedCollapsed } from "./persisted-state.js";
 import { mediaRev } from "./media-rev.js";
 import { batchedBoardThumb } from "./board-thumbs.js";
 import { snapDurationToVideoEnd } from "./animatic-snap.js";
@@ -1386,15 +1387,37 @@ export function AnimaticTimeline({
   );
 }
 
-export function ProdLog({ lines }: { lines: LogLine[] }) {  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [lines.length]);
+export function ProdLog({ lines }: { lines: LogLine[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [collapsed, setCollapsed] = usePersistedCollapsed("cascade.prodLog.collapsed");
+
+  useEffect(() => {
+    if (!collapsed) ref.current?.scrollTo?.({ top: ref.current.scrollHeight });
+  }, [lines.length, collapsed]);
   return (
-    <div className="prod-log" ref={ref}>
-      {lines.map((l, i) => (
-        <div key={i} className={"prod-log-line " + l.level}>
-          <span className="prod-log-time">{l.at}</span> {l.message}
+    <div className="prod-log">
+      <div className="prod-log-head">
+        <button
+          type="button"
+          className="prod-log-toggle"
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed(!collapsed)}
+          title={collapsed ? "Show activity log" : "Hide activity log"}
+        >
+          <span className={"prod-log-caret" + (collapsed ? " collapsed" : "")}>â–¸</span>
+          Activity
+          <span className="prod-log-count">{lines.length}</span>
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="prod-log-lines" ref={ref}>
+          {lines.map((l, i) => (
+            <div key={i} className={"prod-log-line " + l.level}>
+              <span className="prod-log-time">{l.at}</span> {l.message}
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }

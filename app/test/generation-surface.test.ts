@@ -13,8 +13,10 @@ vi.mock("../src/main/scripting.js", () => ({
 }));
 
 import {
+  applyJobShotChanges,
   completeEditGeneration,
   completeImageGeneration,
+  completePendingImageGeneration,
   completeUpscaleGeneration,
   completeVideoGeneration,
 } from "../src/main/pipeline.js";
@@ -62,6 +64,64 @@ describe("node-view completions stay local", () => {
     completeUpscaleGeneration(s, "b/up.jpg", "m", "node");
     expect(s.graphUpscale?.gens?.[0].path).toBe("b/up.jpg");
     expect(s.graphOutputSource).toBe("videogen");
+  });
+});
+
+describe("pending reclaim routes to the node that submitted", () => {
+  const pending = (over: Record<string, unknown> = {}) => ({
+    prompt: "make it night", model: "m", at: "2026-01-01T00:00:00.000Z", ...over,
+  }) as never;
+
+  it("an edit node's reclaimed frame lands on the edit node, not the image node", () => {
+    const s = shot();
+    completePendingImageGeneration(s, "b/reclaimed.jpg", pending({ target: { kind: "editgen", nodeId: "edit0" } }));
+    expect(s.graphEditNodes?.[0].gens?.[0].path).toBe("b/reclaimed.jpg");
+    expect(s.graphImageGens ?? []).toHaveLength(0);
+    expect(s.graphOutputSource).toBe("videogen");
+  });
+
+  it("an image node's reclaimed frame lands on the image node", () => {
+    const s = shot();
+    completePendingImageGeneration(s, "b/reclaimed.jpg", pending({ target: { kind: "imagegen" } }));
+    expect(s.graphImageGens?.[0].path).toBe("b/reclaimed.jpg");
+  });
+
+  it("an upscale node's reclaimed frame lands on the upscale node", () => {
+    const s = shot();
+    completePendingImageGeneration(s, "b/reclaimed.jpg", pending({ target: { kind: "upscale" } }));
+    expect(s.graphUpscale?.gens?.[0].path).toBe("b/reclaimed.jpg");
+    expect(s.graphImageGens ?? []).toHaveLength(0);
+  });
+
+  it("a target whose edit node was deleted falls back to the image node (no output hook)", () => {
+    const s = shot({ graphEditNodes: [] });
+    completePendingImageGeneration(s, "b/reclaimed.jpg", pending({ target: { kind: "editgen", nodeId: "gone" } }));
+    expect(s.graphImageGens?.[0].path).toBe("b/reclaimed.jpg");
+    expect(s.graphOutputSource).toBe("videogen");
+  });
+
+  it("legacy records keep their surface routing (node stays local, classic hooks output)", () => {
+    const nodeSide = shot();
+    completePendingImageGeneration(nodeSide, "b/a.jpg", pending({ surface: "node" }));
+    expect(nodeSide.graphImageGens?.[0].path).toBe("b/a.jpg");
+    expect(nodeSide.graphOutputSource).toBe("videogen");
+    const classic = shot({ graphOutputSource: undefined, graphOutputVideoNodeId: undefined });
+    completePendingImageGeneration(classic, "b/b.jpg", pending());
+    expect(classic.graphOutputSource).toBe("imagegen");
+  });
+});
+
+describe("job rebase field copy", () => {
+  it("propagates deletions (a cleared pending record stays cleared)", () => {
+    const prev = { id: "s1", prompt: "old", pendingImageGen: { historyId: "h" } } as never;
+    const next = { id: "s1", prompt: "old", artwork: "b/new.jpg" } as never;
+    const fresh = { id: "s1", prompt: "edited mid-job", pendingImageGen: { historyId: "h" } } as never;
+    applyJobShotChanges(prev, next, fresh);
+    const f = fresh as unknown as Record<string, unknown>;
+    expect(f.pendingImageGen).toBeUndefined();
+    expect(f.artwork).toBe("b/new.jpg");
+    // Untouched fields keep their fresher on-disk values.
+    expect(f.prompt).toBe("edited mid-job");
   });
 });
 

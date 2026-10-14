@@ -23,7 +23,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { NODE_KIND_REGISTRY, EXTRA_CANVAS_TYPES } from "../src/shared/graph/kinds.js";
-import { CANVAS_TYPE_EQUAL } from "../src/shared/graph/reconcile.js";
+import { CANVAS_TYPE_EQUAL, nodeDataEqual } from "../src/shared/graph/reconcile.js";
 import { nodeDecl } from "../src/shared/graph/ports.js";
 import { nodeKindForId } from "../src/shared/graph/connect.js";
 import { materializeGraph } from "../src/shared/graph/materialize.js";
@@ -118,6 +118,20 @@ describe("node-registration completeness", () => {
       // "copy" would let a stale renderer save overwrite finished takes.
       expect(policy.merge, `${kind} → ${stateField}`).not.toBe("copy");
     }
+  });
+
+  it("editvideo reconciliation notices prompt and model-list changes", () => {
+    const base = {
+      selected: 0, items: [], busy: false, piped: false, pending: false,
+      sourceLabel: null, savedPrompt: "", models: [] as Array<{ id: string }>,
+    };
+    expect(nodeDataEqual("editvideo", base, { ...base })).toBe(true);
+    // The Edit button enables on the prompt text — a saved prompt change
+    // must rebuild the node, or the button stays disabled forever.
+    expect(nodeDataEqual("editvideo", base, { ...base, savedPrompt: "Make it night" })).toBe(false);
+    // The edit-model probe resolves after mount — its arrival must rebuild.
+    expect(nodeDataEqual("editvideo", base, { ...base, models: [{ id: "hf:edit-1" }] })).toBe(false);
+    expect(nodeDataEqual("editvideo", base, { ...base, pending: true })).toBe(false);
   });
 
   it("every declared submit channel exists in the IPC contract", () => {

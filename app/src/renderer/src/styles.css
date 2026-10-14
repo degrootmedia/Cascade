@@ -2264,11 +2264,22 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 8px;
   padding: 8px 12px;
   margin: 12px 0;
-  max-height: 180px;
-  overflow-y: auto;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.78rem;
 }
+.prod-log-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.prod-log-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: none; cursor: pointer; padding: 2px 0;
+  font: inherit; font-size: 12px; color: var(--text-dim);
+}
+.prod-log-toggle:hover { color: var(--text); }
+.prod-log-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.prod-log-caret { transition: transform 0.12s ease; color: currentColor; }
+.prod-log-caret.collapsed { transform: rotate(0deg); }
+.prod-log-caret:not(.collapsed) { transform: rotate(90deg); }
+.prod-log-count { opacity: 0.6; }
+.prod-log-lines { max-height: 180px; overflow-y: auto; margin-top: 6px; }
 .prod-log-line { color: var(--text-dim); padding: 1px 0; word-break: break-word; }
 .prod-log-line.error { color: var(--danger); }
 .prod-log-line.done { color: var(--ok); }
@@ -3129,6 +3140,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 /* Settings sits above every workspace overlay (graph/video/lightbox). */
 .modal-backdrop.top-layer { z-index: 200; }
+/* Destructive confirms sit above every workspace overlay (graph 90, video
+   100, lightbox 120, history 250) so a delete warning is never buried. */
+.modal-backdrop.confirm-layer { z-index: 300; }
 .modal {
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -4619,9 +4633,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-tools-item:active { cursor: grabbing; }
 .prod-graph-tools-icon { color: var(--accent); flex-shrink: 0; }
 .prod-graph-tools-label { font-size: 0.72rem; color: var(--text); flex: 1; min-width: 0; }
-.prod-graph-tools-item.on-canvas { opacity: 0.55; cursor: default; }
-.prod-graph-tools-item.on-canvas:active { cursor: default; }
-.prod-graph-tools-item.on-canvas .prod-graph-tools-icon { color: var(--text-dim); }
+/* Tool tiles are never ghosted for being on the canvas: multi-instance
+   nodes can always be added again, and the count badge shows presence. */
 .prod-graph-tools-item.disabled { opacity: 0.4; cursor: not-allowed; }
 .prod-graph-tools-item.disabled:active { cursor: not-allowed; }
 .prod-graph-tools-item.disabled .prod-graph-tools-icon { color: var(--text-dim); }

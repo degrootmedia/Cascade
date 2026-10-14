@@ -961,18 +961,20 @@ private videoRefsAssign = videoRefsAssign;
   private recordPendingImage(
     shot: ProductionShot | undefined,
     rec: { historyId?: string; url?: string; prompt: string; model: string; resolution?: string; aspectRatio?: string }
-  ): void {
-    if (!shot) return;
+  ): PendingImageGen | undefined {
+    if (!shot) return undefined;
     shot.pendingImageGen = { ...rec, at: new Date().toISOString() };
+    return shot.pendingImageGen;
   }
 
   /** Record an OpenArt video job that outlived the generating call on the
    *  shot, so the finished clip can be fetched later instead of re-paid. A
    *  fresh submission or a successful fetch clears it. The call site tags
    *  `target` (the provider doesn't know which node asked). */
-  private recordPendingVideo(shot: ProductionShot | undefined, rec: Omit<PendingVideoGen, "at" | "target">): void {
-    if (!shot) return;
+  private recordPendingVideo(shot: ProductionShot | undefined, rec: Omit<PendingVideoGen, "at" | "target">): PendingVideoGen | undefined {
+    if (!shot) return undefined;
     shot.pendingVideoGen = { ...rec, at: new Date().toISOString() };
+    return shot.pendingVideoGen;
   }
 
   /**
@@ -1188,7 +1190,7 @@ private videoRefsAssign = videoRefsAssign;
     // the rest of the run); null when the lookup/create fails.
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen) => void): Promise<Buffer> => {
+    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
       // A fresh submission supersedes any earlier pending job — the new
       // historyId is the one a future recheck must poll.
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
@@ -1196,10 +1198,29 @@ private videoRefsAssign = videoRefsAssign;
       /** Persist an orphaned job both on the shot (the storyboard flow) and,
        *  when the caller supplied a sink, wherever it stores pending jobs (a
        *  style frame, a reference, …). */
+      let pendingRecorded = false;
+      let sinkKey = "";
       const recordPending = (rec: Omit<PendingImageGen, "at">): void => {
+        pendingRecorded = true;
         const full: PendingImageGen = { ...rec, at: new Date().toISOString() };
         this.recordPendingImage(shot, full);
-        onPending?.(full);
+        // Notify on receipt changes only: the orphan re-report at the wait
+        // names the same job the submit already reported.
+        const key = `${full.historyId ?? ""}|${full.url ?? ""}`;
+        if (key !== sinkKey) {
+          sinkKey = key;
+          onPending?.(full);
+        }
+      };
+      /** The receipt is spent (job done or dead): drop it in memory and tell
+       *  the persistence sink, so a just-saved record can't strand the shot. */
+      const clearPending = (): void => {
+        if (shot?.pendingImageGen) delete shot.pendingImageGen;
+        if (pendingRecorded) {
+          pendingRecorded = false;
+          sinkKey = "";
+          onPending?.(null);
+        }
       };
 
       // Resolve the dropdown choice (incl. "auto") fresh per run, so edits to
@@ -1279,6 +1300,10 @@ private videoRefsAssign = videoRefsAssign;
       let buffer: Buffer | null = null;
       const historyId = this.openArtHistoryId(text);
       if (historyId) {
+        // Record the receipt NOW, before the wait: if the app closes (or
+        // crashes) mid-wait, the persisted record still names the job and a
+        // recheck can download the finished frame instead of re-paying.
+        recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
         try {
           const done = await this.waitOpenArtImage(historyId, IMAGE_WAIT_DEADLINE_MS, exclude);
           if (done) buffer = done;
@@ -1292,6 +1317,8 @@ private videoRefsAssign = videoRefsAssign;
           // echoed references (notably the style frame) the wait did.
           if (!(e instanceof OpenArtImageFailedError)) {
             recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
+          } else {
+            clearPending();
           }
           throw e;
         }
@@ -1324,6 +1351,7 @@ private videoRefsAssign = videoRefsAssign;
         buffer = downloaded;
       }
 
+      clearPending();
       this.fireGeneration(genMeta);
       return buffer;
     };
@@ -1587,6 +1615,25 @@ private videoRefsAssign = videoRefsAssign;
     // it so a failed download can be retried by a recheck.
     const directUrl = text.match(VIDEO_URL_RX)?.[0];
 
+    // Record the receipt NOW (see the image path): a close or crash during
+    // the long video wait must not lose the job id a Fetch would poll.
+    let videoPendingRecorded = false;
+    const videoPendingFields = {
+      ...(historyId ? { historyId } : {}),
+      ...(directUrl ? { url: directUrl } : {}),
+      prompt: opts.prompt,
+      model: modelId ?? "auto",
+      resolution: opts.resolution || "",
+      durationSec: opts.durationSec,
+      ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+      ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
+    };
+    if (historyId || directUrl) {
+      const full = this.recordPendingVideo(shot, videoPendingFields);
+      videoPendingRecorded = true;
+      if (full) opts.onPending?.(full);
+    }
+
     const done = await (async (): Promise<{ buf: Buffer; ext: string }> => {
       try {
         if (images.length) return { buf: images[0], ext: "mp4" };
@@ -1609,16 +1656,12 @@ private videoRefsAssign = videoRefsAssign;
         // CANCELLED job has nothing to reclaim, and a job with neither an id
         // nor a URL can't be re-polled, so neither is recorded.
         if (!(e instanceof OpenArtVideoFailedError) && (historyId || directUrl)) {
-          this.recordPendingVideo(shot, {
-            ...(historyId ? { historyId } : {}),
-            ...(directUrl ? { url: directUrl } : {}),
-            prompt: opts.prompt,
-            model: modelId ?? "auto",
-            resolution: opts.resolution || "",
-            durationSec: opts.durationSec,
-            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
-            ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
-          });
+          const full = this.recordPendingVideo(shot, videoPendingFields);
+          if (full) opts.onPending?.(full);
+        } else if (e instanceof OpenArtVideoFailedError && videoPendingRecorded) {
+          if (shot.pendingVideoGen) delete shot.pendingVideoGen;
+          videoPendingRecorded = false;
+          opts.onPending?.(null);
         }
         throw e;
       }
@@ -1626,6 +1669,9 @@ private videoRefsAssign = videoRefsAssign;
 
     const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
     const rel = writeShotVideo(p, shot, done.buf, safeExt);
+
+    if (shot.pendingVideoGen) delete shot.pendingVideoGen;
+    if (videoPendingRecorded) opts.onPending?.(null);
 
     this.fireGeneration({
       kind: "video",

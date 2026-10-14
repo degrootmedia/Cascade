@@ -179,6 +179,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [refiningStyleId, setRefiningStyleId] = useState<string | null>(null);
   // step 2: generating a style from an imported/pasted image (spinner on buttons)
   const [styleImgBusy, setStyleImgBusy] = useState(false);
+  // Ref mirror of styleImgBusy for re-entry guards inside async flows, where
+  // the render-scope state value is frozen at call time.
+  const styleImgBusyRef = useRef(false);
+  const markStyleImgBusy = useCallback((v: boolean) => {
+    styleImgBusyRef.current = v;
+    setStyleImgBusy(v);
+  }, []);
   // step 2: which style card is generating/uploading its frame (look anchor)
   const [styleFrameBusy, setStyleFrameBusy] = useState<string | null>(null);
   /** Style ids whose pending style-frame job is being rechecked. */
@@ -1426,8 +1433,23 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    * see images.
    */
   async function styleFromImageDataUrl(dataUrl: string) {
-    if (!prod || styleImgBusy) return;
-    if ((prod.styles?.length ?? 0) >= MAX_STYLES) {
+    if (!prodRef.current || styleImgBusyRef.current) return;
+    markStyleImgBusy(true);
+    try {
+      await distillStyleFromImage(dataUrl);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      markStyleImgBusy(false);
+    }
+  }
+
+  /** The style-from-image work itself; the caller owns the busy flag so the
+   *  "From image…" button can mark it before the file picker even opens. */
+  async function distillStyleFromImage(dataUrl: string) {
+    const start = prodRef.current;
+    if (!start) return;
+    if ((start.styles?.length ?? 0) >= MAX_STYLES) {
       setErr(`Style list is full — remove a style before adding one from an image.`);
       return;
     }
@@ -1443,17 +1465,19 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         return;
       }
     } catch { /* fall through — the generation call reports its own errors */ }
-    setStyleImgBusy(true);
-    try {
-      const style = await window.cascade.styleFromImage(prod.meta.id, dataUrl);
-      saveField({
-        styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: style.name, prompt: style.prompt, ...(style.imagePath ? { imagePath: style.imagePath, frameSource: "reference" as const } : {}) }],
-      });
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    } finally {
-      setStyleImgBusy(false);
+    const style = await window.cascade.styleFromImage(start.meta.id, dataUrl);
+    // Append against the freshest production (never the render-scope one):
+    // the LLM call above can take seconds, during which styles may have
+    // been edited — or another production opened.
+    const current = prodRef.current;
+    if (!current || current.meta.id !== start.meta.id) return;
+    if ((current.styles?.length ?? 0) >= MAX_STYLES) {
+      setErr(`Style list is full — remove a style before adding one from an image.`);
+      return;
     }
+    saveField({
+      styles: [...(current.styles ?? []), { id: uid("style"), index: (current.styles?.length ?? 0) + 1, name: style.name, prompt: style.prompt, ...(style.imagePath ? { imagePath: style.imagePath, frameSource: "reference" as const } : {}) }],
+    });
   }
 
   /** Step 2: generate a style frame (look plate) for one style via IPC,
@@ -1506,14 +1530,27 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 2: attach a picked file as one style's frame. */
+  /** Step 2: attach a picked file as one style's frame. The busy flag is
+   *  marked before the picker opens so the button shows it is working
+   *  through the picker and the attach. */
   async function uploadStyleFrame(styleId: string) {
-    if (!prod || styleFrameBusy) return;
-    const dataUrl = await window.cascade.pickReferenceImage();
-    if (!dataUrl) return;
+    if (!prodRef.current || styleFrameBusy) return;
     setStyleFrameBusy(styleId);
     setErr(null);
-    apply(window.cascade.setStyleFrame(prod.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
+    let dataUrl: string | null;
+    try {
+      dataUrl = await window.cascade.pickReferenceImage();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+      setStyleFrameBusy(null);
+      return;
+    }
+    const current = prodRef.current;
+    if (!dataUrl || !current) {
+      setStyleFrameBusy(null);
+      return;
+    }
+    apply(window.cascade.setStyleFrame(current.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
   }
 
   /** Step 2: drop files onto a style card to set its frame. */
@@ -1534,12 +1571,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 2: pick an image file and generate a style from it. */
+  /** Step 2: pick an image file and generate a style from it. The busy flag
+   *  is marked before the picker opens so the button shows it is working
+   *  through the picker, the model preflight, and the LLM call. */
   async function pickStyleImage() {
-    if (!prod || styleImgBusy) return;
-    const dataUrl = await window.cascade.pickReferenceImage();
-    if (!dataUrl) return;
-    await styleFromImageDataUrl(dataUrl);
+    if (!prodRef.current || styleImgBusyRef.current) return;
+    markStyleImgBusy(true);
+    setErr(null);
+    try {
+      const dataUrl = await window.cascade.pickReferenceImage();
+      if (!dataUrl) return;
+      await distillStyleFromImage(dataUrl);
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      markStyleImgBusy(false);
+    }
   }
 
   /** Next auto-generated reference name (Ref-001, Ref-002, …). */
@@ -2848,7 +2895,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: run one edit-video node (mandatory source clip +
    *  prompt + references). Its source comes from the node's wiring. */
-  async function runEditVideoNode(shotId: string, nodeId: string, model: string, prompt: string, params?: Record<string, string>) {
+  async function runEditVideoNode(shotId: string, nodeId: string, model: string, resolution: string, durationSec: number, prompt: string, params?: Record<string, string>) {
     const key = `${shotId}:${nodeId}`;
     if (!prod || nodeEditVideoBusyIds.has(key)) return;
     setNodeEditVideoBusyIds((prev) => new Set(prev).add(key));
@@ -2882,7 +2929,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         nodeId,
         prompt: editVideoPrompt,
         model,
-        resolution: node?.resolution ?? "",
+        resolution: resolution || node?.resolution || "",
+        durationSec: durationSec > 0 ? durationSec : (node?.durationSec ?? 0),
         sourcePath,
         ...(sourceRefId ? { sourceRefId } : {}),
         refIds: node?.refIds ?? [],
@@ -3994,7 +4042,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                             onDrop={(e) => { e.preventDefault(); void dropStyleFrame(s.id, e.dataTransfer.files); }}
                             title="Use your own image as this style's frame — kept as the look anchor"
                           >
-                            Upload frame
+                            {styleFrameBusy === s.id ? "Uploading…" : "Upload frame"}
                           </button>
                           {s.imagePath && (
                             <button
@@ -4510,7 +4558,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onRunVideoGen={(nodeId, model, resolution, durationSec, params) => graphShotId ? runVideoGenNode(graphShotId, nodeId, model, resolution, durationSec, params) : Promise.resolve()}
                   onUpgradeDraft={(nodeId, rel) => graphShotId ? upgradeDraftVideo(graphShotId, nodeId, rel) : Promise.resolve()}
                   onRunEditGen={(nodeId, model, resolution, params) => graphShotId ? runEditGenNode(graphShotId, nodeId, model, resolution, params) : Promise.resolve()}
-                  onRunEditVideo={(nodeId, model, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, nodeId, model, editPrompt, params) : Promise.resolve()}
+                  onRunEditVideo={(nodeId, model, resolution, durationSec, editPrompt, params) => graphShotId ? runEditVideoNode(graphShotId, nodeId, model, resolution, durationSec, editPrompt, params) : Promise.resolve()}
                   onRunCameraGrid={(opts) => graphShotId ? runCameraGridGen(graphShotId, opts) : Promise.resolve()}
                   onImportCameraGridImage={(source) => graphShotId ? importCameraGridImage(graphShotId, source) : Promise.resolve(null)}
                   onExportCameraGrid={(req) => exportCameraGrid(req)}
@@ -4521,6 +4569,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onUnstitchTween={() => graphShotId ? unstitchTweenShot(graphShotId) : Promise.resolve()}
                   onFetchVideo={() => graphShotId ? recheckVideo(graphShotId) : Promise.resolve()}
                   imageGenBusy={graphShotId ? nodeImageBusyAll.has(graphShotId) : false}
+                  cameraGridBusy={graphShotId ? (remoteBusy?.cameraGrid ?? []).includes(graphShotId) : false}
+                  upscaleBusy={graphShotId ? (remoteBusy?.upscale ?? []).includes(graphShotId) : false}
                   videoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => nodeVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => n.mode === "edit" && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}

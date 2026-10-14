@@ -226,6 +226,22 @@ describe("video / edit / tween / edit-video wires", () => {
     expect(edgeIds(g)).toContain("e-editvideo-out");
   });
 
+  it("direct generation→edit-video-prompt wires rebuild from refIds sentinels (no saved reference)", () => {
+    const g = stable(
+      materializeGraph(
+        shot({
+          graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "Grade it", refIds: ["imagegen", "editgen:edit0"] }],
+          graphEditNodes: [{ id: "edit0", prompt: "Fix" }],
+        }),
+        REFS
+      )
+    );
+    expect(edgeIds(g)).toContain("e-imagegen-editvideoprompt-0");
+    expect(edgeIds(g)).toContain("e-editgen:edit0-editvideoprompt-1");
+    const e0 = g.edges.find((e) => e.id === "e-imagegen-editvideoprompt-0")!;
+    expect(e0.to).toEqual({ node: "editvideoprompt", port: "in-ref-0" });
+  });
+
   it("reference output feed", () => {
     const g = stable(materializeGraph(shot({ prompt: "@[Gondola]", graphOutputSource: "ref", graphOutputRefId: "r1" }), REFS));
     expect(edgeIds(g)).toContain("e-ref-out");

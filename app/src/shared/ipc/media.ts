@@ -5,6 +5,8 @@
  * `../shared/ipc.js` import paths are unchanged.
  */
 
+import type { PendingVideoGen } from "./graph.js";
+
 /** Which vendor serves image/video generation (global setting).
  *  `higgsfield-cli` is the Higgsfield account driven through the local
  *  `higgsfield` CLI binary; its model ids are namespaced
@@ -302,6 +304,13 @@ export interface VideoGenOptions {
    * vendor reuses the draft job's inputs.
    */
   draftJobId?: string;
+  /**
+   * Pending-job receipt hook: fired with the vendor job's record the moment
+   * it is submitted (so the caller can persist it — a crash or quit during
+   * the wait can then reclaim the finished clip instead of losing it), again
+   * if the job orphans at the wait, and with `null` when it completes.
+   */
+  onPending?: (rec: PendingVideoGen | null) => void;
 }
 
 /** Per-config credit quote for one generation (Higgsfield CLI `generate

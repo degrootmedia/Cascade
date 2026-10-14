@@ -37,6 +37,7 @@ export const GRAPH_SHOT_PATCH_FIELDS = [
   "graphOutputSource",
   "graphOutputRefId",
   "graphStyleConnected",
+  "styleNone",
   "graphImageToVideo",
   "graphEditToVideo",
   "graphVideoSourceRefId",

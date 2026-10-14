@@ -664,6 +664,46 @@ describe("applyRendererState", () => {
     expect(merged.scenes[0].shots[1].graphCameraGrid?.sheetPath).toBe("references/grids/g.png");
   });
 
+  it("camera-grid geometry follows the renderer size pick", () => {
+    const withGrid = (grid: unknown) => baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "", graphCameraGrid: grid } as never] }],
+    });
+    const fresh = withGrid({
+      cols: 4, rows: 4, sheetPath: "references/grids/g.png", sheetAt: "2026-01-02T00:00:00.000Z",
+      generation: { provider: "higgsfield", model: "m", prompt: "p" },
+    } as CameraGridData);
+    // Same sheet timestamp (the pick was made against the current sheet),
+    // new geometry, panels cleared so they re-derive.
+    const incoming = withGrid({
+      cols: 3, rows: 3, sheetPath: "references/grids/g.png", sheetAt: "2026-01-02T00:00:00.000Z",
+    } as CameraGridData);
+    const merged = applyRendererState(fresh, incoming);
+    const grid = merged.scenes[0].shots[0].graphCameraGrid;
+    expect(grid?.cols).toBe(3);
+    expect(grid?.rows).toBe(3);
+    // Main still owns the generation record and the sheet itself.
+    expect(grid?.generation?.model).toBe("m");
+    expect(grid?.sheetPath).toBe("references/grids/g.png");
+  });
+
+  it("a stale pre-generation snapshot cannot revert the generated camera-grid geometry", () => {
+    const withGrid = (grid: unknown) => baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "", graphCameraGrid: grid } as never] }],
+    });
+    const fresh = withGrid({
+      cols: 3, rows: 3, sheetPath: "references/grids/new.png", sheetAt: "2026-01-03T00:00:00.000Z",
+      generation: { provider: "higgsfield", model: "m", prompt: "p" },
+    } as CameraGridData);
+    const incoming = withGrid({
+      cols: 4, rows: 4, sheetPath: "references/grids/old.png", sheetAt: "2026-01-01T00:00:00.000Z",
+    } as CameraGridData);
+    const merged = applyRendererState(fresh, incoming);
+    const grid = merged.scenes[0].shots[0].graphCameraGrid;
+    expect(grid?.cols).toBe(3);
+    expect(grid?.rows).toBe(3);
+    expect(grid?.sheetPath).toBe("references/grids/new.png");
+  });
+
   it("overlays tween block prompts by keyframe pair and keeps fresh histories", () => {
     const block = {
       id: "tw0",

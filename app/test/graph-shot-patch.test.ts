@@ -68,6 +68,14 @@ describe("graph shot patch allow-list", () => {
     }
   });
 
+  it("styleNone rides the narrow command (graph style detach must persist)", () => {
+    expect(pickGraphShotPatch({ styleNone: true })).toEqual({ styleNone: true });
+    const merged = applyGraphShotPatch(freshShot(), { styleNone: true } as Partial<ProductionShot>);
+    expect(merged.styleNone).toBe(true);
+    const restored = applyGraphShotPatch(merged, { styleNone: false } as Partial<ProductionShot>);
+    expect(restored.styleNone).toBe(false);
+  });
+
   it("pickGraphShotPatch drops non-listed keys and keeps explicit clears", () => {
     const picked = pickGraphShotPatch({ graphOutputSource: undefined, artwork: "x.jpg" });
     expect(Object.keys(picked)).toEqual(["graphOutputSource"]);

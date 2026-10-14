@@ -995,11 +995,11 @@ export interface CascadeApi {
   generationCost(req: GenerationCostRequest): Promise<number | null>;
   /** Step 3 node graph: edit one video (mandatory video source + prompt +
    *  references) and store the result on the shot's edit-video node. */
-  generateEditVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  generateEditVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /** Shot sequence canvas: edit one video on one of its edit-mode video nodes
    *  (mandatory source clip + prompt + references). The result is stored on the
    *  sequence's video node take history. */
-  generateSequenceEditVideo(productionId: string, sequenceId: string, opts: { nodeId?: string; prompt: string; model: string; resolution?: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  generateSequenceEditVideo(productionId: string, sequenceId: string, opts: { nodeId?: string; prompt: string; model: string; resolution?: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
   /** Step 3: Magic Prompt — generate content-only prompts for the full storyboard (enables magic). */
   generateMagicPrompts(productionId: string): Promise<Production>;
   /** Step 3: Magic Prompt — regenerate ONE shot's content prompt, replacing only that entry. */

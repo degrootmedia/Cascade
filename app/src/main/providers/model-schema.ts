@@ -84,7 +84,7 @@ const ADVANCED_PARAMS = new Set([
 
 /** Flags the image/video emission blocks already own (dedicated controls). */
 export const OWNED_FLAGS = new Set([
-  "prompt", "resolution", "res", "quality",
+  "prompt", "resolution", "resolutiontier", "resolution_tier", "res", "quality",
   "duration", "length", "seconds",
   "aspect_ratio", "aspectratio",
 ]);

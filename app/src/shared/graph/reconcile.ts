@@ -104,8 +104,14 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     sameGenItems(a.items, b.items) &&
     (a.busy as boolean) === (b.busy as boolean) &&
     (a.piped as boolean) === (b.piped as boolean) &&
+    (a.pending as boolean) === (b.pending as boolean) &&
+    (a.savedPrompt as string) === (b.savedPrompt as string) &&
+    (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) &&
+    (a.savedDurationSec as number | undefined) === (b.savedDurationSec as number | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.sourceLabel as string | null) === (b.sourceLabel as string | null),
   cameraGrid: (a, b) =>
+    (a.busy as boolean | undefined) === (b.busy as boolean | undefined) &&
     (a.sheetUrl as string | null) === (b.sheetUrl as string | null) &&
     (a.sheetPath as string | undefined) === (b.sheetPath as string | undefined) &&
     (a.cols as number) === (b.cols as number) &&
@@ -118,6 +124,7 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     JSON.stringify(a.refIds) === JSON.stringify(b.refIds) &&
     (a.models as unknown[]).length === (b.models as unknown[]).length,
   upscale: (a, b) =>
+    (a.busy as boolean | undefined) === (b.busy as boolean | undefined) &&
     (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
     (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) &&
     JSON.stringify(a.savedParams ?? {}) === JSON.stringify(b.savedParams ?? {}) &&

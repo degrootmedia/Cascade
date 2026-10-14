@@ -69,7 +69,7 @@ export function ConfirmHost() {
 
   return createPortal(
     <div
-      className="modal-backdrop"
+      className="modal-backdrop confirm-layer"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) settle(false);
       }}

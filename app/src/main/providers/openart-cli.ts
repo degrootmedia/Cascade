@@ -462,10 +462,12 @@ export class OpenArtCliProvider implements MediaProvider {
     createArgs: string[],
     video: boolean,
     timeoutMs: number,
-    onStatus?: (status: string) => void
+    onStatus?: (status: string) => void,
+    onSubmitted?: (historyId: string) => void
   ): Promise<{ buf: Buffer; ext: string; historyId: string }> {
     const createOut = await this.cli(createArgs, 120_000);
     const historyId = extractHistoryId(createOut);
+    if (historyId) onSubmitted?.(historyId);
     if (!historyId) {
       throw new Error(
         `The OpenArt CLI returned no creation id (${createOut.slice(0, 200) || "empty reply"}) — the submission may not have gone through and no credits should have been spent.`
@@ -546,7 +548,7 @@ export class OpenArtCliProvider implements MediaProvider {
 
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen) => void): Promise<Buffer> => {
+    return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let models: OpenArtModelChoice[] = [];
@@ -592,16 +594,32 @@ export class OpenArtCliProvider implements MediaProvider {
           shotId: shot?.id,
         };
         let done: { buf: Buffer; ext: string; historyId: string };
+        let submitted = false;
+        const submitRec = (historyId: string): PendingImageGen => ({
+          historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, resolution: cfgUsed.resolution, aspectRatio, at: new Date().toISOString(),
+        });
         try {
-          done = await this.createAndWait(args, false, IMAGE_WAIT_TIMEOUT_MS);
-        } catch (e) {
-          if (e instanceof OpenArtCliPendingError) {
-            const rec: PendingImageGen = { historyId: e.historyId, prompt, model: `${OPENART_CLI_ID_PREFIX}${modelId}`, resolution: cfgUsed.resolution, aspectRatio, at: new Date().toISOString() };
+          done = await this.createAndWait(args, false, IMAGE_WAIT_TIMEOUT_MS, undefined, (historyId) => {
+            // Record the receipt before the wait (see the MCP transport): a
+            // close or crash mid-wait can reclaim it instead of re-paying.
+            submitted = true;
+            const rec = submitRec(historyId);
             if (shot) shot.pendingImageGen = rec;
             onPending?.(rec);
+          });
+        } catch (e) {
+          if (e instanceof OpenArtCliPendingError) {
+            const rec = submitRec(e.historyId);
+            if (shot) shot.pendingImageGen = rec;
+            if (!submitted) onPending?.(rec);
+          } else if (submitted && /failed|cancel/i.test(e instanceof Error ? e.message : "")) {
+            if (shot?.pendingImageGen) delete shot.pendingImageGen;
+            onPending?.(null);
           }
           throw e;
         }
+        if (shot?.pendingImageGen) delete shot.pendingImageGen;
+        if (submitted) onPending?.(null);
         this.fireGeneration(genMeta);
         return done.buf;
       } finally {
@@ -755,28 +773,43 @@ export class OpenArtCliProvider implements MediaProvider {
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (OpenArt CLI)…`);
       let done: { buf: Buffer; ext: string; historyId: string };
+      let videoSubmitted = false;
+      const videoRec = (historyId: string, url?: string): PendingVideoGen => ({
+        historyId,
+        ...(url ? { url } : {}),
+        prompt: opts.prompt,
+        model: `${OPENART_CLI_ID_PREFIX}${modelId}`,
+        resolution: opts.resolution || "",
+        durationSec: Math.round(opts.durationSec) || 5,
+        ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+        ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
+        at: new Date().toISOString(),
+      });
       try {
         done = await this.createAndWait(args, true, VIDEO_WAIT_TIMEOUT_MS, (status) =>
-          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info")
+          emit(`Shot ${shot.number}: video ${status.toLowerCase()}… still rendering.`, "info"),
+          (historyId) => {
+            videoSubmitted = true;
+            const rec = videoRec(historyId);
+            shot.pendingVideoGen = rec;
+            opts.onPending?.(rec);
+          }
         );
       } catch (e) {
         // The job keeps rendering (or finished but couldn't be downloaded) —
         // record it as pending so the clip can be fetched instead of re-paid.
         if (e instanceof OpenArtCliPendingError) {
-          shot.pendingVideoGen = {
-            historyId: e.historyId,
-            ...(e.url ? { url: e.url } : {}),
-            prompt: opts.prompt,
-            model: `${OPENART_CLI_ID_PREFIX}${modelId}`,
-            resolution: opts.resolution || "",
-            durationSec: Math.round(opts.durationSec) || 5,
-            ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
-            ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
-            at: new Date().toISOString(),
-          };
+          const rec = videoRec(e.historyId, e.url);
+          shot.pendingVideoGen = rec;
+          if (!videoSubmitted) opts.onPending?.(rec);
+        } else if (videoSubmitted && /failed|cancel/i.test(e instanceof Error ? e.message : "")) {
+          if (shot.pendingVideoGen) delete shot.pendingVideoGen;
+          opts.onPending?.(null);
         }
         throw e;
       }
+      if (shot.pendingVideoGen) delete shot.pendingVideoGen;
+      if (videoSubmitted) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);

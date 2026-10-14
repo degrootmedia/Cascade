@@ -97,6 +97,8 @@ export interface SequenceEditVideoGenOpts {
   nodeId: string;
   prompt: string;
   model: string;
+  resolution: string;
+  durationSec: number;
   sourcePath?: string;
   sourceRefId?: string;
   refIds: string[];
@@ -235,7 +237,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
 
   /** Render one edit-video node's prompt and resolve the source clip it edits
    *  (a wired sequence take, a video reference, or the sequence's own take). */
-  const runEditVideo = useCallback(async (nodeId: string, model: string, prompt: string, params?: GenParams) => {
+  const runEditVideo = useCallback(async (nodeId: string, model: string, resolution: string, durationSec: number, prompt: string, params?: GenParams) => {
     const node = (seq.graph?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
     const src = node?.source;
     let sourcePath: string | undefined;
@@ -255,6 +257,8 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       nodeId,
       prompt: rendered,
       model,
+      resolution: resolution || node?.resolution || "",
+      durationSec: durationSec > 0 ? durationSec : (node?.durationSec ?? 0),
       ...(sourcePath ? { sourcePath } : {}),
       ...(sourceRefId ? { sourceRefId } : {}),
       refIds: node?.refIds ?? [],

@@ -546,8 +546,8 @@ describe("node-graph tool panel", () => {
     expect(host.querySelector(".prod-graph-node.prod-graph-editgen")).toBeTruthy();
     expect(host.querySelector(".prod-graph-node.prod-graph-editprompt")).toBeTruthy();
     // Only the video tile reports "on canvas" — edit nodes count as a list, the
-    // tile always adds another.
-    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(1);
+    // tile always adds another, and no tile ever ghosts for being on canvas.
+    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
@@ -596,7 +596,7 @@ describe("node-graph tool panel", () => {
     // The prompt node sits to the LEFT of the gen node, horizontally aligned.
     expect(pos.videoprompt.x).toBeLessThan(pos.videogen.x);
     expect(pos.videoprompt.y).toBe(pos.videogen.y);
-    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(1);
+    expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 
     // Unused → removable (select + Delete); returns the pair to the panel.
     selectNode(host, ".prod-graph-node.prod-graph-videogen");

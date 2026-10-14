@@ -279,7 +279,7 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     // Generation outputs can wire directly into a video prompt's reference
     // sockets (no saved reference): the take resolves at submit time from the
     // video node's gen-ref sentinels. Same positional scheme as ref→prompt.
-    if (parseVideoPromptNode(target) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
+    if ((parseVideoPromptNode(target) !== null || parseEditVideoPromptNode(target) !== null) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
       const slot = /^in-ref-(\d+)$/.exec(handle);
       if (slot) {
         const idx = Number(slot[1]);
@@ -321,7 +321,7 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     // Generation outputs can wire directly into a video prompt's reference
     // sockets (no saved reference): the take resolves at submit time from the
     // video node's gen-ref sentinels. Same positional scheme as ref→prompt.
-    if (parseVideoPromptNode(target) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
+    if ((parseVideoPromptNode(target) !== null || parseEditVideoPromptNode(target) !== null) && (handle === "in-ref-open" || /^in-ref-\d+$/.test(handle))) {
       const slot = /^in-ref-(\d+)$/.exec(handle);
       if (slot) {
         const idx = Number(slot[1]);
@@ -380,12 +380,15 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
   return null;
 }
 
-/** Insert an edge, first dropping replaced/conflicting edges. Idempotent by edge id. */
+/** Insert an edge, first dropping replaced/conflicting edges. Idempotent by edge id.
+ *  A reference-wire insert re-compacts its prompt node's sockets so an append
+ *  can never land on an occupied socket or past a gap. */
 export function applyConnection(graph: Graph, op: ConnectionEdge): Graph {
   const dropped = new Set(op.dropIds);
   const edges = graph.edges.filter((e) => !dropped.has(e.id) && e.id !== op.edge.id);
   edges.push(op.edge);
-  return { ...graph, edges };
+  const next = { ...graph, edges };
+  return REF_SOCKET_RE.test(op.edge.to.port) ? compactPromptRefEdges(next, op.edge.to.node) : next;
 }
 
 /** A generator's fixed prompt pipe: the prompt node it reads from and the
@@ -460,9 +463,46 @@ export function setBrandEdge(graph: Graph, target: PromptNodeTarget, attached: b
   return { ...graph, edges };
 }
 
-/** Drop one edge by id (disconnect / Delete key). */
+/**
+ * Renumber one prompt node's positional reference sockets (`in-ref-N`) to a
+ * compact 0..n-1 run, preserving wire order (socket index, then stored
+ * order) and rewriting each edge's port + canonical id. The sockets are
+ * positional — socket i IS the i-th prompt tag — so any gap or collision
+ * (left by removing a middle wire, or by an append that counted edges past
+ * a gap) points a wire at the wrong tag or at a socket that no longer
+ * exists, which reads on canvas as other wires unplugging themselves.
+ * Every ref-edge mutation funnels through here so the invariant holds by
+ * construction. Returns the same graph when already compact.
+ */
+export function compactPromptRefEdges(graph: Graph, targetNode: string): Graph {
+  const target = canonicalNodeId(targetNode);
+  const mine: { edge: GraphEdge; idx: number; order: number }[] = [];
+  graph.edges.forEach((edge, order) => {
+    if (edge.to.node !== target) return;
+    const m = REF_SOCKET_RE.exec(edge.to.port);
+    if (m) mine.push({ edge, idx: Number(m[1]), order });
+  });
+  if (mine.length === 0) return graph;
+  const sorted = [...mine].sort((a, b) => a.idx - b.idx || a.order - b.order);
+  const renumbered = new Map<number, GraphEdge>();
+  let changed = false;
+  sorted.forEach((entry, i) => {
+    const port = `in-ref-${i}`;
+    const id = `e-${entry.edge.from.node}-${target}-${i}`;
+    if (entry.edge.to.port !== port || entry.edge.id !== id) changed = true;
+    renumbered.set(entry.order, { ...entry.edge, id, to: { ...entry.edge.to, port } });
+  });
+  if (!changed) return graph;
+  return { ...graph, edges: graph.edges.map((edge, order) => renumbered.get(order) ?? edge) };
+}
+
+/** Drop one edge by id (disconnect / Delete key). Dropping a reference wire
+ *  re-compacts its prompt node's sockets so the wires after it shift onto
+ *  the tags they belong to instead of pointing past the end. */
 export function removeGraphEdge(graph: Graph, edgeId: string): Graph {
-  return { ...graph, edges: graph.edges.filter((e) => e.id !== edgeId) };
+  const removed = graph.edges.find((e) => e.id === edgeId);
+  const next = { ...graph, edges: graph.edges.filter((e) => e.id !== edgeId) };
+  return removed && REF_SOCKET_RE.test(removed.to.port) ? compactPromptRefEdges(next, removed.to.node) : next;
 }
 
 /** Canvas handle a drag-off disconnect starts from (onConnectEnd fromHandle). */
@@ -486,7 +526,9 @@ export function graphEdgesForDetach(
 ): Graph | null {
   const dropInto = (node: string, port: string): Graph | null => {
     const hit = graph.edges.some((e) => e.to.node === node && e.to.port === port);
-    return hit ? { ...graph, edges: graph.edges.filter((e) => !(e.to.node === node && e.to.port === port)) } : null;
+    if (!hit) return null;
+    const next = { ...graph, edges: graph.edges.filter((e) => !(e.to.node === node && e.to.port === port)) };
+    return REF_SOCKET_RE.test(port) ? compactPromptRefEdges(next, node) : next;
   };
 
   if (from.type !== "target") return null;
@@ -613,11 +655,19 @@ export function addGraphNode(graph: Graph, node: GraphNode): Graph {
   return { ...graph, nodes: [...graph.nodes, node] };
 }
 
-/** Remove a node and every incident edge (node Delete). */
+/** Remove a node and every incident edge (node Delete). Prompt nodes that
+ *  lost a reference wire to the removal are re-compacted. */
 export function removeGraphNode(graph: Graph, nodeId: string): Graph {
-  return {
+  const affected = new Set(
+    graph.edges
+      .filter((e) => e.from.node === nodeId && REF_SOCKET_RE.test(e.to.port))
+      .map((e) => e.to.node)
+  );
+  let next: Graph = {
     ...graph,
     nodes: graph.nodes.filter((n) => n.id !== nodeId),
     edges: graph.edges.filter((e) => e.from.node !== nodeId && e.to.node !== nodeId),
   };
+  for (const target of affected) next = compactPromptRefEdges(next, target);
+  return next;
 }

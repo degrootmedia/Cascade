@@ -47,6 +47,11 @@ export interface CanvasBusySnapshot {
   stitching: string[];
   /** `${sequenceId}:${nodeId}` for shot-sequence video nodes. */
   sequences: string[];
+  /** Shot ids with a camera-grid generation running (kept out of `image`:
+   *  sharing that bucket lit the plain image node's busy state). */
+  cameraGrid: string[];
+  /** Shot ids with an upscale generation running (same separation). */
+  upscale: string[];
 }
 
 /** Validate + sanitize an untrusted busy snapshot (main-side IPC boundary).
@@ -82,5 +87,7 @@ export function normalizeCanvasBusy(value: unknown): CanvasBusySnapshot {
     tween,
     stitching: strArray(o.stitching, "stitching"),
     sequences: strArray(o.sequences, "sequences"),
+    cameraGrid: strArray(o.cameraGrid, "cameraGrid"),
+    upscale: strArray(o.upscale, "upscale"),
   };
 }

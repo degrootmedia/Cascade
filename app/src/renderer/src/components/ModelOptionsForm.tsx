@@ -266,7 +266,15 @@ export function ModelOptionsForm({
   persistKey,
   render = "all",
 }: ModelOptionsFormProps) {
-  const excludeKeys = useMemo(() => new Set((exclude ?? []).map(foldKey)), [exclude]);
+  const excludeKeys = useMemo(() => {
+    const keys = new Set((exclude ?? []).map(foldKey));
+    // Some models spell the resolution param "resolutionTier" (OpenArt GPT
+    // Image); the dedicated resolution dropdown owns it via the submit-time
+    // bucket mapping, so excluding "resolution" hides the tier field too —
+    // otherwise the node shows two resolution dropdowns for one concept.
+    if (keys.has("resolution")) keys.add("resolutiontier");
+    return keys;
+  }, [exclude]);
   const all = useMemo(() => {
     const source = fields ?? schema?.fields ?? [];
     return source.filter((f) => {

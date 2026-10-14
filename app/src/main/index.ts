@@ -15,12 +15,12 @@ import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
 import { assetPathInFolder } from "./pipeline.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, mergeJobShotNodes, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
 import { createJobLedger, runWithJobLedger } from "./jobs.js";
 import { externalEditorLabel } from "../shared/editor-label.js";
@@ -59,7 +59,7 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
@@ -2287,10 +2287,20 @@ function registerIpc() {
       let buf: Buffer;
       try {
         buf = await gen(prompt, [], undefined, sanitizeGenParams(params), (rec) => {
-          // The job outlived the wait / hit a transient error but keeps
-          // rendering server-side — persist it on the style so it can be
-          // reclaimed via production:recheckStyleFrame.
-          style.pendingImageGen = rec;
+          // The provider reports the receipt at submission (it keeps
+          // rendering server-side if the wait is outlived) — keep it on the
+          // style and persist immediately, so a quit mid-wait can still
+          // reclaim it via production:recheckStyleFrame. Null = job spent.
+          if (rec) style.pendingImageGen = rec;
+          else delete style.pendingImageGen;
+          void enqueueProduction(id, async () => {
+            const fresh = productions.loadProduction(id);
+            const st = fresh?.styles?.find((s) => s.id === styleId);
+            if (!fresh || !st) return;
+            if (rec) st.pendingImageGen = rec;
+            else delete st.pendingImageGen;
+            productions.saveProduction(fresh);
+          }).catch(() => {});
         });
       } catch (e) {
         if (style.pendingImageGen) {
@@ -2580,15 +2590,19 @@ function registerIpc() {
       const prev = prevById.get(shot.id);
       const next = nextById.get(shot.id);
       if (!prev || !next) continue;
+      // The freshest disk node state + stored graph, captured before the
+      // wholesale field copy below overwrites them with the job's copies.
+      const freshNodeState = {
+        graphEditNodes: shot.graphEditNodes,
+        graphVideoNodes: shot.graphVideoNodes,
+        graphUpscale: shot.graphUpscale,
+      } as ProductionShot;
+      const freshGraph = shot.graph;
       // Copy every shot field the job mutated (artwork, artworkHistory,
       // durationSec/transition for timing, …) but leave untouched fields —
       // e.g. prompt / style / ref overrides edited mid-run — at their
       // fresher on-disk values.
-      for (const key of Object.keys(next) as (keyof ProductionShot)[]) {
-        if (JSON.stringify(prev[key]) !== JSON.stringify(next[key])) {
-          (shot as unknown as Record<string, unknown>)[key] = next[key];
-        }
-      }
+      applyJobShotChanges(prev, next, shot);
       // A mid-job selection change (Make Primary / node cycling) must survive
       // the job's copied generation arrays — re-anchor at the user's path.
       const genPairs = [
@@ -2601,29 +2615,23 @@ function registerIpc() {
           prev[arrKey], prev[idxKey], shot[arrKey], shot[idxKey], next[arrKey], next[idxKey],
         );
       }
-      // Edit nodes own per-node histories; re-anchor each node's selection.
-      for (const node of shot.graphEditNodes ?? []) {
-        const prevNode = prev.graphEditNodes?.find((n) => n.id === node.id);
-        const nextNode = next.graphEditNodes?.find((n) => n.id === node.id);
-        if (!prevNode || !nextNode) continue;
-        if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
-        node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
-      }
-      // Video nodes likewise own per-node histories; re-anchor each selection.
-      for (const node of shot.graphVideoNodes ?? []) {
-        const prevNode = prev.graphVideoNodes?.find((n) => n.id === node.id);
-        const nextNode = next.graphVideoNodes?.find((n) => n.id === node.id);
-        if (!prevNode || !nextNode) continue;
-        if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
-        node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
-      }
-      // The upscale node owns its own history; re-anchor its selection too.
-      const prevUp = prev.graphUpscale;
-      const nextUp = next.graphUpscale;
-      if (prevUp && nextUp && shot.graphUpscale && JSON.stringify(prevUp.gens) !== JSON.stringify(nextUp.gens)) {
-        shot.graphUpscale.genIndex = rebaseGenIndex(
-          prevUp.gens, prevUp.genIndex, shot.graphUpscale.gens, shot.graphUpscale.genIndex, nextUp.gens, nextUp.genIndex,
-        );
+      // Node histories are the job's; every other node field (prompt/tags,
+      // source wiring, reference lists, picks) and node membership belong to
+      // the fresher disk state, so a node rewired mid-job keeps its wire.
+      const mergedNodes = mergeJobShotNodes(prev, freshNodeState, next);
+      if (mergedNodes.graphEditNodes !== undefined) shot.graphEditNodes = mergedNodes.graphEditNodes;
+      if (mergedNodes.graphVideoNodes !== undefined) shot.graphVideoNodes = mergedNodes.graphVideoNodes;
+      if (mergedNodes.graphUpscale !== undefined) shot.graphUpscale = mergedNodes.graphUpscale;
+      // The stored graph is wiring the user may have edited mid-job. When
+      // both sides changed it, the disk wiring wins and only the job's
+      // output binding is re-applied onto it.
+      if (
+        freshGraph &&
+        JSON.stringify(prev.graph) !== JSON.stringify(next.graph) &&
+        JSON.stringify(prev.graph) !== JSON.stringify(freshGraph)
+      ) {
+        shot.graph = freshGraph;
+        syncShotGraphOutput(shot);
       }
       // (Phase 4: the artwork/videoPath mirrors are no longer re-derived
       // after the re-anchor — every surface resolves the pipe live, so the
@@ -2643,21 +2651,58 @@ function registerIpc() {
         const prevSeq = prevSeqById.get(seq.id);
         const nextSeq = nextSeqById.get(seq.id);
         if (!prevSeq || !nextSeq) continue;
+        const freshSeqGraph = seq.graph;
         for (const key of Object.keys(nextSeq) as (keyof ShotSequence)[]) {
           if (JSON.stringify(prevSeq[key]) !== JSON.stringify(nextSeq[key])) {
             (seq as unknown as Record<string, unknown>)[key] = nextSeq[key];
           }
         }
-        for (const node of seq.graph?.graphVideoNodes ?? []) {
-          const prevNode = prevSeq.graph?.graphVideoNodes?.find((n) => n.id === node.id);
-          const nextNode = nextSeq.graph?.graphVideoNodes?.find((n) => n.id === node.id);
-          if (!prevNode || !nextNode) continue;
-          if (JSON.stringify(prevNode.gens) === JSON.stringify(nextNode.gens)) continue;
-          node.genIndex = rebaseGenIndex(prevNode.gens, prevNode.genIndex, node.gens, node.genIndex, nextNode.gens, nextNode.genIndex);
+        // Same rule as the shot graph: the job lands only the sequence
+        // nodes' take histories; wiring/prompts edited mid-job survive.
+        if (seq.graph && nextSeq.graph) {
+          const mergedSeqNodes = mergeJobShotNodes(
+            prevSeq.graph ?? ({} as ProductionShot),
+            freshSeqGraph ?? ({} as ProductionShot),
+            nextSeq.graph
+          );
+          if (mergedSeqNodes.graphVideoNodes !== undefined) seq.graph.graphVideoNodes = mergedSeqNodes.graphVideoNodes;
         }
       }
     }
     return fresh;
+  }
+
+  /** Persist a shot's pending-generation receipt the moment a provider
+   *  reports it (submission), and clear it when the provider reports the
+   *  job spent (null). Without this, the receipt lived only in the running
+   *  job's memory and a quit/crash mid-wait lost the finished result. The
+   *  write is a narrow field merge onto the freshest document — the same
+   *  rule as every other mid-job save — and rides the production queue so
+   *  it can never cross the job's own commit. */
+  function pendingImageSink(id: string, shotId: string, wrap?: (rec: PendingImageGen) => PendingImageGen): (rec: PendingImageGen | null) => void {
+    return (rec) => {
+      void enqueueProduction(id, async () => {
+        const fresh = productions.loadProduction(id);
+        const shot = fresh?.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+        if (!fresh || !shot) return;
+        if (rec) shot.pendingImageGen = wrap ? wrap(rec) : rec;
+        else delete shot.pendingImageGen;
+        productions.saveProduction(fresh);
+      }).catch(() => {});
+    };
+  }
+
+  function pendingVideoSink(id: string, shotId: string, target?: PendingVideoTarget): (rec: PendingVideoGen | null) => void {
+    return (rec) => {
+      void enqueueProduction(id, async () => {
+        const fresh = productions.loadProduction(id);
+        const shot = fresh?.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+        if (!fresh || !shot) return;
+        if (rec) shot.pendingVideoGen = target ? { ...rec, target } : rec;
+        else delete shot.pendingVideoGen;
+        productions.saveProduction(fresh);
+      }).catch(() => {});
+    };
   }
 
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
@@ -2807,7 +2852,7 @@ function registerIpc() {
       return;
     }
     emit(`Using ${routed.displayName} for image generation.`);
-    await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName, lookClause: settings.getPromptTemplates().lookClause });
+    await generateBoards(p, gen, emit, { ...genOpts, providerName: routed.displayName, lookClause: settings.getPromptTemplates().lookClause, onPending: (shot, rec) => pendingImageSink(p.meta.id, shot.id)(rec) });
   };
 
   handle("production:generateBoards", (_e, id: string, opts?: { maxShots?: number; regenerateAll?: boolean }) =>
@@ -2881,8 +2926,26 @@ function registerIpc() {
         delete shot.pendingImageGen;
         throw e;
       }
-      const { jpegRel } = writeBoardFrame(p, shot, buf, "png");
-      completeImageGeneration(shot, jpegRel, pending.prompt, pending.model, pending.surface === "node" ? "node" : "classic");
+      if (pending.target?.kind === "cameragrid") {
+        // A reclaimed camera-grid sheet: write it like a fresh generation
+        // (grids folder + registry + node state), not as a board frame.
+        const dir = `${p.assets.referencesDir}/grids`;
+        fs.mkdirSync(assetPath(p, dir), { recursive: true });
+        const rel = `${dir}/camera-grid-${shot.id}-${Date.now().toString(36)}.png`;
+        fs.writeFileSync(assetPath(p, rel), buf);
+        mediaFiles.register(p, rel, "image", "generated");
+        const prevGrid = normalizeCameraGridData(shot.graphCameraGrid);
+        shot.graphCameraGrid = {
+          ...(prevGrid ?? { cols: CAMERA_GRID_COLS, rows: CAMERA_GRID_ROWS }),
+          sheetPath: rel,
+          sheetAt: new Date().toISOString(),
+          gridSource: undefined,
+          generation: { provider: prevGrid?.generation?.provider ?? "", model: pending.model, prompt: pending.prompt },
+        };
+      } else {
+        const { jpegRel } = writeBoardFrame(p, shot, buf, "png");
+        completePendingImageGeneration(shot, jpegRel, pending);
+      }
       // The original submit never reached its generation recorder (the wait
       // timed out), so the cost was unbilled. Bill it now, once, using the
       // submit-time resolution/aspect kept on the pending record. Higgsfield
@@ -3902,6 +3965,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoPath" });
       let rel: string;
       try {
         rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit)).rel;
@@ -3950,7 +4014,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       emit(`Shot ${shot.number}: generating a node-graph frame…`);
       let png: Buffer;
       try {
-        png = await gen(resolved, extras, shot, opts?.params);
+        png = await gen(resolved, extras, shot, opts?.params, pendingImageSink(id, shotId, (rec) => ({ ...rec, surface: "node", target: { kind: "imagegen" } })));
       } catch (e) {
         // A timed-out node-view job is reclaimed later: remember it
         // started here so the reclaim stays local to the node.
@@ -3998,39 +4062,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // image artwork and dropped video clips upload as visual references.
       // Direct generation wires (no saved reference) resolve to the wired
       // node's selected take.
-      const extraRefs: { name: string; dataUrl: string }[] = [];
-      if (Array.isArray(opts?.refIds)) {
-        const pool = [
-          ...p.characters.map((c) => ({ id: c.id, name: c.name, data: refArtworkDataUrl(p, c) })),
-          ...p.products.map((pr) => ({ id: pr.id, name: pr.name, data: refArtworkDataUrl(p, pr) })),
-          ...(p.references ?? []).map((r) => ({
-            id: r.id,
-            name: r.name,
-            data: r.media === "video" ? refMediaDataUrl(p, r) : refArtworkDataUrl(p, r),
-          })),
-        ];
-        for (const rid of opts.refIds) {
-          if (typeof rid === "string" && isVideoGenRef(rid)) {
-            const genPath = rid === TWEEN_KEY_IMGGEN
-              ? shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path
-              : (() => {
-                const editId = parseEditNodeKeyframe(rid);
-                const node = editId ? (shot.graphEditNodes ?? []).find((n) => n.id === editId) : undefined;
-                return node?.gens?.[node.genIndex ?? 0]?.path;
-              })();
-            const dataUrl = genPath ? fileDataUrl(p, genPath) : null;
-            if (dataUrl) {
-              const name = rid === TWEEN_KEY_IMGGEN ? "Image node frame" : "Edit node frame";
-              if (!extraRefs.some((e) => e.name === name && e.dataUrl === dataUrl)) extraRefs.push({ name, dataUrl });
-            }
-            continue;
-          }
-          const ref = pool.find((r) => r.id === rid && r.data);
-          if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
-        }
-      }
+      const extraRefs = resolveGenRefIds(p, shot, opts?.refIds);
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
+      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
       let rel: string;
       let draftJobId: string | undefined;
       try {
@@ -4159,7 +4194,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // The source clip is the wired sequence take (or an explicit path), and the
   // prompt's `@[name]` references resolve inside the provider exactly like the
   // shot edit-video flow. Only providers with a video-edit path can run it.
-  handle("production:generateSequenceEditVideo", (_e, id: string, sequenceId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+  handle("production:generateSequenceEditVideo", (_e, id: string, sequenceId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "editing a shot sequence video", async (p, emit) => {
       const seq = (p.shotSequences ?? []).find((s) => s.id === sequenceId);
       if (!seq) throw new Error("Shot sequence not found.");
@@ -4168,7 +4203,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "",
-        durationSec: 0,
+        // 0 = Auto: no length pick, the edit keeps the source clip's timing.
+        durationSec: typeof opts?.durationSec === "number" && Number.isFinite(opts.durationSec) ? Math.max(0, Math.round(opts.durationSec)) : 0,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
@@ -4196,7 +4232,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const anchor = [...p.scenes.flatMap((s) => s.shots), ...(p.outdatedShots ?? [])].find((s) => seq.shotIds.includes(s.id));
       if (!anchor) throw new Error("This sequence has no member shots left to generate against.");
       emit(`${seq.name}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      const res = await provider.generateVideoEdit(p, anchor, clean, emit, sourcePath);
+      const extraRefs = resolveGenRefIds(p, seq.graph ?? anchor, opts?.refIds);
+      const res = await provider.generateVideoEdit(p, anchor, clean, emit, sourcePath, extraRefs);
       const rel = relocateClipToSequence(p, seq, res.rel);
       recordSequenceVideoGen(seq, nodeId, rel, clean.prompt, clean.model);
       emit(`${seq.name}: sequence edit ready.`, "done");
@@ -4207,7 +4244,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // references). The source may be an explicit path (piped from the video
   // node or a generated clip), a video reference id, or the shot's current
   // video. Only providers with a video-edit path (Higgsfield CLI) can run it.
-  handle("production:generateEditVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+  handle("production:generateEditVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "editing a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -4216,7 +4253,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const clean: VideoGenOptions = {
         model: typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto",
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "",
-        durationSec: 0,
+        // 0 = Auto: no length pick, the edit keeps the source clip's timing.
+        durationSec: typeof opts?.durationSec === "number" && Number.isFinite(opts.durationSec) ? Math.max(0, Math.round(opts.durationSec)) : 0,
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
@@ -4245,12 +4283,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!provider.generateVideoEdit) {
         throw new Error(`${provider.displayName} can't edit videos yet — switch to a provider with a video-edit path (Higgsfield CLI).`);
       }
-      // References ride the prompt node's @[name] tags and are resolved inside
-      // the provider (like the video node) — no separate refIds arg.
+      // References: @[name] tags resolve inside the provider; direct
+      // generation wires + saved refs ride the node's refIds (resolved here,
+      // the same pass-through the video-generate submit uses).
+      const extraRefs = resolveGenRefIds(p, shot, opts?.refIds);
       emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
       let rel: string;
       try {
-        rel = (await provider.generateVideoEdit(p, shot, clean, emit, sourcePath)).rel;
+        rel = (await provider.generateVideoEdit(p, shot, clean, emit, sourcePath, extraRefs)).rel;
       } catch (e) {
         // Tag the orphaned job so a later Fetch stores the edit clip on this
         // video node (and the output when it feeds it). Reuses the video-node
@@ -4284,6 +4325,44 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     } catch {
       return null;
     }
+  }
+
+  /** Resolve a node's `refIds` to uploadable references: saved references
+   *  by id, plus direct generation wires (gen-ref sentinels resolve to the
+   *  wired node's selected take — no saved reference involved). Shared by
+   *  the video-generate and video-edit submits. */
+  function resolveGenRefIds(p: Production, shot: ProductionShot, refIds: unknown): { name: string; dataUrl: string }[] {
+    const extraRefs: { name: string; dataUrl: string }[] = [];
+    if (!Array.isArray(refIds)) return extraRefs;
+    const pool = [
+      ...p.characters.map((c) => ({ id: c.id, name: c.name, data: refArtworkDataUrl(p, c) })),
+      ...p.products.map((pr) => ({ id: pr.id, name: pr.name, data: refArtworkDataUrl(p, pr) })),
+      ...(p.references ?? []).map((r) => ({
+        id: r.id,
+        name: r.name,
+        data: r.media === "video" ? refMediaDataUrl(p, r) : refArtworkDataUrl(p, r),
+      })),
+    ];
+    for (const rid of refIds) {
+      if (typeof rid === "string" && isVideoGenRef(rid)) {
+        const genPath = rid === TWEEN_KEY_IMGGEN
+          ? shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path
+          : (() => {
+            const editId = parseEditNodeKeyframe(rid);
+            const node = editId ? (shot.graphEditNodes ?? []).find((n) => n.id === editId) : undefined;
+            return node?.gens?.[node.genIndex ?? 0]?.path;
+          })();
+        const dataUrl = genPath ? fileDataUrl(p, genPath) : null;
+        if (dataUrl) {
+          const name = rid === TWEEN_KEY_IMGGEN ? "Image node frame" : "Edit node frame";
+          if (!extraRefs.some((e) => e.name === name && e.dataUrl === dataUrl)) extraRefs.push({ name, dataUrl });
+        }
+        continue;
+      }
+      const ref = pool.find((r) => r.id === rid && r.data);
+      if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
+    }
+    return extraRefs;
   }
 
   /** Resolve a generation-source descriptor (`GraphSource`) to the uploadable
@@ -4329,6 +4408,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     shot: ProductionShot;
     source: GraphSource | undefined | null;
     extraRefs?: { name: string; dataUrl: string }[];
+    /** Which node submitted (tagged on the pending record so a reclaim
+     *  lands back on this node). Absent = classic board generation. */
+    pendingTarget?: PendingImageGen["target"];
     prompt: string;
     frame?: (resolved: string) => string;
     modelId?: string;
@@ -4352,7 +4434,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const { resolved, extras } = resolvePromptRefs(args.p, args.prompt, 1);
     const refs = [{ name: sourceName, dataUrl }, ...(args.extraRefs ?? []), ...extras];
     args.emit(args.describeSource(sourceName), "info");
-    const buf = await gen(args.frame ? args.frame(resolved) : resolved, refs, args.shot, args.params);
+    const buf = await gen(args.frame ? args.frame(resolved) : resolved, refs, args.shot, args.params, pendingImageSink(args.p.meta.id, args.shot.id, args.pendingTarget ? (rec) => ({ ...rec, surface: "node" as const, target: args.pendingTarget }) : undefined));
     return { buf, providerId: media.id };
   }
 
@@ -4413,6 +4495,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      clean.onPending = pendingVideoSink(id, shotId, { kind: "tween", blockId });
       let rel: string;
       try {
         rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, undefined, [], { start, end })).rel;
@@ -4522,6 +4605,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         frame: (resolved) => buildEditGenPrompt(resolved, settings.getPromptTemplates().editImage),
         modelId, resolution, params: opts?.params, emit,
         describeSource: (sourceName) => `Shot ${shot.number}: editing ${sourceName}${modelId ? ` via ${modelId}` : ""}…`,
+        pendingTarget: { kind: "editgen", nodeId: node.id },
       });
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       node.prompt = text;
@@ -4547,7 +4631,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // No prompt: upscalers reject `--prompt` and the node has no prompt UI.
       const { buf: png, providerId } = await submitGraphImage({
         p, shot, source: node.source, prompt: "",
-        modelId, resolution, params: opts?.params, emit,
+        modelId, resolution, params: opts?.params, emit, pendingTarget: { kind: "upscale" },
         describeSource: (sourceName) => `Shot ${shot.number}: upscaling ${sourceName}${modelId ? ` via ${modelId}` : ""}…`,
       });
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
@@ -4932,7 +5016,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         buildEditGenPrompt(editText, settings.getPromptTemplates().editImage),
         [{ name: sourceName, dataUrl }, ...extras],
         shot,
-        editParams
+        editParams,
+        pendingImageSink(id, shot.id)
       );
       const { jpegRel } = writeBoardFrame(p, shot, png, "png");
       recordBoardEdit(shot, jpegRel, text, modelId ?? "auto", node, editParams, resolutionOverride);
@@ -5294,7 +5379,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // an edit instruction.
       const { buf, providerId } = await submitGraphImage({
         p, shot, source: prev?.source, extraRefs: socketRefs, prompt: text,
-        modelId, resolution, params: opts?.params, emit,
+        modelId, resolution, params: opts?.params, emit, pendingTarget: { kind: "cameragrid" },
         describeSource: () => `Generating a ${cols}x${rows} camera grid${modelId ? ` via ${modelId}` : ""}${socketRefs.length ? ` (+${socketRefs.length} reference${socketRefs.length === 1 ? "" : "s"})` : ""}…`,
       });
 

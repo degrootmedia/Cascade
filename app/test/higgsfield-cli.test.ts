@@ -25,7 +25,7 @@ import {
   type CliRun,
   type CliRunResult,
 } from "../src/main/providers/higgsfield-cli.js";
-import type { Production, ProductionShot } from "../src/shared/ipc.js";
+import type { PendingImageGen, Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -587,6 +587,40 @@ describe("HiggsfieldCliProvider.imageGenFn", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("records the pending job at submission (before the wait ends) and clears it on success", async () => {
+    const jobId = "33333333-4444-5555-6666-777777777777";
+    const seen: (PendingImageGen | null)[] = [];
+    let atWait: PendingImageGen | undefined;
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create gpt_image_2_5": () => ok(JSON.stringify([jobId])),
+        [`generate wait ${jobId}`]: () => {
+          atWait = shot.pendingImageGen;
+          return ok(JSON.stringify([{ id: jobId, status: "completed", image_url: "https://example.invalid/fast.png" }]));
+        },
+      })
+    );
+    const p = provider(run);
+    const gen = p.imageGenFn(makeProduction())!;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      const out = await gen("A castle", [], shot, undefined, (rec) => { seen.push(rec); });
+      expect(out).toEqual(Buffer.from([7]));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(atWait).toMatchObject({ historyId: jobId, prompt: "A castle" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ historyId: jobId });
+    expect(seen[1]).toBeNull();
+    expect(shot.pendingImageGen).toBeUndefined();
   });
 
   it("throws a login hint when the CLI reports an expired session", async () => {

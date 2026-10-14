@@ -16,7 +16,7 @@ import { OpenArtClient, videoRefsAssign } from "../src/main/providers/openart.js
 import { openArtCreationResultUrls, openArtCreationStatus } from "../src/main/providers/openart-core.js";
 import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
-import type { PendingImageGen, Production, ProductionShot } from "../src/shared/ipc.js";
+import type { PendingImageGen, PendingVideoGen, Production, ProductionShot } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -881,6 +881,31 @@ describe("OpenArtClient pending-image contingency", () => {
     await expect(client.recheckPendingImage(s.pendingImageGen!)).resolves.toEqual(Buffer.from("late-jpeg"));
   });
 
+  it("records the pending job at submission (before the wait ends) and clears it on success", async () => {
+    const seen: (PendingImageGen | null)[] = [];
+    let atWait: PendingImageGen | undefined;
+    const s = shot();
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-fast","pollAfterSeconds":0}',
+      openart_creation_wait: () => {
+        atWait = s.pendingImageGen;
+        return { text: '{"status":"SUCCEEDED"}', images: [Buffer.from("ok-jpeg")], uris: [] };
+      },
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+    const out = await gen("Draw a castle", [], s, undefined, (rec) => { seen.push(rec); });
+    expect(out.toString()).toBe("ok-jpeg");
+    // The receipt existed while the job was still rendering — a crash or
+    // close during the wait can now reclaim it instead of losing it.
+    expect(atWait).toMatchObject({ historyId: "h-fast", prompt: "Draw a castle" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ historyId: "h-fast", prompt: "Draw a castle" });
+    expect(seen[1]).toBeNull();
+    expect(s.pendingImageGen).toBeUndefined();
+  });
+
   it("records the result URL as pending when the finished image can't be downloaded, then a recheck retries it", async () => {
     const mcp = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
@@ -974,7 +999,7 @@ describe("OpenArtClient pending-image contingency", () => {
 
     vi.useFakeTimers();
     try {
-      const pending = gen("style plate", [], undefined, undefined, (rec) => seen.push(rec));
+      const pending = gen("style plate", [], undefined, undefined, (rec) => { if (rec) seen.push(rec); });
       const assertion = expect(pending).rejects.toThrow(/timed out/i);
       await vi.advanceTimersByTimeAsync(151_000);
       await assertion;
@@ -986,7 +1011,7 @@ describe("OpenArtClient pending-image contingency", () => {
     expect(seen[0]).toMatchObject({ historyId: "h-sink", prompt: "style plate" });
   });
 
-  it("does not report a dead (FAILED) job to the pending sink", async () => {
+  it("clears the submit-time receipt when the job proves dead (FAILED)", async () => {
     const mcp = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
       openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
@@ -994,10 +1019,16 @@ describe("OpenArtClient pending-image contingency", () => {
       openart_creation_get: () => ({ text: '{"status":"FAILED"}', images: [], uris: [] }),
     });
     const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
-    const seen: PendingImageGen[] = [];
+    const seen: (PendingImageGen | null)[] = [];
+    const s = shot();
 
-    await expect(gen("any", [], undefined, undefined, (rec) => seen.push(rec))).rejects.toThrow(/failed/i);
-    expect(seen).toHaveLength(0);
+    await expect(gen("any", [], s, undefined, (rec) => { seen.push(rec); })).rejects.toThrow(/failed/i);
+    // The receipt was reported at submission, then withdrawn — the sink
+    // never retains a job that has nothing left to reclaim.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ historyId: "h-dead" });
+    expect(seen[1]).toBeNull();
+    expect(s.pendingImageGen).toBeUndefined();
   });
 
   it("recheck excludes the echoed style-frame attachment instead of downloading it", async () => {
@@ -1245,6 +1276,39 @@ describe("OpenArtClient generation recorder", () => {
       productionId: "prod-1",
       shotId: "s1",
     });
+  });
+  it("records a video job at submission (before the wait ends) and clears it on success", async () => {
+    const folder = path.join(dataDir, "prod-vid-pending");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    const seen: (PendingVideoGen | null)[] = [];
+    let atWait: PendingVideoGen | undefined;
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_video: () => '{"status":"PENDING","historyId":"h-vid-fast","pollAfterSeconds":0}',
+      openart_creation_wait: () => {
+        atWait = shot.pendingVideoGen;
+        return { text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] };
+      },
+    });
+    const client = new OpenArtClient(mcp);
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const { rel } = await client.generateVideoClip(
+      prod,
+      shot,
+      { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate", onPending: (rec) => { seen.push(rec); } },
+      () => {}
+    );
+    expect(rel).toContain("shot-0100-");
+    expect(atWait).toMatchObject({ historyId: "h-vid-fast", prompt: "animate" });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ historyId: "h-vid-fast" });
+    expect(seen[1]).toBeNull();
+    expect(shot.pendingVideoGen).toBeUndefined();
   });
 
   it("fails loudly on a stale video pick instead of billing another model", async () => {

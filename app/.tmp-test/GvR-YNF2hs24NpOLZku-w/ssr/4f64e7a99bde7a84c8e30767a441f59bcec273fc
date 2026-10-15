@@ -1,0 +1,156 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("react/jsx-dev-runtime", {"importedNames":["jsxDEV"]});
+const __vite_ssr_import_1__ = await __vite_ssr_import__("react", {"importedNames":["useMemo"]});
+const __vite_ssr_import_2__ = await __vite_ssr_import__("/src/renderer/src/components/production/animatic.tsx", {"importedNames":["cascadeMedia"]});
+const __vite_ssr_import_3__ = await __vite_ssr_import__("/src/renderer/src/components/generation-menu.tsx", {"importedNames":["GenerationMenu","useGenerationMenu"]});
+
+
+
+
+function SuiteHistoryRail({
+  prodId,
+  entries,
+  selectedId,
+  busy,
+  onSelect,
+  onDelete,
+  onEditInSuite
+}) {
+  const genMenu = __vite_ssr_import_3__.useGenerationMenu();
+  const rows = __vite_ssr_import_1__.useMemo(
+    () => [...entries].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [entries]
+  );
+  return /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("aside", { className: "suite-rail", "aria-label": "Generation history", children: [
+    /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("div", { className: "suite-rail-head", children: [
+      /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { children: "History" }, void 0, false, {
+        fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+        lineNumber: 42,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "hint", children: entries.length }, void 0, false, {
+        fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+        lineNumber: 43,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+      lineNumber: 41,
+      columnNumber: 7
+    }, this),
+    busy && /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("div", { className: "suite-rail-row suite-rail-inflight", "aria-live": "polite", children: [
+      /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "suite-spinner", "aria-hidden": "true" }, void 0, false, {
+        fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+        lineNumber: 47,
+        columnNumber: 11
+      }, this),
+      " Generating…"
+    ] }, void 0, true, {
+      fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+      lineNumber: 46,
+      columnNumber: 9
+    }, this),
+    rows.length === 0 && !busy && /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("p", { className: "hint suite-rail-empty", children: "No generations yet — describe one and hit Generate." }, void 0, false, {
+      fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+      lineNumber: 50,
+      columnNumber: 38
+    }, this),
+    /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("div", { className: "suite-rail-list", children: rows.map((entry) => {
+      const selected = entry.id === selectedId;
+      return /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(
+        "div",
+        {
+          className: "suite-rail-row" + (selected ? " selected" : ""),
+          children: [
+            /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(
+              "button",
+              {
+                className: "suite-rail-thumb",
+                onClick: () => onSelect(entry.id),
+                onContextMenu: (e) => {
+                  if (!entry.error && entry.outputPath) genMenu.open(e, entry.outputPath, { src: __vite_ssr_import_2__.cascadeMedia(prodId, entry.outputPath), media: "image" });
+                },
+                title: `${entry.kind === "edit" ? "Edit" : entry.kind === "upscale" ? "Upscale" : "Generate"} · ${entry.model || "auto"} · ${entry.resolution}`,
+                children: entry.error ? /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "suite-rail-err", "aria-hidden": "true", children: "!" }, void 0, false, {
+                  fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                  lineNumber: 68,
+                  columnNumber: 19
+                }, this) : /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("img", { src: `${__vite_ssr_import_2__.cascadeMedia(prodId, entry.outputPath)}?thumb=1`, alt: "", loading: "lazy", decoding: "async" }, void 0, false, {
+                  fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                  lineNumber: 70,
+                  columnNumber: 19
+                }, this)
+              },
+              void 0,
+              false,
+              {
+                fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                lineNumber: 59,
+                columnNumber: 15
+              },
+              this
+            ),
+            /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("button", { className: "suite-rail-label", onClick: () => onSelect(entry.id), children: [
+              /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "suite-rail-kind", children: entry.kind === "edit" ? "Edit" : entry.kind === "upscale" ? "Ups" : "Gen" }, void 0, false, {
+                fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                lineNumber: 74,
+                columnNumber: 17
+              }, this),
+              /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "suite-rail-prompt", children: entry.prompt || (entry.kind === "upscale" ? "Upscaled image" : "(no prompt)") }, void 0, false, {
+                fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                lineNumber: 75,
+                columnNumber: 17
+              }, this),
+              /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "suite-rail-meta", children: [
+                entry.model || "auto",
+                " · ",
+                entry.resolution
+              ] }, void 0, true, {
+                fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+                lineNumber: 76,
+                columnNumber: 17
+              }, this)
+            ] }, void 0, true, {
+              fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+              lineNumber: 73,
+              columnNumber: 15
+            }, this),
+            /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("div", { className: "suite-rail-actions", children: /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("button", { className: "suite-rail-btn danger", title: "Delete this image", "aria-label": "Delete this image", onClick: () => onDelete(entry.id), children: "✕" }, void 0, false, {
+              fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+              lineNumber: 79,
+              columnNumber: 17
+            }, this) }, void 0, false, {
+              fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+              lineNumber: 78,
+              columnNumber: 15
+            }, this)
+          ]
+        },
+        entry.id,
+        true,
+        {
+          fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+          lineNumber: 55,
+          columnNumber: 13
+        },
+        this
+      );
+    }) }, void 0, false, {
+      fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+      lineNumber: 51,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(__vite_ssr_import_3__.GenerationMenu, { menu: genMenu.menu, onClose: genMenu.close, onEditInSuite }, void 0, false, {
+      fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+      lineNumber: 85,
+      columnNumber: 7
+    }, this)
+  ] }, void 0, true, {
+    fileName: "D:/Cascade/app/src/renderer/src/features/suite/SuiteHistoryRail.tsx",
+    lineNumber: 40,
+    columnNumber: 5
+  }, this);
+}
+Object.defineProperty(__vite_ssr_exports__, "SuiteHistoryRail", { enumerable: true, configurable: true, get(){ return SuiteHistoryRail }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,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Y0FDbkgsNkNBQUMsVUFBSyxXQUFVLG1CQUFtQjtBQUFBLHNCQUFNLFNBQVM7QUFBQSxnQkFBTztBQUFBLGdCQUFJLE1BQU07QUFBQSxtQkFBbkU7QUFBQTtBQUFBO0FBQUE7QUFBQSxxQkFBOEU7QUFBQSxpQkFIaEY7QUFBQTtBQUFBO0FBQUE7QUFBQSxtQkFJQTtBQUFBLFlBQ0EsNkNBQUMsU0FBSSxXQUFVLHNCQUNiLHVEQUFDLFlBQU8sV0FBVSx5QkFBd0IsT0FBTSxxQkFBb0IsY0FBVyxxQkFBb0IsU0FBUyxNQUFNLFNBQVMsTUFBTSxFQUFFLEdBQUcsaUJBQXRJO0FBQUE7QUFBQTtBQUFBO0FBQUEsbUJBQXVJLEtBRHpJO0FBQUE7QUFBQTtBQUFBO0FBQUEsbUJBRUE7QUFBQTtBQUFBO0FBQUEsUUF4QkssTUFBTTtBQUFBLFFBRGI7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxNQTBCQTtBQUFBLElBRUosQ0FBQyxLQWhDSDtBQUFBO0FBQUE7QUFBQTtBQUFBLFdBaUNBO0FBQUEsSUFDQSw2Q0FBQyx3Q0FBZSxNQUFNLFFBQVEsTUFBTSxTQUFTLFFBQVEsT0FBTyxpQkFBNUQ7QUFBQTtBQUFBO0FBQUE7QUFBQSxXQUEwRjtBQUFBLE9BN0M1RjtBQUFBO0FBQUE7QUFBQTtBQUFBLFNBOENBO0FBRUo7MklBQUEiLCJuYW1lcyI6W10sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbIlN1aXRlSGlzdG9yeVJhaWwudHN4Il0sInNvdXJjZXNDb250ZW50IjpbIi8qKlxyXG4gKiBTdWl0ZSBoaXN0b3J5IHJhaWw6IHRoZSB0aW1lbGluZSBvZiBnZW5lcmF0aW9ucy9lZGl0cywgbmV3ZXN0LWZpcnN0LCBhcyBhXHJcbiAqIHN0cmFpZ2h0IGxpc3QuIFNlbGVjdGluZyBhbiBlbnRyeSBsb2FkcyBpdCBpbnRvIHRoZSBjYW52YXMgKyBwcm9tcHQgcGFuZWxcclxuICogZm9yIHJlcGxheTsgZGVsZXRpbmcgcmVtb3ZlcyBpdCAoYW5kIGl0cyBmaWxlcywgbWFpbi1zaWRlKS5cclxuICpcclxuICogVGh1bWJuYWlscyBzdHJlYW0gb3ZlciBgY2FzY2FkZS1tZWRpYTovL+KApj90aHVtYj0xYCBhbmQgYGxvYWRpbmc9XCJsYXp5XCJgLCBzb1xyXG4gKiBhIGxvbmcgaGlzdG9yeSBuZXZlciBkZWNvZGVzIGZ1bGwtcmVzIGltYWdlcyBpbnRvIHJlbmRlcmVyIG1lbW9yeS5cclxuICovXHJcbmltcG9ydCB7IHVzZU1lbW8gfSBmcm9tIFwicmVhY3RcIjtcclxuaW1wb3J0IHR5cGUgeyBTdWl0ZUVudHJ5IH0gZnJvbSBcIi4vc3VpdGUtdHlwZXMuanNcIjtcclxuaW1wb3J0IHsgY2FzY2FkZU1lZGlhIH0gZnJvbSBcIi4uLy4uL2NvbXBvbmVudHMvcHJvZHVjdGlvbi9hbmltYXRpYy5qc1wiO1xyXG5pbXBvcnQgeyBHZW5lcmF0aW9uTWVudSwgdXNlR2VuZXJhdGlvbk1lbnUgfSBmcm9tIFwiLi4vLi4vY29tcG9uZW50cy9nZW5lcmF0aW9uLW1lbnUuanNcIjtcclxuXHJcbmV4cG9ydCBmdW5jdGlvbiBTdWl0ZUhpc3RvcnlSYWlsKHtcclxuICBwcm9kSWQsXHJcbiAgZW50cmllcyxcclxuICBzZWxlY3RlZElkLFxyXG4gIGJ1c3ksXHJcbiAgb25TZWxlY3QsXHJcbiAgb25EZWxldGUsXHJcbiAgb25FZGl0SW5TdWl0ZSxcclxufToge1xyXG4gIHByb2RJZDogc3RyaW5nO1xyXG4gIGVudHJpZXM6IFN1aXRlRW50cnlbXTtcclxuICBzZWxlY3RlZElkOiBzdHJpbmcgfCBudWxsO1xyXG4gIGJ1c3k/OiBib29sZWFuO1xyXG4gIG9uU2VsZWN0OiAoaWQ6IHN0cmluZykgPT4gdm9pZDtcclxuICBvbkRlbGV0ZTogKGlkOiBzdHJpbmcpID0+IHZvaWQ7XHJcbiAgb25FZGl0SW5TdWl0ZT86IChyZWw6IHN0cmluZykgPT4gdm9pZDtcclxufSkge1xyXG4gIGNvbnN0IGdlbk1lbnUgPSB1c2VHZW5lcmF0aW9uTWVudSgpO1xyXG4gIC8vIE5ld2VzdCBmaXJzdCDigJQgYSBmbGF0IHRpbWVsaW5lIChicmFuY2hpbmcgaXMgc3RpbGwgcGVyc2lzdGVkIG9uIGBwYXJlbnRJZGAsXHJcbiAgLy8gaXQganVzdCBpc24ndCB2aXN1YWxpc2VkIGFzIGEgdHJlZSBoZXJlKS5cclxuICBjb25zdCByb3dzID0gdXNlTWVtbyhcclxuICAgICgpID0+IFsuLi5lbnRyaWVzXS5zb3J0KChhLCBiKSA9PiBiLmNyZWF0ZWRBdC5sb2NhbGVDb21wYXJlKGEuY3JlYXRlZEF0KSksXHJcbiAgICBbZW50cmllc11cclxuICApO1xyXG5cclxuICByZXR1cm4gKFxyXG4gICAgPGFzaWRlIGNsYXNzTmFtZT1cInN1aXRlLXJhaWxcIiBhcmlhLWxhYmVsPVwiR2VuZXJhdGlvbiBoaXN0b3J5XCI+XHJcbiAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1oZWFkXCI+XHJcbiAgICAgICAgPHNwYW4+SGlzdG9yeTwvc3Bhbj5cclxuICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJoaW50XCI+e2VudHJpZXMubGVuZ3RofTwvc3Bhbj5cclxuICAgICAgPC9kaXY+XHJcbiAgICAgIHtidXN5ICYmIChcclxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInN1aXRlLXJhaWwtcm93IHN1aXRlLXJhaWwtaW5mbGlnaHRcIiBhcmlhLWxpdmU9XCJwb2xpdGVcIj5cclxuICAgICAgICAgIDxzcGFuIGNsYXNzTmFtZT1cInN1aXRlLXNwaW5uZXJcIiBhcmlhLWhpZGRlbj1cInRydWVcIiAvPiBHZW5lcmF0aW5n4oCmXHJcbiAgICAgICAgPC9kaXY+XHJcbiAgICAgICl9XHJcbiAgICAgIHtyb3dzLmxlbmd0aCA9PT0gMCAmJiAhYnVzeSAmJiA8cCBjbGFzc05hbWU9XCJoaW50IHN1aXRlLXJhaWwtZW1wdHlcIj5ObyBnZW5lcmF0aW9ucyB5ZXQg4oCUIGRlc2NyaWJlIG9uZSBhbmQgaGl0IEdlbmVyYXRlLjwvcD59XHJcbiAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1saXN0XCI+XHJcbiAgICAgICAge3Jvd3MubWFwKChlbnRyeSkgPT4ge1xyXG4gICAgICAgICAgY29uc3Qgc2VsZWN0ZWQgPSBlbnRyeS5pZCA9PT0gc2VsZWN0ZWRJZDtcclxuICAgICAgICAgIHJldHVybiAoXHJcbiAgICAgICAgICAgIDxkaXZcclxuICAgICAgICAgICAgICBrZXk9e2VudHJ5LmlkfVxyXG4gICAgICAgICAgICAgIGNsYXNzTmFtZT17XCJzdWl0ZS1yYWlsLXJvd1wiICsgKHNlbGVjdGVkID8gXCIgc2VsZWN0ZWRcIiA6IFwiXCIpfVxyXG4gICAgICAgICAgICA+XHJcbiAgICAgICAgICAgICAgPGJ1dHRvblxyXG4gICAgICAgICAgICAgICAgY2xhc3NOYW1lPVwic3VpdGUtcmFpbC10aHVtYlwiXHJcbiAgICAgICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiBvblNlbGVjdChlbnRyeS5pZCl9XHJcbiAgICAgICAgICAgICAgICBvbkNvbnRleHRNZW51PXsoZSkgPT4ge1xyXG4gICAgICAgICAgICAgICAgICBpZiAoIWVudHJ5LmVycm9yICYmIGVudHJ5Lm91dHB1dFBhdGgpIGdlbk1lbnUub3BlbihlLCBlbnRyeS5vdXRwdXRQYXRoLCB7IHNyYzogY2FzY2FkZU1lZGlhKHByb2RJZCwgZW50cnkub3V0cHV0UGF0aCksIG1lZGlhOiBcImltYWdlXCIgfSk7XHJcbiAgICAgICAgICAgICAgICB9fVxyXG4gICAgICAgICAgICAgICAgdGl0bGU9e2Ake2VudHJ5LmtpbmQgPT09IFwiZWRpdFwiID8gXCJFZGl0XCIgOiBlbnRyeS5raW5kID09PSBcInVwc2NhbGVcIiA/IFwiVXBzY2FsZVwiIDogXCJHZW5lcmF0ZVwifSDCtyAke2VudHJ5Lm1vZGVsIHx8IFwiYXV0b1wifSDCtyAke2VudHJ5LnJlc29sdXRpb259YH1cclxuICAgICAgICAgICAgICA+XHJcbiAgICAgICAgICAgICAgICB7ZW50cnkuZXJyb3IgPyAoXHJcbiAgICAgICAgICAgICAgICAgIDxzcGFuIGNsYXNzTmFtZT1cInN1aXRlLXJhaWwtZXJyXCIgYXJpYS1oaWRkZW49XCJ0cnVlXCI+ITwvc3Bhbj5cclxuICAgICAgICAgICAgICAgICkgOiAoXHJcbiAgICAgICAgICAgICAgICAgIDxpbWcgc3JjPXtgJHtjYXNjYWRlTWVkaWEocHJvZElkLCBlbnRyeS5vdXRwdXRQYXRoKX0/dGh1bWI9MWB9IGFsdD1cIlwiIGxvYWRpbmc9XCJsYXp5XCIgZGVjb2Rpbmc9XCJhc3luY1wiIC8+XHJcbiAgICAgICAgICAgICAgICApfVxyXG4gICAgICAgICAgICAgIDwvYnV0dG9uPlxyXG4gICAgICAgICAgICAgIDxidXR0b24gY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1sYWJlbFwiIG9uQ2xpY2s9eygpID0+IG9uU2VsZWN0KGVudHJ5LmlkKX0+XHJcbiAgICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzdWl0ZS1yYWlsLWtpbmRcIj57ZW50cnkua2luZCA9PT0gXCJlZGl0XCIgPyBcIkVkaXRcIiA6IGVudHJ5LmtpbmQgPT09IFwidXBzY2FsZVwiID8gXCJVcHNcIiA6IFwiR2VuXCJ9PC9zcGFuPlxyXG4gICAgICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1wcm9tcHRcIj57ZW50cnkucHJvbXB0IHx8IChlbnRyeS5raW5kID09PSBcInVwc2NhbGVcIiA/IFwiVXBzY2FsZWQgaW1hZ2VcIiA6IFwiKG5vIHByb21wdClcIil9PC9zcGFuPlxyXG4gICAgICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1tZXRhXCI+e2VudHJ5Lm1vZGVsIHx8IFwiYXV0b1wifSDCtyB7ZW50cnkucmVzb2x1dGlvbn08L3NwYW4+XHJcbiAgICAgICAgICAgICAgPC9idXR0b24+XHJcbiAgICAgICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdWl0ZS1yYWlsLWFjdGlvbnNcIj5cclxuICAgICAgICAgICAgICAgIDxidXR0b24gY2xhc3NOYW1lPVwic3VpdGUtcmFpbC1idG4gZGFuZ2VyXCIgdGl0bGU9XCJEZWxldGUgdGhpcyBpbWFnZVwiIGFyaWEtbGFiZWw9XCJEZWxldGUgdGhpcyBpbWFnZVwiIG9uQ2xpY2s9eygpID0+IG9uRGVsZXRlKGVudHJ5LmlkKX0+4pyVPC9idXR0b24+XHJcbiAgICAgICAgICAgICAgPC9kaXY+XHJcbiAgICAgICAgICAgIDwvZGl2PlxyXG4gICAgICAgICAgKTtcclxuICAgICAgICB9KX1cclxuICAgICAgPC9kaXY+XHJcbiAgICAgIDxHZW5lcmF0aW9uTWVudSBtZW51PXtnZW5NZW51Lm1lbnV9IG9uQ2xvc2U9e2dlbk1lbnUuY2xvc2V9IG9uRWRpdEluU3VpdGU9e29uRWRpdEluU3VpdGV9IC8+XHJcbiAgICA8L2FzaWRlPlxyXG4gICk7XHJcbn1cclxuIl0sImZpbGUiOiIvc3JjL3JlbmRlcmVyL3NyYy9mZWF0dXJlcy9zdWl0ZS9TdWl0ZUhpc3RvcnlSYWlsLnRzeCJ9

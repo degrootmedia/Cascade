@@ -1,0 +1,7 @@
+const todoChannels = {
+  "todos:get": { method: "getSessionTodos", kind: "invoke" }
+};
+Object.defineProperty(__vite_ssr_exports__, "todoChannels", { enumerable: true, configurable: true, get(){ return todoChannels }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQ08sTUFBTSxlQUFlO0FBQUEsRUFDMUIsYUFBYSxFQUFFLFFBQVEsbUJBQW1CLE1BQU0sU0FBUztBQUMzRDttSUFBQSIsIm5hbWVzIjpbXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsidG9kb3MudHMiXSwic291cmNlc0NvbnRlbnQiOlsiLyoqIFNlc3Npb24gdG9kby1saXN0IElQQyBjaGFubmVsLiBGcmFnbWVudCBvZiBpcGNDb250cmFjdCAoYXNzZW1ibGVkIGluIC4uL2lwYy50cykuICovXHJcbmV4cG9ydCBjb25zdCB0b2RvQ2hhbm5lbHMgPSB7XHJcbiAgXCJ0b2RvczpnZXRcIjogeyBtZXRob2Q6IFwiZ2V0U2Vzc2lvblRvZG9zXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcclxufSBhcyBjb25zdDtcclxuIl0sImZpbGUiOiIvc3JjL3NoYXJlZC9pcGMtY2hhbm5lbHMvdG9kb3MudHMifQ==

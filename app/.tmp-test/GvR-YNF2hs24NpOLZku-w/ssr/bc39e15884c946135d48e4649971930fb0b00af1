@@ -1,0 +1,30 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("react/jsx-dev-runtime", {"importedNames":["jsxDEV"]});
+const __vite_ssr_import_1__ = await __vite_ssr_import__("react", {"importedNames":["forwardRef","useImperativeHandle","useLayoutEffect","useRef"]});
+
+
+const AutoTextarea = __vite_ssr_import_1__.forwardRef(function AutoTextarea2({ maxHeight = 0, ...props }, outerRef) {
+  const ref = __vite_ssr_import_1__.useRef(null);
+  __vite_ssr_import_1__.useImperativeHandle(outerRef, () => ref.current);
+  __vite_ssr_import_1__.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const want = el.scrollHeight;
+    if (maxHeight > 0 && want > maxHeight) {
+      el.style.height = `${maxHeight}px`;
+      el.style.overflowY = "auto";
+    } else {
+      el.style.height = `${want}px`;
+      el.style.overflowY = "hidden";
+    }
+  });
+  return /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("textarea", { ref, rows: 1, ...props }, void 0, false, {
+    fileName: "D:/Cascade/app/src/renderer/src/components/AutoTextarea.tsx",
+    lineNumber: 29,
+    columnNumber: 10
+  }, this);
+});
+Object.defineProperty(__vite_ssr_exports__, "AutoTextarea", { enumerable: true, configurable: true, get(){ return AutoTextarea }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQUEsQ0FBQTs7QUE0QlM7QUF2QjZGO0FBTy9GLE1BQU0sZUFBZSxpQ0FBdUMsU0FBU0EsY0FBYSxFQUFFLFlBQVksR0FBRyxHQUFHLE1BQU0sR0FBRyxVQUFVO0FBQzlILFFBQU0sTUFBTSw2QkFBNEIsSUFBSTtBQUM1Qyw0Q0FBb0IsVUFBVSxNQUFNLElBQUksT0FBOEI7QUFDdEUsd0NBQWdCLE1BQU07QUFDcEIsVUFBTSxLQUFLLElBQUk7QUFDZixRQUFJLENBQUMsR0FBSTtBQUNULE9BQUcsTUFBTSxTQUFTO0FBQ2xCLFVBQU0sT0FBTyxHQUFHO0FBQ2hCLFFBQUksWUFBWSxLQUFLLE9BQU8sV0FBVztBQUNyQyxTQUFHLE1BQU0sU0FBUyxHQUFHLFNBQVM7QUFDOUIsU0FBRyxNQUFNLFlBQVk7QUFBQSxJQUN2QixPQUFPO0FBQ0wsU0FBRyxNQUFNLFNBQVMsR0FBRyxJQUFJO0FBQ3pCLFNBQUcsTUFBTSxZQUFZO0FBQUEsSUFDdkI7QUFBQSxFQUNGLENBQUM7QUFDRCxTQUFPLDZDQUFDLGNBQVMsS0FBVSxNQUFNLEdBQUksR0FBRyxTQUFqQztBQUFBO0FBQUE7QUFBQTtBQUFBLFNBQXdDO0FBQ2pELENBQUM7bUlBQUEiLCJuYW1lcyI6WyJBdXRvVGV4dGFyZWEiXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsiQXV0b1RleHRhcmVhLnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyIvKipcbiAqIFRleHRhcmVhIHRoYXQgZ3Jvd3Mvc2hyaW5rcyB0byBmaXQgaXRzIGNvbnRlbnQgYXMgdGhlIHVzZXIgdHlwZXMgKGFuZCB3aGVuXG4gKiB0aGUgdmFsdWUgY2hhbmdlcyBwcm9ncmFtbWF0aWNhbGx5LCBlLmcuIGFmdGVyIGFuIEFJIHJlZmluZW1lbnQpLiBCZXlvbmRcbiAqIGBtYXhIZWlnaHRgIGl0IHNjcm9sbHMgaW50ZXJuYWxseSBpbnN0ZWFkIG9mIHN0cmV0Y2hpbmcgdGhlIGxheW91dCBmb3JldmVyLlxuICovXG5pbXBvcnQgeyBmb3J3YXJkUmVmLCB1c2VJbXBlcmF0aXZlSGFuZGxlLCB1c2VMYXlvdXRFZmZlY3QsIHVzZVJlZiwgdHlwZSBUZXh0YXJlYUhUTUxBdHRyaWJ1dGVzIH0gZnJvbSBcInJlYWN0XCI7XG5cbmludGVyZmFjZSBQcm9wcyBleHRlbmRzIFRleHRhcmVhSFRNTEF0dHJpYnV0ZXM8SFRNTFRleHRBcmVhRWxlbWVudD4ge1xuICAvKiogR3JvdyBhdCBtb3N0IHRoaXMgdGFsbCAocHgpIGJlZm9yZSBpbm5lciBzY3JvbGxpbmcga2lja3MgaW4uIDAgPSB1bmNhcHBlZC4gKi9cbiAgbWF4SGVpZ2h0PzogbnVtYmVyO1xufVxuXG5leHBvcnQgY29uc3QgQXV0b1RleHRhcmVhID0gZm9yd2FyZFJlZjxIVE1MVGV4dEFyZWFFbGVtZW50LCBQcm9wcz4oZnVuY3Rpb24gQXV0b1RleHRhcmVhKHsgbWF4SGVpZ2h0ID0gMCwgLi4ucHJvcHMgfSwgb3V0ZXJSZWYpIHtcbiAgY29uc3QgcmVmID0gdXNlUmVmPEhUTUxUZXh0QXJlYUVsZW1lbnQ+KG51bGwpO1xuICB1c2VJbXBlcmF0aXZlSGFuZGxlKG91dGVyUmVmLCAoKSA9PiByZWYuY3VycmVudCBhcyBIVE1MVGV4dEFyZWFFbGVtZW50KTtcbiAgdXNlTGF5b3V0RWZmZWN0KCgpID0+IHtcbiAgICBjb25zdCBlbCA9IHJlZi5jdXJyZW50O1xuICAgIGlmICghZWwpIHJldHVybjtcbiAgICBlbC5zdHlsZS5oZWlnaHQgPSBcImF1dG9cIjtcbiAgICBjb25zdCB3YW50ID0gZWwuc2Nyb2xsSGVpZ2h0O1xuICAgIGlmIChtYXhIZWlnaHQgPiAwICYmIHdhbnQgPiBtYXhIZWlnaHQpIHtcbiAgICAgIGVsLnN0eWxlLmhlaWdodCA9IGAke21heEhlaWdodH1weGA7XG4gICAgICBlbC5zdHlsZS5vdmVyZmxvd1kgPSBcImF1dG9cIjtcbiAgICB9IGVsc2Uge1xuICAgICAgZWwuc3R5bGUuaGVpZ2h0ID0gYCR7d2FudH1weGA7XG4gICAgICBlbC5zdHlsZS5vdmVyZmxvd1kgPSBcImhpZGRlblwiO1xuICAgIH1cbiAgfSk7XG4gIHJldHVybiA8dGV4dGFyZWEgcmVmPXtyZWZ9IHJvd3M9ezF9IHsuLi5wcm9wc30gLz47XG59KTtcbiJdLCJmaWxlIjoiL3NyYy9yZW5kZXJlci9zcmMvY29tcG9uZW50cy9BdXRvVGV4dGFyZWEudHN4In0=

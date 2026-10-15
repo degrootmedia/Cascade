@@ -35,27 +35,29 @@ describe("graphEdgesToFlow reproduces the canvas picture", () => {
       REFS
     );
     const flow = graphEdgesToFlow(g, { selected: new Set(["e-style"]), colors: COLORS });
+    const IMG = { stroke: "#3b82c4" };
+    const OTHER = { stroke: "#8a8f98", strokeDasharray: "2 4" };
     const ref = (id: string, source: string, target: string, targetHandle: string, selected = false): Edge => ({
-      id, source, target, targetHandle, style: { stroke: COLORS.ref }, reconnectable: false, selected,
+      id, source, target, targetHandle, type: "waypoint", data: { waypoints: [] }, style: IMG, reconnectable: false, selected,
     });
-    const fixed = (id: string, source: string, target: string, targetHandle: string, stroke?: string): Edge => ({
-      id, source, target, targetHandle,
-      ...(stroke ? { style: { stroke } } : {}),
+    const fixed = (id: string, source: string, target: string, targetHandle: string, style?: Record<string, string>): Edge => ({
+      id, source, target, targetHandle, type: "waypoint", data: { waypoints: [] },
+      ...(style ? { style } : {}),
       deletable: false, reconnectable: false, selected: id === "e-style",
     });
     expect(flow).toEqual([
       ref("e-ref:r1-composer-0", "ref:r1", "composer", "in-ref-0"),
       ref("e-ref:r2-videoprompt-0", "ref:r2", "videoprompt", "in-ref-0"),
-      fixed("e-style", "style", "composer", "in-style", COLORS.style),
-      fixed("e-style-vp", "style", "videoprompt", "in-style", COLORS.style),
-      fixed("e-brand", "brand", "composer", "in-brand", COLORS.brand),
-      fixed("e-cmp-img", "composer", "imagegen", "in-prompt"),
-      fixed("e-vp-vid", "videoprompt", "videogen", "in-prompt"),
-      fixed("e-ep-edit:edit0", "editprompt:edit0", "editgen:edit0", "in-prompt"),
-      fixed("e-img-vid", "imagegen", "videogen", "in-image", COLORS.ref),
-      fixed("e-img-edit:edit0", "imagegen", "editgen:edit0", "in-image", COLORS.ref),
-      fixed("e-tween-0", "imagegen", "tween", "in-tween-0", COLORS.ref),
-      fixed("e-img-out", "imagegen", "output", "in-out"),
+      fixed("e-style", "style", "composer", "in-style", { stroke: COLORS.style }),
+      fixed("e-style-vp", "style", "videoprompt", "in-style", { stroke: COLORS.style }),
+      fixed("e-brand", "brand", "composer", "in-brand", { stroke: COLORS.brand }),
+      fixed("e-cmp-img", "composer", "imagegen", "in-prompt", OTHER),
+      fixed("e-vp-vid", "videoprompt", "videogen", "in-prompt", OTHER),
+      fixed("e-ep-edit:edit0", "editprompt:edit0", "editgen:edit0", "in-prompt", OTHER),
+      fixed("e-img-vid", "imagegen", "videogen", "in-image", IMG),
+      fixed("e-img-edit:edit0", "imagegen", "editgen:edit0", "in-image", IMG),
+      fixed("e-tween-0", "imagegen", "tween", "in-tween-0", IMG),
+      fixed("e-img-out", "imagegen", "output", "in-out", IMG),
     ]);
   });
 

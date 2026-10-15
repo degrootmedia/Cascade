@@ -1,0 +1,15 @@
+const voiceChannels = {
+  "voice:status": { method: "getVoiceStatus", kind: "invoke" },
+  "voice:prepare": { method: "prepareVoice", kind: "invoke" },
+  "voice:transcribe": { method: "transcribeVoice", kind: "invoke" },
+  "voice:getEnabled": { method: "getVoiceEnabled", kind: "invoke" },
+  "voice:setEnabled": { method: "setVoiceEnabled", kind: "invoke" },
+  "voice:getModel": { method: "getWhisperModel", kind: "invoke" },
+  "voice:setModel": { method: "setWhisperModel", kind: "invoke" },
+  "voice:getCliBinary": { method: "getVoiceCliBinary", kind: "invoke" },
+  "voice:setCliBinary": { method: "setVoiceCliBinary", kind: "invoke" }
+};
+Object.defineProperty(__vite_ssr_exports__, "voiceChannels", { enumerable: true, configurable: true, get(){ return voiceChannels }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQ08sTUFBTSxnQkFBZ0I7QUFBQSxFQUMzQixnQkFBZ0IsRUFBRSxRQUFRLGtCQUFrQixNQUFNLFNBQVM7QUFBQSxFQUMzRCxpQkFBaUIsRUFBRSxRQUFRLGdCQUFnQixNQUFNLFNBQVM7QUFBQSxFQUMxRCxvQkFBb0IsRUFBRSxRQUFRLG1CQUFtQixNQUFNLFNBQVM7QUFBQSxFQUNoRSxvQkFBb0IsRUFBRSxRQUFRLG1CQUFtQixNQUFNLFNBQVM7QUFBQSxFQUNoRSxvQkFBb0IsRUFBRSxRQUFRLG1CQUFtQixNQUFNLFNBQVM7QUFBQSxFQUNoRSxrQkFBa0IsRUFBRSxRQUFRLG1CQUFtQixNQUFNLFNBQVM7QUFBQSxFQUM5RCxrQkFBa0IsRUFBRSxRQUFRLG1CQUFtQixNQUFNLFNBQVM7QUFBQSxFQUM5RCxzQkFBc0IsRUFBRSxRQUFRLHFCQUFxQixNQUFNLFNBQVM7QUFBQSxFQUNwRSxzQkFBc0IsRUFBRSxRQUFRLHFCQUFxQixNQUFNLFNBQVM7QUFDdEU7cUlBQUEiLCJuYW1lcyI6W10sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbInZvaWNlLnRzIl0sInNvdXJjZXNDb250ZW50IjpbIi8qKiBWb2ljZSBpbnB1dCAobG9jYWwgV2hpc3BlcikgSVBDIGNoYW5uZWxzLiBGcmFnbWVudCBvZiBpcGNDb250cmFjdC4gKi9cbmV4cG9ydCBjb25zdCB2b2ljZUNoYW5uZWxzID0ge1xuICBcInZvaWNlOnN0YXR1c1wiOiB7IG1ldGhvZDogXCJnZXRWb2ljZVN0YXR1c1wiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwidm9pY2U6cHJlcGFyZVwiOiB7IG1ldGhvZDogXCJwcmVwYXJlVm9pY2VcIiwga2luZDogXCJpbnZva2VcIiB9LFxuICBcInZvaWNlOnRyYW5zY3JpYmVcIjogeyBtZXRob2Q6IFwidHJhbnNjcmliZVZvaWNlXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcbiAgXCJ2b2ljZTpnZXRFbmFibGVkXCI6IHsgbWV0aG9kOiBcImdldFZvaWNlRW5hYmxlZFwiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwidm9pY2U6c2V0RW5hYmxlZFwiOiB7IG1ldGhvZDogXCJzZXRWb2ljZUVuYWJsZWRcIiwga2luZDogXCJpbnZva2VcIiB9LFxuICBcInZvaWNlOmdldE1vZGVsXCI6IHsgbWV0aG9kOiBcImdldFdoaXNwZXJNb2RlbFwiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwidm9pY2U6c2V0TW9kZWxcIjogeyBtZXRob2Q6IFwic2V0V2hpc3Blck1vZGVsXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcbiAgXCJ2b2ljZTpnZXRDbGlCaW5hcnlcIjogeyBtZXRob2Q6IFwiZ2V0Vm9pY2VDbGlCaW5hcnlcIiwga2luZDogXCJpbnZva2VcIiB9LFxuICBcInZvaWNlOnNldENsaUJpbmFyeVwiOiB7IG1ldGhvZDogXCJzZXRWb2ljZUNsaUJpbmFyeVwiLCBraW5kOiBcImludm9rZVwiIH0sXG59IGFzIGNvbnN0O1xuIl0sImZpbGUiOiIvc3JjL3NoYXJlZC9pcGMtY2hhbm5lbHMvdm9pY2UudHMifQ==

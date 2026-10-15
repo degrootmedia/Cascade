@@ -158,6 +158,11 @@ export function nodeDecl(kind: GraphNodeKind): NodeDecl | undefined {
 
 /** Look up a port declaration, expanding the positional socket patterns
  *  (`in-ref-N` behaves as the open reference socket; `in-tween-N` as declared). */
+/** A node kind's declared outputs (empty for sinks like Frame Output). */
+export function nodeOutputs(kind: GraphNodeKind): PortDecl[] {
+  return TABLE[kind]?.outputs ?? [];
+}
+
 export function portDecl(kind: GraphNodeKind, dir: "in" | "out", portId: string): PortDecl | undefined {
   const decl = TABLE[kind];
   if (!decl) return undefined;

@@ -1,0 +1,11 @@
+function externalEditorLabel(editorPath) {
+  const ed = editorPath?.trim();
+  if (!ed) return "Edit externally";
+  const base = ed.split(/[\\/]/).pop() ?? ed;
+  const name = base.replace(/\.[^.]+$/, "");
+  return name ? `Edit in ${name}` : "Edit externally";
+}
+Object.defineProperty(__vite_ssr_exports__, "externalEditorLabel", { enumerable: true, configurable: true, get(){ return externalEditorLabel }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBS08sU0FBUyxvQkFBb0IsWUFBK0M7QUFDakYsUUFBTSxLQUFLLFlBQVksS0FBSztBQUM1QixNQUFJLENBQUMsR0FBSSxRQUFPO0FBQ2hCLFFBQU0sT0FBTyxHQUFHLE1BQU0sT0FBTyxFQUFFLElBQUksS0FBSztBQUN4QyxRQUFNLE9BQU8sS0FBSyxRQUFRLFlBQVksRUFBRTtBQUN4QyxTQUFPLE9BQU8sV0FBVyxJQUFJLEtBQUs7QUFDcEM7aUpBQUEiLCJuYW1lcyI6W10sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbImVkaXRvci1sYWJlbC50cyJdLCJzb3VyY2VzQ29udGVudCI6WyIvKipcbiAqIFRoZSBvbmUgbGFiZWwgZm9yIFwib3BlbiBpbiB0aGUgY29uZmlndXJlZCBleHRlcm5hbCBpbWFnZSBlZGl0b3JcIiDigJQgc2hhcmVkXG4gKiBieSB0aGUgbmF0aXZlIG1lbnUgKG1haW4pIGFuZCBldmVyeSByZW5kZXJlciBtZW51IHNvIHRoZSB3b3JkaW5nIGNhblxuICogbmV2ZXIgZHJpZnQuIERlcGVuZGVuY3ktZnJlZTogYm90aCBwcm9jZXNzZXMgaW1wb3J0IGl0LlxuICovXG5leHBvcnQgZnVuY3Rpb24gZXh0ZXJuYWxFZGl0b3JMYWJlbChlZGl0b3JQYXRoOiBzdHJpbmcgfCBudWxsIHwgdW5kZWZpbmVkKTogc3RyaW5nIHtcbiAgY29uc3QgZWQgPSBlZGl0b3JQYXRoPy50cmltKCk7XG4gIGlmICghZWQpIHJldHVybiBcIkVkaXQgZXh0ZXJuYWxseVwiO1xuICBjb25zdCBiYXNlID0gZWQuc3BsaXQoL1tcXFxcL10vKS5wb3AoKSA/PyBlZDtcbiAgY29uc3QgbmFtZSA9IGJhc2UucmVwbGFjZSgvXFwuW14uXSskLywgXCJcIik7XG4gIHJldHVybiBuYW1lID8gYEVkaXQgaW4gJHtuYW1lfWAgOiBcIkVkaXQgZXh0ZXJuYWxseVwiO1xufVxuIl0sImZpbGUiOiIvc3JjL3NoYXJlZC9lZGl0b3ItbGFiZWwudHMifQ==

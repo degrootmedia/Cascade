@@ -1,0 +1,64 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("react/jsx-dev-runtime", {"importedNames":["jsxDEV"]});
+const __vite_ssr_import_1__ = await __vite_ssr_import__("react", {"importedNames":["useState"]});
+
+
+function SaveVideoStillButton({
+  productionId,
+  videoRel,
+  getTime,
+  onSaved,
+  className = "prod-btn"
+}) {
+  const [busy, setBusy] = __vite_ssr_import_1__.useState(false);
+  const [error, setError] = __vite_ssr_import_1__.useState(null);
+  async function save() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await window.cascade.saveVideoStill(productionId, videoRel, getTime());
+      onSaved(next);
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "prod-still-save", onClick: (e) => e.stopPropagation(), onMouseDown: (e) => e.stopPropagation(), children: [
+    /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(
+      "button",
+      {
+        type: "button",
+        className,
+        disabled: busy,
+        title: "Save the paused frame as a new reference image",
+        onClick: (e) => {
+          e.stopPropagation();
+          void save();
+        },
+        children: busy ? "Saving frame…" : "Save this frame"
+      },
+      void 0,
+      false,
+      {
+        fileName: "D:/Cascade/app/src/renderer/src/components/common/SaveVideoStillButton.tsx",
+        lineNumber: 44,
+        columnNumber: 7
+      },
+      this
+    ),
+    error && /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV("span", { className: "prod-still-error", title: error, children: "Couldn't save the frame" }, void 0, false, {
+      fileName: "D:/Cascade/app/src/renderer/src/components/common/SaveVideoStillButton.tsx",
+      lineNumber: 53,
+      columnNumber: 17
+    }, this)
+  ] }, void 0, true, {
+    fileName: "D:/Cascade/app/src/renderer/src/components/common/SaveVideoStillButton.tsx",
+    lineNumber: 43,
+    columnNumber: 5
+  }, this);
+}
+Object.defineProperty(__vite_ssr_exports__, "SaveVideoStillButton", { enumerable: true, configurable: true, get(){ return SaveVideoStillButton }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQUEsQ0FBQTs7QUEyQ007QUFwQ21CO0FBR2xCLFNBQVMscUJBQXFCO0FBQUEsRUFDbkM7QUFBQSxFQUNBO0FBQUEsRUFDQTtBQUFBLEVBQ0E7QUFBQSxFQUNBLFlBQVk7QUFDZCxHQVNHO0FBQ0QsUUFBTSxDQUFDLE1BQU0sT0FBTyxJQUFJLCtCQUFTLEtBQUs7QUFDdEMsUUFBTSxDQUFDLE9BQU8sUUFBUSxJQUFJLCtCQUF3QixJQUFJO0FBQ3RELGlCQUFlLE9BQU87QUFDcEIsUUFBSSxLQUFNO0FBQ1YsWUFBUSxJQUFJO0FBQ1osYUFBUyxJQUFJO0FBQ2IsUUFBSTtBQUNGLFlBQU0sT0FBTyxNQUFNLE9BQU8sUUFBUSxlQUFlLGNBQWMsVUFBVSxRQUFRLENBQUM7QUFDbEYsY0FBUSxJQUFJO0FBQUEsSUFDZCxTQUFTLEdBQUc7QUFDVixlQUFTLE9BQU8sQ0FBQyxFQUFFLFFBQVEsY0FBYyxFQUFFLENBQUM7QUFBQSxJQUM5QyxVQUFFO0FBQ0EsY0FBUSxLQUFLO0FBQUEsSUFDZjtBQUFBLEVBQ0Y7QUFDQSxTQUNFLDZDQUFDLFVBQUssV0FBVSxtQkFBa0IsU0FBUyxDQUFDLE1BQU0sRUFBRSxnQkFBZ0IsR0FBRyxhQUFhLENBQUMsTUFBTSxFQUFFLGdCQUFnQixHQUMzRztBQUFBO0FBQUEsTUFBQztBQUFBO0FBQUEsUUFDQyxNQUFLO0FBQUEsUUFDTDtBQUFBLFFBQ0EsVUFBVTtBQUFBLFFBQ1YsT0FBTTtBQUFBLFFBQ04sU0FBUyxDQUFDLE1BQU07QUFBRSxZQUFFLGdCQUFnQjtBQUFHLGVBQUssS0FBSztBQUFBLFFBQUc7QUFBQSxRQUVuRCxpQkFBTyxrQkFBa0I7QUFBQTtBQUFBLE1BUDVCO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxJQVFBO0FBQUEsSUFDQyxTQUFTLDZDQUFDLFVBQUssV0FBVSxvQkFBbUIsT0FBTyxPQUFPLHVDQUFqRDtBQUFBO0FBQUE7QUFBQTtBQUFBLFdBQXdFO0FBQUEsT0FWcEY7QUFBQTtBQUFBO0FBQUE7QUFBQSxTQVdBO0FBRUo7bUpBQUEiLCJuYW1lcyI6W10sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbIlNhdmVWaWRlb1N0aWxsQnV0dG9uLnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyIvKipcclxuICogVGhlIG9uZSBcIlNhdmUgdGhpcyBmcmFtZVwiIGNvbnRyb2wgZXZlcnkgdmlkZW8gbGlnaHRib3ggdXNlczogaXQgcmVhZHMgdGhlXHJcbiAqIHBhdXNlZCBgY3VycmVudFRpbWVgIGZyb20gdGhlIGxpZ2h0Ym94J3MgYDx2aWRlbz5gIGVsZW1lbnQgYW5kIGFza3MgbWFpbiB0b1xyXG4gKiBleHRyYWN0IGV4YWN0bHkgdGhhdCBmcmFtZSB2aWEgZmZtcGVnIGFzIGEgbmV3IGBWaWRlbyBzdGlsbF9OTmAgcmVmZXJlbmNlLlxyXG4gKiBDZW50cmFsaXppbmcgaXQga2VlcHMgdGhlIGNhcHR1cmUgc2hhcGUgaWRlbnRpY2FsIGFjcm9zcyBzdXJmYWNlcyAoRGVzaWduXHJcbiAqIHJlZmVyZW5jZXMsIHN0b3J5Ym9hcmQsIG5vZGUgZ3JhcGgsIG1vb2Rib2FyZCwgb3V0ZGF0ZWQgcGFuZWxzKS5cclxuICovXHJcbmltcG9ydCB7IHVzZVN0YXRlIH0gZnJvbSBcInJlYWN0XCI7XHJcbmltcG9ydCB0eXBlIHsgUHJvZHVjdGlvbiB9IGZyb20gXCIuLi8uLi8uLi8uLi9zaGFyZWQvaXBjLmpzXCI7XHJcblxyXG5leHBvcnQgZnVuY3Rpb24gU2F2ZVZpZGVvU3RpbGxCdXR0b24oe1xyXG4gIHByb2R1Y3Rpb25JZCxcclxuICB2aWRlb1JlbCxcclxuICBnZXRUaW1lLFxyXG4gIG9uU2F2ZWQsXHJcbiAgY2xhc3NOYW1lID0gXCJwcm9kLWJ0blwiLFxyXG59OiB7XHJcbiAgcHJvZHVjdGlvbklkOiBzdHJpbmc7XHJcbiAgLyoqIFRoZSBjbGlwJ3Mgd29ya3NwYWNlLXJlbGF0aXZlIHBhdGggKHdoYXQgbWFpbiBleHRyYWN0cyBmcm9tKS4gKi9cclxuICB2aWRlb1JlbDogc3RyaW5nO1xyXG4gIC8qKiBSZWFkcyB0aGUgcGF1c2VkIHRpbWVzdGFtcCDigJQgdXN1YWxseSBgKCkgPT4gdmlkZW9SZWYuY3VycmVudD8uY3VycmVudFRpbWUgPz8gMGAuICovXHJcbiAgZ2V0VGltZTogKCkgPT4gbnVtYmVyO1xyXG4gIC8qKiBDYWxsZWQgd2l0aCBtYWluJ3MgdXBkYXRlZCBwcm9kdWN0aW9uICh0aGUgY2FsbGVyIGFwcGxpZXMgaXQpLiAqL1xyXG4gIG9uU2F2ZWQ6IChuZXh0OiBQcm9kdWN0aW9uKSA9PiB2b2lkO1xyXG4gIGNsYXNzTmFtZT86IHN0cmluZztcclxufSkge1xyXG4gIGNvbnN0IFtidXN5LCBzZXRCdXN5XSA9IHVzZVN0YXRlKGZhbHNlKTtcclxuICBjb25zdCBbZXJyb3IsIHNldEVycm9yXSA9IHVzZVN0YXRlPHN0cmluZyB8IG51bGw+KG51bGwpO1xyXG4gIGFzeW5jIGZ1bmN0aW9uIHNhdmUoKSB7XHJcbiAgICBpZiAoYnVzeSkgcmV0dXJuO1xyXG4gICAgc2V0QnVzeSh0cnVlKTtcclxuICAgIHNldEVycm9yKG51bGwpO1xyXG4gICAgdHJ5IHtcclxuICAgICAgY29uc3QgbmV4dCA9IGF3YWl0IHdpbmRvdy5jYXNjYWRlLnNhdmVWaWRlb1N0aWxsKHByb2R1Y3Rpb25JZCwgdmlkZW9SZWwsIGdldFRpbWUoKSk7XHJcbiAgICAgIG9uU2F2ZWQobmV4dCk7XHJcbiAgICB9IGNhdGNoIChlKSB7XHJcbiAgICAgIHNldEVycm9yKFN0cmluZyhlKS5yZXBsYWNlKC9eRXJyb3I6XFxzKi8sIFwiXCIpKTtcclxuICAgIH0gZmluYWxseSB7XHJcbiAgICAgIHNldEJ1c3koZmFsc2UpO1xyXG4gICAgfVxyXG4gIH1cclxuICByZXR1cm4gKFxyXG4gICAgPHNwYW4gY2xhc3NOYW1lPVwicHJvZC1zdGlsbC1zYXZlXCIgb25DbGljaz17KGUpID0+IGUuc3RvcFByb3BhZ2F0aW9uKCl9IG9uTW91c2VEb3duPXsoZSkgPT4gZS5zdG9wUHJvcGFnYXRpb24oKX0+XHJcbiAgICAgIDxidXR0b25cclxuICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICBjbGFzc05hbWU9e2NsYXNzTmFtZX1cclxuICAgICAgICBkaXNhYmxlZD17YnVzeX1cclxuICAgICAgICB0aXRsZT1cIlNhdmUgdGhlIHBhdXNlZCBmcmFtZSBhcyBhIG5ldyByZWZlcmVuY2UgaW1hZ2VcIlxyXG4gICAgICAgIG9uQ2xpY2s9eyhlKSA9PiB7IGUuc3RvcFByb3BhZ2F0aW9uKCk7IHZvaWQgc2F2ZSgpOyB9fVxyXG4gICAgICA+XHJcbiAgICAgICAge2J1c3kgPyBcIlNhdmluZyBmcmFtZeKAplwiIDogXCJTYXZlIHRoaXMgZnJhbWVcIn1cclxuICAgICAgPC9idXR0b24+XHJcbiAgICAgIHtlcnJvciAmJiA8c3BhbiBjbGFzc05hbWU9XCJwcm9kLXN0aWxsLWVycm9yXCIgdGl0bGU9e2Vycm9yfT5Db3VsZG4ndCBzYXZlIHRoZSBmcmFtZTwvc3Bhbj59XHJcbiAgICA8L3NwYW4+XHJcbiAgKTtcclxufVxyXG4iXSwiZmlsZSI6Ii9zcmMvcmVuZGVyZXIvc3JjL2NvbXBvbmVudHMvY29tbW9uL1NhdmVWaWRlb1N0aWxsQnV0dG9uLnRzeCJ9

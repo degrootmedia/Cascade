@@ -1,0 +1,98 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/agent.ts", {"importedNames":["Agent"]});
+
+Object.defineProperty(__vite_ssr_exports__, "Agent", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_0__.Agent }});
+const __vite_ssr_import_1__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/chat.ts", {"importedNames":["ChatClient","friendlyApiError","redactSecrets","logChatMetadata"]});
+
+Object.defineProperty(__vite_ssr_exports__, "ChatClient", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_1__.ChatClient }});
+Object.defineProperty(__vite_ssr_exports__, "friendlyApiError", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_1__.friendlyApiError }});
+Object.defineProperty(__vite_ssr_exports__, "redactSecrets", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_1__.redactSecrets }});
+Object.defineProperty(__vite_ssr_exports__, "logChatMetadata", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_1__.logChatMetadata }});
+const __vite_ssr_import_2__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/compact.ts", {"importedNames":["suggestChatTitle","titlePrompt"]});
+
+Object.defineProperty(__vite_ssr_exports__, "suggestChatTitle", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_2__.suggestChatTitle }});
+Object.defineProperty(__vite_ssr_exports__, "titlePrompt", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_2__.titlePrompt }});
+const __vite_ssr_import_3__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/tools.ts", {"importedNames":["TOOLS","TOOL_DEFINITIONS","labelCommandRisk","parseArgv","CommandParseError","lineDiff","runCommandArgv","assertLaunchable","DEFAULT_CMD_TIMEOUT_MS"]});
+
+Object.defineProperty(__vite_ssr_exports__, "TOOLS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.TOOLS }});
+Object.defineProperty(__vite_ssr_exports__, "TOOL_DEFINITIONS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.TOOL_DEFINITIONS }});
+Object.defineProperty(__vite_ssr_exports__, "labelCommandRisk", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.labelCommandRisk }});
+Object.defineProperty(__vite_ssr_exports__, "parseArgv", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.parseArgv }});
+Object.defineProperty(__vite_ssr_exports__, "CommandParseError", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.CommandParseError }});
+Object.defineProperty(__vite_ssr_exports__, "lineDiff", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.lineDiff }});
+Object.defineProperty(__vite_ssr_exports__, "runCommandArgv", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.runCommandArgv }});
+Object.defineProperty(__vite_ssr_exports__, "assertLaunchable", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.assertLaunchable }});
+Object.defineProperty(__vite_ssr_exports__, "DEFAULT_CMD_TIMEOUT_MS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_3__.DEFAULT_CMD_TIMEOUT_MS }});
+const __vite_ssr_import_4__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/spill.ts", {"importedNames":["SPILL_DIR","DEFAULT_SPILL_THRESHOLD_CHARS","DEFAULT_SPILL_PREVIEW_CHARS","MAX_SPILL_FILES","needsSpill","countLines","formatSpillResult","sanitizeToolName","buildSpillFilename","spillContent","pruneSpills"]});
+
+Object.defineProperty(__vite_ssr_exports__, "SPILL_DIR", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.SPILL_DIR }});
+Object.defineProperty(__vite_ssr_exports__, "DEFAULT_SPILL_THRESHOLD_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.DEFAULT_SPILL_THRESHOLD_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "DEFAULT_SPILL_PREVIEW_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.DEFAULT_SPILL_PREVIEW_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_SPILL_FILES", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.MAX_SPILL_FILES }});
+Object.defineProperty(__vite_ssr_exports__, "needsSpill", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.needsSpill }});
+Object.defineProperty(__vite_ssr_exports__, "countLines", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.countLines }});
+Object.defineProperty(__vite_ssr_exports__, "formatSpillResult", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.formatSpillResult }});
+Object.defineProperty(__vite_ssr_exports__, "sanitizeToolName", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.sanitizeToolName }});
+Object.defineProperty(__vite_ssr_exports__, "buildSpillFilename", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.buildSpillFilename }});
+Object.defineProperty(__vite_ssr_exports__, "spillContent", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.spillContent }});
+Object.defineProperty(__vite_ssr_exports__, "pruneSpills", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_4__.pruneSpills }});
+const __vite_ssr_import_5__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/workspace.ts", {"importedNames":["resolveSafe","resolveSafeAsync","PathEscapeError","WorkspaceError","loadWorkspaceInstructions","workspaceInstructionsFile"]});
+
+Object.defineProperty(__vite_ssr_exports__, "resolveSafe", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.resolveSafe }});
+Object.defineProperty(__vite_ssr_exports__, "resolveSafeAsync", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.resolveSafeAsync }});
+Object.defineProperty(__vite_ssr_exports__, "PathEscapeError", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.PathEscapeError }});
+Object.defineProperty(__vite_ssr_exports__, "WorkspaceError", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.WorkspaceError }});
+Object.defineProperty(__vite_ssr_exports__, "loadWorkspaceInstructions", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.loadWorkspaceInstructions }});
+Object.defineProperty(__vite_ssr_exports__, "workspaceInstructionsFile", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_5__.workspaceInstructionsFile }});
+const __vite_ssr_import_6__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/todo.ts", {"importedNames":["MAX_TODO_ITEMS","MAX_TODO_TEXT_CHARS","MAX_TODO_NOTE_CHARS","TODO_STATUSES","formatTodoList","makeTodoTools","parseTodoList","workspaceTodoPersistence"]});
+
+Object.defineProperty(__vite_ssr_exports__, "MAX_TODO_ITEMS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.MAX_TODO_ITEMS }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_TODO_TEXT_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.MAX_TODO_TEXT_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_TODO_NOTE_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.MAX_TODO_NOTE_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "TODO_STATUSES", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.TODO_STATUSES }});
+Object.defineProperty(__vite_ssr_exports__, "formatTodoList", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.formatTodoList }});
+Object.defineProperty(__vite_ssr_exports__, "makeTodoTools", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.makeTodoTools }});
+Object.defineProperty(__vite_ssr_exports__, "parseTodoList", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.parseTodoList }});
+Object.defineProperty(__vite_ssr_exports__, "workspaceTodoPersistence", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_6__.workspaceTodoPersistence }});
+const __vite_ssr_import_7__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/goal.ts", {"importedNames":["GOAL_STATUSES","MAX_GOAL_TEXT_CHARS","MAX_GOAL_CHECKPOINT_CHARS","continuationPrompt","formatGoal","makeGoalTools","parseGoalStatus","parseGoalText","planContinuation","workspaceGoalPersistence"]});
+
+Object.defineProperty(__vite_ssr_exports__, "GOAL_STATUSES", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.GOAL_STATUSES }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_GOAL_TEXT_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.MAX_GOAL_TEXT_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_GOAL_CHECKPOINT_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.MAX_GOAL_CHECKPOINT_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "continuationPrompt", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.continuationPrompt }});
+Object.defineProperty(__vite_ssr_exports__, "formatGoal", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.formatGoal }});
+Object.defineProperty(__vite_ssr_exports__, "makeGoalTools", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.makeGoalTools }});
+Object.defineProperty(__vite_ssr_exports__, "parseGoalStatus", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.parseGoalStatus }});
+Object.defineProperty(__vite_ssr_exports__, "parseGoalText", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.parseGoalText }});
+Object.defineProperty(__vite_ssr_exports__, "planContinuation", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.planContinuation }});
+Object.defineProperty(__vite_ssr_exports__, "workspaceGoalPersistence", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_7__.workspaceGoalPersistence }});
+const __vite_ssr_import_8__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/journal.ts", {"importedNames":["FileJournal"]});
+
+Object.defineProperty(__vite_ssr_exports__, "FileJournal", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_8__.FileJournal }});
+const __vite_ssr_import_9__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/planmode.ts", {"importedNames":["planGate"]});
+
+Object.defineProperty(__vite_ssr_exports__, "planGate", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_9__.planGate }});
+const __vite_ssr_import_10__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/verify.ts", {"importedNames":["DEFAULT_VERIFY_TIMEOUT_MS","DEFAULT_MAX_REPAIR_ROUNDS","MAX_VERIFY_OUTPUT_CHARS","VERIFY_FEEDBACK_BUDGET_CHARS","detectVerifyCommands","formatVerificationFeedback","maxRepairRounds","passed","runVerification","runVerifyCommand"]});
+
+Object.defineProperty(__vite_ssr_exports__, "DEFAULT_VERIFY_TIMEOUT_MS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.DEFAULT_VERIFY_TIMEOUT_MS }});
+Object.defineProperty(__vite_ssr_exports__, "DEFAULT_MAX_REPAIR_ROUNDS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.DEFAULT_MAX_REPAIR_ROUNDS }});
+Object.defineProperty(__vite_ssr_exports__, "MAX_VERIFY_OUTPUT_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.MAX_VERIFY_OUTPUT_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "VERIFY_FEEDBACK_BUDGET_CHARS", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.VERIFY_FEEDBACK_BUDGET_CHARS }});
+Object.defineProperty(__vite_ssr_exports__, "detectVerifyCommands", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.detectVerifyCommands }});
+Object.defineProperty(__vite_ssr_exports__, "formatVerificationFeedback", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.formatVerificationFeedback }});
+Object.defineProperty(__vite_ssr_exports__, "maxRepairRounds", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.maxRepairRounds }});
+Object.defineProperty(__vite_ssr_exports__, "passed", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.passed }});
+Object.defineProperty(__vite_ssr_exports__, "runVerification", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.runVerification }});
+Object.defineProperty(__vite_ssr_exports__, "runVerifyCommand", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_10__.runVerifyCommand }});
+const __vite_ssr_import_11__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/sandbox.ts", {"importedNames":["SANDBOX_DOCKER_IMAGE","applySandbox","normalizeSandboxMode","resolveOnPath","sandboxAvailable","sandboxFallbackNotice"]});
+
+Object.defineProperty(__vite_ssr_exports__, "SANDBOX_DOCKER_IMAGE", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.SANDBOX_DOCKER_IMAGE }});
+Object.defineProperty(__vite_ssr_exports__, "applySandbox", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.applySandbox }});
+Object.defineProperty(__vite_ssr_exports__, "normalizeSandboxMode", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.normalizeSandboxMode }});
+Object.defineProperty(__vite_ssr_exports__, "resolveOnPath", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.resolveOnPath }});
+Object.defineProperty(__vite_ssr_exports__, "sandboxAvailable", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.sandboxAvailable }});
+Object.defineProperty(__vite_ssr_exports__, "sandboxFallbackNotice", { enumerable: true, configurable: true, get(){ return __vite_ssr_import_11__.sandboxFallbackNotice }});
+const __vite_ssr_import_12__ = await __vite_ssr_import__("/@fs/D:/Cascade/core/src/types.ts");
+__vite_ssr_exportAll__(__vite_ssr_import_12__);
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQUEsQ0FBQTs7MklBQXNCOzs7Ozs7K0pBQzZFOzs7O3VKQUNyRDs7Ozs7Ozs7Ozs7NktBQzhHOzs7Ozs7Ozs7Ozs7O3VKQWFySjs7Ozs7Ozs7bUxBRThIOzs7Ozs7Ozs7O2lMQVU5SDs7Ozs7Ozs7Ozs7O2lMQWFBOzs7dUpBRXFCOzs7aUpBQ0g7Ozs7Ozs7Ozs7OztrS0FZbEI7Ozs7Ozs7OzRLQVNBOzs7QUFFTyIsIm5hbWVzIjpbXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsiaW5kZXgudHMiXSwic291cmNlc0NvbnRlbnQiOlsiZXhwb3J0IHsgQWdlbnQgfSBmcm9tIFwiLi9hZ2VudC5qc1wiO1xyXG5leHBvcnQgeyBDaGF0Q2xpZW50LCBmcmllbmRseUFwaUVycm9yLCByZWRhY3RTZWNyZXRzLCBsb2dDaGF0TWV0YWRhdGEsIHR5cGUgQmFsYW5jZUVuZHBvaW50IH0gZnJvbSBcIi4vY2hhdC5qc1wiO1xyXG5leHBvcnQgeyBzdWdnZXN0Q2hhdFRpdGxlLCB0aXRsZVByb21wdCB9IGZyb20gXCIuL2NvbXBhY3QuanNcIjtcclxuZXhwb3J0IHsgVE9PTFMsIFRPT0xfREVGSU5JVElPTlMsIGxhYmVsQ29tbWFuZFJpc2ssIHBhcnNlQXJndiwgQ29tbWFuZFBhcnNlRXJyb3IsIGxpbmVEaWZmLCBydW5Db21tYW5kQXJndiwgYXNzZXJ0TGF1bmNoYWJsZSwgREVGQVVMVF9DTURfVElNRU9VVF9NUyB9IGZyb20gXCIuL3Rvb2xzLmpzXCI7XHJcbmV4cG9ydCB7XHJcbiAgU1BJTExfRElSLFxyXG4gIERFRkFVTFRfU1BJTExfVEhSRVNIT0xEX0NIQVJTLFxyXG4gIERFRkFVTFRfU1BJTExfUFJFVklFV19DSEFSUyxcclxuICBNQVhfU1BJTExfRklMRVMsXHJcbiAgbmVlZHNTcGlsbCxcclxuICBjb3VudExpbmVzLFxyXG4gIGZvcm1hdFNwaWxsUmVzdWx0LFxyXG4gIHNhbml0aXplVG9vbE5hbWUsXHJcbiAgYnVpbGRTcGlsbEZpbGVuYW1lLFxyXG4gIHNwaWxsQ29udGVudCxcclxuICBwcnVuZVNwaWxscyxcclxufSBmcm9tIFwiLi9zcGlsbC5qc1wiO1xyXG5leHBvcnQgdHlwZSB7IFNwaWxsT3B0aW9ucywgU3BpbGxPdXRjb21lIH0gZnJvbSBcIi4vc3BpbGwuanNcIjtcclxuZXhwb3J0IHsgcmVzb2x2ZVNhZmUsIHJlc29sdmVTYWZlQXN5bmMsIFBhdGhFc2NhcGVFcnJvciwgV29ya3NwYWNlRXJyb3IsIGxvYWRXb3Jrc3BhY2VJbnN0cnVjdGlvbnMsIHdvcmtzcGFjZUluc3RydWN0aW9uc0ZpbGUgfSBmcm9tIFwiLi93b3Jrc3BhY2UuanNcIjtcclxuZXhwb3J0IHtcclxuICBNQVhfVE9ET19JVEVNUyxcclxuICBNQVhfVE9ET19URVhUX0NIQVJTLFxyXG4gIE1BWF9UT0RPX05PVEVfQ0hBUlMsXHJcbiAgVE9ET19TVEFUVVNFUyxcclxuICBmb3JtYXRUb2RvTGlzdCxcclxuICBtYWtlVG9kb1Rvb2xzLFxyXG4gIHBhcnNlVG9kb0xpc3QsXHJcbiAgd29ya3NwYWNlVG9kb1BlcnNpc3RlbmNlLFxyXG59IGZyb20gXCIuL3RvZG8uanNcIjtcclxuZXhwb3J0IHR5cGUgeyBQYXJzZVRvZG9MaXN0LCBUb2RvSXRlbSwgVG9kb1BlcnNpc3RlbmNlLCBUb2RvU3RhdHVzIH0gZnJvbSBcIi4vdG9kby5qc1wiO1xyXG5leHBvcnQge1xyXG4gIEdPQUxfU1RBVFVTRVMsXHJcbiAgTUFYX0dPQUxfVEVYVF9DSEFSUyxcclxuICBNQVhfR09BTF9DSEVDS1BPSU5UX0NIQVJTLFxyXG4gIGNvbnRpbnVhdGlvblByb21wdCxcclxuICBmb3JtYXRHb2FsLFxyXG4gIG1ha2VHb2FsVG9vbHMsXHJcbiAgcGFyc2VHb2FsU3RhdHVzLFxyXG4gIHBhcnNlR29hbFRleHQsXHJcbiAgcGxhbkNvbnRpbnVhdGlvbixcclxuICB3b3Jrc3BhY2VHb2FsUGVyc2lzdGVuY2UsXHJcbn0gZnJvbSBcIi4vZ29hbC5qc1wiO1xyXG5leHBvcnQgdHlwZSB7IENvbnRpbnVhdGlvblBsYW4sIEdvYWxQZXJzaXN0ZW5jZSwgR29hbFJlY29yZCwgR29hbFN0YXR1cywgUGFyc2VHb2FsU3RhdHVzLCBQYXJzZUdvYWxUZXh0IH0gZnJvbSBcIi4vZ29hbC5qc1wiO1xyXG5leHBvcnQgeyBGaWxlSm91cm5hbCB9IGZyb20gXCIuL2pvdXJuYWwuanNcIjtcclxuZXhwb3J0IHsgcGxhbkdhdGUgfSBmcm9tIFwiLi9wbGFubW9kZS5qc1wiO1xyXG5leHBvcnQge1xyXG4gIERFRkFVTFRfVkVSSUZZX1RJTUVPVVRfTVMsXHJcbiAgREVGQVVMVF9NQVhfUkVQQUlSX1JPVU5EUyxcclxuICBNQVhfVkVSSUZZX09VVFBVVF9DSEFSUyxcclxuICBWRVJJRllfRkVFREJBQ0tfQlVER0VUX0NIQVJTLFxyXG4gIGRldGVjdFZlcmlmeUNvbW1hbmRzLFxyXG4gIGZvcm1hdFZlcmlmaWNhdGlvbkZlZWRiYWNrLFxyXG4gIG1heFJlcGFpclJvdW5kcyxcclxuICBwYXNzZWQsXHJcbiAgcnVuVmVyaWZpY2F0aW9uLFxyXG4gIHJ1blZlcmlmeUNvbW1hbmQsXHJcbn0gZnJvbSBcIi4vdmVyaWZ5LmpzXCI7XHJcbmV4cG9ydCB0eXBlIHsgVmVyaWZpY2F0aW9uQ29uZmlnLCBWZXJpZnlDb21tYW5kLCBWZXJpZnlSZXN1bHQsIFZlcmlmeVJ1bm5lciB9IGZyb20gXCIuL3ZlcmlmeS5qc1wiO1xyXG5leHBvcnQge1xyXG4gIFNBTkRCT1hfRE9DS0VSX0lNQUdFLFxyXG4gIGFwcGx5U2FuZGJveCxcclxuICBub3JtYWxpemVTYW5kYm94TW9kZSxcclxuICByZXNvbHZlT25QYXRoLFxyXG4gIHNhbmRib3hBdmFpbGFibGUsXHJcbiAgc2FuZGJveEZhbGxiYWNrTm90aWNlLFxyXG59IGZyb20gXCIuL3NhbmRib3guanNcIjtcclxuZXhwb3J0IHR5cGUgeyBTYW5kYm94RGVwcywgU2FuZGJveE1vZGUsIFNhbmRib3hXcmFwIH0gZnJvbSBcIi4vc2FuZGJveC5qc1wiO1xyXG5leHBvcnQgKiBmcm9tIFwiLi90eXBlcy5qc1wiO1xyXG4iXSwiZmlsZSI6IkQ6L0Nhc2NhZGUvY29yZS9zcmMvaW5kZXgudHMifQ==

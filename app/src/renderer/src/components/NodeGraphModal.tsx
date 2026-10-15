@@ -59,10 +59,15 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
 import { graphEdgesToFlow, promptSockets, type PromptSocket } from "./graphFlow.js";
+import { WaypointContext, WaypointEdge, type WaypointHandlers } from "./graph/WaypointEdge.js";
 import { storedOrMaterializedGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
-import { canConnect, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
+import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
+import { tidyGraphLayout } from "../../../shared/graph/layout.js";
+import { createUndoHistory } from "./production/undo-history.js";
+import { canConnect, nodeOutputs, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
+import { traceChain } from "../../../shared/graph/trace.js";
 import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../../../shared/graph/render.js";
@@ -2598,6 +2603,8 @@ function withNodeDelete<P extends { id: string }>(Base: ComponentType<P>): Compo
   return DeletableNode;
 }
 
+const edgeTypes = { waypoint: WaypointEdge };
+
 const nodeTypes = {
   ref: RefNodeView,
   composer: ComposerNodeView,
@@ -2885,6 +2892,139 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 }) {
   const saveLayoutRef = useRef(onSaveLayout);
   saveLayoutRef.current = onSaveLayout;
+
+  // ---- Node-view undo/redo -------------------------------------------------
+  // Every graph/layout mutation funnels through graphField / saveLayout /
+  // saveGraph below, which capture a pre-mutation snapshot (the shot's
+  // graph-owned fields via the patch allowlist + the canvas layout). Undo
+  // restores the snapshot through the same narrow commands. Generation
+  // results (gens, jobs) are main-owned and never enter a snapshot, so undo
+  // can never un-record a finished generation.
+  type GraphHistorySnapshot = { fields: Partial<ProductionShot>; layout: GraphLayout | undefined };
+  const historyRef = useRef(createUndoHistory<GraphHistorySnapshot>({ limit: 50, coalesceMs: 1200 }));
+  const restoringRef = useRef(false);
+  const shotNowRef = useRef(shot);
+  shotNowRef.current = shot;
+  const [, setHistoryTick] = useState(0);
+  const snapshotNow = useCallback((): GraphHistorySnapshot => ({
+    fields: pickGraphShotPatch(shotNowRef.current as unknown as Record<string, unknown>) as Partial<ProductionShot>,
+    layout: cb.current.initialLayout ? (JSON.parse(JSON.stringify(cb.current.initialLayout)) as GraphLayout) : undefined,
+  }), []);
+  const captureHistory = useCallback((force = false) => {
+    if (restoringRef.current || readOnly) return;
+    if (historyRef.current.push(snapshotNow(), { force })) setHistoryTick((n) => n + 1);
+  }, [readOnly, snapshotNow]);
+  const graphField = useCallback((patch: Partial<ProductionShot>): void => {
+    captureHistory();
+    cb.current.onGraphField(patch);
+  }, [captureHistory]);
+  const saveLayout = useCallback((patch: GraphLayoutPatch): void => {
+    // Pan/zoom alone is not an undoable edit.
+    if (!("viewport" in patch && Object.keys(patch).length === 1)) captureHistory();
+    saveLayoutRef.current(patch);
+  }, [captureHistory]);
+  /** Apply layout positions to the LIVE canvas. The reconcile effect
+   *  deliberately keeps a mounted node's current position (so unrelated
+   *  rebuilds never snap a node mid-drag), which means a saved layout
+   *  change only becomes visible when the live node state is moved
+   *  explicitly — Tidy and undo/redo restores do that here. */
+  const applyLivePositions = useCallback((positions: Record<string, { x: number; y: number }> | undefined) => {
+    if (!positions || !Object.keys(positions).length) return;
+    const next = nodesRef.current.map((n) => (positions[n.id] ? { ...n, position: positions[n.id] } : n));
+    nodesRef.current = next;
+    setNodes(next);
+  }, []);
+  const restoreHistory = useCallback((entry: GraphHistorySnapshot) => {
+    restoringRef.current = true;
+    try {
+      cb.current.onGraphField(entry.fields);
+      const cur = cb.current.initialLayout;
+      const snap = entry.layout;
+      const idsOf = (l: GraphLayout | undefined) => new Set([
+        ...Object.keys(l?.positions ?? {}),
+        ...Object.keys(l?.sizes ?? {}),
+        ...Object.keys(l?.collapsed ?? {}),
+      ]);
+      const curIds = idsOf(cur);
+      const snapIds = idsOf(snap);
+      const remove = [...curIds].filter((id) => !snapIds.has(id));
+      saveLayoutRef.current({
+        positions: snap?.positions ?? {},
+        sizes: snap?.sizes ?? {},
+        collapsed: snap?.collapsed ?? {},
+        waypoints: snap?.waypoints ?? {},
+        remove,
+      });
+      // The saved layout alone doesn't move mounted nodes (the reconcile
+      // effect preserves live positions) - apply the restored ones.
+      applyLivePositions(snap?.positions);
+    } finally {
+      restoringRef.current = false;
+    }
+  }, [applyLivePositions]);
+  const doUndo = useCallback(() => {
+    const target = historyRef.current.undo(snapshotNow());
+    if (target) restoreHistory(target);
+    setHistoryTick((n) => n + 1);
+  }, [restoreHistory, snapshotNow]);
+  /** Edge waypoint edits (click-to-add, drag, double-click delete). Each
+   *  gesture is one forced history step; the layout save itself is the
+   *  narrow updateGraphLayout command, so bends persist and classic view
+   *  never sees them. */
+  const waypointHandlers = useMemo<WaypointHandlers>(() => ({
+    add: (edgeId, pos, index) => {
+      if (readOnly) return;
+      captureHistory(true);
+      const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
+      saveLayout({ waypoints: { [edgeId]: [...cur.slice(0, index), pos, ...cur.slice(index)] } });
+    },
+    move: (edgeId, index, pos) => {
+      if (readOnly) return;
+      captureHistory(true);
+      const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
+      saveLayout({ waypoints: { [edgeId]: cur.map((p, i) => (i === index ? pos : p)) } });
+    },
+    remove: (edgeId, index) => {
+      if (readOnly) return;
+      captureHistory(true);
+      const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
+      saveLayout({ waypoints: { [edgeId]: cur.filter((_, i) => i !== index) } });
+    },
+  }), [captureHistory, readOnly, saveLayout]);
+
+  /** Tidy: arrange every node into a deterministic left-to-right flow and
+   *  clear all edge waypoints (stale bends are meaningless once nodes move).
+   *  One history step (the forced capture above the layout save). */
+  const tidyLayout = useCallback(() => {
+    if (readOnly) return;
+    const inst = flowRef.current;
+    if (!inst) return;
+    captureHistory(true);
+    const flowNodes = inst.getNodes();
+    const sizes: Record<string, { width: number; height: number }> = {};
+    for (const n of flowNodes) {
+      sizes[n.id] = { width: n.measured?.width ?? 300, height: n.measured?.height ?? 200 };
+    }
+    const mini = {
+      nodes: flowNodes.map((n) => ({ id: n.id })),
+      edges: inst.getEdges().map((e) => ({ from: { node: e.source }, to: { node: e.target } })),
+    };
+    const positions = tidyGraphLayout(mini, sizes, (id) => id === "output");
+    const clearWaypoints = Object.fromEntries(
+      inst.getEdges().map((e) => [e.id, [] as { x: number; y: number }[]])
+    );
+    saveLayoutRef.current({
+      positions,
+      ...(Object.keys(clearWaypoints).length ? { waypoints: clearWaypoints } : {}),
+    });
+    applyLivePositions(positions);
+  }, [captureHistory, readOnly, applyLivePositions]);
+
+  const doRedo = useCallback(() => {
+    const target = historyRef.current.redo(snapshotNow());
+    if (target) restoreHistory(target);
+    setHistoryTick((n) => n + 1);
+  }, [restoreHistory, snapshotNow]);
   /** Node kinds / palette tools this host does not have at all (a shot sequence
    *  canvas hides the image-generation node and the shot-only generators):
    *  they are not rendered, not draggable, and stripped from a stored graph.
@@ -2929,7 +3069,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const stitching = tweenStitching === true;
   const hintTimer = useRef<number | null>(null);
   /** React Flow instance (captured on init) — used to map drop coordinates. */
-  const flowRef = useRef<{ screenToFlowPosition: (p: { x: number; y: number }) => { x: number; y: number } } | null>(null);
+  const flowRef = useRef<{
+  screenToFlowPosition: (p: { x: number; y: number }) => { x: number; y: number };
+  getNodes: () => { id: string; measured?: { width?: number; height?: number } }[];
+  getEdges: () => { id: string; source: string; target: string }[];
+} | null>(null);
   /** Ref ids deleted this session (keyboard/trash). Keeps a deleted tagged node
    *  from being re-added by the reconcile effect while the parent's async prompt
    *  save is still in flight; re-dragging from the shelf clears the entry. */
@@ -2980,6 +3124,17 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, lightbox]);
+
+  useEffect(() => {
+    const onUndoKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.isComposing || isEditingTarget(e.target)) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) { e.preventDefault(); doUndo(); }
+      else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); doRedo(); }
+    };
+    document.addEventListener("keydown", onUndoKey);
+    return () => document.removeEventListener("keydown", onUndoKey);
+  }, [doUndo, doRedo]);
 
   // Output thumbnail: fetched lazily, refetched when the frame changes. The
   // thumbnail resolves through the shared display (the pipe when bound), so
@@ -3253,7 +3408,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const appliers = useRef<Record<string, PromptDraftApplier | undefined>>({});
   /** Replace one video node immutably in the shot's `graphVideoNodes` list. */
   const patchVideoNode = (nodeId: string, patch: Partial<GraphVideoNode>): void => {
-    cb.current.onGraphField({ graphVideoNodes: (cb.current.graphVideoNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) });
+    graphField({ graphVideoNodes: (cb.current.graphVideoNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) });
   };
   /** Apply a prompt transform to the live draft when one exists; returns true
    *  when handled (the applier emitted upstream itself). */
@@ -3301,7 +3456,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       });
       nodesRef.current = next;
       setNodes(next);
-      saveLayoutRef.current({ collapsed: { ...collapsedRef.current } });
+      saveLayout({ collapsed: { ...collapsedRef.current } });
     },
     onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => cb.current.setLightbox({ name, artwork, kind, rel }),
     // Generation nodes queue through the shared per-target queue so extra
@@ -3336,7 +3491,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const res = await cb.current.onImportCameraGridImage?.(source);
       if (res?.sheetPath) {
         const cur = normalizeCameraGridData(cb.current.graphCameraGrid) ?? { cols: CAMERA_GRID_COLS, rows: CAMERA_GRID_ROWS };
-        cb.current.onGraphField({ graphCameraGrid: { ...cur, sheetPath: res.sheetPath, sheetAt: res.sheetAt, gridSource: source } });
+        graphField({ graphCameraGrid: { ...cur, sheetPath: res.sheetPath, sheetAt: res.sheetAt, gridSource: source } });
       }
       return res;
     },
@@ -3345,7 +3500,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     /** Persist a patch onto the shot's camera-grid node state. */
     onCameraGridSave: (patch: Partial<CameraGridData>) => {
       const cur = normalizeCameraGridData(cb.current.graphCameraGrid) ?? { cols: CAMERA_GRID_COLS, rows: CAMERA_GRID_ROWS };
-      cb.current.onGraphField({ graphCameraGrid: { ...cur, ...patch } });
+      graphField({ graphCameraGrid: { ...cur, ...patch } });
     },
     onRunUpscale: (model: string, resolution: string, params?: GenParams) => {
       genQueue.enqueue(genKeys.upscale(cb.current.shotId), () => cb.current.onRunUpscale?.(model, resolution, params) ?? Promise.resolve());
@@ -3353,7 +3508,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     },
     /** Persist a patch onto the shot's upscale node state. */
     onUpscaleSave: (patch: Partial<UpscaleData>) => {
-      cb.current.onGraphField({ graphUpscale: { ...(cb.current.graphUpscale ?? {}), ...patch } });
+      graphField({ graphUpscale: { ...(cb.current.graphUpscale ?? {}), ...patch } });
     },
     /** Export marqueed panels, then place the created refs as canvas nodes. */
     /** Export marqueed panels, place the created refs as canvas nodes, and
@@ -3432,12 +3587,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     /** Per-node video-gen selections (model/resolution/length) → the node. */
     onSaveVideoFields: (nodeId: string, patch: Partial<GraphVideoNode>) => patchVideoNode(nodeId, patch),
     /** Per-shot image-gen params → the shot (image node advanced panel). */
-    onSaveImageFields: (patch: Partial<ProductionShot>) => cb.current.onGraphField(patch),
+    onSaveImageFields: (patch: Partial<ProductionShot>) => graphField(patch),
     /** Per-node edit-video selections (model/params) — the node. */
     onSaveEditVideoFields: (nodeId: string, patch: Partial<GraphVideoNode>) => patchVideoNode(nodeId, patch),
     /** Per-node edit-gen selections → the named edit node in the list. */
     onEditNodeSave: (nodeId: string, patch: Partial<GraphEditNode>) =>
-      cb.current.onGraphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) }),
+      graphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) }),
     onEditPromptChange: (nodeId: string, text: string) => cb.current.onEditNodePrompt(nodeId, stripSharedSections(text)),
     onPipeImageToVideo: (nodeId: string) => cb.current.onPipeImageToVideo(nodeId),
     onPipeEditToVideo: (nodeId: string, sourceNodeId: string) => cb.current.onPipeEditToVideo?.(nodeId, sourceNodeId),
@@ -3489,7 +3644,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     nodesRef.current = next;
     setNodes(next);
     setPlacedRefIds((prev) => { const n = new Set(prev); n.add(ref.id); return n; });
-    saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+    saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
     // Stored graph mirrors the placement (see header note).
     const gcur = cb.current.graph;
     if (gcur) saveGraph(addGraphNode(gcur, { id, kind: "ref", pos: { ...pos }, data: { label: ref.name } }));
@@ -3910,7 +4065,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       nodesRef.current = next;
       setNodes(next);
       setPlacedTools((prev) => { const n = new Set(prev); n.add("upscale"); return n; });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       const gcur = cb.current.graph;
       if (gcur) saveGraph(addGraphNode(gcur, { id: "upscale", kind: "upscale", pos: { ...genPos } }));
       showHint("Upscale node added — wire a source image in (or use the shot's frame), pick an upscale model, then upscale.");
@@ -3923,7 +4078,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       nodesRef.current = next;
       setNodes(next);
       setPlacedTools((prev) => { const n = new Set(prev); n.add("cameraGrid"); return n; });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       const gcur = cb.current.graph;
       if (gcur) saveGraph(addGraphNode(gcur, { id: "cameraGrid", kind: "cameraGrid", pos: { ...genPos } }));
       showHint("Camera grid added — wire a source frame in (and optional references), then generate a 4×4 sheet and marquee panels to export them as references.");
@@ -3935,8 +4090,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const next = [...nodesRef.current, ...pair];
       nodesRef.current = next;
       setNodes(next);
-      cb.current.onGraphField({ graphEditNodes: [...editNodes, { id: nodeId, prompt: "" }] });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      graphField({ graphEditNodes: [...editNodes, { id: nodeId, prompt: "" }] });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       // Stored graph mirrors the placement (see header note).
       const gcur = cb.current.graph;
       if (gcur) {
@@ -3956,8 +4111,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const next = [...nodesRef.current, ...pair];
       nodesRef.current = next;
       setNodes(next);
-      cb.current.onGraphField({ graphVideoNodes: [...(cb.current.graphVideoNodes ?? []), node] });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      graphField({ graphVideoNodes: [...(cb.current.graphVideoNodes ?? []), node] });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       const gcur = cb.current.graph;
       if (gcur) {
         let g = addGraphNode(gcur, { id: editVideoGenNodeId(nodeId), kind: "editvideo", pos: { ...genPos } });
@@ -3975,8 +4130,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const next = [...nodesRef.current, ...pair];
       nodesRef.current = next;
       setNodes(next);
-      cb.current.onGraphField({ graphVideoNodes: [...(cb.current.graphVideoNodes ?? []), node] });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      graphField({ graphVideoNodes: [...(cb.current.graphVideoNodes ?? []), node] });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       const gcur = cb.current.graph;
       if (gcur) {
         let g = addGraphNode(gcur, { id: videoGenNodeId(nodeId), kind: "videogen", pos: { ...genPos } });
@@ -3993,7 +4148,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       nodesRef.current = next;
       setNodes(next);
       setPlacedTools((prev) => { const n = new Set(prev); for (const node of pair) n.add(node.id); return n; });
-      saveLayoutRef.current({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
+      saveLayout({ positions: Object.fromEntries(next.map((n) => [n.id, n.position])) });
       const gcur = cb.current.graph;
       if (gcur) {
         let g = gcur;
@@ -4266,8 +4421,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   );
   const edges = useMemo<Edge[]>(() => {
     if (!wiringGraph) return [];
-    return graphEdgesToFlow(wiringGraph, { selected: selectedEdges, colors: SOCKET_COLORS });
-  }, [wiringGraph, selectedEdges]);
+    return graphEdgesToFlow(wiringGraph, {
+      selected: selectedEdges,
+      colors: SOCKET_COLORS,
+      waypoints: initialLayout?.waypoints,
+      refMediaByNode: Object.fromEntries(references.map((r) => [`ref:${r.id}`, refOutputMedia(r)])),
+    });
+  }, [wiringGraph, selectedEdges, initialLayout?.waypoints, referencesSig]);
 
   // Ensure every opened shot owns a stored graph: legacy shots materialize on
   // first open (load migration skips v2 files), and drift from manual prompt
@@ -4315,7 +4475,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const g = cb.current.graph;
     if (!g) return;
     const next = wireComposerRefs(g, magicRefIds);
-    if (JSON.stringify(next) !== JSON.stringify(g)) cb.current.onGraphField({ graph: next });
+    if (JSON.stringify(next) !== JSON.stringify(g)) graphField({ graph: next });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [magicActive, prompt, shot.graph, magicRefIds]);
 
@@ -4425,13 +4585,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (cameraGridRemoved) {
       setPlacedTools((prev) => { const n = new Set(prev); n.delete("cameraGrid"); return n; });
       // Drop the node's wiring/picks so it doesn't resurrect on the next build.
-      cb.current.onGraphField({ graphCameraGrid: undefined });
+      graphField({ graphCameraGrid: undefined });
     }
     if (upscaleRemoved) {
       setPlacedTools((prev) => { const n = new Set(prev); n.delete("upscale"); return n; });
       // Drop the node's wiring/picks and the output feed so it doesn't
       // resurrect on the next build.
-      cb.current.onGraphField({ graphUpscale: undefined, ...(cb.current.graphOutputSource === "upscale" ? { graphOutputSource: undefined } : {}) });
+      graphField({ graphUpscale: undefined, ...(cb.current.graphOutputSource === "upscale" ? { graphOutputSource: undefined } : {}) });
     }
     if (removedEditIds.size > 0) {
       // Drop the node, clear every pipe that pointed at it (output, video
@@ -4453,7 +4613,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         return !(eid && removedEditIds.has(eid));
       });
       if (tween.length !== (cb.current.graphTweenRefIds ?? []).length) patch.graphTweenRefIds = tween;
-      cb.current.onGraphField(patch);
+      graphField(patch);
     }
     if (removedVidIds.size > 0 || removedVidEditIds.size > 0) {
       // Drop the removed video nodes (generate and/or edit); clear the output
@@ -4467,7 +4627,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         patch.graphOutputSource = undefined;
         patch.graphOutputVideoNodeId = undefined;
       }
-      cb.current.onGraphField(patch);
+      graphField(patch);
     }
     // Ref node deletion (select + Delete/Backspace): strip the reference from
     // every prompt + pipe and drop its position so it returns to the shelf.
@@ -4497,7 +4657,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           return prompt !== n.prompt || source !== n.source || refIds !== n.refIds ? { ...n, prompt, source, refIds } : n;
         });
         if (vidNodesNext.some((n, i) => n !== (cb.current.graphVideoNodes ?? [])[i])) {
-          cb.current.onGraphField({ graphVideoNodes: vidNodesNext });
+          graphField({ graphVideoNodes: vidNodesNext });
         }
         const editNodesNext = (cb.current.graphEditNodes ?? []).map((n) => {
           const fresh = appliers.current[`edit:${n.id}`]?.get() ?? n.prompt ?? "";
@@ -4508,10 +4668,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           return p !== n.prompt || source !== n.source ? { ...n, prompt: p, source } : n;
         });
         if (editNodesNext.some((n, i) => n !== (cb.current.graphEditNodes ?? [])[i])) {
-          cb.current.onGraphField({ graphEditNodes: editNodesNext });
+          graphField({ graphEditNodes: editNodesNext });
         }
         if (cb.current.graphOutputSource === "ref" && cb.current.graphOutputRefId === refId) cb.current.onUnpipeOutput();
-        if (cb.current.graphVideoSourceRefId === refId) cb.current.onGraphField({ graphVideoSourceRefId: undefined });
+        if (cb.current.graphVideoSourceRefId === refId) graphField({ graphVideoSourceRefId: undefined });
         if ((cb.current.graphTweenRefIds ?? []).includes(refId)) {
           cb.current.onTweenRefs((cb.current.graphTweenRefIds ?? []).filter((id) => id !== refId));
         }
@@ -4568,7 +4728,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           ?? (n as { style?: { height?: number } }).style?.height;
         if (typeof w === "number" && typeof h === "number") sizes[n.id] = { width: Math.round(w), height: Math.round(h) };
       }
-      saveLayoutRef.current({
+      saveLayout({
         positions: Object.fromEntries(final.map((n) => [n.id, n.position])),
         ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
         ...(removed.length > 0 ? { remove: removed.map((c) => c.id) } : {}),
@@ -4591,7 +4751,19 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // legacy flag/text writes below, which continue as the generation projection
   // (LEGACY-PROJECTION — generation still consumes flags/text until steps
   // 04–05; step 10 deletes them). Both derive from the same event.
-  const saveGraph = (g: Graph): void => { cb.current.onGraphField({ graph: g }); };
+  const saveGraph = (g: Graph): void => {
+    const prev = cb.current.graph;
+    graphField({ graph: g });
+    // Deleting an edge (or a node, which deletes its edges) deletes its
+    // waypoints with it — they are layout data keyed by edge id.
+    if (prev) {
+      const nextIds = new Set(g.edges.map((e) => e.id));
+      const gone = prev.edges.filter((e) => !nextIds.has(e.id) && (cb.current.initialLayout?.waypoints?.[e.id]?.length ?? 0) > 0);
+      if (gone.length) {
+        saveLayoutRef.current({ waypoints: Object.fromEntries(gone.map((e) => [e.id, [] as { x: number; y: number }[]])) });
+      }
+    }
+  };
   const tweenResolveFor = (g: Graph) => (keyId: string): string | null => {
     const editIds = new Set((cb.current.graphEditNodes ?? []).map((n) => n.id));
     const refNodes = new Set(g.nodes.map((n) => n.id).filter((id) => id.startsWith("ref:")));
@@ -4641,7 +4813,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const evEdge = /^e-(?:vid|ref)-ev(?::(.+))?$/.exec(c.id);
         if (evEdge) {
           const nodeId = evEdge[1] ?? "ev0";
-          cb.current.onGraphField({ graphVideoNodes: (cb.current.graphVideoNodes ?? []).map((n) => (n.id === nodeId ? { ...n, source: undefined } : n)) });
+          graphField({ graphVideoNodes: (cb.current.graphVideoNodes ?? []).map((n) => (n.id === nodeId ? { ...n, source: undefined } : n)) });
           setSelectedEdges(new Set());
           continue;
         }
@@ -4650,7 +4822,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (c.id === "e-brand") { cb.current.onToggleBrand(false); setSelectedEdges(new Set()); continue; }
         // Composer style plug: select + Delete drops it and mirrors to None
         // so the sidepanel dropdown reflects the unwired state.
-        if (c.id === "e-style") { cb.current.onGraphField({ graphStyleConnected: false, styleNone: true }); setSelectedEdges(new Set()); continue; }
+        if (c.id === "e-style") { graphField({ graphStyleConnected: false, styleNone: true }); setSelectedEdges(new Set()); continue; }
         // Reference edges are deletable via keyboard (select+Delete) —
         // ids are `e-<refId>-<target>-<idx>` for the prompt nodes.
         const m = /^e-(.+)-(composer|videoprompt(?::[^:]+)?|editvideoprompt(?::[^:]+)?|editprompt(?::[^:]+)?)-(\d+)$/.exec(c.id);
@@ -4812,7 +4984,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const anchor = nodesRef.current.find((n) => n.id === target)?.position;
     const posMap = Object.fromEntries(nodesRef.current.map((n) => [n.id, n.position]));
     posMap[refNodeId] = anchor ? { x: anchor.x - 260, y: anchor.y + 48 } : { x: 40, y: 40 };
-    saveLayoutRef.current({ positions: posMap });
+    saveLayout({ positions: posMap });
     // Tag the reference into the prompt at the socket — the wire's substance.
     const slot = /^in-ref-(\d+)$/.exec(handle);
     const place = (t: string) => (slot ? replaceRefTagAt(t, Number(slot[1]), saved.name) : addRefTag(t, saved.name));
@@ -4904,7 +5076,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     };
     /** Replace one edit node immutably in the shot's list. */
     const patchEditNode = (nodeId: string, patch: Partial<GraphEditNode>) => {
-      cb.current.onGraphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) });
+      graphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) });
     };
     const srcEditId = parseEditGenNode(conn.source);
     const tgtEditId = parseEditGenNode(conn.target);
@@ -5051,7 +5223,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         // legacy flag still mirrors it for graph-less rebuilds (projection).
         // The sidepanel selection mirrors the wire: plugging the composer wire
         // re-activates a style (clears None so the dropdown shows the style).
-        if (isComposer) cb.current.onGraphField({ graphStyleConnected: true, styleNone: false });
+        if (isComposer) graphField({ graphStyleConnected: true, styleNone: false });
         else if (isVideo) patchVideoNode(tgtVideoPromptId!, { styleConnected: true });
         else if (isEditVideoPrompt) patchVideoNode(evpTargetId!, { styleConnected: true });
         else patchEditNode(editPromptId!, { styleConnected: true });
@@ -5256,7 +5428,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         if (handleId === "in-style") {
           // The edge is the plug and the sidepanel mirrors it: detaching the
           // composer wire selects None so the dropdown reflects the unwired state.
-          cb.current.onGraphField({ graphStyleConnected: false, styleNone: true });
+          graphField({ graphStyleConnected: false, styleNone: true });
           return true;
         }
         if (handleId === "in-brand") { cb.current.onToggleBrand(false); return true; }
@@ -5293,7 +5465,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         const editId = nodeId === "editprompt" ? "edit0" : nodeId.slice(EDITPROMPT_NODE_PREFIX.length);
         const pv = cb.current.editPromptValues.get(editId) ?? "";
         const freshEdit = appliers.current[`edit:${editId}`]?.get() ?? pv;
-        const patchNode = (patch: Partial<GraphEditNode>) => cb.current.onGraphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === editId ? { ...n, ...patch } : n)) });
+        const patchNode = (patch: Partial<GraphEditNode>) => graphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === editId ? { ...n, ...patch } : n)) });
         const applyEdit = (fn: (t: string) => string) => { if (!applyDraftEdit(`edit:${editId}`, fn)) cb.current.onEditNodePrompt(editId, fn(freshEdit)); };
         if (handleId === "in-style") { patchNode({ styleConnected: false }); return true; }
         if (handleId === "in-brand") return true;
@@ -5353,7 +5525,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (from.type === "target") {
       const editId = parseEditGenNode(from.nodeId ?? "");
       if (editId && from.id === "in-image") {
-        cb.current.onGraphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === editId ? { ...n, source: undefined } : n)) });
+        graphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === editId ? { ...n, source: undefined } : n)) });
         return;
       }
     }
@@ -5477,6 +5649,54 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     })();
   }, [onDropFile, showHint, references, addPlacedRef, addTool]);
 
+  // ---- CTRL+Click → Frame Output ------------------------------------------
+  // The one shortcut that changes wiring, and only as an explicit gesture:
+  // it routes through the exact same onConnect code path as dragging the
+  // wire by hand (canonical edge + legacy projection + one history step).
+  const [outputChooser, setOutputChooser] = useState<{ nodeId: string; x: number; y: number; outputs: { id: string; label: string }[] } | null>(null);
+  const routeNodeToOutput = useCallback((nodeId: string, sourceHandle: string) => {
+    captureHistory(true);
+    onConnect({ source: nodeId, sourceHandle, target: "output", targetHandle: "in-out" });
+  }, [captureHistory, onConnect]);
+  const onNodeClick = useCallback((e: React.MouseEvent, node: { id: string }) => {
+    if (!(e.ctrlKey || e.metaKey) || readOnly) return;
+    const nodeId = canonicalNodeId(node.id);
+    if (nodeId === "output") return;
+    const kind = nodeKindForId(nodeId);
+    if (!kind) return;
+    const outputs = nodeOutputs(kind).filter((o) => o.media === "image" || o.media === "video");
+    if (outputs.length === 0) return;
+    if (outputs.length === 1) {
+      routeNodeToOutput(nodeId, outputs[0].id);
+      return;
+    }
+    setOutputChooser({ nodeId, x: e.clientX, y: e.clientY, outputs: outputs.map((o) => ({ id: o.id, label: o.label })) });
+  }, [readOnly, routeNodeToOutput]);
+
+  // ---- Trace path (visual only) -------------------------------------------
+  // Hovering a node dims everything outside its upstream/downstream chain.
+  // Applied as DOM classes on the rendered wrappers — no React state, no
+  // selection or graph change, and no node/edge re-render per hover.
+  const traceRootRef = useRef<HTMLElement | null>(null);
+  const applyTrace = useCallback((hoverId: string | null) => {
+    const rootEl = traceRootRef.current;
+    if (!rootEl) return;
+    rootEl.querySelectorAll(".prod-trace-dim").forEach((el) => el.classList.remove("prod-trace-dim"));
+    if (!hoverId) return;
+    const graphNow = cb.current.graph ?? fallbackGraph;
+    const chain = traceChain(graphNow, canonicalNodeId(hoverId));
+    rootEl.querySelectorAll<HTMLElement>(".react-flow__node").forEach((el) => {
+      const id = el.getAttribute("data-id");
+      if (id && !chain.nodes.has(canonicalNodeId(id))) el.classList.add("prod-trace-dim");
+    });
+    rootEl.querySelectorAll<HTMLElement>(".react-flow__edge").forEach((el) => {
+      const id = el.getAttribute("data-id");
+      if (id && !chain.edges.has(id)) el.classList.add("prod-trace-dim");
+    });
+  }, [fallbackGraph]);
+  const onNodeMouseEnter = useCallback((_e: React.MouseEvent, node: { id: string }) => applyTrace(node.id), [applyTrace]);
+  const onNodeMouseLeave = useCallback(() => applyTrace(null), [applyTrace]);
+
   /** Per-tool disabled hints: the provider gates (their tiles stay visible,
    *  disabled, with an explanation). Host-hidden tools have no tile at all. */
   const toolHints = {
@@ -5489,7 +5709,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       <div className={"prod-graph-panel" + (magicActive ? " magic-active" : "") + (readOnly ? " prod-graph-readonly" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="prod-graph-head">
           <span className="prod-graph-title">{subjectLabel ?? `Shot ${shot.number}`} — node graph</span>
-          <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off an input socket to detach it</span>
+          <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off an input socket to detach it · CTRL+Click a node routes it to Frame Output</span>
           {onToggleMagic && (
             <button
               className={"prod-btn prod-magic-btn" + (magicActive ? " active" : "")}
@@ -5518,6 +5738,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               Pop out
             </button>
           )}
+          {!readOnly && (
+            <>
+              <button className="prod-btn" onClick={doUndo} disabled={!historyRef.current.canUndo()} title="Undo (Ctrl+Z)">Undo</button>
+              <button className="prod-btn" onClick={doRedo} disabled={!historyRef.current.canRedo()} title="Redo (Ctrl+Shift+Z)">Redo</button>
+              <button className="prod-btn" onClick={tidyLayout} title="Arrange all nodes into a clean left-to-right flow (clears edge waypoints)">Tidy</button>
+            </>
+          )}
           <button className="prod-btn" onClick={onClose}>Close</button>
         </div>
         <div className="prod-graph-body">
@@ -5530,15 +5757,20 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             onDismissHighlight={dismissHighlight}
             onZoom={stable.onShelfRefZoom}
           />
-          <div className="prod-graph-canvas" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>
+          <div className="prod-graph-canvas" ref={(el) => { traceRootRef.current = el; }} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>
             <NodeDeleteContext.Provider value={requestDeleteNode}>
             <NodeHistoryContext.Provider value={setHistoryTarget}>
+            <WaypointContext.Provider value={waypointHandlers}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               onInit={(inst) => { flowRef.current = inst; }}
               onNodesChange={onNodesChange}
+              onNodeClick={onNodeClick}
+              onNodeMouseEnter={onNodeMouseEnter}
+              onNodeMouseLeave={onNodeMouseLeave}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onConnectEnd={onConnectEnd}
@@ -5561,9 +5793,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             >
               <Background gap={22} />
             </ReactFlow>
+            </WaypointContext.Provider>
             </NodeHistoryContext.Provider>
             </NodeDeleteContext.Provider>
           {dropHint && <div className="prod-graph-drop-hint">{dropHint}</div>}
+          {outputChooser && (
+            <div className="prod-graph-output-chooser" style={{ left: outputChooser.x, top: outputChooser.y }}>
+              <div className="prod-graph-output-chooser-title">Route to Frame Output</div>
+              {outputChooser.outputs.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  className="prod-graph-output-chooser-item"
+                  onClick={() => { routeNodeToOutput(outputChooser.nodeId, o.id); setOutputChooser(null); }}
+                >
+                  {o.label}
+                </button>
+              ))}
+              <button type="button" className="prod-graph-output-chooser-item" onClick={() => setOutputChooser(null)}>Cancel</button>
+            </div>
+          )}
           {lightbox && (
             <div
               className="prod-ref-lightbox prod-graph-lightbox"

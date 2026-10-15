@@ -1,0 +1,23 @@
+{
+  "id": "mv8sk50l-dn8x2d",
+  "title": "New chat",
+  "createdAt": "2026-10-15T00:19:20.805Z",
+  "updatedAt": "2026-10-15T00:19:20.805Z",
+  "workspace": "/ws",
+  "pureChat": false,
+  "followProduction": false,
+  "agentId": null,
+  "history": [],
+  "display": [],
+  "mentionImages": [],
+  "planMode": false,
+  "autonomousMode": false,
+  "allowedTools": [
+    "openart__gen"
+  ],
+  "allowedToolGroups": [
+    "openart"
+  ],
+  "verifyCommands": [],
+  "verifyDeclined": false
+}

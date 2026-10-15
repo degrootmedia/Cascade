@@ -1,0 +1,204 @@
+const __vite_ssr_import_0__ = await __vite_ssr_import__("react/jsx-dev-runtime", {"importedNames":["jsxDEV"]});
+const __vite_ssr_import_1__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/attach-file.svg", {"importedNames":["default"]});
+const __vite_ssr_import_2__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/drag-handle.svg", {"importedNames":["default"]});
+const __vite_ssr_import_3__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/Edit.svg", {"importedNames":["default"]});
+const __vite_ssr_import_4__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/expenses.svg", {"importedNames":["default"]});
+const __vite_ssr_import_5__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/eye-off.svg", {"importedNames":["default"]});
+const __vite_ssr_import_6__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/eye.svg", {"importedNames":["default"]});
+const __vite_ssr_import_7__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/film-strip.svg", {"importedNames":["default"]});
+const __vite_ssr_import_8__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/Image.svg", {"importedNames":["default"]});
+const __vite_ssr_import_9__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/import.svg", {"importedNames":["default"]});
+const __vite_ssr_import_10__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/inbetween.svg", {"importedNames":["default"]});
+const __vite_ssr_import_11__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/insert.svg", {"importedNames":["default"]});
+const __vite_ssr_import_12__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/magic.svg", {"importedNames":["default"]});
+const __vite_ssr_import_13__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/Magnify.svg", {"importedNames":["default"]});
+const __vite_ssr_import_14__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/nodes.svg", {"importedNames":["default"]});
+const __vite_ssr_import_15__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/play-button.svg", {"importedNames":["default"]});
+const __vite_ssr_import_16__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/plus.svg", {"importedNames":["default"]});
+const __vite_ssr_import_17__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/regenerate.svg", {"importedNames":["default"]});
+const __vite_ssr_import_18__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/search.svg", {"importedNames":["default"]});
+const __vite_ssr_import_19__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/stop-button.svg", {"importedNames":["default"]});
+const __vite_ssr_import_20__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/token.svg", {"importedNames":["default"]});
+const __vite_ssr_import_21__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/video-editing.svg", {"importedNames":["default"]});
+const __vite_ssr_import_22__ = await __vite_ssr_import__("/src/renderer/src/assets/icons/X.svg", {"importedNames":["default"]});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function Icon({ src, size = 16, className, title, alt = "" }) {
+  return /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(
+    "img",
+    {
+      src,
+      alt,
+      width: size,
+      height: size,
+      className: "cascade-icon" + (className ? ` ${className}` : ""),
+      title,
+      draggable: false,
+      "aria-hidden": !alt
+    },
+    void 0,
+    false,
+    {
+      fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+      lineNumber: 37,
+      columnNumber: 5
+    },
+    this
+  );
+}
+const XIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_22__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 51,
+  columnNumber: 40
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "XIcon", { enumerable: true, configurable: true, get(){ return XIcon }});
+const TokenIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_20__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 53,
+  columnNumber: 44
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "TokenIcon", { enumerable: true, configurable: true, get(){ return TokenIcon }});
+const StopButtonIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_19__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 55,
+  columnNumber: 49
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "StopButtonIcon", { enumerable: true, configurable: true, get(){ return StopButtonIcon }});
+const RegenerateIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_17__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 57,
+  columnNumber: 49
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "RegenerateIcon", { enumerable: true, configurable: true, get(){ return RegenerateIcon }});
+const PlusIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_16__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 59,
+  columnNumber: 43
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "PlusIcon", { enumerable: true, configurable: true, get(){ return PlusIcon }});
+const PlayButtonIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_15__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 61,
+  columnNumber: 49
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "PlayButtonIcon", { enumerable: true, configurable: true, get(){ return PlayButtonIcon }});
+const NodesIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_14__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 63,
+  columnNumber: 44
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "NodesIcon", { enumerable: true, configurable: true, get(){ return NodesIcon }});
+const MagnifyIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_13__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 65,
+  columnNumber: 46
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "MagnifyIcon", { enumerable: true, configurable: true, get(){ return MagnifyIcon }});
+const SearchIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_18__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 67,
+  columnNumber: 45
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "SearchIcon", { enumerable: true, configurable: true, get(){ return SearchIcon }});
+const DragHandleIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_2__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 69,
+  columnNumber: 49
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "DragHandleIcon", { enumerable: true, configurable: true, get(){ return DragHandleIcon }});
+const InsertIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_11__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 71,
+  columnNumber: 45
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "InsertIcon", { enumerable: true, configurable: true, get(){ return InsertIcon }});
+const ImportIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_9__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 73,
+  columnNumber: 45
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "ImportIcon", { enumerable: true, configurable: true, get(){ return ImportIcon }});
+const InbetweenIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_10__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 75,
+  columnNumber: 48
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "InbetweenIcon", { enumerable: true, configurable: true, get(){ return InbetweenIcon }});
+const FilmStripIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_7__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 77,
+  columnNumber: 48
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "FilmStripIcon", { enumerable: true, configurable: true, get(){ return FilmStripIcon }});
+const EditVideoIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_21__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 79,
+  columnNumber: 48
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "EditVideoIcon", { enumerable: true, configurable: true, get(){ return EditVideoIcon }});
+const ExpensesIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_4__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 81,
+  columnNumber: 47
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "ExpensesIcon", { enumerable: true, configurable: true, get(){ return ExpensesIcon }});
+const EyeIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_6__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 83,
+  columnNumber: 42
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "EyeIcon", { enumerable: true, configurable: true, get(){ return EyeIcon }});
+const EyeOffIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_5__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 85,
+  columnNumber: 45
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "EyeOffIcon", { enumerable: true, configurable: true, get(){ return EyeOffIcon }});
+const EditIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_3__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 87,
+  columnNumber: 43
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "EditIcon", { enumerable: true, configurable: true, get(){ return EditIcon }});
+const AttachFileIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_1__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 89,
+  columnNumber: 49
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "AttachFileIcon", { enumerable: true, configurable: true, get(){ return AttachFileIcon }});
+const ImageIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_8__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 91,
+  columnNumber: 44
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "ImageIcon", { enumerable: true, configurable: true, get(){ return ImageIcon }});
+const MagicIcon = (p) => /* @__PURE__ */ __vite_ssr_import_0__.jsxDEV(Icon, { src: __vite_ssr_import_12__.default, ...p }, void 0, false, {
+  fileName: "D:/Cascade/app/src/renderer/src/components/icons.tsx",
+  lineNumber: 93,
+  columnNumber: 44
+}, this);
+Object.defineProperty(__vite_ssr_exports__, "MagicIcon", { enumerable: true, configurable: true, get(){ return MagicIcon }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,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Q0FBQyxRQUFLLEtBQUssZ0NBQWtCLEdBQUcsS0FBaEM7QUFBQTtBQUFBO0FBQUE7QUFBQSxPQUFtQztxSUFBQTtBQUUzRSxNQUFNLGVBQWUsQ0FBQyxNQUFpQiw2Q0FBQyxRQUFLLEtBQUssK0JBQWMsR0FBRyxLQUE1QjtBQUFBO0FBQUE7QUFBQTtBQUFBLE9BQStCO21JQUFBO0FBRXRFLE1BQU0sVUFBVSxDQUFDLE1BQWlCLDZDQUFDLFFBQUssS0FBSywrQkFBUyxHQUFHLEtBQXZCO0FBQUE7QUFBQTtBQUFBO0FBQUEsT0FBMEI7eUhBQUE7QUFFNUQsTUFBTSxhQUFhLENBQUMsTUFBaUIsNkNBQUMsUUFBSyxLQUFLLCtCQUFZLEdBQUcsS0FBMUI7QUFBQTtBQUFBO0FBQUE7QUFBQSxPQUE2QjsrSEFBQTtBQUVsRSxNQUFNLFdBQVcsQ0FBQyxNQUFpQiw2Q0FBQyxRQUFLLEtBQUssK0JBQVUsR0FBRyxLQUF4QjtBQUFBO0FBQUE7QUFBQTtBQUFBLE9BQTJCOzJIQUFBO0FBRTlELE1BQU0saUJBQWlCLENBQUMsTUFBaUIsNkNBQUMsUUFBSyxLQUFLLCtCQUFnQixHQUFHLEtBQTlCO0FBQUE7QUFBQTtBQUFBO0FBQUEsT0FBaUM7dUlBQUE7QUFFMUUsTUFBTSxZQUFZLENBQUMsTUFBaUIsNkNBQUMsUUFBSyxLQUFLLCtCQUFXLEdBQUcsS0FBekI7QUFBQTtBQUFBO0FBQUE7QUFBQSxPQUE0Qjs2SEFBQTtBQUVoRSxNQUFNLFlBQVksQ0FBQyxNQUFpQiw2Q0FBQyxRQUFLLEtBQUssZ0NBQVcsR0FBRyxLQUF6QjtBQUFBO0FBQUE7QUFBQTtBQUFBLE9BQTRCOzZIQUFBIiwibmFtZXMiOltdLCJpZ25vcmVMaXN0IjpbXSwic291cmNlcyI6WyJpY29ucy50c3giXSwic291cmNlc0NvbnRlbnQiOlsiLyoqIEZ1bGwtY29sb3IgaWNvbiBzZXQg4oCUIHRoaW4gYDxpbWc+YCB3cmFwcGVycyBvdmVyIHRoZSBTVkdzIGluXG4gKiAgYGFzc2V0cy9pY29ucy9gIChidW5kbGVkIGJ5IFZpdGUgYXMgc3RhdGljIGFzc2V0cykuIEtlZXBzIHRoZSBoYXJkLWNvZGVkXG4gKiAgYnJhbmQgY29sb3JzIGZyb20gdGhlIHNvdXJjZSBhcnQ7IHNpemluZyBpcyBjb250cm9sbGVkIGF0IHRoZSBjYWxsIHNpdGVcbiAqICAoYHNpemVgIG9yIGBjbGFzc05hbWVgKSwgc28gdGhlc2Ugc3RheSBzbWFsbCBhbmQgY29uc2lzdGVudCBldmVyeXdoZXJlLiAqL1xuaW1wb3J0IGF0dGFjaEZpbGVVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9hdHRhY2gtZmlsZS5zdmdcIjtcbmltcG9ydCBkcmFnSGFuZGxlVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvZHJhZy1oYW5kbGUuc3ZnXCI7XG5pbXBvcnQgZWRpdFVybCBmcm9tIFwiLi4vYXNzZXRzL2ljb25zL0VkaXQuc3ZnXCI7XG5pbXBvcnQgZXhwZW5zZXNVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9leHBlbnNlcy5zdmdcIjtcbmltcG9ydCBleWVPZmZVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9leWUtb2ZmLnN2Z1wiO1xuaW1wb3J0IGV5ZVVybCBmcm9tIFwiLi4vYXNzZXRzL2ljb25zL2V5ZS5zdmdcIjtcbmltcG9ydCBmaWxtU3RyaXBVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9maWxtLXN0cmlwLnN2Z1wiO1xuaW1wb3J0IGltYWdlVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvSW1hZ2Uuc3ZnXCI7XG5pbXBvcnQgaW1wb3J0VXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvaW1wb3J0LnN2Z1wiO1xuaW1wb3J0IGluYmV0d2VlblVybCBmcm9tIFwiLi4vYXNzZXRzL2ljb25zL2luYmV0d2Vlbi5zdmdcIjtcbmltcG9ydCBpbnNlcnRVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9pbnNlcnQuc3ZnXCI7XG5pbXBvcnQgbWFnaWNVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9tYWdpYy5zdmdcIjtcbmltcG9ydCBtYWduaWZ5VXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvTWFnbmlmeS5zdmdcIjtcbmltcG9ydCBub2Rlc1VybCBmcm9tIFwiLi4vYXNzZXRzL2ljb25zL25vZGVzLnN2Z1wiO1xuaW1wb3J0IHBsYXlCdXR0b25VcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9wbGF5LWJ1dHRvbi5zdmdcIjtcbmltcG9ydCBwbHVzVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvcGx1cy5zdmdcIjtcbmltcG9ydCByZWdlbmVyYXRlVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvcmVnZW5lcmF0ZS5zdmdcIjtcbmltcG9ydCBzZWFyY2hVcmwgZnJvbSBcIi4uL2Fzc2V0cy9pY29ucy9zZWFyY2guc3ZnXCI7XG5pbXBvcnQgc3RvcEJ1dHRvblVybCBmcm9tIFwiLi4vYXNzZXRzL2ljb25zL3N0b3AtYnV0dG9uLnN2Z1wiO1xuaW1wb3J0IHRva2VuVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvdG9rZW4uc3ZnXCI7XG5pbXBvcnQgdmlkZW9FZGl0aW5nVXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvdmlkZW8tZWRpdGluZy5zdmdcIjtcbmltcG9ydCB4VXJsIGZyb20gXCIuLi9hc3NldHMvaWNvbnMvWC5zdmdcIjtcblxuaW50ZXJmYWNlIEljb25Qcm9wcyB7XG4gIC8qKiBQaXhlbCBib3ggc2l6ZSDigJQgZGVmYXVsdCAxNi4gKi9cbiAgc2l6ZT86IG51bWJlcjtcbiAgY2xhc3NOYW1lPzogc3RyaW5nO1xuICB0aXRsZT86IHN0cmluZztcbn1cblxuZnVuY3Rpb24gSWNvbih7IHNyYywgc2l6ZSA9IDE2LCBjbGFzc05hbWUsIHRpdGxlLCBhbHQgPSBcIlwiIH06IHsgc3JjOiBzdHJpbmcgfSAmIEljb25Qcm9wcyAmIHsgYWx0Pzogc3RyaW5nIH0pIHtcbiAgcmV0dXJuIChcbiAgICA8aW1nXG4gICAgICBzcmM9e3NyY31cbiAgICAgIGFsdD17YWx0fVxuICAgICAgd2lkdGg9e3NpemV9XG4gICAgICBoZWlnaHQ9e3NpemV9XG4gICAgICBjbGFzc05hbWU9e1wiY2FzY2FkZS1pY29uXCIgKyAoY2xhc3NOYW1lID8gYCAke2NsYXNzTmFtZX1gIDogXCJcIil9XG4gICAgICB0aXRsZT17dGl0bGV9XG4gICAgICBkcmFnZ2FibGU9e2ZhbHNlfVxuICAgICAgYXJpYS1oaWRkZW49eyFhbHR9XG4gICAgLz5cbiAgKTtcbn1cblxuLyoqIFJlZCBYIOKAlCBjbG9zZSAvIHJlbW92ZS4gKi9cbmV4cG9ydCBjb25zdCBYSWNvbiA9IChwOiBJY29uUHJvcHMpID0+IDxJY29uIHNyYz17eFVybH0gey4uLnB9IC8+O1xuLyoqIEdvbGQgY29pbiDigJQgQUkgY3JlZGl0IC8gdG9rZW4gY29zdC4gKi9cbmV4cG9ydCBjb25zdCBUb2tlbkljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e3Rva2VuVXJsfSB7Li4ucH0gLz47XG4vKiogUmVkIHN0b3Agc3F1YXJlIOKAlCBzdG9wIGdlbmVyYXRpb24gLyBwbGF5YmFjay4gKi9cbmV4cG9ydCBjb25zdCBTdG9wQnV0dG9uSWNvbiA9IChwOiBJY29uUHJvcHMpID0+IDxJY29uIHNyYz17c3RvcEJ1dHRvblVybH0gey4uLnB9IC8+O1xuLyoqIEFtYmVyIGNpcmN1bGFyIGFycm93cyDigJQgcmVnZW5lcmF0ZSAvIHJldHJ5LiAqL1xuZXhwb3J0IGNvbnN0IFJlZ2VuZXJhdGVJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtyZWdlbmVyYXRlVXJsfSB7Li4ucH0gLz47XG4vKiogR3JlZW4gcGx1cyDigJQgYWRkLiAqL1xuZXhwb3J0IGNvbnN0IFBsdXNJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtwbHVzVXJsfSB7Li4ucH0gLz47XG4vKiogUmVkIHBsYXkgdHJpYW5nbGUg4oCUIHBsYXkuICovXG5leHBvcnQgY29uc3QgUGxheUJ1dHRvbkljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e3BsYXlCdXR0b25Vcmx9IHsuLi5wfSAvPjtcbi8qKiBCbHVlIG5vZGUgZGlhZ3JhbSDigJQgdGhlIHBlci1zaG90IG5vZGUgZ3JhcGguICovXG5leHBvcnQgY29uc3QgTm9kZXNJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtub2Rlc1VybH0gey4uLnB9IC8+O1xuLyoqIEJsdWUgbWFnbmlmaWVyIOKAlCBzZWFyY2ggLyB6b29tLiAqL1xuZXhwb3J0IGNvbnN0IE1hZ25pZnlJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXttYWduaWZ5VXJsfSB7Li4ucH0gLz47XG4vKiogU2VhcmNoIGxlbnMg4oCUIHRoZSBzaWRlYmFyIGNoYXQgc2VhcmNoIGJhci4gKi9cbmV4cG9ydCBjb25zdCBTZWFyY2hJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtzZWFyY2hVcmx9IHsuLi5wfSAvPjtcbi8qKiBTaXgtZG90IGdyaXAg4oCUIGRyYWcgdG8gcmVvcmRlci4gKi9cbmV4cG9ydCBjb25zdCBEcmFnSGFuZGxlSWNvbiA9IChwOiBJY29uUHJvcHMpID0+IDxJY29uIHNyYz17ZHJhZ0hhbmRsZVVybH0gey4uLnB9IC8+O1xuLyoqIEJsdWUgYXJyb3cgaW50byBhIGNvbnRhaW5lciDigJQgaW5zZXJ0IGJlZm9yZS4gKi9cbmV4cG9ydCBjb25zdCBJbnNlcnRJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtpbnNlcnRVcmx9IHsuLi5wfSAvPjtcbi8qKiBCbHVlIGRvd25sb2FkL2ltcG9ydCBhcnJvdyDigJQgaW1wb3J0IGEgZmlsZS4gKi9cbmV4cG9ydCBjb25zdCBJbXBvcnRJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtpbXBvcnRVcmx9IHsuLi5wfSAvPjtcbi8qKiBCbHVlL2dyZWVuIGludGVycG9sYXRpb24gYXJyb3dzIOKAlCBpbi1iZXR3ZWVuZXIgbm9kZS4gKi9cbmV4cG9ydCBjb25zdCBJbmJldHdlZW5JY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtpbmJldHdlZW5Vcmx9IHsuLi5wfSAvPjtcbi8qKiBGaWxtIHN0cmlwIOKAlCBhbmltYXRpYyAvIHZpZGVvIHRpbWVsaW5lLiAqL1xuZXhwb3J0IGNvbnN0IEZpbG1TdHJpcEljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e2ZpbG1TdHJpcFVybH0gey4uLnB9IC8+O1xuLyoqIEJsdWUgZmlsbSBmcmFtZSB3aXRoIGEgcGVuY2lsIOKAlCB0aGUgZWRpdC12aWRlbyBub2RlLiAqL1xuZXhwb3J0IGNvbnN0IEVkaXRWaWRlb0ljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e3ZpZGVvRWRpdGluZ1VybH0gey4uLnB9IC8+O1xuLyoqIFdhbGxldC9yZWNlaXB0IOKAlCBleHBlbnNlcyBsZWRnZXIuICovXG5leHBvcnQgY29uc3QgRXhwZW5zZXNJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtleHBlbnNlc1VybH0gey4uLnB9IC8+O1xuLyoqIE9wZW4gYmx1ZSBleWUg4oCUIHNob3cgdGhlIG1vZGVscyBoaWRkZW4gZnJvbSB0aGUgZHJvcGRvd25zLiAqL1xuZXhwb3J0IGNvbnN0IEV5ZUljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e2V5ZVVybH0gey4uLnB9IC8+O1xuLyoqIENyb3NzZWQtb3V0IGdyYXkgZXllIOKAlCBjb25jZWFsIHRoZW0gKHZpc3VhbCBvbmx5KS4gKi9cbmV4cG9ydCBjb25zdCBFeWVPZmZJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtleWVPZmZVcmx9IHsuLi5wfSAvPjtcbi8qKiBSZWQgcGVuY2lsIOKAlCBlZGl0LiAqL1xuZXhwb3J0IGNvbnN0IEVkaXRJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtlZGl0VXJsfSB7Li4ucH0gLz47XG4vKiogQmx1ZSBwYXBlcmNsaXAg4oCUIGF0dGFjaCBhIGZpbGUuICovXG5leHBvcnQgY29uc3QgQXR0YWNoRmlsZUljb24gPSAocDogSWNvblByb3BzKSA9PiA8SWNvbiBzcmM9e2F0dGFjaEZpbGVVcmx9IHsuLi5wfSAvPjtcbi8qKiBQaG90byBmcmFtZSDigJQgaW1hZ2UgaW5wdXQgLyBmcm9tLWltYWdlIGFjdGlvbnMuICovXG5leHBvcnQgY29uc3QgSW1hZ2VJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXtpbWFnZVVybH0gey4uLnB9IC8+O1xuLyoqIEdvbGRlbiBtYWdpYyB3YW5kL3NwYXJrbGUg4oCUIEFJIG1hZ2ljIC8gcmVmaW5lIHByb21wdHMuICovXG5leHBvcnQgY29uc3QgTWFnaWNJY29uID0gKHA6IEljb25Qcm9wcykgPT4gPEljb24gc3JjPXttYWdpY1VybH0gey4uLnB9IC8+OyJdLCJmaWxlIjoiL3NyYy9yZW5kZXJlci9zcmMvY29tcG9uZW50cy9pY29ucy50c3gifQ==

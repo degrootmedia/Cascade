@@ -135,6 +135,23 @@ const validators: Record<string, (args: unknown[]) => void> = {
     };
     xyMap(p.positions, "positions");
     xyMap(p.sizes, "sizes");
+    if (p.waypoints !== undefined) {
+      if (!p.waypoints || typeof p.waypoints !== "object" || Array.isArray(p.waypoints)) {
+        throw new Error("IPC validation: updateGraphLayout waypoints must be an object");
+      }
+      for (const [k, pts] of Object.entries(p.waypoints as Record<string, unknown>)) {
+        if (typeof k !== "string" || k.length === 0 || k.length > 256 || !Array.isArray(pts) || pts.length > 64) {
+          throw new Error("IPC validation: updateGraphLayout waypoints must map edge ids to point arrays");
+        }
+        for (const pt of pts) {
+          const q = pt as Record<string, unknown>;
+          if (!q || typeof q !== "object" || typeof q.x !== "number" || typeof q.y !== "number" ||
+            !Number.isFinite(q.x) || !Number.isFinite(q.y) || Math.abs(q.x) > 100000 || Math.abs(q.y) > 100000) {
+            throw new Error("IPC validation: updateGraphLayout waypoint coordinates must be finite numbers");
+          }
+        }
+      }
+    }
     if (p.collapsed !== undefined) {
       if (!p.collapsed || typeof p.collapsed !== "object" || Array.isArray(p.collapsed)) {
         throw new Error("IPC validation: updateGraphLayout collapsed must be an object");

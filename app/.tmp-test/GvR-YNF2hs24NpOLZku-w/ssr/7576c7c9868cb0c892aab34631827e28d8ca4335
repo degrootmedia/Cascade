@@ -1,0 +1,8 @@
+const goalChannels = {
+  "goals:get": { method: "getSessionGoal", kind: "invoke" },
+  "goals:set": { method: "setSessionGoal", kind: "invoke" }
+};
+Object.defineProperty(__vite_ssr_exports__, "goalChannels", { enumerable: true, configurable: true, get(){ return goalChannels }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQ08sTUFBTSxlQUFlO0FBQUEsRUFDMUIsYUFBYSxFQUFFLFFBQVEsa0JBQWtCLE1BQU0sU0FBUztBQUFBLEVBQ3hELGFBQWEsRUFBRSxRQUFRLGtCQUFrQixNQUFNLFNBQVM7QUFDMUQ7bUlBQUEiLCJuYW1lcyI6W10sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbImdvYWxzLnRzIl0sInNvdXJjZXNDb250ZW50IjpbIi8qKiBTZXNzaW9uIGdvYWwgSVBDIGNoYW5uZWxzLiBGcmFnbWVudCBvZiBpcGNDb250cmFjdCAoYXNzZW1ibGVkIGluIC4uL2lwYy50cykuICovXHJcbmV4cG9ydCBjb25zdCBnb2FsQ2hhbm5lbHMgPSB7XHJcbiAgXCJnb2FsczpnZXRcIjogeyBtZXRob2Q6IFwiZ2V0U2Vzc2lvbkdvYWxcIiwga2luZDogXCJpbnZva2VcIiB9LFxyXG4gIFwiZ29hbHM6c2V0XCI6IHsgbWV0aG9kOiBcInNldFNlc3Npb25Hb2FsXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcclxufSBhcyBjb25zdDtcclxuIl0sImZpbGUiOiIvc3JjL3NoYXJlZC9pcGMtY2hhbm5lbHMvZ29hbHMudHMifQ==

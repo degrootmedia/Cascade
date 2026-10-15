@@ -1,0 +1,15 @@
+const ledgerChannels = {
+  "ledger:get": { method: "getLedger", kind: "invoke" },
+  "ledger:getPriceRules": { method: "getExpensePriceRules", kind: "invoke" },
+  "ledger:setPriceRules": { method: "setExpensePriceRules", kind: "invoke" },
+  "ledger:reprice": { method: "repriceExpenses", kind: "invoke" },
+  "ledger:exportRules": { method: "exportExpensePriceRules", kind: "invoke" },
+  "ledger:importRules": { method: "importExpensePriceRules", kind: "invoke" },
+  "ledger:addManual": { method: "addManualExpense", kind: "invoke" },
+  "ledger:removeEntry": { method: "removeLedgerEntry", kind: "invoke" },
+  "ledger:openFile": { method: "openLedgerFile", kind: "invoke" }
+};
+Object.defineProperty(__vite_ssr_exports__, "ledgerChannels", { enumerable: true, configurable: true, get(){ return ledgerChannels }});
+
+//# sourceMappingSource=vite-node
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJtYXBwaW5ncyI6IkFBQ08sTUFBTSxpQkFBaUI7QUFBQSxFQUM1QixjQUFjLEVBQUUsUUFBUSxhQUFhLE1BQU0sU0FBUztBQUFBLEVBQ3BELHdCQUF3QixFQUFFLFFBQVEsd0JBQXdCLE1BQU0sU0FBUztBQUFBLEVBQ3pFLHdCQUF3QixFQUFFLFFBQVEsd0JBQXdCLE1BQU0sU0FBUztBQUFBLEVBQ3pFLGtCQUFrQixFQUFFLFFBQVEsbUJBQW1CLE1BQU0sU0FBUztBQUFBLEVBQzlELHNCQUFzQixFQUFFLFFBQVEsMkJBQTJCLE1BQU0sU0FBUztBQUFBLEVBQzFFLHNCQUFzQixFQUFFLFFBQVEsMkJBQTJCLE1BQU0sU0FBUztBQUFBLEVBQzFFLG9CQUFvQixFQUFFLFFBQVEsb0JBQW9CLE1BQU0sU0FBUztBQUFBLEVBQ2pFLHNCQUFzQixFQUFFLFFBQVEscUJBQXFCLE1BQU0sU0FBUztBQUFBLEVBQ3BFLG1CQUFtQixFQUFFLFFBQVEsa0JBQWtCLE1BQU0sU0FBUztBQUNoRTt1SUFBQSIsIm5hbWVzIjpbXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsibGVkZ2VyLnRzIl0sInNvdXJjZXNDb250ZW50IjpbIi8qKiBMZWRnZXIgKGV4cGVuc2VzKSBJUEMgY2hhbm5lbHMuIEZyYWdtZW50IG9mIGlwY0NvbnRyYWN0LiAqL1xuZXhwb3J0IGNvbnN0IGxlZGdlckNoYW5uZWxzID0ge1xuICBcImxlZGdlcjpnZXRcIjogeyBtZXRob2Q6IFwiZ2V0TGVkZ2VyXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcbiAgXCJsZWRnZXI6Z2V0UHJpY2VSdWxlc1wiOiB7IG1ldGhvZDogXCJnZXRFeHBlbnNlUHJpY2VSdWxlc1wiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwibGVkZ2VyOnNldFByaWNlUnVsZXNcIjogeyBtZXRob2Q6IFwic2V0RXhwZW5zZVByaWNlUnVsZXNcIiwga2luZDogXCJpbnZva2VcIiB9LFxuICBcImxlZGdlcjpyZXByaWNlXCI6IHsgbWV0aG9kOiBcInJlcHJpY2VFeHBlbnNlc1wiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwibGVkZ2VyOmV4cG9ydFJ1bGVzXCI6IHsgbWV0aG9kOiBcImV4cG9ydEV4cGVuc2VQcmljZVJ1bGVzXCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcbiAgXCJsZWRnZXI6aW1wb3J0UnVsZXNcIjogeyBtZXRob2Q6IFwiaW1wb3J0RXhwZW5zZVByaWNlUnVsZXNcIiwga2luZDogXCJpbnZva2VcIiB9LFxuICBcImxlZGdlcjphZGRNYW51YWxcIjogeyBtZXRob2Q6IFwiYWRkTWFudWFsRXhwZW5zZVwiLCBraW5kOiBcImludm9rZVwiIH0sXG4gIFwibGVkZ2VyOnJlbW92ZUVudHJ5XCI6IHsgbWV0aG9kOiBcInJlbW92ZUxlZGdlckVudHJ5XCIsIGtpbmQ6IFwiaW52b2tlXCIgfSxcbiAgXCJsZWRnZXI6b3BlbkZpbGVcIjogeyBtZXRob2Q6IFwib3BlbkxlZGdlckZpbGVcIiwga2luZDogXCJpbnZva2VcIiB9LFxufSBhcyBjb25zdDtcbiJdLCJmaWxlIjoiL3NyYy9zaGFyZWQvaXBjLWNoYW5uZWxzL2xlZGdlci50cyJ9

@@ -15,6 +15,8 @@ import type { Edge } from "@xyflow/react";
 import type { Graph } from "../../../shared/ipc.js";
 import { nodeKindForId } from "../../../shared/graph/connect.js";
 import { portDecl, TWEEN_SOCKET_RE, FRAME_SOCKET_RE } from "../../../shared/graph/ports.js";
+import { edgeMediaStyle } from "../../../shared/graph/edge-style.js";
+import type { GraphMedia } from "../../../shared/ipc.js";
 
 export interface SocketColors {
   ref: string;
@@ -54,7 +56,14 @@ export function edgeDeletable(fromNode: string, toNode: string): boolean {
  *  disconnecting is drag-off via onConnectEnd, as before). */
 export function graphEdgesToFlow(
   graph: Graph,
-  opts: { selected: Set<string>; colors: SocketColors }
+  opts: {
+    selected: Set<string>;
+    colors: SocketColors;
+    /** Stored edge waypoints (layout-only bend points) by edge id. */
+    waypoints?: Record<string, { x: number; y: number }[]>;
+    /** Reference nodes' output media by node id (refOutputMedia results). */
+    refMediaByNode?: Record<string, GraphMedia>;
+  }
 ): Edge[] {
   return graph.edges.map((e) => {
     const stroke = edgeStroke(e.from.node, e.to.port, opts.colors);
@@ -63,11 +72,27 @@ export function graphEdgesToFlow(
       source: e.from.node,
       target: e.to.node,
       targetHandle: e.to.port,
+      type: "waypoint",
+      data: { waypoints: opts.waypoints?.[e.id] ?? [] },
       reconnectable: false,
       selected: opts.selected.has(e.id),
     };
     if (!edgeDeletable(e.from.node, e.to.node)) edge.deletable = false;
-    if (stroke) edge.style = { stroke };
+    // Media typing (edge coloring): style/brand control plugs keep their
+    // socket colors; every other edge is styled by the media flowing from
+    // its source — the port table's declared output media, or the
+    // reference's own media for ref nodes.
+    const fromKind = nodeKindForId(e.from.node);
+    if (fromKind === "style" || fromKind === "brand") {
+      if (stroke) edge.style = { stroke };
+    } else {
+      const media = fromKind === "ref"
+        ? (opts.refMediaByNode?.[e.from.node] ?? "image")
+        : fromKind
+          ? portDecl(fromKind, "out", "out")?.media
+          : undefined;
+      edge.style = { ...edgeMediaStyle(media) };
+    }
     return edge;
   });
 }

@@ -1,0 +1,23 @@
+{
+  "id": "mv8rodfk-aw85qz",
+  "title": "New chat",
+  "createdAt": "2026-10-14T23:54:38.720Z",
+  "updatedAt": "2026-10-14T23:54:38.720Z",
+  "workspace": "/ws",
+  "pureChat": false,
+  "followProduction": false,
+  "agentId": null,
+  "history": [],
+  "display": [],
+  "mentionImages": [],
+  "planMode": false,
+  "autonomousMode": false,
+  "allowedTools": [
+    "openart__gen"
+  ],
+  "allowedToolGroups": [
+    "openart"
+  ],
+  "verifyCommands": [],
+  "verifyDeclined": false
+}

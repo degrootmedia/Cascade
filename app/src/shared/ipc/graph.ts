@@ -22,6 +22,10 @@ export interface GraphLayout {
   sizes?: Record<string, { width: number; height: number }>;
   /** Reference nodes collapsed to a name-only tile, keyed by graph node id. */
   collapsed?: Record<string, boolean>;
+  /** Edge waypoints (bend points) keyed by edge id, in canvas coordinates.
+   *  Layout-only: they route connection lines visually and are never graph
+   *  nodes; classic view ignores them. */
+  waypoints?: Record<string, { x: number; y: number }[]>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
 }
@@ -34,6 +38,9 @@ export interface GraphLayoutPatch {
   positions?: Record<string, { x: number; y: number }>;
   sizes?: Record<string, { width: number; height: number }>;
   collapsed?: Record<string, boolean>;
+  /** Edge waypoints by edge id. An explicit empty list deletes the entry
+   *  (edge deleted, or Tidy clearing all bends). */
+  waypoints?: Record<string, { x: number; y: number }[]>;
   viewport?: { x: number; y: number; zoom: number };
   /** Node ids whose positions/sizes/collapsed entries should be dropped
    *  (the node was deleted — absence alone can't express a delete in a

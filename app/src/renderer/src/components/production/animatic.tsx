@@ -13,6 +13,7 @@ import {
   slipOffsetFromDx,
   videoTimeForPlayback,
 } from "./animatic-slip.js";
+import { edgeDragUpdates, type AnimaticEditMode } from "./animatic-edit.js";
 
 /** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
@@ -629,6 +630,15 @@ export function AnimaticTimeline({
   // badge, and preview all read through it) and commits once on release, so
   // a drag costs one production save instead of one per pointermove.
   const [slip, setSlip] = useState<{ itemId: string; offset: number } | null>(null);
+  /** Edge-drag tool: roll (trade time with the next block, total fixed) or
+   *  ripple (only this block changes; everything after it shifts). */
+  const [editMode, setEditMode] = useState<AnimaticEditMode>(() => {
+    try { return window.localStorage.getItem("cascade.animatic.editMode") === "ripple" ? "ripple" : "roll"; } catch { return "roll"; }
+  });
+  const pickEditMode = (mode: AnimaticEditMode) => {
+    setEditMode(mode);
+    try { window.localStorage.setItem("cascade.animatic.editMode", mode); } catch { /* session-only then */ }
+  };
   const slipRef = useRef<{
     itemId: string;
     idx: number;
@@ -899,28 +909,30 @@ export function AnimaticTimeline({
 
   // ---- Interactions -----------------------------------------------------
 
-  /** Drag a block's right edge to set its duration. This is a roll edit: the
-   *  dragged shot trades time with the following shot, so the total stays put
-   *  and every later edit point is untouched. */
+  /** Drag a block's right edge to set its duration, per the active edit
+   *  tool: roll trades time with the following shot (total stays put);
+   *  ripple changes only this shot, shifting everything after it. */
   const dragRef = useRef<{
-    shotId: string;
+    index: number;
     startX: number;
     startDur: number;
     pxPerSec: number;
-    nextShot: { id: string; dur: number } | null;
+    mode: AnimaticEditMode;
+    items: { id: string; durationSec: number }[];
   } | null>(null);
   const onHandleDown = (e: React.PointerEvent, shotId: string) => {
     if (e.button !== 0 || pps <= 0) return;
     const idx = shots.findIndex((s) => s.id === shotId);
     if (idx < 0) return;
+    // Alt temporarily flips the toolbar tool for this one drag.
+    const mode: AnimaticEditMode = e.altKey ? (editMode === "roll" ? "ripple" : "roll") : editMode;
     dragRef.current = {
-      shotId,
+      index: idx,
       startX: e.clientX,
       startDur: shots[idx].durationSec ?? 3,
       pxPerSec: pps,
-      nextShot: idx + 1 < shots.length
-        ? { id: shots[idx + 1].id, dur: shots[idx + 1].durationSec ?? 3 }
-        : null,
+      mode,
+      items: shots.map((s) => ({ id: s.id, durationSec: s.durationSec ?? 3 })),
     };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     stop();
@@ -933,33 +945,24 @@ export function AnimaticTimeline({
     const dx = e.clientX - d.startX;
     let next = Math.max(0.5, Math.min(20, d.startDur + dx / d.pxPerSec));
     // Snap the dragged edge to the clip's own video end when close. The
-    // marker stays freely overshootable — this only eases landing on it.
+    // marker stays freely overshootable - this only eases landing on it.
     // A slipped clip snaps to its remaining source (length minus offset).
-    const dragged = shots.find((q) => q.id === d.shotId);
+    const dragged = shots[d.index];
     const draggedRel = dragged?.videoPath;
     const draggedVideoSec = draggedRel
       ? (videoDurationsRef.current[draggedRel] ?? videoDurationCache.get(`${prodId}:${draggedRel}`))
       : undefined;
     const draggedEnd = effectiveVideoEndSec(draggedVideoSec, dragged?.videoOffsetSec);
     if (draggedEnd != null) next = snapDurationToVideoEnd(next, draggedEnd, d.pxPerSec);
-    const updates: { shotId: string; durationSec: number }[] = [{ shotId: d.shotId, durationSec: next }];
-    if (d.nextShot) {
-      // Keep the boundary after the next shot fixed: shot i+1 absorbs the delta.
-      let nextDur = d.nextShot.dur - (next - d.startDur);
-      if (nextDur < 0.5) { nextDur = 0.5; next = d.startDur + (d.nextShot.dur - 0.5); }
-      if (nextDur > 20) { nextDur = 20; next = d.startDur - (20 - d.nextShot.dur); }
-      next = Math.max(0.5, Math.min(20, next));
-      updates[0].durationSec = next;
-      updates.push({ shotId: d.nextShot.id, durationSec: nextDur });
-    }
+    const updates = edgeDragUpdates(d.items, d.index, next, d.mode);
     const rounded = updates.map((u) => ({ ...u, durationSec: Math.round(u.durationSec * 10) / 10 }));
-    // Roll edits cross item kinds: a sequence block's edge trades time with the
-    // next item whether that's a shot or another sequence.
+    // Edge edits cross item kinds: a sequence block trades/shifts time with
+    // the next item whether that's a shot or another sequence.
     const shotUpdates: { shotId: string; durationSec: number }[] = [];
     for (const u of rounded) {
-      const item = shots.find((q) => q.id === u.shotId);
+      const item = shots.find((q) => q.id === u.id);
       if (item?.kind === "sequence" && item.sequenceId) onUpdateSequenceDuration?.(item.sequenceId, u.durationSec);
-      else shotUpdates.push({ shotId: u.shotId, durationSec: u.durationSec });
+      else shotUpdates.push({ shotId: u.id, durationSec: u.durationSec });
     }
     if (shotUpdates.length) onUpdateDurations(shotUpdates);
   };
@@ -1244,6 +1247,22 @@ export function AnimaticTimeline({
         )}
       </div>
 
+      <div className="prod-animatic-edittools" role="group" aria-label="Timeline edit tool">
+        <span className="prod-animatic-edittools-label">Edge drag:</span>
+        <button
+          className={editMode === "roll" ? "active" : ""}
+          onClick={() => pickEditMode("roll")}
+          aria-pressed={editMode === "roll"}
+          title="Roll: dragging a block edge trades time with the next block - total runtime stays fixed (Alt-drag flips for one drag)"
+        >Roll</button>
+        <button
+          className={editMode === "ripple" ? "active" : ""}
+          onClick={() => pickEditMode("ripple")}
+          aria-pressed={editMode === "ripple"}
+          title="Ripple: dragging a block edge changes only that block - every following block shifts (Alt-drag flips for one drag)"
+        >Ripple</button>
+      </div>
+
       <div className="prod-animatic-strip-wrap">
         {/* Horizontal scroll frame: the wheel-zoomed strip lives inside. The
             transport scrubber above stays a fixed full-range overview. */}
@@ -1355,7 +1374,7 @@ export function AnimaticTimeline({
                     onPointerMove={onHandleMove}
                     onPointerUp={onHandleUp}
                     onPointerCancel={onHandleUp}
-                    title="Drag to set the length of this clip"
+                    title={editMode === "roll" ? "Drag to roll this edit point (trades time with the next clip; Alt-drag ripples)" : "Drag to ripple-trim this clip (following clips shift; Alt-drag rolls)"}
                   />
                 </div>
               );
@@ -1404,7 +1423,7 @@ export function ProdLog({ lines }: { lines: LogLine[] }) {
           onClick={() => setCollapsed(!collapsed)}
           title={collapsed ? "Show activity log" : "Hide activity log"}
         >
-          <span className={"prod-log-caret" + (collapsed ? " collapsed" : "")}>â–¸</span>
+          <span className={"prod-log-caret" + (collapsed ? " collapsed" : "")} aria-hidden="true" />
           Activity
           <span className="prod-log-count">{lines.length}</span>
         </button>

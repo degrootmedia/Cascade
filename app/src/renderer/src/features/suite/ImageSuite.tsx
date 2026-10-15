@@ -28,6 +28,8 @@ import { pruneModelOptionValues } from "../../components/ModelOptionsForm.js";
 import { isQuotableCostModel, useGenerationCost } from "../../components/production/generation-cost.js";
 import { SuiteHistoryRail } from "./SuiteHistoryRail.js";
 import { confirmDestructive } from "../../components/ConfirmDialog.js";
+import { askName } from "../../components/NamePromptDialog.js";
+import { referenceNameError, suggestSuiteRefName } from "../../../../shared/ref-names.js";
 import { SuiteCanvas } from "./SuiteCanvas.js";
 import { SuitePromptPanel } from "./SuitePromptPanel.js";
 import { resolveSuiteCompare, seedSourceFrame } from "./suite-compare.js";
@@ -336,8 +338,23 @@ export function ImageSuite({
 
   const exportEntry = useCallback(async (target: "references" | "boards") => {
     if (!selected) return;
+    // Saving into references creates a named, taggable reference: ask for the
+    // name up front (pre-filled from the prompt) instead of leaving the user
+    // to rename an auto-derived one afterwards. Boards exports stay one-click.
+    let name: string | undefined;
+    if (target === "references") {
+      const asked = await askName({
+        title: "Save as reference",
+        label: "This name is how prompts cite the reference (@[name]).",
+        initial: suggestSuiteRefName(selected.prompt),
+        confirmLabel: "Save reference",
+        validate: referenceNameError,
+      });
+      if (asked === null) return;
+      name = asked;
+    }
     try {
-      const res = await window.cascade.exportSuiteEntry(prodId, selected.id, target);
+      const res = await window.cascade.exportSuiteEntry(prodId, selected.id, target, name);
       if (res.production) onProdChange(res.production);
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));

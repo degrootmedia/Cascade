@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import type { DetachedCanvasContext } from "../../../shared/ipc/window.js";
 import { ProductionWorkspace } from "./ProductionWorkspace.js";
 import { ConfirmHost } from "./ConfirmDialog.js";
+import { NamePromptHost } from "./NamePromptDialog.js";
 
 export function DetachedCanvasApp() {
   const [ctx, setCtx] = useState<DetachedCanvasContext | null>(null);
@@ -55,6 +56,7 @@ export function DetachedCanvasApp() {
       <div className="detached-canvas-body">
         <ProductionWorkspace detached={ctx} onDetachedTitle={setTitle} />
         <ConfirmHost />
+        <NamePromptHost />
       </div>
     </div>
   );

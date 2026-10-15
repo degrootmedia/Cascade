@@ -62,7 +62,7 @@ import { graphEdgesToFlow, promptSockets, type PromptSocket } from "./graphFlow.
 import { WaypointContext, WaypointEdge, type WaypointHandlers } from "./graph/WaypointEdge.js";
 import { storedOrMaterializedGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
-import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
+import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, reconcilePromptRefEdges, removeGraphEdge, removeGraphNode, setStyleEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs } from "../../../shared/graph/connect.js";
 import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
 import { tidyGraphLayout } from "../../../shared/graph/layout.js";
 import { createUndoHistory } from "./production/undo-history.js";
@@ -71,6 +71,7 @@ import { traceChain } from "../../../shared/graph/trace.js";
 import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { isBrandAttached, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../../../shared/graph/render.js";
+import { brandClauseText } from "../../../shared/look.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 import { GraphHistoryModal, type GraphHistoryItem, type GraphHistoryTarget } from "./graph/history-modal.js";
@@ -2824,7 +2825,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   onCycleGraphGen: (kind: "image" | "video" | "edit" | "editvideo" | "upscale", dir: 1 | -1, nodeId?: string) => void;
   /** Permanently delete a stored take (right-click). The workspace confirms
    *  and blocks takes that still feed a pipe/output. */
-  onDeleteGeneration?: (rel: string) => void;
+  onDeleteGeneration?: (rel: string) => Promise<string | void> | string | void;
   /** Copy a stored take into the production as a new reference (right-click). */
   onSaveAsReference?: (rel: string) => void;
   /** Copy a stored take into the production as a new reference and resolve the
@@ -2971,12 +2972,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  gesture is one forced history step; the layout save itself is the
    *  narrow updateGraphLayout command, so bends persist and classic view
    *  never sees them. */
+  const [selectedWaypoint, setSelectedWaypoint] = useState<{ edgeId: string; index: number } | null>(null);
   const waypointHandlers = useMemo<WaypointHandlers>(() => ({
     add: (edgeId, pos, index) => {
       if (readOnly) return;
       captureHistory(true);
       const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
       saveLayout({ waypoints: { [edgeId]: [...cur.slice(0, index), pos, ...cur.slice(index)] } });
+      setSelectedWaypoint((sel) => (sel && sel.edgeId === edgeId && index <= sel.index ? { edgeId, index: sel.index + 1 } : sel));
     },
     move: (edgeId, index, pos) => {
       if (readOnly) return;
@@ -2989,8 +2992,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       captureHistory(true);
       const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
       saveLayout({ waypoints: { [edgeId]: cur.filter((_, i) => i !== index) } });
+      setSelectedWaypoint((sel) => {
+        if (!sel || sel.edgeId !== edgeId) return sel;
+        if (sel.index === index) return null;
+        return sel.index > index ? { edgeId, index: sel.index - 1 } : sel;
+      });
     },
-  }), [captureHistory, readOnly, saveLayout]);
+    select: (edgeId, index) => {
+      setSelectedWaypoint({ edgeId, index });
+      // Exchange selections: with React Flow's node/edge selection empty,
+      // its deleteKeyCode handler is a no-op when Delete removes the
+      // waypoint - one keypress can never do both.
+      setSelectedEdges(new Set());
+      if (nodesRef.current.some((n) => n.selected)) {
+        const next = nodesRef.current.map((n) => (n.selected ? { ...n, selected: false } : n));
+        nodesRef.current = next;
+        setNodes(next);
+      }
+    },
+    selected: selectedWaypoint,
+  }), [captureHistory, readOnly, saveLayout, selectedWaypoint]);
 
   /** Tidy: arrange every node into a deterministic left-to-right flow and
    *  clear all edge waypoints (stale bends are meaningless once nodes move).
@@ -3017,6 +3038,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       positions,
       ...(Object.keys(clearWaypoints).length ? { waypoints: clearWaypoints } : {}),
     });
+    setSelectedWaypoint(null);
     applyLivePositions(positions);
   }, [captureHistory, readOnly, applyLivePositions]);
 
@@ -3086,6 +3108,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Paste stagger — each pasted reference lands offset from the last so a
    *  multi-image paste doesn't stack every node on the same point. */
   const pasteCountRef = useRef(0);
+  /** Media refreshes currently running (per rel), so a second Refresh click
+   *  while one is in flight says so instead of queueing a duplicate encode. */
+  const refreshingRelsRef = useRef<Set<string>>(new Set());
 
   const showHint = useCallback((message: string) => {
     setDropHint(message);
@@ -3135,6 +3160,26 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     document.addEventListener("keydown", onUndoKey);
     return () => document.removeEventListener("keydown", onUndoKey);
   }, [doUndo, doRedo]);
+
+  // Delete removes a selected waypoint (layout-only, so React Flow's
+  // deleteKeyCode cannot see it). Selecting a waypoint cleared the flow
+  // selection, so the two delete paths never collide; keypresses inside
+  // prompt editables are ignored so text editing stays text editing.
+  useEffect(() => {
+    const onWaypointDeleteKey = (e: KeyboardEvent) => {
+      if (readOnly) return;
+      if ((e.key !== "Delete" && e.key !== "Backspace") || e.isComposing || isEditingTarget(e.target)) return;
+      const sel = selectedWaypoint;
+      if (!sel) return;
+      const pts = cb.current.initialLayout?.waypoints?.[sel.edgeId];
+      if (!pts || pts[sel.index] === undefined) { setSelectedWaypoint(null); return; }
+      e.preventDefault();
+      waypointHandlers.remove(sel.edgeId, sel.index);
+      setSelectedWaypoint(null);
+    };
+    document.addEventListener("keydown", onWaypointDeleteKey);
+    return () => document.removeEventListener("keydown", onWaypointDeleteKey);
+  }, [readOnly, selectedWaypoint, waypointHandlers]);
 
   // Output thumbnail: fetched lazily, refetched when the frame changes. The
   // thumbnail resolves through the shared display (the pipe when bound), so
@@ -3402,6 +3447,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // which keeps React Flow's selection bookkeeping from fighting re-renders.
   const cb = useRef({ graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, videoNodes, videoPromptValues, taggedVideoByNode, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onUpgradeDraft, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onFetchVideo, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphVideoNodes: shot.graphVideoNodes, graphOutputVideoNodeId: shot.graphOutputVideoNodeId, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, allVideoNodes, editVidNodes, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale, graphSequence: shot.graphSequence, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts });
   cb.current = { graph: shot.graph, prodId: prod.meta.id, shotId: shot.id, onPromptChange, onStyleChange, onToggleBrand, prompt, videoPromptValue, videoNodes, videoPromptValues, taggedVideoByNode, editPromptValues, editNodes, setLightbox, styles, styleValue, initialLayout, onStyleDetached, onRunImageGen, onRunVideoGen, onUpgradeDraft, onRunEditGen, onRunEditVideo, onRunCameraGrid, onImportCameraGridImage, onExportCameraGrid, onEditNodePrompt, onRenameRef, onRunTweenBlock, onStitchTween, onFetchVideo, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration, onSaveAsReference, onSaveGenerationAsReference, onGraphField, onPipeImageToVideo, onPipeEditToVideo, onPipeRefToVideo, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput, onPipeUpscaleToOutput, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs, onOpenTweenTimeline: () => setTweenOpen(true), onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen, onUnpipeEditGen, onUnpipeOutput, references, graphStyleConnected: shot.graphStyleConnected, graphVideoStyleConnected: shot.graphVideoStyleConnected, graphVideoNodes: shot.graphVideoNodes, graphOutputVideoNodeId: shot.graphOutputVideoNodeId, graphEditNodes: shot.graphEditNodes, graphOutputSource: shot.graphOutputSource, graphOutputRefId: shot.graphOutputRefId, graphOutputEditNodeId: shot.graphOutputEditNodeId, graphEditToVideo: shot.graphEditToVideo, graphVideoSourceRefId: shot.graphVideoSourceRefId, graphVideoSourceEditNodeId: shot.graphVideoSourceEditNodeId, graphTweenRefIds: shot.graphTweenRefIds, allVideoNodes, editVidNodes, graphCameraGrid: shot.graphCameraGrid, graphUpscale: shot.graphUpscale, onRunUpscale, graphSequence: shot.graphSequence, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts };
+  // The prompt-commit wrappers below are created once (stable), so they
+  // read the live Magic flag through a ref, not the first render's prop.
+  const magicActiveRef = useRef(magicActive);
+  magicActiveRef.current = magicActive;
   // Live-draft handles registered by the three prompt nodes (see
   // PromptDraftApplier). Prompt mutations below prefer them over cb.current's
   // prop values, which lag the node's local draft while it is focused.
@@ -3419,7 +3468,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     return true;
   };
   const stable = useRef({
-    onPromptChange: (value: string) => cb.current.onPromptChange(value),
+    onPromptChange: (value: string) => {
+      cb.current.onPromptChange(value);
+      // Magic commits skip the tag->wire reconcile: the magic effect
+      // rebuilds the composer's wires from the generated text itself.
+      if (!magicActiveRef.current) reconcileTagsToEdges("composer", value);
+    },
     onStyleChange: (style: string) => {
       // Selection persists; every plugged box re-renders from the library on
       // next read. No draft rewrite: blur-sync stores stripped content, so a
@@ -3477,9 +3531,25 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
      *  media revision and re-render so the node shows the fresh pixels. */
     onRefreshGen: async (rel: string) => {
       const prodId = cb.current.prodId;
-      try { await window.cascade.refreshMedia(prodId, rel); } catch { /* best effort */ }
-      bumpMediaRev(prodId, rel);
-      setMediaRevTick((t) => t + 1);
+      const name = rel.split("/").pop() ?? rel;
+      if (refreshingRelsRef.current.has(rel)) { showHint(`Already refreshing ${name}...`); return; }
+      refreshingRelsRef.current.add(rel);
+      showHint(`Refreshing ${name}...`);
+      try {
+        const status = await window.cascade.refreshMedia(prodId, rel);
+        bumpMediaRev(prodId, rel);
+        setMediaRevTick((t) => t + 1);
+        showHint(
+          status === "refreshed" ? `Refreshed ${name}.`
+          : status === "up-to-date" ? `${name} is already up to date.`
+          : status === "no-original" ? `${name} has no archived original - showing the file as-is.`
+          : `${name} is missing on disk.`
+        );
+      } catch (e) {
+        showHint(`Refresh failed for ${name}: ${String(e).replace(/^Error:\s*/, "")}`);
+      } finally {
+        refreshingRelsRef.current.delete(rel);
+      }
     },
     onRunCameraGrid: (opts: CameraGridGenOptions) => {
       genQueue.enqueue(genKeys.cameraGrid(cb.current.shotId), () => cb.current.onRunCameraGrid?.(opts) ?? Promise.resolve());
@@ -3540,7 +3610,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onCycleEditGen: (nodeId: string, dir: 1 | -1) => cb.current.onCycleGraphGen("edit", dir, nodeId),
     onCycleEditVideoGen: (nodeId: string, dir: 1 | -1) => cb.current.onCycleGraphGen("video", dir, nodeId),
     onCycleUpscaleGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("upscale", dir),
-    onDeleteGen: (rel: string) => cb.current.onDeleteGeneration(rel),
+    onDeleteGen: async (rel: string) => {
+      // A refusal (in use / not a generation) comes back as a message: the
+      // workspace error banner sits under this modal, so surface it here.
+      const msg = await cb.current.onDeleteGeneration(rel);
+      if (typeof msg === "string" && msg) showHint(msg);
+    },
     /** Seed a take as the Image Suite's edit source (the "Before edit" frame). */
     onEditInSuite: (rel: string) => openImageSuite(cb.current.prodId, { mode: "edit", sourcePath: rel }),
     /** Save a take as a reference: prefer the resolver that hands back the
@@ -3581,9 +3656,15 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         return s;
       }).catch(() => null);
     },
-    onVideoPromptChange: (nodeId: string, text: string) => patchVideoNode(nodeId, { prompt: stripSharedSections(text) }),
+    onVideoPromptChange: (nodeId: string, text: string) => {
+      patchVideoNode(nodeId, { prompt: stripSharedSections(text) });
+      reconcileTagsToEdges(videoPromptNodeId(nodeId), text);
+    },
     /** Per-node edit-video prompt — the node (a prompt node per edit node). */
-    onEditVideoPromptChange: (nodeId: string, text: string) => patchVideoNode(nodeId, { prompt: stripSharedSections(text) }),
+    onEditVideoPromptChange: (nodeId: string, text: string) => {
+      patchVideoNode(nodeId, { prompt: stripSharedSections(text) });
+      reconcileTagsToEdges(editVideoPromptNodeId(nodeId), text);
+    },
     /** Per-node video-gen selections (model/resolution/length) → the node. */
     onSaveVideoFields: (nodeId: string, patch: Partial<GraphVideoNode>) => patchVideoNode(nodeId, patch),
     /** Per-shot image-gen params → the shot (image node advanced panel). */
@@ -3593,7 +3674,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     /** Per-node edit-gen selections → the named edit node in the list. */
     onEditNodeSave: (nodeId: string, patch: Partial<GraphEditNode>) =>
       graphField({ graphEditNodes: (cb.current.graphEditNodes ?? []).map((n) => (n.id === nodeId ? { ...n, ...patch } : n)) }),
-    onEditPromptChange: (nodeId: string, text: string) => cb.current.onEditNodePrompt(nodeId, stripSharedSections(text)),
+    onEditPromptChange: (nodeId: string, text: string) => {
+      cb.current.onEditNodePrompt(nodeId, stripSharedSections(text));
+      reconcileTagsToEdges(editPromptNodeId(nodeId), text);
+    },
     onPipeImageToVideo: (nodeId: string) => cb.current.onPipeImageToVideo(nodeId),
     onPipeEditToVideo: (nodeId: string, sourceNodeId: string) => cb.current.onPipeEditToVideo?.(nodeId, sourceNodeId),
     onPipeRefToVideo: (nodeId: string, refId: string) => cb.current.onPipeRefToVideo?.(nodeId, refId),
@@ -3639,8 +3723,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         onZoom: stable.onZoom,
       },
       deletable: true,
+      // The just-placed ref is what the user is reaching for next: select it
+      // (elevateNodesOnSelect also raises it above overlapping nodes) and
+      // make it the flow's single selection.
+      selected: true,
     };
-    const next = [...nodesRef.current, node];
+    const next = [...nodesRef.current.map((n) => (n.selected ? { ...n, selected: false } : n)), node];
     nodesRef.current = next;
     setNodes(next);
     setPlacedRefIds((prev) => { const n = new Set(prev); n.add(ref.id); return n; });
@@ -4190,6 +4278,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     return ids;
   }, [wiringGraph]);
 
+  /** The Brand node is omitted while the brand identity is blank (no valid
+   *  colors and no font): it contributes no clause, so the node is pure
+   *  clutter. This is a RENDER filter only - never routed through
+   *  nodeKindHidden, whose ensure effect would strip the brand node/edges
+   *  from the stored graph for good. Add a color/font in Design and the
+   *  node and its wires reappear, the stored graph untouched. */
+  const brandEmpty = brandClauseText(prod.brand).trim() === "";
   const buildDerived = useCallback((): GraphNode[] => {
     const ORIGIN = { x: 0, y: 0 };
     const build = <T extends GraphNode>(node: T): T => ({ ...node, position: defaultPosition(node.id, availIds, taggedIds) });
@@ -4246,7 +4341,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         data: { styles, value: styleValue, onChange: stable.onStyleChange },
         deletable: false,
       }),
-      ...(nodeKindHidden("brand") ? [] : [build({
+      ...(nodeKindHidden("brand") || brandEmpty ? [] : [build({
         id: "brand",
         type: "brand" as const,
         position: ORIGIN,
@@ -4320,7 +4415,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       ...(hasCameraGridTool && !nodeKindHidden("cameraGrid") ? [build(cameraGridNode(ORIGIN))] : []),
       ...(hasUpscaleTool && !nodeKindHidden("upscale") ? [build(upscaleNode(ORIGIN))] : []),
     ];
-  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, sourcedRefIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, videoPromptValues, videoNodes, taggedVideoByNode, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, prod.openArt?.quality, shot.graphImageGens, shot.graphImageGenIndex, shot.graphImageParams, shot.graphVideoNodes, shot.pendingVideoGen, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphUpscale, imageModels, videoModels, references, hasVideoTool, hasTweenTool, hasEditVideoTool, hasCameraGridTool, hasUpscaleTool, videoPair, editPair, tweenNode, editVideoPairFor, cameraGridNode, upscaleNode, allVideoNodes, editVidNodes, imageGenBusy, videoBusyNodeIds, editVideoBusyNodeIds, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height, mediaRevTick]);
+  }, [unionTagged, tagged, taggedVideo, available, availIds, taggedIds, sourcedRefIds, stable, styles, styleValue, includeBrand, magicActive, prompt, videoPromptValue, videoPromptValues, videoNodes, taggedVideoByNode, thumbnail, editNodes, editPromptValues, taggedEditByNode, shot.number, shot.artworkHistory, prod.meta.id, prod.openArt?.model, prod.openArt?.resolution, prod.openArt?.quality, shot.graphImageGens, shot.graphImageGenIndex, shot.graphImageParams, shot.graphVideoNodes, shot.pendingVideoGen, shot.graphTweenRefIds, shot.graphTweenBlocks, shot.graphTweenModel, shot.graphTweenResolution, shot.graphTweenOutput, shot.graphTweenReencoded, shot.graphOutputSource, shot.graphOutputRefId, shot.graphOutputEditNodeId, shot.graphUpscale, imageModels, videoModels, references, hasVideoTool, hasTweenTool, hasEditVideoTool, hasCameraGridTool, hasUpscaleTool, videoPair, editPair, tweenNode, editVideoPairFor, cameraGridNode, upscaleNode, allVideoNodes, editVidNodes, imageGenBusy, videoBusyNodeIds, editVideoBusyNodeIds, editBusyNodeIds, initialLayout, initialLayout?.sizes?.output?.width, initialLayout?.sizes?.output?.height, mediaRevTick, brandEmpty]);
 
   // Persistent node state (the canonical React Flow controlled pattern): all
   // changes flow through applyNodeChanges so selection lives in ONE place.
@@ -4421,13 +4516,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   );
   const edges = useMemo<Edge[]>(() => {
     if (!wiringGraph) return [];
-    return graphEdgesToFlow(wiringGraph, {
+    const g = brandEmpty ? { ...wiringGraph, edges: wiringGraph.edges.filter((e) => e.from.node !== "brand") } : wiringGraph;
+    return graphEdgesToFlow(g, {
       selected: selectedEdges,
       colors: SOCKET_COLORS,
       waypoints: initialLayout?.waypoints,
       refMediaByNode: Object.fromEntries(references.map((r) => [`ref:${r.id}`, refOutputMedia(r)])),
     });
-  }, [wiringGraph, selectedEdges, initialLayout?.waypoints, referencesSig]);
+  }, [wiringGraph, selectedEdges, initialLayout?.waypoints, referencesSig, brandEmpty]);
 
   // Ensure every opened shot owns a stored graph: legacy shots materialize on
   // first open (load migration skips v2 files), and drift from manual prompt
@@ -4763,6 +4859,21 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         saveLayoutRef.current({ waypoints: Object.fromEntries(gone.map((e) => [e.id, [] as { x: number; y: number }[]])) });
       }
     }
+  };
+  /**
+   * Deleting a reference's @[name] tag from a prompt drops that reference's
+   * wire into the prompt node (the converse of detach-strips-tag, which the
+   * detach paths already do). Wired into the four prompt commit wrappers
+   * with the committed text; remove-only, so a tag that lacks a wire never
+   * grows one, and unchanged tag sets save nothing.
+   */
+  const reconcileTagsToEdges = (target: string, text: string): void => {
+    const g = cb.current.graph;
+    if (!g) return;
+    const names = new Set(refTagNames(text).map((n) => n.toLowerCase()));
+    const tagRefIds = cb.current.references.filter((r) => names.has((r.name ?? "").toLowerCase())).map((r) => r.id);
+    const next = reconcilePromptRefEdges(g, target, tagRefIds);
+    if (next !== g) saveGraph(next);
   };
   const tweenResolveFor = (g: Graph) => (keyId: string): string | null => {
     const editIds = new Set((cb.current.graphEditNodes ?? []).map((n) => n.id));
@@ -5771,6 +5882,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               onNodeClick={onNodeClick}
               onNodeMouseEnter={onNodeMouseEnter}
               onNodeMouseLeave={onNodeMouseLeave}
+              onPaneClick={() => setSelectedWaypoint(null)}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onConnectEnd={onConnectEnd}
@@ -5782,7 +5894,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               minZoom={0.2}
               connectionRadius={30}
               nodesConnectable
-              connectionLineType={ConnectionLineType.Bezier}
+              connectionLineType={ConnectionLineType.Straight}
               autoPanOnSelection={false}
               elevateEdgesOnSelect
               nodesDraggable

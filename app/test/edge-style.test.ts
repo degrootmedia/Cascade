@@ -4,7 +4,7 @@ import { graphEdgesToFlow } from "../src/renderer/src/components/graphFlow.js";
 import { materializeGraph } from "../src/shared/graph/materialize.js";
 
 describe("edge media styles", () => {
-  it("image, video, and other are pairwise distinct in color and line style", () => {
+  it("image, video, and other are distinct colors; only other is dashed", () => {
     expect(edgeMediaKind("image")).toBe("image");
     expect(edgeMediaKind("video")).toBe("video");
     expect(edgeMediaKind("text")).toBe("other");
@@ -12,7 +12,9 @@ describe("edge media styles", () => {
     expect(edgeMediaKind(undefined)).toBe("other");
     const styles = [EDGE_MEDIA_STYLES.image, EDGE_MEDIA_STYLES.video, EDGE_MEDIA_STYLES.other];
     expect(new Set(styles.map((s) => s.stroke)).size).toBe(3);
-    expect(new Set(styles.map((s) => s.strokeDasharray ?? "solid")).size).toBe(3);
+    expect(EDGE_MEDIA_STYLES.other.strokeDasharray).toBeTruthy();
+    expect(EDGE_MEDIA_STYLES.image.strokeDasharray).toBeUndefined();
+    expect(EDGE_MEDIA_STYLES.video.strokeDasharray).toBeUndefined();
     expect(edgeMediaStyle(undefined)).toEqual(EDGE_MEDIA_STYLES.other);
   });
 

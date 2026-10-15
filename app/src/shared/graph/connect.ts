@@ -496,6 +496,33 @@ export function compactPromptRefEdges(graph: Graph, targetNode: string): Graph {
   return { ...graph, edges: graph.edges.map((edge, order) => renumbered.get(order) ?? edge) };
 }
 
+/**
+ * Direction-A tag/edge symmetry for one prompt node: deleting a reference's
+ * `@[name]` tag from the prompt text drops that reference's positional wire
+ * (`ref:<id>` → `in-ref-N`), mirroring how detaching the wire strips the
+ * tag. Only ref-sourced positional sockets on THIS prompt node are touched:
+ * gen-sourced wires (`imagegen`, `editgen:<id>`) carry no tag and survive,
+ * as do `in-frame-N` sequence sockets (not `in-ref-N`). The result is
+ * compacted so surviving wires shift onto the tags they belong to. Returns
+ * the same graph when nothing dropped, so callers can skip a redundant
+ * save.
+ */
+export function reconcilePromptRefEdges(graph: Graph, targetNode: string, tagRefIds: Iterable<string>): Graph {
+  const target = canonicalNodeId(targetNode);
+  const keep = new Set(tagRefIds);
+  let dropped = false;
+  const edges = graph.edges.filter((e) => {
+    if (e.to.node !== target) return true;
+    if (!e.from.node.startsWith("ref:")) return true;
+    if (!REF_SOCKET_RE.test(e.to.port)) return true;
+    if (keep.has(e.from.node.slice(4))) return true;
+    dropped = true;
+    return false;
+  });
+  if (!dropped) return graph;
+  return compactPromptRefEdges({ ...graph, edges }, target);
+}
+
 /** Drop one edge by id (disconnect / Delete key). Dropping a reference wire
  *  re-compacts its prompt node's sockets so the wires after it shift onto
  *  the tags they belong to instead of pointing past the end. */

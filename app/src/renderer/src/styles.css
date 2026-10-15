@@ -1922,6 +1922,14 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-animatic-transport button.primary { background: var(--accent); border-color: var(--accent); color: white; }
 .prod-animatic-transport button:hover:not(:disabled) { border-color: var(--accent); }
+.prod-animatic-edittools { display: flex; align-items: center; gap: 6px; padding: 0 4px 6px; }
+.prod-animatic-edittools-label { font-size: 0.82rem; color: var(--text-dim); }
+.prod-animatic-edittools button {
+  background: var(--bg-raised); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.85rem;
+}
+.prod-animatic-edittools button:hover { border-color: var(--accent); }
+.prod-animatic-edittools button.active { background: var(--accent); border-color: var(--accent); color: white; }
 .prod-animatic-scrub {
   position: relative;
   flex: 1;
@@ -2275,7 +2283,13 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-log-toggle:hover { color: var(--text); }
 .prod-log-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-.prod-log-caret { transition: transform 0.12s ease; color: currentColor; }
+.prod-log-caret {
+  display: inline-block; width: 0; height: 0; flex: none;
+  border-left: 6px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.12s ease;
+}
 .prod-log-caret.collapsed { transform: rotate(0deg); }
 .prod-log-caret:not(.collapsed) { transform: rotate(90deg); }
 .prod-log-count { opacity: 0.6; }
@@ -3181,6 +3195,14 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .modal-actions .primary { background: var(--accent); border-color: var(--accent); color: white; }
 .modal-actions .primary:disabled { opacity: 0.5; cursor: default; }
 .modal-actions .danger { background: none; border-color: var(--danger); color: var(--danger); }
+.name-prompt-input {
+  width: 100%; box-sizing: border-box; margin-top: 6px;
+  padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-raised);
+  color: var(--text); font: inherit; font-size: 0.9rem;
+}
+.name-prompt-input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.name-prompt-error { color: var(--danger); font-size: 0.82rem; margin: 8px 0 0; }
 
 /* ---------- settings ---------- */
 .settings label { display: block; margin: 16px 0 6px; font-weight: 600; }
@@ -4635,6 +4657,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-waypoint-hit { stroke: transparent; stroke-width: 14; fill: none; pointer-events: stroke; cursor: pointer; }
 .prod-waypoint-dot { fill: var(--bg-elev, #1c1e24); stroke: var(--accent); stroke-width: 1.5; cursor: grab; pointer-events: all; }
 .prod-waypoint-dot:active { cursor: grabbing; }
+.prod-waypoint-dot.selected { fill: var(--accent); stroke: var(--bg-elev, #1c1e24); stroke-width: 2; }
 .prod-graph-tools-item {
   display: flex;
   align-items: center;

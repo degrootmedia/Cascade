@@ -130,6 +130,86 @@ describe("PromptContentEditor reference-block editing", () => {
     dispose(h);
   });
 
+  it("deleting the spaces before a tag moves it to the start without losing the caret", () => {
+    const h = renderEditor("  @[Gandalf] walks");
+    act(() => { h.box.focus(); });
+    // Caret right before the chip (after the two spaces).
+    setCaret(h.box.childNodes[0] as Node, 2);
+    key(h.box, "Backspace");
+    expect(h.value()).toBe(" @[Gandalf] walks");
+    expect(caretOffset(h.box)).toBe(1);
+    key(h.box, "Backspace");
+    expect(h.value()).toBe("@[Gandalf] walks");
+    // The caret must still live inside the box, at the very start — losing
+    // it (offset -1) is the reported "cursor loses focus" failure.
+    expect(caretOffset(h.box)).toBe(0);
+    expect(h.box.contains(document.activeElement) || document.activeElement === h.box).toBe(true);
+    dispose(h);
+  });
+
+  it("deleting text before a tag char-by-char keeps the caret glued to the edit point", () => {
+    const h = renderEditor("A @[Gandalf] walks");
+    act(() => { h.box.focus(); });
+    setCaret(h.box.childNodes[0] as Node, 2);
+    key(h.box, "Backspace"); // the space
+    expect(h.value()).toBe("A@[Gandalf] walks");
+    expect(caretOffset(h.box)).toBe(1);
+    key(h.box, "Backspace"); // the "A" — the tag is now at the start
+    expect(h.value()).toBe("@[Gandalf] walks");
+    expect(caretOffset(h.box)).toBe(0);
+    dispose(h);
+  });
+
+  it("Backspace at the very start (tag first) is a harmless no-op", () => {
+    const h = renderEditor("@[Gandalf] walks");
+    act(() => { h.box.focus(); });
+    // Caret at 0: the box's first child is the chip; anchor on the box itself.
+    setCaret(h.box, 0);
+    key(h.box, "Backspace");
+    expect(h.value()).toBe("@[Gandalf] walks");
+    expect(caretOffset(h.box)).toBe(0);
+    dispose(h);
+  });
+
+  it("deleting runs of spaces mid-text keeps the caret at the deletion point", () => {
+    const h = renderEditor("A hero   walks @[Gandalf]");
+    act(() => { h.box.focus(); });
+    setCaret(h.box.childNodes[0] as Node, 9); // after the three spaces
+    key(h.box, "Backspace");
+    key(h.box, "Backspace");
+    expect(h.value()).toBe("A hero walks @[Gandalf]");
+    expect(caretOffset(h.box)).toBe(7);
+    dispose(h);
+  });
+
+  it("a tag at the very start keeps an editable text anchor before the chip", () => {
+    // Chromium cannot hold a caret before a leading contenteditable=false
+    // element: with the chip as first child there is nowhere for the
+    // selection to land, which reads as "cursor loses focus". The box must
+    // always keep a (possibly empty) text node ahead of a leading chip, and
+    // restored carets must never anchor inside chip text.
+    const h = renderEditor("@[Gandalf] walks");
+    expect(h.box.childNodes[0]?.nodeType).toBe(3); // text anchor, not the chip
+    act(() => { h.handle.current?.setSelectionRange(0, 0); });
+    const sel = window.getSelection();
+    const anchor = sel?.getRangeAt(0).startContainer as Node;
+    expect((anchor as HTMLElement).parentElement?.classList.contains("prompt-tag-chip") ?? false).toBe(false);
+    expect(caretOffset(h.box)).toBe(0);
+    dispose(h);
+  });
+
+  it("setSelectionRange into the middle of a chip clamps to a chip boundary, never inside it", () => {
+    const h = renderEditor("A hero @[Gandalf] walks");
+    act(() => { h.handle.current?.setSelectionRange(10, 10); }); // inside "@[Gandalf]" (7..16)
+    const range = window.getSelection()?.getRangeAt(0);
+    const container = range?.startContainer as Node;
+    const insideChip = (container as HTMLElement).parentElement?.classList.contains("prompt-tag-chip") ?? false;
+    expect(insideChip).toBe(false);
+    const off = caretOffset(h.box);
+    expect(off === 7 || off === 16).toBe(true);
+    dispose(h);
+  });
+
   it("focusAfterTag lands the caret right after an externally added block", () => {
     const h = renderEditor("A hero walks");
     // The node graph adds the tag from outside and asks for the caret after it.

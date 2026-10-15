@@ -7,6 +7,7 @@ import { TodoPanel } from "./components/TodoPanel.js";
 import { GoalPanel } from "./components/GoalPanel.js";
 import { ApprovalModal } from "./components/ApprovalModal.js";
 import { ConfirmHost } from "./components/ConfirmDialog.js";
+import { NamePromptHost } from "./components/NamePromptDialog.js";
 import { VerifyApprovalModal } from "./components/VerifyApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { OPEN_SETTINGS_EVENT } from "./components/settings/open-settings.js";
@@ -900,6 +901,7 @@ export function App() {
         {prodEverOpen && <MemoProductionWorkspace onOpenSettings={openSettings} />}
       </div>
       <ConfirmHost />
+      <NamePromptHost />
       {approval && (
         <ApprovalModal
           request={approval}

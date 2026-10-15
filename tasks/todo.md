@@ -4312,4 +4312,3 @@ adoption flows; files written by raw provider download paths still land in
 the registry via their write choke points (`writeBoardFrame`/`writeShotVideo`
 are every provider's finish line). Suite outputs (Image Suite) live outside
 production fields and aren't registered yet.
-

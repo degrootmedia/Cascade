@@ -639,6 +639,10 @@ export interface CascadeApi {
    * image input first.
    */
   styleFromImage(productionId: string, imageDataUrl: string): Promise<{ name: string; prompt: string; imagePath?: string }>;
+  /** Step 2: the markdown style presets in the app-level presets folder. */
+  listStylePresets(): Promise<{ name: string; prompt: string; file: string }[]>;
+  /** Step 2: reveal the style-presets folder so presets can be added/edited. */
+  openStylePresetsFolder(): Promise<void>;
   /**
    * Step 2: generate a style frame (look plate) for one style via the active
    * media provider — fixed neutral-subject scaffold + the style's text —
@@ -1023,7 +1027,7 @@ export interface CascadeApi {
   checkExternalEdits(): Promise<void>;
   /** Re-derive one board frame's JPEG preview from its archived original (the
    *  UI "Refresh" fallback for an externally edited take). No-op without one. */
-  refreshMedia(productionId: string, rel: string): Promise<void>;
+  refreshMedia(productionId: string, rel: string): Promise<"refreshed" | "up-to-date" | "no-original" | "missing">;
   /** Fired after an externally edited board's JPEG preview has been regenerated. */
   onBoardExternalUpdate(cb: (e: { productionId: string; jpegRel: string; originalRel: string }) => void): () => void;
   /** Fired the moment a reference file is saved over outside Cascade, so every
@@ -1101,7 +1105,7 @@ export interface CascadeApi {
   /** Delete one suite entry (and its output file). Returns the session. */
   deleteSuiteEntry(productionId: string, entryId: string): Promise<SuiteSession>;
   /** Copy one entry's output into the production as a reference or board file. */
-  exportSuiteEntry(productionId: string, entryId: string, target: SuiteExportTarget): Promise<SuiteExportResult>;
+  exportSuiteEntry(productionId: string, entryId: string, target: SuiteExportTarget, name?: string): Promise<SuiteExportResult>;
   /** Run one suite generation/edit through the active `MediaProvider`, writing
    *  the output into the production's suite folder. Vendor-blind. */
   generateSuiteImage(productionId: string, req: SuiteGenerateRequest): Promise<SuiteEntry>;

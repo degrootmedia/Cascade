@@ -8,7 +8,8 @@
  * - Click (press + release within a few px) on the line adds a waypoint at
  *   the click point, inserted on the nearest segment.
  * - Dragging a waypoint moves it (committed on release).
- * - Double-clicking a waypoint deletes it.
+ * - Clicking/dragging a waypoint selects it; Delete (or double-click)
+ *   deletes it.
  * Only dragging from a port starts a connection — waypoint dots carry
  * `nodrag` and swallow their pointerdown, so a waypoint drag never becomes
  * a connection drag or a canvas pan.
@@ -20,6 +21,11 @@ export interface WaypointHandlers {
   add: (edgeId: string, pos: { x: number; y: number }, index: number) => void;
   move: (edgeId: string, index: number, pos: { x: number; y: number }) => void;
   remove: (edgeId: string, index: number) => void;
+  /** Select a waypoint (click/drag start) so Delete can remove it; the
+   *  canvas clears its node/edge selection in exchange, so one Delete
+   *  keypress can never also delete a node. */
+  select: (edgeId: string, index: number) => void;
+  selected: { edgeId: string; index: number } | null;
 }
 
 export const WaypointContext = createContext<WaypointHandlers | null>(null);
@@ -84,6 +90,7 @@ export function WaypointEdge({ id, sourceX, sourceY, targetX, targetY, style, ma
     if (!handlers) return;
     e.preventDefault();
     e.stopPropagation();
+    handlers.select(id, index);
     const move = (ev: PointerEvent) => {
       setDrag({ index, pos: screenToFlowPosition({ x: ev.clientX, y: ev.clientY }) });
     };
@@ -108,14 +115,14 @@ export function WaypointEdge({ id, sourceX, sourceY, targetX, targetY, style, ma
           cx={p.x}
           cy={p.y}
           r={5.5}
-          className="prod-waypoint-dot nodrag"
+          className={"prod-waypoint-dot nodrag" + (handlers?.selected?.edgeId === id && handlers.selected.index === i ? " selected" : "")}
           onPointerDown={startWaypointDrag(i)}
           onDoubleClick={(e) => {
             e.stopPropagation();
             handlers?.remove(id, i);
           }}
         >
-          <title>Drag to move · double-click to delete</title>
+          <title>Drag to move · select + Delete, or double-click, to delete</title>
         </circle>
       ))}
     </>

@@ -17,6 +17,7 @@ import {
   ensurePromptPipe,
   graphEdgesForDetach,
   nodeKindForId,
+  reconcilePromptRefEdges,
   removeGraphEdge,
   removeGraphNode,
   tweenKeyForSource,
@@ -656,5 +657,61 @@ describe("prompt reference sockets stay compact (positional invariant)", () => {
       ["ref:r2", "in-ref-0", "e-ref:r2-videoprompt-0"],
       ["ref:r3", "in-ref-1", "e-ref:r3-videoprompt-1"],
     ]);
+  });
+});
+
+describe("reconcilePromptRefEdges (delete a tag -> drop its wire)", () => {
+  const REFS_LOCAL = [
+    { id: "r1", name: "Gondola", artwork: "g.png" },
+    { id: "r2", name: "Marco", artwork: "m.png" },
+    { id: "r3", name: "Third", artwork: "t.png" },
+  ];
+  const refEdgesIntoLocal = (g: Graph, target: string) =>
+    g.edges
+      .filter((e) => e.to.node === target && /^in-ref-\d+$/.test(e.to.port))
+      .map((e) => [e.from.node, e.to.port, e.id] as const)
+      .sort((a, b) => a[1].localeCompare(b[1]));
+  it("drops a ref wire whose tag is gone, keeps the rest, and compacts after a middle removal", () => {
+    let g = materializeGraph(
+      shot({ prompt: "Scene @[Gondola] @[Marco] @[Third]" }),
+      REFS_LOCAL
+    );
+    // Marco's tag was deleted from the text: only r1 + r3 remain tagged.
+    g = reconcilePromptRefEdges(g, "composer", ["r1", "r3"]);
+    expect(refEdgesIntoLocal(g, "composer")).toEqual([
+      ["ref:r1", "in-ref-0", "e-ref:r1-composer-0"],
+      ["ref:r3", "in-ref-1", "e-ref:r3-composer-1"],
+    ]);
+  });
+
+  it("preserves gen-sourced wires and in-frame-N sequence sockets", () => {
+    const g0 = baseGraph();
+    const withExtras: Graph = {
+      ...g0,
+      edges: [
+        ...g0.edges,
+        { id: "e-imagegen-composer-9", from: { node: "imagegen", port: "out" }, to: { node: "composer", port: "in-ref-9" } },
+        { id: "e-ref:r2-composer-frame0", from: { node: "ref:r2", port: "out" }, to: { node: "composer", port: "in-frame-0" } },
+      ],
+    };
+    // Every tag deleted: ref wires into in-ref-N go, the other two stay.
+    const g = reconcilePromptRefEdges(withExtras, "composer", []);
+    expect(g.edges.some((e) => e.id === "e-ref:r1-composer-0")).toBe(false);
+    expect(g.edges.some((e) => e.from.node === "imagegen" && e.to.node === "composer")).toBe(true);
+    expect(g.edges.some((e) => e.id === "e-ref:r2-composer-frame0")).toBe(true);
+  });
+
+  it("ignores other prompt nodes and is a no-op (same graph) when nothing changes", () => {
+    let g = materializeGraph(
+      shot({ prompt: "Scene @[Gondola]", graphVideoNodes: [{ id: "vid0", prompt: "Move @[Gondola]" }] }),
+      REFS
+    );
+    const before = g;
+    g = reconcilePromptRefEdges(g, "composer", ["r1"]);
+    expect(g).toBe(before);
+    // Deleting the composer's tag does not touch the video prompt's wire.
+    g = reconcilePromptRefEdges(g, "composer", []);
+    expect(refEdgesIntoLocal(g, "composer")).toEqual([]);
+    expect(refEdgesIntoLocal(g, "videoprompt")).toEqual([["ref:r1", "in-ref-0", "e-ref:r1-videoprompt-0"]]);
   });
 });

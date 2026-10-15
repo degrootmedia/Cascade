@@ -46,4 +46,14 @@ describe("ProdLog", () => {
     act(() => { root.unmount(); });
     host.remove();
   });
+
+  it("the collapse caret is a CSS shape with no text glyph (encoding-proof)", () => {
+    const { host, root } = mount();
+    const caret = host.querySelector(".prod-log-caret");
+    expect(caret, "caret element").toBeTruthy();
+    expect(caret!.textContent).toBe("");
+    expect(caret!.getAttribute("aria-hidden")).toBe("true");
+    act(() => { root.unmount(); });
+    host.remove();
+  });
 });

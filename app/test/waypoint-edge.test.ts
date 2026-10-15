@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { waypointInsertIndex } from "../src/renderer/src/components/graph/WaypointEdge.js";
+import { createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { act } from "react";
+import { ReactFlowProvider, Position } from "@xyflow/react";
+import { waypointInsertIndex, WaypointContext, WaypointEdge, type WaypointHandlers } from "../src/renderer/src/components/graph/WaypointEdge.js";
 import { graphEdgesToFlow } from "../src/renderer/src/components/graphFlow.js";
 import { materializeGraph } from "../src/shared/graph/materialize.js";
 import type { Graph } from "../src/shared/ipc.js";
@@ -36,5 +40,53 @@ describe("graphEdgesToFlow waypoints", () => {
     // Edges without stored points render straight (empty waypoint list).
     const other = flow.find((e) => e.id !== edgeId);
     if (other) expect((other.data as { waypoints: unknown }).waypoints).toEqual([]);
+  });
+});
+
+/**
+ * Waypoint selection (the canvas's Delete-key target). The modal-level path
+ * can't be exercised under jsdom — ReactFlow never renders edges without
+ * measured handles — so the selectable surface is covered at the component
+ * seam: pointerdown selects, the selected dot is marked, and the legacy
+ * double-click delete still fires.
+ */
+describe("WaypointEdge selection", () => {
+  it("pointerdown on a dot selects it; selected renders marked; double-click removes", async () => {
+    const calls: string[] = [];
+    const handlers: WaypointHandlers = {
+      add: () => {},
+      move: () => {},
+      remove: (edgeId, index) => calls.push(`remove:${edgeId}:${index}`),
+      select: (edgeId, index) => calls.push(`select:${edgeId}:${index}`),
+      selected: null,
+    };
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const tree = (h: WaypointHandlers) =>
+      createElement(ReactFlowProvider, null,
+        createElement(WaypointContext.Provider, { value: h },
+          createElement("svg", null,
+            createElement(WaypointEdge, {
+              id: "e1",
+              sourceX: 0, sourceY: 0, targetX: 200, targetY: 0,
+              sourcePosition: Position.Right, targetPosition: Position.Left,
+              data: { waypoints: [{ x: 100, y: 40 }] },
+            } as never))));
+    act(() => { root.render(tree(handlers)); });
+    const dot = host.querySelector(".prod-waypoint-dot");
+    expect(dot, "waypoint dot rendered").toBeTruthy();
+    expect(dot!.classList.contains("selected")).toBe(false);
+    act(() => {
+      dot!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+      window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, cancelable: true }));
+    });
+    expect(calls).toContain("select:e1:0");
+    act(() => { root.render(tree({ ...handlers, selected: { edgeId: "e1", index: 0 } })); });
+    expect(host.querySelector(".prod-waypoint-dot")!.classList.contains("selected")).toBe(true);
+    act(() => { host.querySelector(".prod-waypoint-dot")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true })); });
+    expect(calls).toContain("remove:e1:0");
+    act(() => { root.unmount(); });
+    host.remove();
   });
 });

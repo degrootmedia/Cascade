@@ -44,6 +44,8 @@ export function findGeneration(shot: ProductionShot, rel: string): GenerationRef
     index = indexOfPath(node.gens, rel);
     if (index >= 0) return { kind: "video", rel, index, nodeId: node.id };
   }
+  index = indexOfPath(shot.graphEditVideoGens, rel);
+  if (index >= 0) return { kind: "editvideo", rel, index };
   index = indexOfPath(shot.graphUpscale?.gens, rel);
   if (index >= 0) return { kind: "upscale", rel, index };
   for (const node of shot.graphEditNodes ?? []) {

@@ -51,23 +51,35 @@ function textOffsetOfNode(el: HTMLElement, node: Node): number {
   return textLengthBeforeRange(el, range);
 }
 
-/** Collapsed range at a serialized-text offset (walks the text nodes). */
+/** Collapsed range at a serialized-text offset (walks child nodes).
+ *  Chip-aware: a caret must never anchor INSIDE a chip's text - the chip is
+ *  contenteditable=false, so Chromium cannot hold a selection there and
+ *  drops it (the user-visible "cursor loses focus", worst when a chip is
+ *  the box's first child). Offsets inside a chip clamp to the nearer chip
+ *  boundary; boundary offsets anchor beside the chip or in the adjacent
+ *  text node. */
 function offsetToRange(el: HTMLElement, offset: number): Range {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  let remaining = offset;
-  let node = walker.nextNode();
-  while (node) {
-    const len = node.textContent?.length ?? 0;
-    if (remaining <= len) {
-      const r = document.createRange();
-      r.setStart(node, remaining);
-      r.collapse(true);
-      return r;
-    }
-    remaining -= len;
-    node = walker.nextNode();
-  }
   const r = document.createRange();
+  let remaining = Math.max(0, offset);
+  for (const node of Array.from(el.childNodes)) {
+    const len = node.textContent?.length ?? 0;
+    const isChip = node instanceof HTMLElement && node.classList.contains("prompt-tag-chip");
+    if (isChip) {
+      if (remaining === 0) { r.setStartBefore(node); r.collapse(true); return r; }
+      if (remaining < len) {
+        if (remaining * 2 < len) r.setStartBefore(node); else r.setStartAfter(node);
+        r.collapse(true);
+        return r;
+      }
+      if (remaining === len) { r.setStartAfter(node); r.collapse(true); return r; }
+      remaining -= len;
+      continue;
+    }
+    if (node.nodeType === 3) {
+      if (remaining <= len) { r.setStart(node, remaining); r.collapse(true); return r; }
+      remaining -= len;
+    }
+  }
   r.selectNodeContents(el);
   r.collapse(false);
   return r;
@@ -415,9 +427,22 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     el.textContent = "";
     const frag = document.createDocumentFragment();
     let last = 0;
+    // Editable text anchors around chips: Chromium cannot place a caret
+    // before a leading (or between adjacent) contenteditable=false chips
+    // with no text node to land in, so keep a possibly-empty text node in
+    // those spots. Empty anchors don't change the serialized text.
+    let prevWasChip = false;
+    let emittedAny = false;
     for (const m of refTagMatches(t)) {
       const idx = m.index;
-      if (idx > last) frag.appendChild(document.createTextNode(t.slice(last, idx)));
+      if (idx > last) {
+        frag.appendChild(document.createTextNode(t.slice(last, idx)));
+        prevWasChip = false;
+      } else if (!emittedAny || prevWasChip) {
+        frag.appendChild(document.createTextNode(""));
+      }
+      emittedAny = true;
+      prevWasChip = true;
       const chip = document.createElement("span");
       chip.className = "prompt-tag-chip nodrag";
       chip.setAttribute("contenteditable", "false");
@@ -467,6 +492,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
       last = idx + m.tag.length;
     }
     if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last)));
+    else if (prevWasChip) frag.appendChild(document.createTextNode(""));
     el.appendChild(frag);
   }
 

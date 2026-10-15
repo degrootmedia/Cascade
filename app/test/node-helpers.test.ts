@@ -10,6 +10,7 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
+import { materializeGraph } from "../src/shared/graph/materialize.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
@@ -26,12 +27,14 @@ const gWin = globalThis as unknown as { cascade: unknown };
 gWin.cascade = new Proxy({}, {
   get: (_t, prop) => {
     if (prop === "videoEditModels") return async () => [];
+    if (prop === "refreshMedia") return async () => "refreshed";
     if (prop === "saveSelection") return async () => {};
     if (prop === "writeText") return async () => {};
     if (prop === "readText") return async () => "";
     return async () => null;
   },
 });
+if (typeof window !== "undefined") (window as unknown as { cascade: unknown }).cascade = gWin.cascade;
 
 function baseShot(overrides: Partial<ProductionShot> = {}): ProductionShot {
   return {
@@ -61,11 +64,11 @@ function baseProd(): Production {
 }
 
 /** NodeGraphModal with every callback a no-op (set via extraProps). */
-function renderModal(shot: ProductionShot, onGraphField: (patch: Partial<ProductionShot>) => void, onSaveLayout: (patch: unknown) => void = () => {}) {
+function renderModal(shot: ProductionShot, onGraphField: (patch: Partial<ProductionShot>) => void, onSaveLayout: (patch: unknown) => void = () => {}, opts: { brand?: unknown; onPasteFiles?: (files: File[]) => Promise<unknown[]>; initialLayout?: unknown; onDeleteGeneration?: (rel: string) => void } = {}) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
-  const prod = baseProd();
+  const prod = { ...baseProd(), ...(opts.brand !== undefined ? { brand: opts.brand } : {}) } as Production;
   act(() => {
     root.render(
       createElement(NodeGraphModal, {
@@ -80,6 +83,8 @@ function renderModal(shot: ProductionShot, onGraphField: (patch: Partial<Product
         imageModels: [],
         videoModels: [],
         onClose: () => {},
+        initialLayout: opts.initialLayout,
+        onDeleteGeneration: opts.onDeleteGeneration ?? (() => {}),
         onPromptChange: () => {},
         onStyleChange: () => {},
         onToggleBrand: () => {},
@@ -102,7 +107,7 @@ function renderModal(shot: ProductionShot, onGraphField: (patch: Partial<Product
         onCycleGraphGen: () => {},
         onSaveGenerationAsReference: async () => null,
         onDropFile: async () => null,
-        onPasteFiles: () => {},
+        onPasteFiles: opts.onPasteFiles ?? (async () => []),
         onRenameRef: () => {},
         onRunImageGen: async () => {},
         onRunVideoGen: async () => {},
@@ -179,6 +184,137 @@ describe("CTRL+Click routes to Frame Output", () => {
       expect(el?.style.transform, `${id} moved to its tidied position`).toContain(`${want.x}px`);
       expect(el?.style.transform).toContain(`${want.y}px`);
     }
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("a pasted reference lands selected (and nothing else does)", async () => {
+    const hero = { id: "r1", name: "Hero", artwork: "references/hero.png" };
+    const { host, root } = renderModal(baseShot({ graphOutputSource: undefined }), () => {}, () => {}, {
+      onPasteFiles: async () => [hero],
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const ev = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "clipboardData", {
+      value: { items: [{ kind: "file", type: "image/png", getAsFile: () => new File([], "x.png", { type: "image/png" }) }] },
+    });
+    await act(async () => { window.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
+    const placed = host.querySelector('.react-flow__node[data-id="ref:r1"]');
+    expect(placed, "pasted ref node on canvas").toBeTruthy();
+    expect(placed!.classList.contains("selected")).toBe(true);
+    expect(host.querySelectorAll(".react-flow__node.selected")).toHaveLength(1);
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("Brand node renders only when the brand identity is non-blank", async () => {
+    const blank = renderModal(baseShot(), () => {});
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(blank.host.querySelector('.react-flow__node[data-id="brand"]')).toBeNull();
+    act(() => { blank.root.unmount(); });
+    blank.host.remove();
+
+    const branded = renderModal(baseShot(), () => {}, () => {}, { brand: { colors: ["#ff0000"], font: "" } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(branded.host.querySelector('.react-flow__node[data-id="brand"]')).toBeTruthy();
+    act(() => { branded.root.unmount(); });
+    branded.host.remove();
+  });
+
+  it("deleting a ref tag from the composer drops that ref's wire from the stored graph", async () => {
+    const patches: Array<Partial<ProductionShot>> = [];
+    const fields = {
+      id: "shot1", number: "0100", audio: "", visual: "",
+      prompt: "Walks @[Hero] onward.", graphStandalone: true,
+    } as unknown as ProductionShot;
+    const graph = materializeGraph(fields as never, [{ id: "r1", name: "Hero", artwork: "references/hero.png" }] as never);
+    expect(graph.edges.some((e) => e.id === "e-ref:r1-composer-0")).toBe(true);
+    const shot = baseShot({ prompt: "Walks @[Hero] onward.", graphOutputSource: undefined, graph });
+    const { host, root } = renderModal(shot, (p) => patches.push(p));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    patches.length = 0;
+    const ed = host.querySelector(".prod-graph-composer .prompt-content-editor") as HTMLElement | null;
+    expect(ed, "composer editor rendered").toBeTruthy();
+    const chip = ed!.querySelector(".prompt-tag-chip");
+    expect(chip, "tag chip rendered").toBeTruthy();
+    await act(async () => {
+      ed!.focus();
+      chip!.remove();
+      ed!.dispatchEvent(new Event("input", { bubbles: true }));
+      ed!.blur();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const graphPatch = patches.filter((p) => p.graph).pop();
+    expect(graphPatch, "a stored graph write after tag deletion").toBeTruthy();
+    const edges = (graphPatch!.graph as { edges: { id: string }[] }).edges;
+    expect(edges.some((e) => e.id === "e-ref:r1-composer-0")).toBe(false);
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("right-click Delete on an image-gen take reaches onDeleteGeneration", async () => {
+    const deleted: string[] = [];
+    const shot = baseShot({
+      graphOutputSource: undefined,
+      graphImageGens: [
+        { path: "out/gen-a.png", prompt: "A" },
+        { path: "out/gen-b.png", prompt: "B" },
+      ],
+      graphImageGenIndex: 1,
+    } as never);
+    const { host, root } = renderModal(shot, () => {}, () => {}, { onDeleteGeneration: (rel) => deleted.push(rel) });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const preview = host.querySelector(".prod-graph-imagegen .prod-graph-gen-preview-wrap");
+    expect(preview, "image-gen preview rendered").toBeTruthy();
+    act(() => { preview!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const del = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Delete generation"));
+    expect(del, "Delete item in the context menu").toBeTruthy();
+    act(() => { del!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); });
+    expect(deleted).toEqual(["out/gen-b.png"]);
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("a delete refusal is surfaced inside the modal as a hint", async () => {
+    const shot = baseShot({
+      graphOutputSource: undefined,
+      graphImageGens: [{ path: "out/gen-b.png", prompt: "B" }],
+      graphImageGenIndex: 0,
+    } as never);
+    const { host, root } = renderModal(shot, () => {}, () => {}, {
+      onDeleteGeneration: async () => "That take is the storyboard's current frame - unplug it first.",
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const preview = host.querySelector(".prod-graph-imagegen .prod-graph-gen-preview-wrap");
+    act(() => { preview!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const del = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Delete generation"));
+    await act(async () => {
+      del!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelector(".prod-graph-drop-hint")?.textContent).toContain("current frame");
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("right-click Refresh reports its outcome as a hint", async () => {
+    const shot = baseShot({
+      graphOutputSource: undefined,
+      graphImageGens: [{ path: "out/gen-b.png", prompt: "B" }],
+      graphImageGenIndex: 0,
+    } as never);
+    const { host, root } = renderModal(shot, () => {});
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const preview = host.querySelector(".prod-graph-imagegen .prod-graph-gen-preview-wrap");
+    act(() => { preview!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const btn = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Refresh image");
+    expect(btn, "Refresh item in the context menu").toBeTruthy();
+    await act(async () => {
+      btn!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(host.querySelector(".prod-graph-drop-hint")?.textContent).toContain("Refreshed gen-b.png");
     act(() => { root.unmount(); });
     host.remove();
   });

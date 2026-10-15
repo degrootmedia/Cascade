@@ -179,6 +179,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [refiningStyleId, setRefiningStyleId] = useState<string | null>(null);
   // step 2: generating a style from an imported/pasted image (spinner on buttons)
   const [styleImgBusy, setStyleImgBusy] = useState(false);
+  const [stylePresets, setStylePresets] = useState<{ name: string; prompt: string; file: string }[]>([]);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const presets = await window.cascade.listStylePresets?.();
+        if (live && Array.isArray(presets)) setStylePresets(presets);
+      } catch { /* presets are an enhancement - the section works without them */ }
+    })();
+    return () => { live = false; };
+  }, []);
   // Ref mirror of styleImgBusy for re-entry guards inside async flows, where
   // the render-scope state value is frozen at call time.
   const styleImgBusyRef = useRef(false);
@@ -1151,20 +1162,25 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  revision conflict ("Stale edit: …") is recoverable: refresh to the fresh
    *  document (named in the error) so the user sees current state and can
    *  retry, instead of silently applying onto a moved document. */
-  const apply = useCallback((p: Promise<Production>) => {
+  const apply = useCallback(async (p: Promise<Production>): Promise<string | undefined> => {
     setBusy(true); setErr(null);
-    p.then((next) => { applySnapshot(next); void refreshList(); })
-      .catch(async (e) => {
-        const msg = String(e).replace(/^Error:\s*/, "");
-        if (msg.startsWith("Stale edit:") && prodRef.current) {
-          try {
-            const fresh = await window.cascade.loadProduction(prodRef.current.meta.id);
-            if (fresh) applySnapshot(fresh);
-          } catch { /* the message stands regardless */ }
-        }
-        setErr(msg);
-      })
-      .finally(() => setBusy(false));
+    try {
+      const next = await p;
+      applySnapshot(next); void refreshList();
+      return undefined;
+    } catch (e) {
+      const msg = String(e).replace(/^Error:\s*/, "");
+      if (msg.startsWith("Stale edit:") && prodRef.current) {
+        try {
+          const fresh = await window.cascade.loadProduction(prodRef.current.meta.id);
+          if (fresh) applySnapshot(fresh);
+        } catch { /* the message stands regardless */ }
+      }
+      setErr(msg);
+      return msg;
+    } finally {
+      setBusy(false);
+    }
   }, [refreshList, applySnapshot]);
 
   function setStep(n: 1 | 2 | 3 | 4 | 5) {
@@ -1424,6 +1440,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod || (prod.styles?.length ?? 0) >= MAX_STYLES) return;
     saveField({
       styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: "", prompt: "" }],
+    });
+  }
+
+  /** Step 2: append a style from a markdown preset (name + prompt copied in;
+   *  the frame then comes from the usual upload/generate flow). */
+  function addStyleFromPreset(file: string) {
+    if (!prod || (prod.styles?.length ?? 0) >= MAX_STYLES) return;
+    const preset = stylePresets.find((p) => p.file === file);
+    if (!preset) return;
+    saveField({
+      styles: [...(prod.styles ?? []), { id: uid("style"), index: (prod.styles?.length ?? 0) + 1, name: preset.name, prompt: preset.prompt }],
     });
   }
 
@@ -3503,17 +3530,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Step 3: permanently delete one stored generation (right-click on a board
    *  history frame, a node-graph take, or a tween take). Blocks while the take
    *  still feeds the storyboard/animatic/a pipe, then confirms before unlinking. */
-  async function deleteGeneration(shotId: string, rel: string) {
+  async function deleteGeneration(shotId: string, rel: string): Promise<string | undefined> {
     const current = prodRef.current;
     if (!current) return;
     const shot = current.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (!shot) return;
     const gen = findGeneration(shot, rel);
-    if (!gen) return;
+    if (!gen) { const msg = "That frame isn't a stored generation - nothing to delete."; setErr(msg); return msg; }
     const reason = generationInUse(shot, gen);
-    if (reason) { setErr(generationInUseMessage(reason)); return; }
+    if (reason) { const msg = generationInUseMessage(reason); setErr(msg); return msg; }
     if (!(await confirmDestructive({ title: "Delete generation?", body: DELETE_GENERATION_WARNING, confirmLabel: "Delete" }))) return;
-    apply(window.cascade.deleteGeneration(current.meta.id, shotId, rel));
+    return apply(window.cascade.deleteGeneration(current.meta.id, shotId, rel));
   }
 
   /** Step 3/4: copy any generated image or clip into the production as a new
@@ -4140,6 +4167,26 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 >
                   {styleImgBusy ? "Reading image…" : <><ImageIcon size={14} /> From image…</>}
                 </button>
+                {stylePresets.length > 0 && (
+                  <select
+                    className="prod-openart-select"
+                    value=""
+                    disabled={(prod.styles?.length ?? 0) >= MAX_STYLES}
+                    onChange={(e) => { if (e.target.value) addStyleFromPreset(e.target.value); }}
+                    title="Add a style from a markdown preset (userData/style-presets)"
+                    aria-label="Add style from preset"
+                  >
+                    <option value="" disabled>From preset...</option>
+                    {stylePresets.map((p) => <option key={p.file} value={p.file}>{p.name}</option>)}
+                  </select>
+                )}
+                <button
+                  className="prod-btn ghost"
+                  onClick={() => void window.cascade.openStylePresetsFolder?.()}
+                  title="Open the style-presets folder - add or edit .md preset files there"
+                >
+                  Presets folder
+                </button>
               </div>
             </DesignSection>
 
@@ -4578,7 +4625,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   tweenStitching={graphShotId ? tweenStitchingAll.has(graphShotId) : false}
                   onSelectGraphGen={(kind, index, nodeId) => { if (graphShotId) selectGraphGen(graphShotId, kind, index, nodeId); }}
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
-                  onDeleteGeneration={(rel) => { if (graphShotId) deleteGeneration(graphShotId, rel); }}
+          onDeleteGeneration={(rel) => (graphShotId ? deleteGeneration(graphShotId, rel) : undefined)}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
                   onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}

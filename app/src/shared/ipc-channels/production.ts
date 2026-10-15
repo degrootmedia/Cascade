@@ -23,6 +23,8 @@ export const productionChannels = {
   "production:refineCharacterDescription": { method: "refineCharacterDescription", kind: "invoke" },
   "production:generateStyles": { method: "generateStyles", kind: "invoke" },
   "production:styleFromImage": { method: "styleFromImage", kind: "invoke" },
+  "production:listStylePresets": { method: "listStylePresets", kind: "invoke" },
+  "production:openStylePresetsFolder": { method: "openStylePresetsFolder", kind: "invoke" },
   "production:generateStyleFrame": { method: "generateStyleFrame", kind: "invoke" },
   "production:setStyleFrame": { method: "setStyleFrame", kind: "invoke" },
   "production:useShotAsStyleFrame": { method: "useShotAsStyleFrame", kind: "invoke" },

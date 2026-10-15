@@ -14,8 +14,10 @@ import * as sessions from "./sessions.js";
 import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
+import { sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
+import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -2237,6 +2239,39 @@ function registerIpc() {
   // Step 2: look at a reference image and distill one named style from it.
   // Keeps the input image as the style's frame (the look anchor) instead of
   // discarding it — the distilled text stays for text-only compatibility.
+  // Markdown style presets (userData/style-presets, one .md per preset).
+  // Seeded with the bundled defaults on first list; user edits/additions in
+  // the folder are the whole point, so seeding never overwrites a file.
+  const stylePresetsDir = (): string => path.join(app.getPath("userData"), "style-presets");
+  const ensureStylePresets = (): string => {
+    const dir = stylePresetsDir();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      for (const seed of STYLE_PRESET_SEEDS) {
+        const file = path.join(dir, seed.file);
+        if (!fs.existsSync(file)) fs.writeFileSync(file, seed.content, "utf8");
+      }
+    } catch { /* listing below still returns what it can read */ }
+    return dir;
+  };
+  handle("production:listStylePresets", (): StylePreset[] => {
+    const dir = ensureStylePresets();
+    const out: StylePreset[] = [];
+    let files: string[] = [];
+    try { files = fs.readdirSync(dir).filter((f) => /\.md$/i.test(f)).sort(); } catch { return out; }
+    for (const file of files) {
+      try {
+        const preset = parseStylePreset(fs.readFileSync(path.join(dir, file), "utf8"), file);
+        if (preset) out.push(preset);
+      } catch { /* unreadable/malformed preset file: skip it, keep the rest */ }
+    }
+    return out;
+  });
+  handle("production:openStylePresetsFolder", async (): Promise<void> => {
+    const dir = ensureStylePresets();
+    await shell.openPath(dir);
+  });
+
   handle("production:styleFromImage", async (_e, id: string, imageDataUrl: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
@@ -3416,19 +3451,21 @@ function registerIpc() {
   // high-quality file an external editor edits), so a UI "Refresh" picks up a
   // change the focus sweep may have missed (e.g. the original was edited before
   // "Edit externally" registered a watch). No-op when the file has no original.
-  handle("production:refreshMedia", (_e, id: string, rel: string) => {
+  handle("production:refreshMedia", (_e, id: string, rel: string): "refreshed" | "up-to-date" | "no-original" | "missing" => {
     const p = productions.loadProduction(id);
-    if (!p || typeof rel !== "string" || !rel) return;
+    if (!p || typeof rel !== "string" || !rel) return "missing";
     const originalRel = originalForJpegRel(p, rel);
-    if (!originalRel || originalRel === rel) return;
-    // Only re-encode when the original is the newer file — i.e. the external
+    if (!originalRel || originalRel === rel) return "no-original";
+    // Only re-encode when the original is the newer file - i.e. the external
     // editor's save is what's stale in the preview. If the JPEG itself is newer
-    // (edited directly), leave it so Refresh can't revert the user's work.
+    // (edited directly), leave it so Refresh can't revert the user's work. The
+    // result tells the UI which branch ran, so Refresh never silently no-ops.
     try {
       const jpg = fs.statSync(assetPath(p, rel));
       const orig = fs.statSync(assetPath(p, originalRel));
-      if (orig.mtimeMs > jpg.mtimeMs) regenerateBoardJpeg(p, originalRel, rel);
-    } catch { /* missing file — nothing to refresh */ }
+      if (orig.mtimeMs <= jpg.mtimeMs) return "up-to-date";
+      return regenerateBoardJpeg(p, originalRel, rel) ? "refreshed" : "missing";
+    } catch { return "missing"; }
   });
 
   // Step 3: image/video-capable models for the model dropdowns. Empty on
@@ -3480,7 +3517,7 @@ function registerIpc() {
     return removeSuiteEntry(id, entryId);
   });
 
-  handle("suite:exportEntry", (_e, id: string, entryId: string, target: SuiteExportTarget): SuiteExportResult => {
+  handle("suite:exportEntry", (_e, id: string, entryId: string, target: SuiteExportTarget, name?: string): SuiteExportResult => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const entry = loadSuiteSession(id).entries.find((e) => e.id === entryId);
@@ -3488,14 +3525,17 @@ function registerIpc() {
     const src = assetPath(p, entry.outputPath);
     if (!fs.existsSync(src)) throw new Error("The suite entry's file is missing on disk.");
     const ext = (path.extname(entry.outputPath) || ".png").replace(/^\./, "");
-    const base = entry.prompt.split("\n")[0].replace(/[^\w\- ]+/g, "").trim().slice(0, 48) || "Suite";
+    const suggested = suggestSuiteRefName(entry.prompt);
+    const asked = typeof name === "string" ? sanitizeReferenceName(name) : "";
+    const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const base = target === "references" && asked ? uniqueReferenceName(p, refId, asked) : suggested;
     const dir = target === "boards" ? p.assets.boardsDir : p.assets.referencesDir;
     fs.mkdirSync(assetPath(p, dir), { recursive: true });
     const rel = uniqueSuiteRel(dir, base, ext, (r) => fs.existsSync(assetPath(p, r)));
     fs.copyFileSync(src, assetPath(p, rel));
     if (target === "boards") return { path: rel, ref: null, production: p };
     const ref: CustomRef = {
-      id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      id: refId,
       name: base,
       imagePath: rel,
       shotIds: [],

@@ -101,6 +101,8 @@ function cascadeMock(): Record<string, unknown> {
     addReferenceMedia: stub, removeReferenceFile: stub,
     importVoiceover: stub, voiceoverFile: stub, importMusic: stub, musicFile: stub,
     refineStylePrompt: stub, generateMagicPrompts: stub, setMagicEnabled: stub,
+    listStylePresets: async () => [{ name: "Pencil sketch", prompt: "Graphite pencil on paper.", file: "pencil-sketch.md" }],
+    openStylePresetsFolder: stub,
     ingestScript: stub, createProduction: stub,
     removeProduction: stub, pickProductionFolder: stub, pickScriptFile: stub,
     reorderShot: stub, promoteBoardHistory: stub, recheckBoard: stub, removeVideo: stub,
@@ -204,6 +206,26 @@ describe("Upload frame", () => {
     const { host, root } = await renderWorkspace();
     await act(async () => { buttonByText(host, "Upload frame").click(); await tick(); await tick(); });
     expect(host.textContent).toContain("larger than 15 MB");
+    teardown(root, host);
+  });
+});
+
+describe("Style presets", () => {
+  it("picking a preset appends a style with its name and prompt", async () => {
+    disk = freshProd();
+    const { host, root } = await renderWorkspace();
+    const select = host.querySelector('select[aria-label="Add style from preset"]') as HTMLSelectElement | null;
+    expect(select, "preset picker").toBeTruthy();
+    await act(async () => {
+      const proto = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+      proto?.call(select, "pencil-sketch.md");
+      select!.dispatchEvent(new Event("change", { bubbles: true }));
+      await tick(); await tick();
+    });
+    const styles = (disk?.styles as Array<Record<string, unknown>> | undefined) ?? [];
+    expect(styles).toHaveLength(2);
+    expect(styles[1].name).toBe("Pencil sketch");
+    expect(styles[1].prompt).toBe("Graphite pencil on paper.");
     teardown(root, host);
   });
 });

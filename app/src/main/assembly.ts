@@ -443,11 +443,31 @@ export function buildManifest(
 
 // ---- ffmpeg argv builders --------------------------------------------------
 
-/** Pass A: normalize one timeline event into a uniform h264/aac segment of
- *  exactly `durationSec` at the target resolution/fps. Every segment gets both
- *  a video and an audio stream (silence for stills, blank slots, muted clips,
- *  and clips without embedded audio) so Pass B can concat with `-c copy`.
- *  Blank slots are generated directly from a black lavfi `color` source. */
+/** Whole frames a timeline event occupies at `fps` — the render timeline
+ *  is frame-based, so every segment is quantized to an exact frame count
+ *  and its audio to the exact matching sample count. Without this, a
+ *  1.3s shot at 24fps rendered 31 frames of video (1.2917s) beside
+ *  1.300s of audio, and the mismatch compounded at every concat joint
+ *  until clip audio audibly drifted away from the picture. */
+export function segmentFrames(durationSec: number, fps: number): number {
+  return Math.max(1, Math.round(Math.max(0.1, durationSec) * Math.max(1, Math.round(fps))));
+}
+
+/** Exact on-timeline duration of a frame-quantized segment, in seconds. */
+export function segmentSec(durationSec: number, fps: number): number {
+  return segmentFrames(durationSec, fps) / Math.max(1, Math.round(fps));
+}
+
+/** Pass A: normalize one timeline event into a uniform h264/PCM segment of
+ *  exactly `segmentFrames(durationSec, fps)` frames at the target
+ *  resolution/fps, with sample-exact 48kHz audio of the same length.
+ *  Every segment gets both a video and an audio stream (silence for
+ *  stills, blank slots, muted clips, and clips without embedded audio)
+ *  so Pass B can concat with `-c copy`. Segment audio is uncompressed
+ *  PCM on purpose: AAC carries per-file priming/padding samples that
+ *  stream-copy concat turns into real inserted silence at every joint —
+ *  the other half of the cumulative drift. AAC is encoded exactly once,
+ *  in Pass C. Blank slots are generated from a black lavfi `color`. */
 export function buildNormalizeArgs(
   ev: { kind: "still" | "clip" | "blank"; durationSec: number; muted: boolean; probedSec?: number; hasAudio?: boolean; offsetSec?: number },
   cfg: AssemblyConfig,
@@ -455,7 +475,9 @@ export function buildNormalizeArgs(
   outAbs: string
 ): string[] {
   const { fps, width, height } = cfg;
-  const dur = Math.max(0.1, ev.durationSec);
+  const frames = segmentFrames(ev.durationSec, fps);
+  const dur = frames / fps;
+  const samples = Math.round((frames * 48000) / fps);
   // Slip offset into a clip's source (Step 4 right-drag): seek before decode
   // so the window opens on the slipped frame. Anything else stays identical.
   const offset = ev.kind === "clip" && ev.offsetSec != null && Number.isFinite(ev.offsetSec) && ev.offsetSec > 0
@@ -480,18 +502,22 @@ export function buildNormalizeArgs(
     if (offset > 0) args.push("-ss", offset.toFixed(3));
     args.push("-i", srcAbs);
   }
+  // Sample-exact segment audio: resample, pad with silence when short,
+  // then hard-trim to the exact sample count the frame count implies —
+  // so audio and video leave Pass A with identical durations.
+  const audioFilter = `aresample=48000,apad,atrim=end_sample=${samples}`;
   if (silent) {
-    args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a");
+    args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a", "-af", audioFilter);
   } else {
-    args.push("-map", "0:v", "-map", "0:a", "-af", "apad");
+    args.push("-map", "0:v", "-map", "0:a", "-af", audioFilter);
   }
   args.push(
-    "-t", dur.toFixed(3),
+    "-t", dur.toFixed(6),
     "-vf", video,
+    "-frames:v", String(frames),
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
     "-pix_fmt", "yuv420p", "-r", String(fps),
-    "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k",
-    "-movflags", "+faststart",
+    "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2",
     outAbs
   );
   return args;
@@ -502,13 +528,15 @@ export function buildConcatList(segmentAbsPaths: string[]): string {
   return segmentAbsPaths.map((s) => `file '${s.replace(/\\/g, "/").replace(/'/g, "'\\''")}'`).join("\n") + "\n";
 }
 
-/** Pass B: stream-copy the normalized segments into one file (uniform codecs). */
+/** Pass B: stream-copy the normalized segments into one file (uniform
+ *  codecs; frame/sample-exact segment lengths keep the joints seamless). */
 export function buildConcatArgs(concatListAbs: string, outAbs: string): string[] {
-  return ["-y", "-f", "concat", "-safe", "0", "-i", concatListAbs, "-c", "copy", "-movflags", "+faststart", outAbs];
+  return ["-y", "-f", "concat", "-safe", "0", "-i", concatListAbs, "-c", "copy", outAbs];
 }
 
 /** Pass C: mix the VO + music beds over the concat result (clip audio already
- *  baked into the base track). With no beds the audio is copied through. */
+ *  baked into the base track) and encode the final AAC track (the premix
+ *  carries PCM). `totalSec` is the frame-quantized timeline total. */
 export function buildMixArgs(opts: {
   renderAbs: string;
   voiceover?: { abs: string; volume: number };
@@ -528,7 +556,8 @@ export function buildMixArgs(opts: {
     beds++;
   }
   if (beds === 0) {
-    return [...inputs, "-map", "0:v", "-map", "0:a", "-t", totalSec.toFixed(3), "-c", "copy", outAbs];
+    // The premix carries PCM segment audio — this is the one AAC encode.
+    return [...inputs, "-map", "0:v", "-map", "0:a", "-t", totalSec.toFixed(3), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", outAbs];
   }
   const v = (x: number) => x.toFixed(2);
   let filter: string;
@@ -687,16 +716,20 @@ export async function renderAnimatic(
       }
     }
     const segments: string[] = [];
+    // The rendered timeline is frame-quantized segment by segment; its
+    // exact total (not the plan's fractional sum) bounds the final mix
+    // so audio and video end together.
+    const renderTotalSec = plan.events.reduce((sum, ev) => sum + segmentSec(ev.durationSec, cfg.fps), 0);
     for (let i = 0; i < plan.events.length; i++) {
       const ev = plan.events[i];
-      const outAbs = path.join(segDir, String(i + 1).padStart(4, "0") + ".mp4");
+      const outAbs = path.join(segDir, String(i + 1).padStart(4, "0") + ".mov");
       await deps.runFfmpeg(deps.bin, buildNormalizeArgs(ev, cfg, ev.srcRel ? assetPath(p, ev.srcRel) : "", outAbs), emit);
       segments.push(outAbs);
       emit(`Rendered shot ${ev.number} (${i + 1}/${plan.events.length}).`);
     }
     const concatList = path.join(segDir, "concat.txt");
     fs.writeFileSync(concatList, buildConcatList(segments), "utf8");
-    const preMix = path.join(segDir, "premix.mp4");
+    const preMix = path.join(segDir, "premix.mov");
     await deps.runFfmpeg(deps.bin, buildConcatArgs(concatList, preMix), emit);
     const renderAbs = path.join(exportAbs, "render.mp4");
     await deps.runFfmpeg(
@@ -705,7 +738,7 @@ export async function renderAnimatic(
         renderAbs: preMix,
         voiceover: plan.voiceover ? { abs: assetPath(p, plan.voiceover.srcRel), volume: plan.voiceover.volume } : undefined,
         music: plan.music ? { abs: assetPath(p, plan.music.srcRel), volume: plan.music.volume } : undefined,
-        totalSec: plan.totalSec,
+        totalSec: renderTotalSec,
         outAbs: renderAbs,
       }),
       emit

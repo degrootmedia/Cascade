@@ -107,6 +107,7 @@ export function resolveSuiteCompare(input: ResolveCompareInput): SuiteComparePai
   const selected = selectedId ? (entries.find((e) => e.id === selectedId) ?? null) : null;
 
   // An edit/upscale entry always offers its before/after pair.
+  if (selected?.pending || (selected && !selected.outputPath)) return null;
   if (selected?.kind === "edit" || selected?.kind === "upscale") {
     const before = entrySourceFrame(selected, prod, media);
     if (before) return { a: before, b: entryFrame(selected, media) };

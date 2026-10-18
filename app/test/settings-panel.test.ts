@@ -28,7 +28,6 @@ const ALL_SETTINGS_KEYS: Record<keyof SettingsView, true> = {
   followProduction: true,
   accent: true,
   externalEditor: true,
-  has3daiApiKey: true,
 };
 
 describe("settings registry coverage", () => {
@@ -41,6 +40,12 @@ describe("settings registry coverage", () => {
     // No section may claim a key outside SettingsView.
     const valid = new Set(Object.keys(ALL_SETTINGS_KEYS));
     for (const s of sections) for (const k of s.owns) expect(valid.has(k)).toBe(true);
+  });
+
+  it("has no 3D section (the 3D model feature was removed)", () => {
+    const sections = buildSettingsRegistry().flatMap((c) => c.sections);
+    expect(sections.some((s) => s.id === "three-d")).toBe(false);
+    expect(sections.some((s) => s.owns.includes("has3daiApiKey" as never))).toBe(false);
   });
 
   it("has unique section ids and every section belongs to its category", () => {
@@ -99,7 +104,6 @@ const VIEW: SettingsView = {
   followProduction: false,
   accent: "#4f8ef7",
   externalEditor: null,
-  has3daiApiKey: false,
 };
 
 function installCascade() {
@@ -136,7 +140,6 @@ function installCascade() {
     setModel: async (id: string) => { writes.push(["setModel", id]); },
     setAccent: async (c: string) => { writes.push(["setAccent", c]); },
     setExternalEditor: async (p: string | null) => { writes.push(["setExternalEditor", p]); },
-    set3daiApiKey: async (k: string) => { writes.push(["set3daiApiKey", k]); },
     clearDefaultWorkspace: async () => { writes.push(["clearDefaultWorkspace", null]); },
     openSkillsFolder: async () => {},
     openSubmissionLog: async () => {},
@@ -189,6 +192,38 @@ describe("settings deep link", () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(writes).toContainEqual(["setProvider", "gab"]);
     expect(writes.some(([k]) => k === "setAccent")).toBe(false);
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(container);
+  });
+
+  it("CLI Tools Check status shows a checking state and renders the result", async () => {
+    const { container, root } = await mount("#settings/cli-tools");
+    expect(activeTabId(container)).toBe("cli-tools");
+
+    // Defer the next status probe so the checking state is observable.
+    let resolveStatus: ((s: unknown) => void) | null = null;
+    let statusCalls = 0;
+    gWin.cascade.getHiggsfieldCliStatus = () => {
+      statusCalls++;
+      return new Promise((r) => { resolveStatus = r; });
+    };
+
+    const checkBtns = Array.from(container.querySelectorAll("button")).filter((b) => b.textContent === "Check status");
+    expect(checkBtns.length).toBeGreaterThan(0);
+    await act(async () => { checkBtns[0].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(statusCalls).toBe(1);
+    expect(checkBtns[0].textContent).toBe("Checking…");
+    expect((checkBtns[0] as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveStatus!({ binary: "C:/bin/hf.exe", version: "hf 1.0", authenticated: true, account: "a@b.c" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(checkBtns[0].textContent).toBe("Check status");
+    expect((checkBtns[0] as HTMLButtonElement).disabled).toBe(false);
+    expect(container.textContent).toContain("Binary: C:/bin/hf.exe");
+    expect(container.textContent).toContain("signed in as a@b.c");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(container);

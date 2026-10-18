@@ -173,13 +173,22 @@ function edgesInto(graph: Graph, toNode: string, toPort: string): GraphEdge[] {
  *  Returns the same graph when already matching, so callers can run it on
  *  every selection write without churning saved state. */
 export function syncOutputEdge(graph: Graph, sourceNodeId: string | null, edgeId?: string): Graph {
-  const current = edgesInto(graph, "output", "in-out");
-  const want = sourceNodeId && graph.nodes.some((n) => n.id === sourceNodeId) ? sourceNodeId : null;
-  if (want === null && current.length === 0) return graph;
-  if (want !== null && current.length === 1 && current[0].from.node === want) return graph;
-  const edges = graph.edges.filter((e) => !(e.to.node === "output" && e.to.port === "in-out"));
+  // A piped reference may have no stored graph node yet (its canvas tile was
+  // derived from a tag or layout entry, or the pipe was set programmatically
+  // by a board drop). Materialize it so the output wire has a real endpoint
+  // — without it the guard below would sync the wire away as dangling even
+  // though the pipe took effect. Other kinds keep the guard: a missing
+  // generation node means that tool is genuinely off-canvas.
+  const base = sourceNodeId?.startsWith("ref:") && !graph.nodes.some((n) => n.id === sourceNodeId)
+    ? { ...graph, nodes: [...graph.nodes, { id: sourceNodeId, kind: "ref" as const, pos: { x: 0, y: 0 } }] }
+    : graph;
+  const current = edgesInto(base, "output", "in-out");
+  const want = sourceNodeId && base.nodes.some((n) => n.id === sourceNodeId) ? sourceNodeId : null;
+  if (want === null && current.length === 0) return base;
+  if (want !== null && current.length === 1 && current[0].from.node === want) return base;
+  const edges = base.edges.filter((e) => !(e.to.node === "output" && e.to.port === "in-out"));
   if (want !== null) edges.push(mkEdge(edgeId ?? "e-out", want, "out", "output", "in-out"));
-  return { ...graph, edges };
+  return { ...base, edges };
 }
 
 /** Count ref→prompt edges on a prompt node (append-slot index). Only the
@@ -384,11 +393,115 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
  *  A reference-wire insert re-compacts its prompt node's sockets so an append
  *  can never land on an occupied socket or past a gap. */
 export function applyConnection(graph: Graph, op: ConnectionEdge): Graph {
+  // An append (socket index at/past the wire count — the always-open
+  // socket) of a source already wired into this prompt is a reconnect:
+  // keep its existing slot instead of moving it to the end.
+  if (REF_SOCKET_RE.test(op.edge.to.port)) {
+    const idx = Number(REF_SOCKET_RE.exec(op.edge.to.port)![1]);
+    const mine = graph.edges.filter((e) => e.to.node === op.edge.to.node && REF_SOCKET_RE.test(e.to.port));
+    if (idx >= mine.length && mine.some((e) => e.from.node === op.edge.from.node)) return graph;
+  }
   const dropped = new Set(op.dropIds);
-  const edges = graph.edges.filter((e) => !dropped.has(e.id) && e.id !== op.edge.id);
+  const isRefWire = REF_SOCKET_RE.test(op.edge.to.port);
+  // A reference-socket insert also drops any other wire from the same
+  // source into the same prompt node: reconnecting (or moving) a source
+  // must never leave it wired twice while its single prompt tag says
+  // once — the duplicate pointed at a socket past the rendered handles.
+  const edges = graph.edges.filter(
+    (e) =>
+      !dropped.has(e.id) &&
+      e.id !== op.edge.id &&
+      !(isRefWire && e.from.node === op.edge.from.node && e.to.node === op.edge.to.node && REF_SOCKET_RE.test(e.to.port))
+  );
   edges.push(op.edge);
-  const next = { ...graph, edges };
-  return REF_SOCKET_RE.test(op.edge.to.port) ? compactPromptRefEdges(next, op.edge.to.node) : next;
+  // A canvas tile can be derived (tagged in a prompt, layout-placed)
+  // without a stored graph node; an edge touching it would normalize away
+  // as dangling and the wire would vanish on the next save even though the
+  // connection took effect. Materialize any missing endpoint — its canvas
+  // position resolves from layout/defaults, never from this placeholder.
+  const nodes = [...graph.nodes];
+  for (const id of [op.edge.from.node, op.edge.to.node]) {
+    if (nodes.some((n) => n.id === id)) continue;
+    const kind = nodeKindForId(id);
+    if (kind) nodes.push({ id, kind, pos: { x: 0, y: 0 } });
+  }
+  const next = { ...graph, nodes, edges };
+  return isRefWire ? compactPromptRefEdges(next, op.edge.to.node) : next;
+}
+
+/** Source node ids wired into one prompt node's positional reference
+ *  sockets, in socket order — `ref:<id>` for references, the generation
+ *  node id (`imagegen`, `editgen:<id>`) for direct video-prompt wires.
+ *  This ordered list is the single value the connection/tag sync is
+ *  computed from: sockets, prompt tags, and video `refIds` sentinels all
+ *  derive from it, so they cannot drift apart. */
+export function promptRefWires(graph: Graph, targetNode: string): string[] {
+  const target = canonicalNodeId(targetNode);
+  return graph.edges
+    .filter((e) => e.to.node === target && REF_SOCKET_RE.test(e.to.port))
+    .sort((a, b) => Number(REF_SOCKET_RE.exec(a.to.port)![1]) - Number(REF_SOCKET_RE.exec(b.to.port)![1]))
+    .map((e) => e.from.node);
+}
+
+/**
+ * Rebuild one prompt node's reference-socket wires from an ordered source
+ * list (positions are sockets), mirroring `applyTweenKeys`. Sources are
+ * deduplicated (first occurrence wins — a source is wired at most once
+ * per prompt). A `ref:` source whose node is missing from the graph gets
+ * its node added, so the wire can never dangle (normalization drops
+ * dangling edges on reopen, which read as the connection and its tag
+ * vanishing); a missing generation source is skipped. Every other edge
+ * is untouched. Returns the same graph when the wires already match, so
+ * callers can skip a redundant save.
+ */
+export function withPromptRefWires(graph: Graph, targetNode: string, sources: readonly string[]): Graph {
+  const target = canonicalNodeId(targetNode);
+  const nodes = [...graph.nodes];
+  const have = new Set(nodes.map((n) => n.id));
+  const wanted: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of sources) {
+    const source = canonicalNodeId(raw);
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    if (!have.has(source)) {
+      if (!source.startsWith("ref:")) continue;
+      have.add(source);
+      nodes.push({ id: source, kind: "ref", pos: { x: 0, y: 0 } });
+    }
+    wanted.push(source);
+  }
+  const current = promptRefWires(graph, target);
+  if (current.length === wanted.length && current.every((s, i) => s === wanted[i]) && nodes.length === graph.nodes.length) {
+    return graph;
+  }
+  const kept = graph.edges.filter((e) => !(e.to.node === target && REF_SOCKET_RE.test(e.to.port)));
+  const fresh = wanted.map((source, i) => mkEdge(`e-${source}-${target}-${i}`, source, "out", target, `in-ref-${i}`));
+  return { ...graph, nodes, edges: [...kept, ...fresh] };
+}
+
+/**
+ * The wire list after a prompt reference-socket connect: the always-open
+ * socket appends (an already-wired source keeps its slot — a reconnect
+ * heals, never reorders); a numbered socket replaces the wire in that
+ * slot, and a source already wired elsewhere moves (its old wire drops),
+ * so the result cites the source exactly once. A slot past the end
+ * appends. Mirrors the tag side (`syncRefTags` over the same list).
+ */
+export function promptWiresAfterConnect(wires: readonly string[], sourceNode: string, slot: number | null): string[] {
+  const source = canonicalNodeId(sourceNode);
+  if (slot === null) {
+    return wires.includes(source) ? [...wires] : [...wires, source];
+  }
+  // Replace the occupant at the ORIGINAL slot index, then drop the
+  // source's old wire: removing the source first would shift every later
+  // slot left and land the replacement one socket past the intended one.
+  const next = [...wires];
+  const at = Math.max(0, Math.min(slot, next.length));
+  if (at < next.length) next[at] = source;
+  else next.push(source);
+  const placed = at < next.length ? at : next.length - 1;
+  return next.filter((w, i) => w !== source || i === placed);
 }
 
 /** A generator's fixed prompt pipe: the prompt node it reads from and the
@@ -497,30 +610,49 @@ export function compactPromptRefEdges(graph: Graph, targetNode: string): Graph {
 }
 
 /**
- * Direction-A tag/edge symmetry for one prompt node: deleting a reference's
- * `@[name]` tag from the prompt text drops that reference's positional wire
- * (`ref:<id>` → `in-ref-N`), mirroring how detaching the wire strips the
- * tag. Only ref-sourced positional sockets on THIS prompt node are touched:
- * gen-sourced wires (`imagegen`, `editgen:<id>`) carry no tag and survive,
- * as do `in-frame-N` sequence sockets (not `in-ref-N`). The result is
- * compacted so surviving wires shift onto the tags they belong to. Returns
- * the same graph when nothing dropped, so callers can skip a redundant
- * save.
+ * Tag/edge symmetry for one prompt node, text → wires: the prompt's
+ * ordered `@[name]` tags (as reference ids, in document order) become the
+ * node's ref-sourced positional wires — deleting a tag drops its wire,
+ * typing one adds it, and reordering tags reorders wires, mirroring how
+ * wire edits rewrite the tags (`syncRefTags`). Only ref-sourced
+ * positional sockets on THIS prompt node are derived from the text:
+ * gen-sourced wires (`imagegen`, `editgen:<id>`) carry no tag and keep
+ * their slots, as do `in-frame-N` sequence sockets (not `in-ref-N`).
+ * Returns the same graph when already in sync, so callers can skip a
+ * redundant save.
  */
 export function reconcilePromptRefEdges(graph: Graph, targetNode: string, tagRefIds: Iterable<string>): Graph {
   const target = canonicalNodeId(targetNode);
-  const keep = new Set(tagRefIds);
-  let dropped = false;
-  const edges = graph.edges.filter((e) => {
-    if (e.to.node !== target) return true;
-    if (!e.from.node.startsWith("ref:")) return true;
-    if (!REF_SOCKET_RE.test(e.to.port)) return true;
-    if (keep.has(e.from.node.slice(4))) return true;
-    dropped = true;
-    return false;
-  });
-  if (!dropped) return graph;
-  return compactPromptRefEdges({ ...graph, edges }, target);
+  const orderedIds = [...tagRefIds];
+  // Full ordered sync (not remove-only): the prompt's tag order is the
+  // desired ref-wire order, so a hand-typed tag wires its reference in and
+  // a chip drag reorders the wires — otherwise the rendered prompt (tags
+  // reconciled from edges) silently undid both. Gen-sourced wires
+  // (`imagegen`, `editgen:<id>`) carry no tag: they keep their slots, with
+  // the text's ref list poured into the remaining slots in order (extra
+  // refs append after the last ref slot, before any trailing gen wires).
+  const current = promptRefWires(graph, target);
+  const wantedRefs: string[] = [];
+  const seenRefs = new Set<string>();
+  for (const id of orderedIds) {
+    const node = `ref:${id}`;
+    if (!id || seenRefs.has(node)) continue;
+    seenRefs.add(node);
+    wantedRefs.push(node);
+  }
+  const next: string[] = [];
+  let ri = 0;
+  for (const source of current) {
+    if (!source.startsWith("ref:")) { next.push(source); continue; }
+    if (ri < wantedRefs.length) next.push(wantedRefs[ri++]);
+  }
+  if (ri < wantedRefs.length) {
+    const rest = wantedRefs.slice(ri);
+    const lastRefAt = next.map((s, i) => (s.startsWith("ref:") ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    if (lastRefAt >= 0) next.splice(lastRefAt + 1, 0, ...rest);
+    else next.push(...rest);
+  }
+  return withPromptRefWires(graph, target, next);
 }
 
 /** Drop one edge by id (disconnect / Delete key). Dropping a reference wire

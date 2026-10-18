@@ -247,6 +247,12 @@ describe("video / edit / tween / edit-video wires", () => {
     expect(edgeIds(g)).toContain("e-ref-out");
   });
 
+  it("reference output feed: an untagged, unplaced video ref still gets its node + edge", () => {
+    const g = stable(materializeGraph(shot({ graphOutputSource: "ref", graphOutputRefId: "r2" }), REFS));
+    expect(nodeIds(g)).toContain("ref:r2");
+    expect(edgeIds(g)).toContain("e-ref-out");
+  });
+
   it("direct generation→video-prompt wires rebuild from refIds sentinels (no saved reference)", () => {
     const g = stable(
       materializeGraph(

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 import { BoardCard } from "../src/renderer/src/components/production/boards.js";
 import { resetBoardThumbSchedulerForTests } from "../src/renderer/src/components/production/board-thumbs.js";
+import { bumpMediaRev } from "../src/renderer/src/components/production/media-rev.js";
 
 type BoardCardProps = Parameters<typeof BoardCard>[0];
 
@@ -196,6 +197,26 @@ describe("BoardCard history", () => {
     expect(regen.disabled).toBe(false);
     await act(async () => { regen.click(); });
     expect(onRegenerate).toHaveBeenCalledWith("shot1");
+  });
+
+  it("refetches the frame thumbnail when its media revision is bumped (node Refresh)", async () => {
+    await render(makeShot());
+    expectFrame(PRIMARY);
+    const callsBefore = boardThumbnail.mock.calls.length;
+    // The file on disk changed (external edit + node Refresh): the next
+    // thumbnail fetch returns fresh pixels for the same path.
+    boardThumbnail.mockImplementation(async () => thumbnail("boards/0100/refreshed.jpg"));
+    try {
+      await act(async () => {
+        bumpMediaRev("prod1", PRIMARY);
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      expect(boardThumbnail.mock.calls.length).toBeGreaterThan(callsBefore);
+      expectFrame("boards/0100/refreshed.jpg");
+    } finally {
+      // Restore the shared stub (clearAllMocks does not reset implementations).
+      boardThumbnail.mockImplementation(async (_prodId: string, shotId: string, path?: string) => thumbnail(path ?? shotArtwork[shotId] ?? currentPath));
+    }
   });
 
   function expectFrame(path: string) {

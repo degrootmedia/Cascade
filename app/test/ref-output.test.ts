@@ -89,6 +89,30 @@ describe("applyRefToOutput", () => {
     }
   });
 
+  it("keeps the e-ref-out wire (and adds its ref node) when applying a video reference", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-ref-output-"));
+    try {
+      // The stored graph carries the just-drawn e-ref-out edge but no
+      // ref:ref-v node (the canvas tile was derived, e.g. layout-placed).
+      // Applying the pipe must not sync the wire away as dangling.
+      const shot = makeShot("0100", {
+        graph: {
+          version: 1,
+          nodes: [{ id: "output", kind: "output", pos: { x: 0, y: 0 } }],
+          edges: [{ id: "e-ref-out", from: { node: "ref:ref-v", port: "out" }, to: { node: "output", port: "in-out" } }],
+        },
+      });
+      const p = makeProduction(root, [shot]);
+      const jpegRel = applyRefToOutput(p, shot, { id: "ref-v", media: "video", mediaPath: "references/clip.mp4" });
+      expect(jpegRel).toBeNull();
+      expect(shot.videoPath).toBe("references/clip.mp4");
+      expect(shot.graph?.nodes).toContainEqual(expect.objectContaining({ id: "ref:ref-v", kind: "ref" }));
+      expect(shot.graph?.edges.map((e) => e.id)).toContain("e-ref-out");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("throws when the reference has no usable media", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-ref-output-"));
     try {

@@ -744,7 +744,7 @@ describe("node-graph delete key", () => {
     document.body.removeChild(host);
   });
 
-  it("offers the Seedance draft toggle only for Seedance 2.5 on Higgsfield", async () => {
+  it("never offers a draft toggle on the video generation node", async () => {
     const s25 = [{ id: "higgsfield-cli:seedance_2_5", displayName: "Seedance 2.5", videoInput: true }];
     const s20 = [{ id: "higgsfield-cli:seedance_2_0", displayName: "Seedance 2.0", videoInput: true }];
     const draftOnly = [{ id: "openart:seedance_2_5_draft", displayName: "Seedance 2.5 Draft", videoInput: true }];
@@ -757,9 +757,12 @@ describe("node-graph delete key", () => {
       return { ...r, node };
     };
 
-    // Higgsfield + Seedance 2.5 → the checkbox shows.
+    // Higgsfield + Seedance 2.5 → still no draft checkbox (removed), and
+    // the resolution picker is not pinned to 480p.
     const a = await render({ videoModels: s25, draftUpgradeAvailable: true });
-    expect(a.node.querySelector(".prod-graph-gen-draft")).toBeTruthy();
+    expect(a.node.querySelector(".prod-graph-gen-draft")).toBeNull();
+    const resSelA = a.node.querySelectorAll("select")[1] as HTMLSelectElement;
+    expect(resSelA.disabled).toBe(false);
     await act(async () => { a.root.unmount(); }); document.body.removeChild(a.host);
 
     // Higgsfield + another model → no checkbox.

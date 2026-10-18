@@ -2006,7 +2006,7 @@ export function shotMediaRefs(shot: ProductionShot): string[] {
 /**
  * Every workspace-relative media path a production references — active shots,
  * the outdated bucket, sequence canvases, style frames, references,
- * voiceover/music, and 3D models. The media registry bootstraps from this
+ * voiceover/music. The media registry bootstraps from this
  * list at load, so a new path-bearing field must land here too (or the
  * registry can't track it and the missing-media state drifts).
  */
@@ -2029,7 +2029,6 @@ export function productionMediaRefs(p: Production): string[] {
   }
   add(p.voiceoverPath);
   add(p.musicPath);
-  for (const m of p.models3d ?? []) add(m.glbPath);
   return [...refs];
 }
 

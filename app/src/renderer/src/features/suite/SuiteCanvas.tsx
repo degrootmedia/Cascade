@@ -18,6 +18,8 @@ export function SuiteCanvas({
   onExport,
   onDelete,
   onEditInSuite,
+  onRecheck,
+  rechecking,
 }: {
   prodId: string;
   entry: SuiteEntry | null;
@@ -29,6 +31,9 @@ export function SuiteCanvas({
   onDelete: () => void;
   /** Right-click a result → seed it as a new edit source in the suite. */
   onEditInSuite?: (rel: string) => void;
+  /** Fetch a pending entry's finished result from the vendor. */
+  onRecheck?: () => void;
+  rechecking?: boolean;
 }) {
   const genMenu = useGenerationMenu();
   /** Open the right-click menu for whichever frame was clicked. The suite-only
@@ -46,7 +51,7 @@ export function SuiteCanvas({
           {compare ? "Compare" : before ? before.label : entry ? (entry.kind === "edit" ? "Edit result" : entry.kind === "upscale" ? "Upscale result" : "Generation result") : "Nothing selected"}
         </span>
         <div className="suite-canvas-actions">
-          <button className="prod-btn ghost" disabled={!entry} onClick={() => onExport("references")} title="Copy this result into the production's references">Save as reference</button>
+          <button className="prod-btn ghost" disabled={!entry || !!entry.pending} onClick={() => onExport("references")} title="Copy this result into the production's references">Save as reference</button>
           <button className="prod-btn ghost danger" disabled={!entry} onClick={onDelete}>Delete</button>
         </div>
       </div>
@@ -57,7 +62,16 @@ export function SuiteCanvas({
             <span className="suite-spinner" aria-hidden="true" /> Generating…
           </div>
         )}
-        {compare ? (
+        {entry?.pending ? (
+          <div className="suite-canvas-pending" aria-live="polite">
+            <span className="suite-spinner" aria-hidden="true" />
+            <p>Still rendering on the vendor — the job is saved, so you can fetch the finished image without paying again.</p>
+            {entry.error && <p className="hint">{entry.error}</p>}
+            <button className="prod-btn" disabled={rechecking} onClick={() => onRecheck?.()}>
+              {rechecking ? "Fetching…" : "Fetch result"}
+            </button>
+          </div>
+        ) : compare ? (
           <SuiteCompare a={compare.a} b={compare.b} onFrameContextMenu={openFrameMenu} />
         ) : before ? (
           <figure className="suite-canvas-figure">

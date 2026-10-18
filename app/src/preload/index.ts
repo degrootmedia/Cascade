@@ -111,6 +111,11 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("production:jobsChanged", listener);
     return () => ipcRenderer.removeListener("production:jobsChanged", listener);
   };
+  api.onModelsChanged = (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("media:modelsChanged", listener);
+    return () => ipcRenderer.removeListener("media:modelsChanged", listener);
+  };
   api.onDetachedClosed = (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on("window:detachedClosed", listener);

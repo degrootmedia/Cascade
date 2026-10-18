@@ -12,7 +12,7 @@
 import { afterAll, describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
 import type { Production } from "../src/shared/ipc.js";
-import { isFresh, revOf } from "../src/shared/snapshot-freshness.js";
+import { isFresh, revOf, isStaleRevisionError, applySavedRevision } from "../src/shared/snapshot-freshness.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -69,6 +69,42 @@ describe("isFresh", () => {
     expect(revOf({ rev: undefined })).toBe(0);
     expect(revOf({ rev: "3" })).toBe(0);
     expect(revOf({ rev: 7 })).toBe(7);
+  });
+});
+
+describe("stale-revision error detection (delete shot recovery)", () => {
+  it("recognizes a bare stale-edit error", () => {
+    expect(isStaleRevisionError(new Error("Stale edit: this production changed since (rev 3 → 5). Refresh and retry."))).toBe(true);
+  });
+
+  it("recognizes the Electron invoke-wrapped form a renderer actually receives", () => {
+    // ipcRenderer.invoke rejects with the remote-method prefix, so a
+    // startsWith("Stale edit:") check in the renderer never matches and the
+    // refresh-and-retry recovery for Delete shot silently never runs.
+    const wrapped = new Error("Error invoking remote method 'production:deleteShot': Error: Stale edit: this production changed since (rev 3 → 5). Refresh and retry.");
+    expect(isStaleRevisionError(wrapped)).toBe(true);
+    expect(isStaleRevisionError(String(wrapped).replace(/^Error:\s*/, ""))).toBe(true);
+  });
+
+  it("does not flag unrelated errors", () => {
+    expect(isStaleRevisionError(new Error("Shot not found."))).toBe(false);
+    expect(isStaleRevisionError(null)).toBe(false);
+  });
+});
+
+describe("applySavedRevision (whole-document saves adopt the stamped rev)", () => {
+  it("bumps a lagging local revision to the saved one, keeping local fields", () => {
+    const local = { rev: 3, name: "optimistic edit" };
+    const next = applySavedRevision(local, 4);
+    expect(next).toEqual({ rev: 4, name: "optimistic edit" });
+    expect(next).not.toBe(local);
+  });
+
+  it("keeps identity when the saved revision is not newer", () => {
+    const local = { rev: 5, name: "current" };
+    expect(applySavedRevision(local, 5)).toBe(local);
+    expect(applySavedRevision(local, 2)).toBe(local);
+    expect(applySavedRevision(local, 0)).toBe(local);
   });
 });
 

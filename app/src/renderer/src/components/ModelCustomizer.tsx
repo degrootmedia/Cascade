@@ -287,6 +287,10 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
       if (refresh) await window.cascade.refreshModelProbe(id).catch(() => {});
       const r = await window.cascade.probeModels(id);
       setProbe(r);
+      // A refresh drops the main-side catalog caches — tell every open
+      // picker to reload too, or a newly-surfaced model stays invisible
+      // in the generation dropdowns until the workspace remounts.
+      if (refresh) window.dispatchEvent(new Event("cascade:media-provider-changed"));
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
     } finally {

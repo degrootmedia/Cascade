@@ -21,7 +21,7 @@ import {
   SUITE_ENTRY_CAP,
   type SuiteEntry,
 } from "../src/shared/ipc/suite.js";
-import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, uniqueSuiteRel, imageExtFor } from "../src/main/suite.js";
+import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, uniqueSuiteRel, imageExtFor } from "../src/main/suite.js";
 import { validateIpcArgs } from "../src/shared/ipc-schemas.js";
 
 function entry(id: string, overrides: Partial<SuiteEntry> = {}): SuiteEntry {
@@ -115,6 +115,57 @@ describe("normalizeSuiteSession", () => {
   });
 });
 
+describe("pending suite entries", () => {
+  const receipt = { historyId: "hist-123", prompt: "a test image", model: "m1", resolution: "1k", aspectRatio: "16:9", at: "2026-10-16T00:00:00.000Z", refHashes: ["abc"], refUrls: ["https://cdn.example/ref.png"] };
+
+  it("keeps a pending entry with no output file yet, receipt intact", () => {
+    const s = normalizeSuiteSession({
+      version: 1,
+      entries: [entry("1", { outputPath: "", pending: receipt })],
+      selectedId: "1",
+      draft: { mode: "generate", prompt: "", model: "", resolution: "1k", refIds: [] },
+    });
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0].outputPath).toBe("");
+    expect(s.entries[0].pending).toMatchObject({ historyId: "hist-123", model: "m1", refHashes: ["abc"] });
+    expect(s.selectedId).toBe("1");
+  });
+
+  it("still drops a finished entry with an escaping path, pending or not", () => {
+    const s = normalizeSuiteSession({
+      version: 1,
+      entries: [entry("1", { outputPath: "../evil.png", pending: receipt }), entry("2", { outputPath: "" })],
+      selectedId: null,
+      draft: { mode: "generate", prompt: "", model: "", resolution: "1k", refIds: [] },
+    });
+    expect(s.entries).toEqual([]);
+  });
+
+  it("drops a receipt with neither job id nor URL (unreclaimable)", () => {
+    const s = normalizeSuiteSession({
+      version: 1,
+      entries: [entry("1", { pending: { prompt: "x", model: "m", at: "2026-10-16T00:00:00.000Z" } })],
+      selectedId: null,
+      draft: { mode: "generate", prompt: "", model: "", resolution: "1k", refIds: [] },
+    });
+    expect(s.entries[0].pending).toBeUndefined();
+    expect(s.entries[0].outputPath).toBe("out/suite/1.png");
+  });
+
+  it("round-trips a pending entry through the on-disk store", () => {
+    saveSuiteSession("prod-p", {
+      version: 1,
+      entries: [entry("9", { outputPath: "", pending: receipt })],
+      selectedId: "9",
+      draft: emptySuiteSession().draft,
+    });
+    const back = loadSuiteSession("prod-p");
+    expect(back.entries).toHaveLength(1);
+    expect(back.entries[0].pending?.historyId).toBe("hist-123");
+    expect(back.entries[0].outputPath).toBe("");
+  });
+});
+
 describe("pruneSuiteSession", () => {
   it("drops oldest leaf entries down to the cap", () => {
     const entries = Array.from({ length: SUITE_ENTRY_CAP + 12 }, (_, i) => entry(`e${String(i).padStart(4, "0")}`));
@@ -152,6 +203,24 @@ describe("suite session store", () => {
     expect(next.selectedId).toBeNull();
   });
 
+  it("upsert completes a pending entry in place (receipt first, file second)", () => {
+    const pendingEntry = entry("7", {
+      outputPath: "",
+      pending: { historyId: "hist-7", prompt: "a test image", model: "m", at: "2026-10-16T00:00:00.000Z" },
+    });
+    upsertSuiteEntry("p7", pendingEntry);
+    let s = loadSuiteSession("p7");
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0].pending?.historyId).toBe("hist-7");
+    expect(s.selectedId).toBe("7");
+    const done = entry("7");
+    upsertSuiteEntry("p7", done);
+    s = loadSuiteSession("p7");
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0].outputPath).toBe("out/suite/7.png");
+    expect(s.entries[0].pending).toBeUndefined();
+  });
+
   it("returns an empty session for an unknown production", () => {
     expect(loadSuiteSession("missing")).toEqual(emptySuiteSession());
   });
@@ -175,6 +244,20 @@ describe("suite IPC validation", () => {
     const payload = { version: 1, entries: [entry("1", { outputPath: "../evil.png" })], selectedId: null, draft: emptySuiteSession().draft };
     expect(() => validateIpcArgs("suite:saveSession", ["p1", payload])).toThrow(/production-relative/);
   });
+  it("accepts a pending entry's empty outputPath but not a finished entry's", () => {
+    const pendingPayload = {
+      version: 1,
+      entries: [entry("1", { outputPath: "", pending: { historyId: "h1", prompt: "", model: "", at: "2026-10-16T00:00:00.000Z" } })],
+      selectedId: "1",
+      draft: emptySuiteSession().draft,
+    };
+    expect(() => validateIpcArgs("suite:saveSession", ["p1", pendingPayload])).not.toThrow();
+    const barePayload = { version: 1, entries: [entry("1", { outputPath: "" })], selectedId: null, draft: emptySuiteSession().draft };
+    expect(() => validateIpcArgs("suite:saveSession", ["p1", barePayload])).toThrow(/production-relative/);
+    expect(() => validateIpcArgs("suite:recheckEntry", ["p1", "e1"])).not.toThrow();
+    expect(() => validateIpcArgs("suite:recheckEntry", ["p1", 42])).toThrow();
+  });
+
   it("accepts a well-formed saveSession payload", () => {
     const payload = { version: 1, entries: [entry("1")], selectedId: "1", draft: emptySuiteSession().draft };
     expect(() => validateIpcArgs("suite:saveSession", ["p1", payload])).not.toThrow();

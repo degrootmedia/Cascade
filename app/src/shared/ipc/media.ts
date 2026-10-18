@@ -282,13 +282,16 @@ export interface VideoGenOptions {
    */
   params?: Record<string, string | number | boolean | string[]>;
   /**
-   * Submit every input through the model's reference arrays, never the
-   * dedicated start/end frame slots. The shot-sequence canvas sets this:
-   * its member frames are peer references (a multi-shot timeline), not
-   * one animated still — and some Higgsfield models (e.g. minimax_h3_max)
-   * reject mixing reference media with start_image/end_image outright.
-   * Normal single-frame video keeps the start slot (image2video forms
-   * require it); the in-betweener keeps the start/end pair.
+   * Reference mode: submit every input through the model's reference
+   * arrays, never the dedicated start/end frame slots. Every generation
+   * surface sets this — the video generation node, the classic video
+   * interface, and the shot-sequence canvas (whose member frames are
+   * peer references, not one animated still). Several Higgsfield
+   * models (e.g. minimax_h3, wan3_0) reject mixing reference media
+   * with start_image/end_image outright. A model with no reference
+   * array falls back to a lone start frame (nothing to mix). The
+   * in-betweener is the ONLY start/end-frame surface: it passes
+   * `frameRefs` and never sets this.
    */
   refsOnly?: boolean;
   /**
@@ -341,8 +344,15 @@ export interface GenerationCostRequest {
 export interface VideoModelOptions {
   /** Resolution labels the model accepts (e.g. ["720p","1080p"]). */
   resolutions: string[];
-  /** Clip lengths in seconds the model accepts. */
+  /** Clip lengths in seconds the model accepts (closed set). Empty when
+   *  the model takes any length — see `durationRange`. */
   durations: number[];
+  /** Open-ended clip length: the model accepts any integer seconds,
+   *  optionally bounded by `min`/`max` (absent bound = the vendor enforces
+   *  it server-side but doesn't publish it). Present only for open-integer
+   *  duration params (then `durations` is empty); the UI expands the
+   *  range into one dropdown option per second. */
+  durationRange?: { min?: number; max?: number; step?: number };
   /** Accepted aspect ratios. The UI default is forced by
    *  `DEFAULT_ASPECT_RATIO` regardless of the vendor default. */
   aspectRatios?: string[];

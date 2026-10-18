@@ -214,7 +214,11 @@ for (const c of choices) {
         let durMax: number | null = null;
         if (c.videoInput) {
           const o = await p.videoModelOptions(c.id, true).catch(() => null);
-          if (o && o.resolutions.length && o.durations.length) {
+          if (o && o.resolutions.length && o.durationRange && typeof o.durationRange.min === "number" && typeof o.durationRange.max === "number") {
+            resolutions = o.resolutions;
+            durMin = o.durationRange.min;
+            durMax = o.durationRange.max;
+          } else if (o && o.resolutions.length && o.durations.length) {
             resolutions = o.resolutions;
             durMin = Math.min(...o.durations);
             durMax = Math.max(...o.durations);

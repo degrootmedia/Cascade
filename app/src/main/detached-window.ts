@@ -5,7 +5,7 @@
  * reference moodboard on a second monitor. Everything Electron-specific is
  * injected (`createWindow`, `resolveLoadUrl`, `onClosed`, `ensureVisible`) so
  * the controller is unit-testable with a fake window — the injection IS the
- * test surface, same pattern as `OpenArtClient`/`ModelGenClient`.
+ * test surface, same pattern as `OpenArtClient`.
  *
  * Security invariants (asserted in tests):
  *  - same preload as the main window, contextIsolation on, sandboxed,

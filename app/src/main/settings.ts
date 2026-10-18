@@ -71,8 +71,6 @@ interface SettingsFile {
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
   externalEditor: string | null;
-  /** base64-encrypted 3D AI Studio API key (separate from the LLM keys). */
-  encrypted3daiApiKey: string | null;
   /**
    * Media model ids the user hides from the generation model dropdowns
    * (Settings → Models & expenses toggles). Filtered main-side so every
@@ -182,7 +180,6 @@ const DEFAULTS: SettingsFile = {
   higgsfieldCreditUsd: null,
   accent: "#4f8ef7",
   externalEditor: null,
-  encrypted3daiApiKey: null,
   hiddenMediaModels: [],
   modelKindOverrides: {},
   mediaDefaults: {},
@@ -590,30 +587,6 @@ export function getExternalEditor(): string | null {
 export function setExternalEditor(p: string | null): void {
   const next = typeof p === "string" && p.trim() ? p.trim() : null;
   load().externalEditor = next;
-  save();
-}
-
-/** The 3D AI Studio API key (decrypted), or null when not set. */
-export function get3daiApiKey(): string | null {
-  const enc = load().encrypted3daiApiKey;
-  if (!enc) return null;
-  try {
-    return safeStorage.decryptString(Buffer.from(enc, "base64"));
-  } catch {
-    return null;
-  }
-}
-
-export function has3daiApiKey(): boolean {
-  return get3daiApiKey() !== null;
-}
-
-export function set3daiApiKey(key: string): void {
-  const s = load();
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("OS encryption unavailable; refusing to store API key in plain text");
-  }
-  s.encrypted3daiApiKey = key ? safeStorage.encryptString(key).toString("base64") : null;
   save();
 }
 

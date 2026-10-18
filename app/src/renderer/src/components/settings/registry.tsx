@@ -13,7 +13,6 @@ import { ModelsSection } from "./sections/ModelsSection.js";
 import { ModelExposureSection } from "./sections/ModelExposureSection.js";
 import { CliToolsSection } from "./sections/CliToolsSection.js";
 import { ExternalEditorSection, resetExternalEditor } from "./sections/ExternalEditorSection.js";
-import { ThreeDSection, resetThreeD } from "./sections/ThreeDSection.js";
 import { McpServersSection } from "./sections/McpServersSection.js";
 import { VoiceSection, resetVoice } from "./sections/VoiceSection.js";
 import { AgentSection, resetAgent } from "./sections/AgentSection.js";
@@ -115,16 +114,6 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           owns: ["externalEditor"],
           render: () => <ExternalEditorSection />,
           onReset: resetExternalEditor,
-        },
-        {
-          id: "three-d",
-          title: "3D",
-          category: "tools",
-          description: "3D AI Studio key for Hunyuan Pro.",
-          keywords: ["3d", "3d ai studio", "hunyuan", "model", "glb", "tencent", "api key"],
-          owns: ["has3daiApiKey"],
-          render: () => <ThreeDSection />,
-          onReset: resetThreeD,
         },
         {
           id: "mcp",

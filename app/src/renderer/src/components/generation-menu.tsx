@@ -90,11 +90,11 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
             <button
               className="ctx-item"
               onClick={() => {
-                const { x, y } = menu;
                 onClose();
-                // Let the menu unmount before main samples the page at (x, y),
-                // so "Copy image" captures the take, not the menu sitting on it.
-                requestAnimationFrame(() => { void window.cascade.copyImage(x, y); });
+                // Copy from the take's own source (main resolves the file
+                // behind the cascade-media URL) — no page hit-testing, so
+                // the menu sitting over the image can't swallow the copy.
+                void window.cascade.copyImage({ src, relPath: menu.rel, x: menu.x, y: menu.y });
               }}
             >
               {MEDIA_MENU_LABELS.copyImage}

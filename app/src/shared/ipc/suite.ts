@@ -9,7 +9,7 @@
  * production-relative output paths served over `cascade-media://`. No vendor
  * id ever appears in this file, so a new backend needs zero suite changes.
  */
-import type { GenParams } from "./graph.js";
+import type { GenParams, PendingImageGen } from "./graph.js";
 import type { CustomRef, ImageGenAspectRatio, Production } from "./production.js";
 
 /** The suite's three modes: generate from a prompt, edit an image with a
@@ -34,6 +34,12 @@ export interface SuiteEntry {
   promptRefs: string[];
   /** Production-relative path of the output (`cascade-media://` serves it). */
   outputPath: string;
+  /** A vendor job that outlived the submit call (wait timed out or the
+   *  finished image couldn't be downloaded). The result is reclaimable via
+   *  `recheckSuiteEntry` without paying for a second generation — the same
+   *  receipt the storyboard keeps on a shot. While present, `outputPath`
+   *  is empty (no file on disk yet). */
+  pending?: PendingImageGen;
   /** Source reference id for edits; absent for pure generations. */
   sourceRefId?: string;
   /** Source image path for edits when the source isn't a production reference
@@ -177,11 +183,40 @@ function normalizeDraft(raw: unknown): SuiteDraft {
   return draft;
 }
 
+/** Coerce an untrusted pending-job receipt. A receipt with neither a job
+ *  id nor a result URL can never be rechecked, so it normalizes away. */
+function normalizePending(raw: unknown): PendingImageGen | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const historyId = typeof r.historyId === "string" && r.historyId ? r.historyId.slice(0, 200) : undefined;
+  const url = typeof r.url === "string" && /^https?:\/\//.test(r.url) ? r.url.slice(0, 4000) : undefined;
+  if (!historyId && !url) return undefined;
+  const pending: PendingImageGen = {
+    ...(historyId ? { historyId } : {}),
+    ...(url ? { url } : {}),
+    prompt: typeof r.prompt === "string" ? r.prompt.slice(0, 8000) : "",
+    model: typeof r.model === "string" ? r.model.slice(0, 200) : "",
+    at: typeof r.at === "string" && r.at ? r.at : new Date(0).toISOString(),
+  };
+  if (typeof r.resolution === "string" && r.resolution) pending.resolution = r.resolution.slice(0, 40);
+  if (typeof r.aspectRatio === "string" && r.aspectRatio) pending.aspectRatio = r.aspectRatio.slice(0, 20);
+  if (typeof r.quality === "string" && r.quality) pending.quality = r.quality.slice(0, 40);
+  const refHashes = stringList(r.refHashes).slice(0, 32);
+  if (refHashes.length) pending.refHashes = refHashes;
+  const refUrls = stringList(r.refUrls).filter((u) => /^https?:\/\//.test(u)).slice(0, 32);
+  if (refUrls.length) pending.refUrls = refUrls;
+  return pending;
+}
+
 function normalizeEntry(raw: unknown): SuiteEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const e = raw as Record<string, unknown>;
   if (typeof e.id !== "string" || !e.id) return null;
-  if (typeof e.outputPath !== "string" || !isProductionRelative(e.outputPath)) return null;
+  const pending = normalizePending(e.pending);
+  // A finished entry must name a real output file; a pending entry has no
+  // file yet (its receipt is the durable handle), so it may carry "".
+  if (!pending && (typeof e.outputPath !== "string" || !isProductionRelative(e.outputPath))) return null;
+  if (typeof e.outputPath === "string" && e.outputPath && !isProductionRelative(e.outputPath)) return null;
   const entry: SuiteEntry = {
     id: e.id,
     parentId: typeof e.parentId === "string" && e.parentId ? e.parentId : null,
@@ -191,7 +226,8 @@ function normalizeEntry(raw: unknown): SuiteEntry | null {
     resolution: typeof e.resolution === "string" && e.resolution ? e.resolution : "1k",
     prompt: typeof e.prompt === "string" ? e.prompt.slice(0, 8000) : "",
     promptRefs: stringList(e.promptRefs),
-    outputPath: e.outputPath,
+    outputPath: typeof e.outputPath === "string" ? e.outputPath : "",
+    ...(pending ? { pending } : {}),
     refIds: stringList(e.refIds),
   };
   const aspect = normalizeAspect(e.aspectRatio);

@@ -176,6 +176,30 @@ describe("BoardCard pending clear", () => {
     expect(onClearPending).toHaveBeenCalledWith("shot1", "video");
   });
 
+  it("right-click Delete shot confirms, then calls onDelete with the shot id", async () => {
+    const onDelete = vi.fn();
+    await renderCard(baseProps(makeShot(), { onDelete }));
+    openMenu();
+    const item = menuItem("Delete shot…");
+    expect(item, "Delete shot menu item").not.toBeNull();
+    await act(async () => { item!.click(); });
+    const confirmBtn = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Delete");
+    expect(confirmBtn, "confirm dialog Delete button").not.toBeNull();
+    await act(async () => { confirmBtn!.click(); });
+    expect(onDelete).toHaveBeenCalledWith("shot1");
+  });
+
+  it("right-click Delete shot on a blank shot deletes without a confirm", async () => {
+    const onDelete = vi.fn();
+    const blank = { ...makeShot(), visual: "", pendingImageGen: undefined };
+    await renderCard(baseProps(blank, { pending: false, onDelete }));
+    openMenu();
+    const item = menuItem("Delete shot…");
+    expect(item, "Delete shot menu item").not.toBeNull();
+    await act(async () => { item!.click(); });
+    expect(onDelete).toHaveBeenCalledWith("shot1");
+  });
+
   it("offers no clear items when nothing is pending", async () => {
     const shot = { ...makeShot(), pendingImageGen: undefined };
     await renderCard(baseProps(shot, { pending: false, videoPending: false, onClearPending: vi.fn() }));

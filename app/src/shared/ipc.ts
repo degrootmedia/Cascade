@@ -51,7 +51,6 @@ import type {
   ProductionScene,
   ProductionShot,
   ProductionStyle,
-  ProductionModel,
   ProductionAssembly,
   Production,
   CharacterSheet,
@@ -65,9 +64,6 @@ import type {
   ReferenceImageGenOptions,
   CharacterSheetView,
   CharacterSheetGenOptions,
-  Model3dViewType,
-  Model3dViewImage,
-  Model3dGenOptions,
   StoryboardPdfSettings,
   StoryboardPdfExportOptions,
   StoryboardPdfExportResult,
@@ -183,8 +179,6 @@ export interface SettingsView {
   accent: string;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
-  /** Whether a 3D AI Studio API key is stored (encrypted). */
-  has3daiApiKey: boolean;
 }
 
 export interface ModelInfo {
@@ -368,8 +362,6 @@ export interface CascadeApi {
   setAccent(color: string): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
-  /** Set (or clear with "") the 3D AI Studio API key, encrypted at rest. */
-  set3daiApiKey(key: string): Promise<void>;
   /** Media model ids the user hides from the generation model dropdowns. */
   getHiddenMediaModels(): Promise<string[]>;
   setHiddenMediaModels(ids: string[]): Promise<void>;
@@ -436,8 +428,8 @@ export interface CascadeApi {
   showImageMenu(opts: { src: string; x: number; y: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Download an image URL via the native save dialog (same as the native menu's "Save image as…"). */
   saveImage(src: string): Promise<void>;
-  /** Copy the image under the given page coords to the clipboard (same as the native menu's "Copy image"). */
-  copyImage(x: number, y: number): Promise<void>;
+  /** Copy an image to the clipboard from its own source (production file, data URL, or remote URL — same target shape as `editImageExternally`). `x`/`y` page coords are only a last-resort hit-test fallback for sources main cannot decode. */
+  copyImage(target: { src?: string; productionId?: string; relPath?: string; dataUrl?: string; x?: number; y?: number }): Promise<void>;
   /** Open an image in the external editor (same as the native menu's "Edit in <editor>"). */
   editImageExternally(opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }): Promise<void>;
   /** Reveal a production image/video file in the OS file manager. Accepts an
@@ -547,7 +539,9 @@ export interface CascadeApi {
   /** Re-register an existing production folder whose JSON is missing. Returns the existing document when the folder is already registered. */
   importProduction(folder: string): Promise<Production>;
   loadProduction(id: string): Promise<Production | null>;
-  saveProduction(p: Production): Promise<void>;
+  /** Persist a whole renderer snapshot; resolves with the saved document
+   *  (its stamped `rev` is how optimistic callers resync their revision). */
+  saveProduction(p: Production): Promise<Production>;
   removeProduction(id: string, mode: "delete" | "archive"): Promise<boolean>;
   /** Native file dialog for a script (pdf/docx/txt/md/fountain). */
   pickScriptFile(): Promise<string | null>;
@@ -964,6 +958,14 @@ export interface CascadeApi {
    * `snapshot.productionId`); returns the unsubscribe function.
    */
   onJobsChanged(cb: (snapshot: JobSnapshot) => void): () => void;
+  /**
+   * Subscribe to media-model catalog invalidations. Main broadcasts this
+   * to EVERY window when a provider's model probes are refreshed (Model
+   * Customizer "Refresh probe") so all open pickers — including a
+   * detached canvas window, which never sees the main window's DOM
+   * events — reload their model lists and surface newly listed models.
+   */
+  onModelsChanged(cb: () => void): () => void;
   /** Step 4: streamable `cascade-media://` URL for a shot's generated video. */
   videoUrl(productionId: string, shotId: string): Promise<string | null>;
   /** Step 4: remove a shot's generated video file and clear videoPath. */
@@ -1010,19 +1012,6 @@ export interface CascadeApi {
   regenerateMagicPrompt(productionId: string, shotId: string): Promise<Production>;
   /** Step 3: toggle Magic Prompt alternate state on/off (false restores original prompts). */
   setMagicEnabled(productionId: string, enabled: boolean): Promise<Production>;
-  /**
-   * Step 2: generate a 3D model via the 3D AI Studio API (Tencent Hunyuan Pro).
-   * Downloads the finished GLB into the production's models folder, records it
-   * in `prod.models3d`, and returns the updated production. Requires a stored
-   * 3D AI Studio API key.
-   */
-  generate3dModel(productionId: string, opts: Model3dGenOptions): Promise<Production>;
-  /** Step 2: remove a generated 3D model (deletes the .glb + removes the record). */
-  delete3dModel(productionId: string, modelId: string): Promise<Production>;
-  /** Step 2: open a native "Save As" dialog and copy a generated .glb to the user's chosen location. */
-  save3dModel(productionId: string, modelId: string): Promise<string | null>;
-  /** The 3D AI Studio credit balance (null when no key is stored). */
-  get3daiCredits(): Promise<number | null>;
   /** Board external edit — re-encode any externally modified originals to their JPEG previews. */
   checkExternalEdits(): Promise<void>;
   /** Re-derive one board frame's JPEG preview from its archived original (the
@@ -1109,6 +1098,10 @@ export interface CascadeApi {
   /** Run one suite generation/edit through the active `MediaProvider`, writing
    *  the output into the production's suite folder. Vendor-blind. */
   generateSuiteImage(productionId: string, req: SuiteGenerateRequest): Promise<SuiteEntry>;
+  /** Recheck a pending suite entry's vendor job: when the finished image is
+   *  downloadable, writes it into the suite folder and completes the entry
+   *  in place (returned); still-rendering returns the entry unchanged. */
+  recheckSuiteEntry(productionId: string, entryId: string): Promise<SuiteEntry>;
 
   /* Detached canvas window (Spec 03) */
   /** Open (or retarget) the single detached canvas window. Resolves to its state. */
@@ -1201,7 +1194,8 @@ type SubscriptionMethod =
   | "onCanvasSelectionChanged"
   | "onCanvasBusy"
   | "onDetachedClosed"
-  | "onVoiceProgress";
+  | "onVoiceProgress"
+  | "onModelsChanged";
 
 /** Every non-subscription method on CascadeApi must be wired in ipcContract,
  *  and every contract method must exist on CascadeApi — a type-level drift

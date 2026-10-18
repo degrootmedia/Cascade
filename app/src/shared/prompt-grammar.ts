@@ -97,6 +97,56 @@ export function isTagOnlyDiff(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
+/**
+ * Make the text's known-reference tag sequence exactly `orderedNames`
+ * (deduplicated, case-insensitive) — the text half of the node view's
+ * connection↔tag sync. Existing known tags keep their positions slot-wise:
+ * the i-th known tag in the text becomes `orderedNames[i]`, extra known
+ * tags are removed, and names beyond the existing slots append (before a
+ * trailing Brand paragraph, like `addRefTag`). Tags naming no known
+ * reference are prose and are left untouched, as is all non-tag text.
+ *
+ * This replaces index-based edits (`replaceRefTagAt` by socket number),
+ * which silently targeted the wrong tag whenever tag order and socket
+ * order had drifted apart: callers now state the desired final list and
+ * both sides (wires and tags) are rebuilt from it.
+ */
+export function syncRefTags(text: string, orderedNames: readonly string[], knownNames: Iterable<string>): string {
+  const known = new Set([...knownNames].map((n) => n.toLowerCase()));
+  const wanted: string[] = [];
+  const wantedLc = new Set<string>();
+  for (const name of orderedNames) {
+    const lc = name.toLowerCase();
+    if (!name || wantedLc.has(lc)) continue;
+    wantedLc.add(lc);
+    wanted.push(name);
+  }
+  const matches = refTagMatches(text);
+  const currentKnown = matches.filter((m) => known.has(m.name.toLowerCase()));
+  const currentSeq = currentKnown.map((m) => m.name.toLowerCase());
+  if (currentSeq.length === wanted.length && currentSeq.every((lc, i) => lc === wanted[i].toLowerCase())) {
+    // Already in sync modulo duplicate known tags: drop only the repeats.
+    const seen = new Set<string>();
+    let dup = false;
+    for (const lc of currentSeq) { if (seen.has(lc)) { dup = true; break; } seen.add(lc); }
+    if (!dup) return text;
+  }
+  let out = "";
+  let cursor = 0;
+  let slot = 0;
+  for (const m of matches) {
+    out += text.slice(cursor, m.index);
+    cursor = m.index + m.tag.length;
+    if (!known.has(m.name.toLowerCase())) { out += m.tag; continue; }
+    if (slot < wanted.length) out += `@[${wanted[slot]}]`;
+    slot++;
+  }
+  out += text.slice(cursor);
+  out = out.replace(/\n{3,}/g, "\n\n").trim();
+  for (let i = slot; i < wanted.length; i++) out = addRefTag(out, wanted[i]);
+  return out;
+}
+
 /** Replace the `@[Name]` tag at occurrence `index` with a different reference
  *  name, preserving its position in the prompt. Used when a connection is
  *  dropped onto an occupied socket: the incoming reference takes the slot the

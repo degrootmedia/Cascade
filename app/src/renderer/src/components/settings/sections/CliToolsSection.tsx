@@ -24,14 +24,27 @@ export function CliToolsSection() {
   const [oaSavedFlag, setOaSavedFlag] = useState(false);
   const [hfStatus, setHfStatus] = useState<CliStatus | null>(null);
   const [oaStatus, setOaStatus] = useState<CliStatus | null>(null);
+  const [hfChecking, setHfChecking] = useState(false);
+  const [oaChecking, setOaChecking] = useState(false);
 
+  // The probe can take seconds (PATH lookup + version + account calls), so
+  // show a checking state and surface failures instead of silently keeping
+  // the old status — a click must visibly do something.
   const refreshHf = () => {
     void window.cascade.getHiggsfieldCliBinary().then((p) => { setHfBinary(p ?? ""); setHfSaved(p ?? ""); }).catch(() => {});
-    void window.cascade.getHiggsfieldCliStatus().then(setHfStatus).catch(() => setHfStatus(null));
+    setHfChecking(true);
+    void window.cascade.getHiggsfieldCliStatus()
+      .then((s) => { setHfStatus(s); setError(null); })
+      .catch((e) => setError(`Higgsfield CLI status check failed: ${String(e)}`))
+      .finally(() => setHfChecking(false));
   };
   const refreshOa = () => {
     void window.cascade.getOpenArtCliBinary().then((p) => { setOaBinary(p ?? ""); setOaSaved(p ?? ""); }).catch(() => {});
-    void window.cascade.getOpenArtCliStatus().then(setOaStatus).catch(() => setOaStatus(null));
+    setOaChecking(true);
+    void window.cascade.getOpenArtCliStatus()
+      .then((s) => { setOaStatus(s); setError(null); })
+      .catch((e) => setError(`OpenArt CLI status check failed: ${String(e)}`))
+      .finally(() => setOaChecking(false));
   };
 
   useEffect(() => {
@@ -86,7 +99,7 @@ export function CliToolsSection() {
             style={{ flex: 1 }}
           />
           <button onClick={() => void persist()}>Save path</button>
-          <button onClick={() => refreshHf()} title="Re-check the binary, version, and login">Check status</button>
+          <button onClick={() => refreshHf()} disabled={hfChecking} title="Re-check the binary, version, and login">{hfChecking ? "Checking…" : "Check status"}</button>
           {hfSavedFlag && !dirty && <span className="hint">saved</span>}
         </div>
         {hfStatus && (
@@ -115,7 +128,7 @@ export function CliToolsSection() {
             style={{ flex: 1 }}
           />
           <button onClick={() => void persist()}>Save path</button>
-          <button onClick={() => refreshOa()} title="Re-check the binary, version, and login">Check status</button>
+          <button onClick={() => refreshOa()} disabled={oaChecking} title="Re-check the binary, version, and login">{oaChecking ? "Checking…" : "Check status"}</button>
           {oaSavedFlag && !dirty && <span className="hint">saved</span>}
         </div>
         {oaStatus && (

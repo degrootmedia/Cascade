@@ -15,7 +15,7 @@ import { GenerationMenu } from "../src/renderer/src/components/generation-menu.j
 
 interface Calls {
   saveImage: string[];
-  copyImage: Array<[number, number]>;
+  copyImage: Array<Record<string, unknown>>;
   editImageExternally: Array<Record<string, unknown>>;
   showInFolder: Array<Record<string, unknown>>;
 }
@@ -27,12 +27,12 @@ beforeEach(() => {
   calls = { saveImage: [], copyImage: [], editImageExternally: [], showInFolder: [] };
   (globalThis.window as unknown as Record<string, unknown>).cascade = {
     saveImage: async (src: string) => { calls.saveImage.push(src); },
-    copyImage: async (x: number, y: number) => { calls.copyImage.push([x, y]); },
+    copyImage: async (target: Record<string, unknown>) => { calls.copyImage.push(target); },
     editImageExternally: async (opts: Record<string, unknown>) => { calls.editImageExternally.push(opts); },
     showInFolder: async (opts: Record<string, unknown>) => { calls.showInFolder.push(opts); },
   };
   // jsdom's setup stub never runs the callback; run it synchronously so the
-  // deferred Copy path is observable.
+  // a menu action that defers work to the next frame is observable.
   (globalThis as Record<string, unknown>).requestAnimationFrame = ((cb: FrameRequestCallback) => { cb(0); return 0; }) as never;
 });
 
@@ -80,13 +80,13 @@ describe("GenerationMenu native media actions", () => {
     expect(calls.saveImage).toEqual(["cascade-media://p1/boards%2F0100%2Fframe.png"]);
   });
 
-  it("routes copy (deferred), edit, and open-folder to the right IPC", async () => {
+  it("routes copy (by source, not page hit-test), edit, and open-folder to the right IPC", async () => {
     await renderMenu({
       menu: { x: 12, y: 34, rel: "boards/0100/frame.png", src: "cascade-media://p1/frame.png", media: "image" },
       onClose: () => {},
     });
     await click("Copy image");
-    expect(calls.copyImage).toEqual([[12, 34]]);
+    expect(calls.copyImage).toEqual([{ src: "cascade-media://p1/frame.png", relPath: "boards/0100/frame.png", x: 12, y: 34 }]);
     await click("Edit externally");
     expect(calls.editImageExternally).toEqual([{ src: "cascade-media://p1/frame.png", relPath: "boards/0100/frame.png" }]);
     await click("Open file folder");

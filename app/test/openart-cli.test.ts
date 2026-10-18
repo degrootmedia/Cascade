@@ -407,6 +407,41 @@ describe("OpenArtCliProvider.generateVideoClip", () => {
     });
   });
 
+  it("reports live status between wait slices instead of going silent for the whole wait", async () => {
+    // First slice elapses (wait errors), `creation get` says RUNNING
+    // (reported as progress), the next slice lands the job.
+    let waits = 0;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate video": () => ok(JSON.stringify({ historyId: "h-vid-sliced" })),
+        "creation wait": () => {
+          waits++;
+          return waits === 1
+            ? fail("Error: timed out waiting")
+            : ok(JSON.stringify({ historyId: "h-vid-sliced", status: "SUCCEEDED", video_url: "https://example.invalid/out.mp4" }));
+        },
+        "creation get": () => ok(JSON.stringify({ historyId: "h-vid-sliced", status: "RUNNING" })),
+      })
+    );
+    const p = provider(run);
+    const emits: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      arrayBuffer: async () => Uint8Array.from([7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      const res = await p.generateVideoClip(prodDir("prod-vid-sliced"), shot(), {
+        model: `${OPENART_CLI_ID_PREFIX}kling-3-omni`, resolution: "1080p", durationSec: 5, prompt: "animate",
+      }, (m) => emits.push(String(m)));
+      expect(res.rel).toMatch(/\.mp4$/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(waits).toBe(2);
+    expect(emits.some((m) => /running/i.test(m))).toBe(true);
+  });
+
   it("records a pending video when the wait outlives the cap, then a recheck reclaims it", async () => {
     let finished = false;
     const { run } = fakeRun(

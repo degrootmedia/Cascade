@@ -183,6 +183,14 @@ export function extractOpenArtVideoOptions(props: Record<string, unknown>): Vide
         for (let n = min; n <= max && n <= 120; n++) nums.add(n);
       }
       for (const n of nums) out.durations.push(n);
+      // A numeric duration with no closed set and no published bounds is
+      // open-ended (any integer seconds) — report the range so the UI
+      // offers a per-second dropdown instead of a hardcoded ladder. The
+      // submit-side check already lets any length through when the
+      // extracted list is empty.
+      if (nums.size === 0 && (p.type === undefined || p.type === "integer" || p.type === "number")) {
+        out.durationRange = {};
+      }
       continue;
     }
     if (!Array.isArray(p.enum)) continue;

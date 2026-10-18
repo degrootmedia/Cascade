@@ -100,7 +100,7 @@ export const CSP_PROD = [
   "media-src 'self' blob: cascade-media:",
   "font-src 'self' data:",
   // The renderer fetch()es cascade-media:// URLs (reference → data-URL
-  // resolution, 3D-model inputs, audio decode) — same-document fetches that
+  // resolution, audio decode) — same-document fetches that
   // need an explicit connect-src entry once a CSP exists at all.
   "connect-src 'self' https: cascade-media:",
   "frame-src 'none'",

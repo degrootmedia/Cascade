@@ -19,6 +19,21 @@ vi.mock("../src/main/scripting.js", () => ({
 
 import { assemble, renderAnimatic } from "../src/main/assembly.js";
 import { probeMedia, resolveFfmpeg, runFfmpeg } from "../src/main/ffmpeg.js";
+import { spawn } from "node:child_process";
+
+/** Detect beep onsets (silence_end times) in a rendered file's audio. */
+function detectOnsets(bin: string, absPath: string): Promise<number[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, ["-hide_banner", "-nostdin", "-i", absPath, "-af", "silencedetect=noise=-40dB:d=0.05", "-f", "null", "-"], { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", (c: Buffer) => { stderr += c.toString(); });
+    child.on("error", reject);
+    child.on("close", () => {
+      const ends = [...stderr.matchAll(/silence_end:\s*([0-9.]+)/g)].map((m) => Number(m[1]));
+      resolve(ends);
+    });
+  });
+}
 
 const maybe = process.env.ASSEMBLY_E2E === "1" ? it : it.skip;
 
@@ -113,4 +128,75 @@ describe("renderAnimatic against real ffmpeg", () => {
     expect(info.durationSec!).toBeLessThan(5.8);
     expect(info.hasAudio).toBe(true);
   });
+
+  maybe("keeps clip audio in sync across many segments (no cumulative drift)", async () => {
+    const bin = await resolveFfmpeg();
+    if (!bin) throw new Error("no ffmpeg available for the e2e smoke test");
+
+    // One beep clip reused for every shot: a 0.15s tone burst at the very
+    // start, silence after. Any per-segment timing error (AAC priming,
+    // frame quantization) compounds across concat boundaries, so the
+    // last beep lands measurably late when sync is broken.
+    const prod = path.join(root, "prod-sync");
+    const write = (rel: string) => {
+      const abs = path.join(prod, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      return abs;
+    };
+    const clip = write("videos/beep.mp4");
+    const still = write("boards/0100/shot.jpg");
+    await runFfmpeg(bin, ["-y", "-f", "lavfi", "-i", "color=c=white:s=320x180:r=24", "-frames:v", "1", still]);
+    await runFfmpeg(bin, [
+      "-y",
+      "-f", "lavfi", "-i", "color=c=green:s=320x180:r=24",
+      "-f", "lavfi", "-i", "sine=frequency=880:duration=0.15:sample_rate=48000",
+      "-af", "apad", "-t", "1.3",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+      clip,
+    ]);
+
+    const N = 16;
+    const DUR = 1.3; // deliberately NOT frame-aligned at 24fps (31.2 frames)
+    const shots: ProductionShot[] = Array.from({ length: N }, (_, i) => ({
+      id: `s${i}`,
+      number: String((i + 1) * 100).padStart(4, "0"),
+      audio: "",
+      visual: "",
+      artwork: "boards/0100/shot.jpg",
+      videoPath: "videos/beep.mp4",
+      durationSec: DUR,
+    } as ProductionShot));
+    const p = makeProd({
+      meta: { id: "e2e-sync", name: "E2E Sync", folder: prod, createdAt: "", updatedAt: "", stepDone: 4, shotCount: N },
+      currentStep: 5,
+      visualStyle: "",
+      styles: [],
+      scenes: [{ number: 1, title: "T", shots } as ProductionScene],
+      characters: [], products: [], openArt: { model: "auto", resolution: "1k" }, status: {},
+      assembly: { fps: 24, width: 640, height: 360, exportDir: "out/assembly" },
+      assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", videosDir: "videos", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
+    });
+
+    const rel = await renderAnimatic(p, undefined, () => {}, { bin, runFfmpeg, probe: probeMedia });
+    const outAbs = path.join(prod, rel);
+    const ends = await detectOnsets(bin, outAbs);
+    // A beep at t=0 produces no leading silence_end (and silencedetect
+    // may flush a final silence_end at EOF); a beep after a short
+    // priming gap does. Normalize both shapes to N onsets.
+    const firstDetected = ends.length > 0 && ends[0] < DUR / 2;
+    const onsets = (firstDetected ? ends : [0, ...ends]).slice(0, N);
+    // eslint-disable-next-line no-console
+    console.log("beep onsets:", onsets.map((t) => t.toFixed(3)).join(" "));
+    expect(onsets.length).toBe(N);
+    // Each segment holds exactly round(1.3*24)=31 frames, so beep i must
+    // land at i * 31/24 within a frame-ish tolerance — with NO growth
+    // across the timeline.
+    const segSec = Math.round(DUR * 24) / 24;
+    onsets.forEach((t, i) => {
+      expect(Math.abs(t - i * segSec)).toBeLessThan(0.06);
+    });
+    const info = await probeMedia(bin, outAbs);
+    expect(info.durationSec!).toBeGreaterThan(N * segSec - 0.15);
+    expect(info.durationSec!).toBeLessThan(N * segSec + 0.15);
+  }, 180_000);
 });

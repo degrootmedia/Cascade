@@ -209,6 +209,18 @@ describe("connectionToEdge: references", () => {
     expect(keysOf(g2)).not.toContain("e-ref:r1-composer-0");
   });
 
+  it("video ref→output materializes a missing ref node so the wire survives normalization", () => {
+    // r2 (Marco, video) is on the canvas as a derived tile (tagged/placed)
+    // but has no stored graph node in the base graph. Connecting it must
+    // add the node — otherwise normalize/sync drop e-ref-out as dangling
+    // and the line disappears even though the pipe took effect.
+    const g0 = baseGraph();
+    expect(g0.nodes.some((n) => n.id === "ref:r2")).toBe(false);
+    const g = connect(g0, conn("ref:r2", "output", "in-out"));
+    expect(g.nodes).toContainEqual(expect.objectContaining({ id: "ref:r2", kind: "ref" }));
+    expect(keysOf(g)).toContain("e-ref-out");
+  });
+
   it("ref→tween slot routes through connectTweenKey", () => {
     const g = baseGraph();
     expect(connectionToEdge(conn("ref:r1", "tween", "in-tween-0"), g)).toBeNull();

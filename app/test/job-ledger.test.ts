@@ -145,6 +145,8 @@ describe("channel → job mapping", () => {
     expect(jobForChannel("suite:generate", ["p1", { mode: "generate" }]))
       .toEqual({ kind: "suite", shotId: undefined, nodeId: undefined });
     expect(jobForChannel("production:save", ["p1", {}])).toBeNull();
+    // The 3D model feature was removed — its channel maps to no job.
+    expect(jobForChannel("production:generate3dModel", ["p1", "s1", {}])).toBeNull();
   });
 
   it("every mapped kind has a user-facing label", () => {
@@ -160,7 +162,7 @@ describe("channel → job mapping", () => {
       "production:generateStyleFrame": 1, "production:recheckStyleFrame": 1,
       "production:generateReferenceImage": 1, "production:generateCharacterSheet": 1,
       "production:generateMagicPrompts": 1, "production:regenerateMagicPrompt": 1,
-      "suite:generate": 1, "production:generate3dModel": 1,
+      "suite:generate": 1,
     })) {
       const job = jobForChannel(channel, ["p1", "s1", {}]);
       expect(job, channel).not.toBeNull();

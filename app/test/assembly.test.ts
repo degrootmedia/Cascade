@@ -31,6 +31,8 @@ import {
   edlReelFor,
   framesToTc,
   renderAnimatic,
+  segmentFrames,
+  segmentSec,
   type AssemblyEmit,
 } from "../src/main/assembly.js";
 
@@ -389,7 +391,7 @@ describe("buildNormalizeArgs", () => {
   const cfg = { fps: 24, width: 1920, height: 1080 };
 
   it("loops stills to an exact duration with silent audio", () => {
-    const args = buildNormalizeArgs({ kind: "still", durationSec: 2.5, muted: false }, cfg, "C:/src/a.png", "C:/out/0001.mp4");
+    const args = buildNormalizeArgs({ kind: "still", durationSec: 2.5, muted: false }, cfg, "C:/src/a.png", "C:/out/0001.mov");
     expect(args).toContain("-loop");
     expect(args).toContain("-framerate");
     expect(args).toContain("24");
@@ -397,8 +399,26 @@ describe("buildNormalizeArgs", () => {
     expect(args).toContain("C:/src/a.png");
     expect(args).toContain("anullsrc=r=48000:cl=stereo");
     expect(args).toContain("-t");
-    expect(args).toContain("2.500");
-    expect(args[args.length - 1]).toBe("C:/out/0001.mp4");
+    expect(args).toContain("2.500000");
+    // Frame/sample-exact: 60 frames, 120000 samples, PCM segment audio.
+    expect(args[args.indexOf("-frames:v") + 1]).toBe("60");
+    expect(args.some((a) => a.includes("atrim=end_sample=120000"))).toBe(true);
+    expect(args).toContain("pcm_s16le");
+    expect(args[args.length - 1]).toBe("C:/out/0001.mov");
+  });
+
+  it("frame-quantizes non-aligned durations so audio and video lengths match exactly", () => {
+    // 1.3s at 24fps is 31.2 frames: the segment must be 31 frames of
+    // video AND 31*2000 samples of audio — not 1.300s of audio beside
+    // 1.2917s of video (the compounding-drift bug).
+    const args = buildNormalizeArgs({ kind: "clip", durationSec: 1.3, muted: false, hasAudio: true }, cfg, "C:/src/b.mp4", "C:/out/0002.mov");
+    expect(args[args.indexOf("-frames:v") + 1]).toBe("31");
+    expect(args.some((a) => a.includes("atrim=end_sample=62000"))).toBe(true);
+    expect(args).toContain("1.291667");
+    expect(segmentFrames(1.3, 24)).toBe(31);
+    expect(segmentSec(1.3, 24)).toBeCloseTo(31 / 24, 9);
+    expect(segmentFrames(2.5, 24)).toBe(60);
+    expect(segmentFrames(0.01, 24)).toBe(2); // 0.1s floor: 2.4 frames rounds to 2
   });
 
   it("renders blank slots from a black lavfi source with no input file", () => {
@@ -411,7 +431,7 @@ describe("buildNormalizeArgs", () => {
     const vf = args[args.indexOf("-vf") + 1];
     expect(vf).not.toContain("scale=");
     expect(vf).toContain("fps=24");
-    expect(args).toContain("3.000");
+    expect(args).toContain("3.000000");
   });
 
   it("keeps an unmuted clip's embedded audio, padded with apad", () => {
@@ -419,7 +439,7 @@ describe("buildNormalizeArgs", () => {
     expect(args).toContain("-map");
     expect(args).toContain("0:a");
     expect(args).toContain("-af");
-    expect(args).toContain("apad");
+    expect(args.some((a) => a.includes("apad"))).toBe(true);
     expect(args.some((a) => a.includes("anullsrc"))).toBe(false);
   });
 
@@ -445,18 +465,18 @@ describe("buildConcatList / buildConcatArgs", () => {
   it("writes a concat list with escaped paths and a stream-copy command", () => {
     const list = buildConcatList(["C:/a/b.mp4", "C:/c/'quoted'.mp4"]);
     expect(list).toBe("file 'C:/a/b.mp4'\nfile 'C:/c/'\\''quoted'\\''.mp4'\n");
-    const args = buildConcatArgs("C:/list.txt", "C:/out.mp4");
-    expect(args).toEqual(["-y", "-f", "concat", "-safe", "0", "-i", "C:/list.txt", "-c", "copy", "-movflags", "+faststart", "C:/out.mp4"]);
+    const args = buildConcatArgs("C:/list.txt", "C:/out.mov");
+    expect(args).toEqual(["-y", "-f", "concat", "-safe", "0", "-i", "C:/list.txt", "-c", "copy", "C:/out.mov"]);
   });
 });
 
 describe("buildMixArgs", () => {
   const base = { renderAbs: "C:/pre.mp4", totalSec: 6.5, outAbs: "C:/render.mp4" };
 
-  it("copies audio through when there are no beds", () => {
+  it("encodes the PCM premix audio to AAC when there are no beds", () => {
     const args = buildMixArgs(base);
-    expect(args).toContain("-c");
-    expect(args).toContain("copy");
+    expect(args[args.indexOf("-c:v") + 1]).toBe("copy");
+    expect(args[args.indexOf("-c:a") + 1]).toBe("aac");
   });
 
   it("mixes VO + music with per-bed volumes", () => {

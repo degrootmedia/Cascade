@@ -9,6 +9,7 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { SuiteHistoryRail } from "../src/renderer/src/features/suite/SuiteHistoryRail.js";
+import { SuiteCanvas } from "../src/renderer/src/features/suite/SuiteCanvas.js";
 import { SuitePromptPanel } from "../src/renderer/src/features/suite/SuitePromptPanel.js";
 import type { SuiteDraft, SuiteEntry } from "../src/shared/ipc.js";
 
@@ -65,6 +66,55 @@ describe("SuiteHistoryRail", () => {
     // No tree affordances.
     expect(document.querySelector(".suite-rail-branch")).toBeNull();
     expect(rows.some((r) => (r as HTMLElement).style.paddingLeft)).toBe(false);
+  });
+});
+
+describe("pending suite entries", () => {
+  const pendingEntry: SuiteEntry = {
+    ...entry("9", null),
+    outputPath: "",
+    pending: { historyId: "hist-9", prompt: "prompt 9", model: "m", at: "2026-10-16T00:00:00.000Z" },
+  };
+
+  it("shows Fetch result (not a broken image) and fires onRecheck", async () => {
+    const onRecheck = vi.fn();
+    await act(async () => {
+      root!.render(createElement(SuiteCanvas, {
+        prodId: "p1",
+        entry: pendingEntry,
+        compare: null,
+        before: null,
+        busy: false,
+        onExport: () => {},
+        onDelete: () => {},
+        onRecheck,
+        rechecking: false,
+      }));
+    });
+    expect(document.querySelector(".suite-canvas-pending")).not.toBeNull();
+    expect(document.querySelector(".suite-canvas-img")).toBeNull();
+    const fetchBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Fetch result");
+    expect(fetchBtn).toBeDefined();
+    await act(async () => { fetchBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(onRecheck).toHaveBeenCalledTimes(1);
+    // Export stays disabled while there's no file on disk.
+    const saveRef = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save as reference") as HTMLButtonElement;
+    expect(saveRef.disabled).toBe(true);
+  });
+
+  it("rail shows a spinner (not a broken thumb) for a pending entry", async () => {
+    await act(async () => {
+      root!.render(createElement(SuiteHistoryRail, {
+        prodId: "p1",
+        entries: [pendingEntry],
+        selectedId: "9",
+        onSelect: () => {},
+        onDelete: () => {},
+      }));
+    });
+    const row = document.querySelector(".suite-rail-row");
+    expect(row?.querySelector(".suite-spinner")).not.toBeNull();
+    expect(row?.querySelector("img")).toBeNull();
   });
 });
 

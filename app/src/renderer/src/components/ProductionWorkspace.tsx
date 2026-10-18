@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
-import { isFresh, revOf } from "../../../shared/snapshot-freshness.js";
+import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
@@ -24,7 +24,6 @@ import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from
 import { AssemblyPanel } from "./production/assembly.js";
 import { ExpensesPanel } from "./production/expenses.js";
 import { BrandSwatchRow } from "./production/brand.js";
-import { ModelGenSection } from "./production/modelgen.js";
 import { uid } from "./production/hex.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { ImageSuite } from "../features/suite/ImageSuite.js";
@@ -709,7 +708,16 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       refetchModels();
     };
     window.addEventListener("cascade:media-provider-changed", onChange);
-    return () => window.removeEventListener("cascade:media-provider-changed", onChange);
+    // Main also broadcasts catalog invalidations over IPC (Model
+    // Customizer refresh) — the only signal a detached canvas window
+    // receives, since DOM events don't cross BrowserWindows.
+    const offModels = typeof window.cascade.onModelsChanged === "function"
+      ? window.cascade.onModelsChanged(onChange)
+      : undefined;
+    return () => {
+      window.removeEventListener("cascade:media-provider-changed", onChange);
+      offModels?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -981,6 +989,27 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return true;
   }, []);
 
+  /** Adopt the revision a whole-document save stamped on disk. Optimistic
+   *  saves (`saveField`, step switches, style toggles) keep rendering their
+   *  local snapshot, whose `rev` otherwise lags the disk by one per save —
+   *  and every rev-gated structural command (Delete shot, reorder) then
+   *  fails as a stale edit. Only the rev moves; in-flight optimistic fields
+   *  stay. */
+  const adoptSavedRev = useCallback((saved: Production) => {
+    const rev = revOf(saved);
+    if (!rev) return;
+    prodRevRef.current = Math.max(prodRevRef.current, rev);
+    setProd((prev) => (prev && prev.meta.id === saved.meta.id ? applySavedRevision(prev, rev) : prev));
+  }, []);
+
+  /** `window.cascade.saveProduction` + revision adoption (above). Every
+   *  whole-document save in this workspace goes through here. */
+  const persistProduction = useCallback(async (next: Production): Promise<Production> => {
+    const saved = await window.cascade.saveProduction(next);
+    if (saved) adoptSavedRev(saved);
+    return saved ?? next;
+  }, [adoptSavedRev]);
+
   // Dangling-focus cleanup (Fix C): whenever the production's shot set changes,
   // clear sidebar/graph focus that points at a shot id no longer present and
   // prune its cache entry — otherwise the sidebar keeps a dead editor whose
@@ -1026,7 +1055,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const next: Production = { ...prod, currentStep: 3 };
       prodRef.current = next;
       setProd(next);
-      void window.cascade.saveProduction(next).catch(() => {});
+      void persistProduction(next).catch(() => {});
     }
     if (detached.target === "sequence") {
       setSeqCanvasId(detached.sequenceId ?? null);
@@ -1170,7 +1199,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       return undefined;
     } catch (e) {
       const msg = String(e).replace(/^Error:\s*/, "");
-      if (msg.startsWith("Stale edit:") && prodRef.current) {
+      if (isStaleRevisionError(e) && prodRef.current) {
         try {
           const fresh = await window.cascade.loadProduction(prodRef.current.meta.id);
           if (fresh) applySnapshot(fresh);
@@ -1190,7 +1219,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod || prod.currentStep === n) return;
     const next = { ...prod, currentStep: n };
     setProd(next);
-    void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
+    void persistProduction(next).then(() => refreshList()).catch(() => {});
   }
 
   function saveField(patch: Partial<Production>) {
@@ -1199,7 +1228,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const next = { ...current, ...patch };
     prodRef.current = next;
     setProd(next);
-    void window.cascade.saveProduction(next).then(() => refreshList()).catch(() => {});
+    void persistProduction(next).then(() => refreshList()).catch(() => {});
   }
 
   /** Attach/remove a reference image on a character or product. Images are
@@ -1894,7 +1923,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setRecheckIds((prev) => new Set(prev).add(shotId));
     try {
       const next = await window.cascade.recheckBoard(prod.meta.id, shotId);
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
       void refreshList();
     } catch (e) {
@@ -1918,7 +1947,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setVideoRecheckIds((prev) => new Set(prev).add(shotId));
     try {
       const next = await window.cascade.recheckVideo(prod.meta.id, shotId);
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
       void refreshList();
     } catch (e) {
@@ -1940,7 +1969,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setErr(null);
     try {
       const next = await window.cascade.clearPending(prod.meta.id, shotId, kind);
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
       void refreshList();
     } catch (e) {
@@ -2183,7 +2212,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       promptCacheRef.current[shotId] = rerendered;
       setPromptForShot(shotId, rerendered);
     }
-    void window.cascade.saveProduction(next).then(async () => {
+    void persistProduction(next).then(async () => {
       await refreshList();
       // The save may resolve after the user switched frames: always refresh
       // this shot's cache, but only push live text while it is still focused —
@@ -2272,7 +2301,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         const withRefs: Production = { ...base, references };
         prodRef.current = withRefs;
         setProd(withRefs);
-        await window.cascade.saveProduction(withRefs);
+        await persistProduction(withRefs);
         const saved = await window.cascade.updateBoardPrompt(withRefs.meta.id, shotId, next);
         if (saved) applySnapshot(saved);
         return;
@@ -3198,7 +3227,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const next: Production = { ...current, scenes: current.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => s.id === shotId ? { ...s, ...patch } : s) })) };
     setProd(next);
     try {
-      await window.cascade.saveProduction(next);
+      await persistProduction(next);
       const fresh = await window.cascade.getBoardPrompt(next.meta.id, shotId);
       if (fresh == null) return;
       // The save may resolve after the user switched frames: always refresh
@@ -4267,10 +4296,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onRescan={rescanRefFolder}
                 onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
-            </DesignSection>
-
-            <DesignSection title="3D models" prodId={prod.meta.id}>
-              <ModelGenSection prod={prod} onGenerated={(next) => setProd(next)} />
             </DesignSection>
 
             {refGen && (

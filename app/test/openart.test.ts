@@ -485,6 +485,21 @@ describe("videoRefsAssign", () => {
     };
     expect(videoRefsAssign(refs, props, { refsOnly: true })).toEqual({ visualReferences: refs });
   });
+
+  it("refsOnly falls back to a lone start slot when the form has no reference array", () => {
+    // Generation surfaces submit in reference mode, but a start-only form
+    // has no array to ride: bind ONLY the start slot (never slot + array).
+    const refs = [
+      { type: "image", label: "Shot 0100 frame", url: "https://example.invalid/frame.png", id: "vr-1" },
+    ];
+    const props = {
+      startFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+      endFrame: { type: "object", properties: { type: {}, url: {}, id: {} } },
+    };
+    expect(videoRefsAssign(refs, props, { refsOnly: true })).toEqual({
+      startFrame: { type: "image", url: "https://example.invalid/frame.png", id: "vr-1" },
+    });
+  });
 });
 
 describe("video-ref 720p ceiling", () => {
@@ -753,6 +768,36 @@ describe("OpenArtClient.imageGenFn", () => {
       ]);
       expect(out.toString()).toBe("OUTPUT");
       expect(polls).toBeGreaterThanOrEqual(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("falls through to the second result URL when the first is dead", async () => {
+    // Regression: only urls[0] was fetched, single attempt — one dead CDN
+    // URL silently stranded a finished, paid job.
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => '{"status":"PENDING","historyId":"h-dl","pollAfterSeconds":0}',
+      openart_creation_wait: () => ({
+        text: '{"status":"SUCCEEDED","urls":["https://example.invalid/dead.png","https://example.invalid/out.png"]}',
+        images: [],
+        uris: [],
+      }),
+    });
+    const realFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string) => {
+      seen.push(String(url));
+      if (String(url).includes("dead.png")) return { ok: false, status: 404, arrayBuffer: async () => Buffer.from("gone") };
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.from("OUTPUT") };
+    }) as unknown as typeof fetch;
+    try {
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+      const out = await gen("a castle", []);
+      expect(out.toString()).toBe("OUTPUT");
+      expect(seen).toEqual(["https://example.invalid/dead.png", "https://example.invalid/out.png"]);
     } finally {
       globalThis.fetch = realFetch;
     }

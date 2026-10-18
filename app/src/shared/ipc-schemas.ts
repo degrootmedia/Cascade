@@ -228,7 +228,10 @@ const validators: Record<string, (args: unknown[]) => void> = {
     if (s && Array.isArray(s.entries)) {
       for (const e of s.entries) {
         if (!e || typeof e !== "object") continue;
-        if (typeof e.outputPath === "string" && !isProductionRelative(e.outputPath)) {
+        // A pending entry carries "" (no file yet — its vendor receipt is
+        // the durable handle); any real path must stay production-relative.
+        const pendingOnly = e.outputPath === "" && !!e.pending;
+        if (!pendingOnly && typeof e.outputPath === "string" && !isProductionRelative(e.outputPath)) {
           throw new Error("IPC validation: suite entry outputPath must be production-relative (no '..')");
         }
       }
@@ -278,6 +281,10 @@ const validators: Record<string, (args: unknown[]) => void> = {
     checkPathString(args[1], "entryId", 256);
     if (args[2] !== "references" && args[2] !== "boards") throw new Error("IPC validation: suite export target must be 'references' or 'boards'");
     if (args[3] !== undefined && (typeof args[3] !== "string" || args[3].length > 128)) throw new Error("IPC validation: suite export name must be a string of at most 128 chars");
+  },
+  "suite:recheckEntry": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    checkPathString(args[1], "entryId", 256);
   },
   "suite:generate": (args) => {
     checkPathString(args[0], "productionId", 256);

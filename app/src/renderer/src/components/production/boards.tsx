@@ -3,11 +3,13 @@ import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, Vi
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
+import { DurationField, snapDurationSec } from "./duration-field.js";
 import { getPromptTemplate } from "./prompt-templates.js";
 import { costAspect, isQuotableCostModel, useGenerationCost } from "./generation-cost.js";
 import { CostValue, GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { afterFirstPaint, batchedBoardThumb } from "./board-thumbs.js";
+import { useMediaRev } from "./media-rev.js";
 import { boardFrameHistory } from "../../../../shared/board-frames.js";
 import { findGeneration, frameOrigin } from "../../../../shared/generations.js";
 import { confirmDestructive } from "../ConfirmDialog.js";
@@ -151,6 +153,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   const display = resolveShotDisplay(shot);
   const clipRel = display.media === "clip" ? display.path : undefined;
   const stillRel = display.media === "still" ? display.path : display.stillPath;
+  // The frame file can change on disk in place (external edit re-encoded, a
+  // node Refresh): its media revision bumps, and the thumbnail fetch below
+  // keys on it so the card refetches instead of holding the stale bitmap.
+  const frameRev = useMediaRev(prod.meta.id, stillRel);
   const cardRef = useRef<HTMLElement>(null);
   useEffect(() => {
     let live = true;
@@ -184,7 +190,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     }
     load();
     return () => { live = false; };
-  }, [prod.meta.id, shot.id, display.path, display.stillPath, bust]);
+  }, [prod.meta.id, shot.id, display.path, display.stillPath, bust, frameRev]);
 
   // Lazily load the history frame being viewed.
   useEffect(() => {
@@ -311,7 +317,13 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   function copyMenuImage() {
     const pos = menu;
     setMenu(null);
-    void window.cascade.copyImage(pos?.x ?? 0, pos?.y ?? 0);
+    void window.cascade.copyImage({
+      src: nativeSrc,
+      productionId: relForExternal ? prod.meta.id : undefined,
+      relPath: relForExternal ?? undefined,
+      x: pos?.x ?? 0,
+      y: pos?.y ?? 0,
+    });
   }
   function editMenuImageExternally() {
     setMenu(null);
@@ -853,7 +865,6 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     return () => { live = false; };
   }, [model]);
   const resolutions = modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"];
-  const durations = modelOpts?.durations?.length ? modelOpts.durations : [5, 10, 15, 20];
   // Keep the current selection valid when the model's options arrive — or
   // when the provider switches under the modal (new model list, new options).
   // The dep is the joined id list (not the array) because the parent passes a
@@ -865,7 +876,8 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     // fallback list would prematurely clobber e.g. a saved "2k".
     if (!modelOpts) return;
     if (resolutions.length && !resolutions.includes(resolution)) setResolution(closestResolution(resolution, resolutions));
-    if (durations.length && !durations.includes(durationSec)) setDurationSec(durations[0]);
+    const snapped = snapDurationSec(durationSec, modelOpts);
+    if (snapped !== durationSec) setDurationSec(snapped);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelOpts, videoModelIds]);
   useEffect(() => {
@@ -924,9 +936,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
             </select>
           </label>
           <label className="prod-label">Length
-            <select className="prod-openart-select" value={durationSec} onChange={(e) => { setDurationSec(Number(e.target.value)); onShotField({ graphVideoDurationSec: Number(e.target.value) }); }}>
-              {durations.map((s) => <option key={s} value={s}>{s}s</option>)}
-            </select>
+            <DurationField opts={modelOpts} value={durationSec} onChange={(n) => { setDurationSec(n); onShotField({ graphVideoDurationSec: n }); }} />
           </label>
         </div>
         <ModelOptionsForm

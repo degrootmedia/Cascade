@@ -73,6 +73,7 @@ export function ImageSuite({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [branchParentId, setBranchParentId] = useState<string | null>(null);
+  const [rechecking, setRechecking] = useState(false);
   /** True once the on-disk session for the current production has loaded —
    *  persistence stays off until then so a handoff can't clobber stored
    *  entries with the pre-load draft. */
@@ -321,6 +322,25 @@ export function ImageSuite({
     }
   }, [patchDraft]);
 
+  /** Fetch a pending entry's finished result. Still-rendering keeps the
+   *  entry pending (notice says so); a dead job lands as failed history. */
+  const recheckEntry = useCallback(async (entryId: string) => {
+    if (rechecking) return;
+    setRechecking(true);
+    setError(null);
+    try {
+      const updated = await window.cascade.recheckSuiteEntry(prodId, entryId);
+      setSession((s) => ({ ...s, entries: s.entries.map((e) => (e.id === updated.id ? updated : e)), selectedId: updated.id }));
+      if (updated.pending) setNotice("Still rendering — try Fetch result again in a minute.");
+      else if (updated.error && !updated.outputPath) setError(updated.error);
+      else setNotice(null);
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setRechecking(false);
+    }
+  }, [prodId, rechecking]);
+
   const deleteEntry = useCallback(async (id: string) => {
     const entry = sessionRef.current.entries.find((e) => e.id === id);
     const what = entry?.prompt?.trim()
@@ -381,6 +401,8 @@ export function ImageSuite({
         onExport={(t) => void exportEntry(t)}
         onDelete={() => selected && void deleteEntry(selected.id)}
         onEditInSuite={editInSuite}
+        onRecheck={() => selected && void recheckEntry(selected.id)}
+        rechecking={rechecking}
       />
       <SuitePromptPanel
         prod={prod}

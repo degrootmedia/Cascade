@@ -35,6 +35,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
+import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
 import {
   IMAGE_URL_RX,
   parseJsonLooseArray,
@@ -97,6 +98,13 @@ const IMAGE_WAIT_TIMEOUT_MS = 150_000;
 const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
 const VIDEO_RECHECK_TIMEOUT_MS = 60_000;
+/** One `creation wait` slice. The full budget is waited in slices so live
+ *  job status can be reported between them — a single blocking wait emits
+ *  nothing for up to 20 minutes, which looks exactly like a frozen app
+ *  when the vendor queue is slow. */
+const WAIT_SLICE_MS = 30_000;
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const IMAGE_MODES = ["image2image", "text2image"];
 const VIDEO_IMAGE_MODES = ["image2video", "image_to_video", "img2video", "element2video"];
@@ -149,13 +157,17 @@ export class OpenArtCliPendingError extends Error {
 }
 
 /** Resolve the `openart` binary: an explicit custom path first, then PATH.
- *  The official installers drop a real binary — no shim mapping needed. */
+ *  The official installers drop a real binary — no shim mapping needed. An
+ *  explicit custom path that is not an existing file resolves to null (an
+ *  honest "not found") instead of silently using a different PATH binary
+ *  the user did not pick — same contract as the Higgsfield resolver. */
 export async function resolveOpenArtCliBinary(customPath?: string | null): Promise<string | null> {
   const custom = typeof customPath === "string" ? customPath.trim() : "";
   if (custom) {
     try {
       if (fs.existsSync(custom) && fs.statSync(custom).isFile()) return custom;
-    } catch { /* fall through to PATH */ }
+    } catch { /* not a file — fall through to null */ }
+    return null;
   }
   return resolveCliOnPath(["openart"]);
 }
@@ -240,6 +252,10 @@ export class OpenArtCliProvider implements MediaProvider {
     if (!this.listCache || now - this.listCache.at >= FORM_TTL_MS) {
       const choices = shapeOpenArtModelChoices(await this.json(["model", "list"]));
       for (const c of choices) c.id = `${OPENART_CLI_ID_PREFIX}${c.id}`;
+      // An empty parse is a failed fetch, not an empty catalog — never
+      // cache it (a garbled reply once hid every model for the TTL).
+      // Serve the stale list when one exists and retry next call.
+      if (!choices.length) return this.listCache?.choices ?? [];
       this.listCache = { at: now, choices };
       void this.warmCosts().catch(() => {});
     }
@@ -440,16 +456,10 @@ export class OpenArtCliProvider implements MediaProvider {
 
   // ---- submit + poll ------------------------------------------------------------------
 
-  /** One attempt to fetch bytes from a URL; null when not fetchable. */
-  private async fetchBytes(url: string): Promise<Buffer | null> {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const buf = Buffer.from(await res.arrayBuffer());
-      return buf.length ? buf : null;
-    } catch {
-      return null;
-    }
+  /** Fetch result bytes via the shared failsafe downloader (retries,
+   *  timeout, error-page rejection); null when not fetchable yet. */
+  private async fetchBytes(url: string, kind: "image" | "video" = "image"): Promise<Buffer | null> {
+    return (await tryDownloadBytes([url], { attempts: 3, kind }))?.buf ?? null;
   }
 
   /**
@@ -473,10 +483,45 @@ export class OpenArtCliProvider implements MediaProvider {
         `The OpenArt CLI returned no creation id (${createOut.slice(0, 200) || "empty reply"}) — the submission may not have gone through and no credits should have been spent.`
       );
     }
-    const waitOut = await this.cli(
-      ["creation", "wait", historyId, "--timeout", `${Math.max(30, Math.round(timeoutMs / 1000))}s`],
-      timeoutMs + 60_000
-    );
+    // Wait in short slices, reporting the live job status between them:
+    // one blocking `creation wait` for the whole budget emits nothing for
+    // up to 20 minutes, so a slow vendor queue looks exactly like a frozen
+    // app. A wait that RETURNS (terminal, or an early non-terminal reply)
+    // exits the loop into the status handling below, exactly as the single
+    // long wait used to; a slice that ERRORS (its own timeout elapsed)
+    // probes `creation get` as ground truth — failed jobs surface, finished
+    // ones complete from the probe, and still-running ones report status
+    // and slice again until the overall deadline.
+    const deadline = Date.now() + timeoutMs;
+    let waitOut = "";
+    for (;;) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const sliceMs = Math.min(remainingMs, WAIT_SLICE_MS);
+      try {
+        waitOut = await this.cli(
+          ["creation", "wait", historyId, "--timeout", `${Math.max(5, Math.round(sliceMs / 1000))}s`],
+          sliceMs + 60_000
+        );
+        break;
+      } catch (e) {
+        if (Date.now() >= deadline) break;
+        let getOut = "";
+        try {
+          getOut = await this.cli(["creation", "get", historyId], 60_000);
+        } catch {
+          throw e; // even the status probe fails — surface the original error
+        }
+        const gs = openArtCreationStatus(getOut);
+        if (gs.failed) throw new Error(`OpenArt generation ${gs.status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
+        if (OPENART_JOB_DONE_RX.test(gs.status)) {
+          waitOut = getOut;
+          break;
+        }
+        if (gs.status) onStatus?.(gs.status);
+        await sleepMs(2_000);
+      }
+    }
     const { status, failed } = openArtCreationStatus(waitOut);
     if (failed) throw new Error(`OpenArt generation ${status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
     if (status && !OPENART_JOB_DONE_RX.test(status)) {
@@ -487,8 +532,9 @@ export class OpenArtCliProvider implements MediaProvider {
         if (gs.failed) throw new Error(`OpenArt generation ${gs.status.toLowerCase() || "failed"} (${historyId.slice(0, 8)}…).`);
         const urls = openArtCreationResultUrls(getOut, video);
         if (urls.length) {
-          const buf = await this.fetchBytes(urls[0]);
-          if (buf) return { buf, ext: OpenArtCliProvider.extOf(urls[0], video), historyId };
+          const got = await tryDownloadBytes(urls, { attempts: 3, kind: video ? "video" : "image" });
+          const buf = got?.buf ?? null;
+          if (buf) return { buf, ext: OpenArtCliProvider.extOf(got!.url, video), historyId };
         }
       } catch (e) {
         if (e instanceof Error && /failed|cancel/i.test(e.message)) throw e;
@@ -503,13 +549,18 @@ export class OpenArtCliProvider implements MediaProvider {
       const direct = (video ? waitOut.match(VIDEO_URL_RX)?.[0] : waitOut.match(IMAGE_URL_RX)?.[0]);
       if (direct) urls.push(direct);
     }
-    const url = urls[0];
-    if (!url) throw new OpenArtCliPendingError(historyId);
-    const buf = await this.fetchBytes(url);
-    // The job finished but its result couldn't be downloaded — keep the id +
-    // URL so a recheck can retry the fetch.
-    if (!buf) throw new OpenArtCliPendingError(historyId, url);
-    return { buf, ext: OpenArtCliProvider.extOf(url, video), historyId };
+    if (!urls.length) throw new OpenArtCliPendingError(historyId);
+    // Try EVERY result URL via the shared failsafe downloader — one dead
+    // CDN URL must not strand a finished, paid job.
+    let downloaded: { buf: Buffer; url: string };
+    try {
+      downloaded = await downloadBytes(urls, { attempts: 3, kind: video ? "video" : "image" });
+    } catch (e) {
+      // The job finished but its result couldn't be downloaded — keep the
+      // id + URL so a recheck can retry the fetch.
+      throw new OpenArtCliPendingError(historyId, e instanceof DownloadError && e.url ? e.url : urls[0]);
+    }
+    return { buf: downloaded.buf, ext: OpenArtCliProvider.extOf(downloaded.url, video), historyId };
   }
 
   private static extOf(url: string, video: boolean): string {
@@ -650,7 +701,7 @@ export class OpenArtCliProvider implements MediaProvider {
         if (!direct) return null;
         return this.fetchBytes(direct);
       }
-      return this.fetchBytes(urls[0]);
+      return (await tryDownloadBytes(urls, { attempts: 3, kind: "image" }))?.buf ?? null;
     }
     if (rec.url) return this.fetchBytes(rec.url);
     return null;
@@ -674,13 +725,16 @@ export class OpenArtCliProvider implements MediaProvider {
       const { failed, status } = openArtCreationStatus(out);
       if (failed) throw new Error(`OpenArt generation ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
       const urls = openArtCreationResultUrls(out, true);
-      const url = urls[0] ?? out.match(VIDEO_URL_RX)?.[0];
-      if (!url) return null;
-      const buf = await this.fetchBytes(url);
+      const direct = out.match(VIDEO_URL_RX)?.[0];
+      const candidates = direct && !urls.includes(direct) ? [...urls, direct] : urls;
+      if (!candidates.length) return null;
+      const got = await tryDownloadBytes(candidates, { attempts: 3, kind: "video" });
+      const buf = got?.buf ?? null;
+      const url = got?.url ?? candidates[0];
       return buf ? { buf, ext: OpenArtCliProvider.extOf(url, true) } : null;
     }
     if (rec.url) {
-      const buf = await this.fetchBytes(rec.url);
+      const buf = await this.fetchBytes(rec.url, "video");
       return buf ? { buf, ext: OpenArtCliProvider.extOf(rec.url, true) } : null;
     }
     return null;

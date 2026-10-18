@@ -150,16 +150,27 @@ describe("CTRL+Click routes to Frame Output", () => {
     host.remove();
   });
 
-  it("hovering a node dims nodes outside its chain; mouse-leave clears", async () => {
+  it("hovering a node dims nodes outside its chain only while Alt is held", async () => {
     const { host, root } = renderModal(baseShot(), () => {});
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const img = host.querySelector('.react-flow__node[data-id="imagegen"]');
     expect(img).toBeTruthy();
+    // Plain hover (no Alt): nothing dims.
     act(() => { img!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true })); });
+    expect(host.querySelectorAll(".prod-trace-dim").length).toBe(0);
+    // Pressing Alt while already hovering switches the trace on.
+    act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Alt", bubbles: true, cancelable: true })); });
     const dimmed = host.querySelectorAll(".react-flow__node.prod-trace-dim");
     expect(dimmed.length).toBeGreaterThan(0);
     expect(img!.classList.contains("prod-trace-dim")).toBe(false);
-    act(() => { img!.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, cancelable: true })); });
+    // Releasing Alt clears the trace even though the hover continues.
+    act(() => { document.dispatchEvent(new KeyboardEvent("keyup", { key: "Alt", bubbles: true, cancelable: true })); });
+    expect(host.querySelectorAll(".prod-trace-dim").length).toBe(0);
+    // Entering a node with Alt already held traces immediately; leaving clears.
+    act(() => { img!.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, cancelable: true, altKey: true })); });
+    act(() => { img!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, altKey: true })); });
+    expect(host.querySelectorAll(".react-flow__node.prod-trace-dim").length).toBeGreaterThan(0);
+    act(() => { img!.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, cancelable: true, altKey: true })); });
     expect(host.querySelectorAll(".prod-trace-dim").length).toBe(0);
     act(() => { root.unmount(); });
     host.remove();

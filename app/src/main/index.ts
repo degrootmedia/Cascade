@@ -2,7 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
-import { app, BrowserWindow, dialog, ipcMain, session, shell, Menu, nativeImage, protocol, screen } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell, Menu, nativeImage, protocol, screen } from "electron";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,7 +22,7 @@ import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/l
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
 import { assetPathInFolder } from "./pipeline.js";
-import { resolveProductionFile } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, mergeJobShotNodes, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
+import { resolveProductionFile, classifyCopyImageSource, type CopyImageTarget } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, mergeJobShotNodes, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
 import { createJobLedger, runWithJobLedger } from "./jobs.js";
 import { externalEditorLabel } from "../shared/editor-label.js";
@@ -33,7 +33,6 @@ import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSur
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
-import { ModelGenClient, modelFileName, toProductionModel } from "./modelgen.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
@@ -48,7 +47,7 @@ import { loadSessionTasks, makeSessionTodoTools } from "./session-tasks.js";
 import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./session-goals.js";
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { makeProductionAgentTools, type ProductionOp } from "./production-tools.js";
-import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, isSeedance25Model, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
+import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
 styleFrameOverride, normalizeCanvasBusy, normalizeCameraGridData, recordSequenceVideoGen, sequenceSelectedTake, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, 
 CAMERA_GRID_COLS, CAMERA_GRID_ROWS, type DisplayItem, type GraphSource, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
@@ -58,10 +57,10 @@ import { pathToFileURL } from "node:url";
 import { dataUrlToBytes, parsePromptBoxes, refTagNames, stripReferenceClause, addStyleParagraph } from "../shared/prompt-grammar.js";
 import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
-import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, appendSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
+import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, Model3dGenOptions, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
@@ -567,6 +566,52 @@ async function openImageExternally(win: BrowserWindow, target: { productionId?: 
   }
 }
 
+/** Copy an image to the OS clipboard from its own source: the production
+ *  file on disk (preferring the full-res original behind a JPEG preview),
+ *  an inline data URL, or a remote URL fetched here. Only when none of
+ *  those decode does it fall back to `copyImageAt(x, y)` page hit-testing —
+ *  that used to be the ONLY path, and it silently no-ops whenever the
+ *  point is covered (e.g. by the still-open custom context menu) or the
+ *  layout shifted between right-click and menu choice. */
+async function copyImageToClipboard(win: BrowserWindow, target: CopyImageTarget): Promise<void> {
+  const fallbackToCoords = (): void => {
+    if (typeof target.x === "number" && typeof target.y === "number") {
+      win.webContents.copyImageAt(target.x, target.y);
+    }
+  };
+  try {
+    const source = classifyCopyImageSource(target);
+    let img: Electron.NativeImage | null = null;
+    if (source.kind === "file") {
+      const p = productions.loadProduction(source.file.productionId);
+      if (p) {
+        const candidates: string[] = [];
+        const originalRel = originalForJpegRel(p, source.file.relPath);
+        if (originalRel) candidates.push(assetPath(p, originalRel));
+        candidates.push(assetPath(p, source.file.relPath));
+        for (const abs of candidates) {
+          if (!fs.existsSync(abs)) continue;
+          const candidate = nativeImage.createFromPath(abs);
+          if (!candidate.isEmpty()) { img = candidate; break; }
+        }
+      }
+    } else if (source.kind === "dataUrl") {
+      const bytes = dataUrlToBytes(source.dataUrl);
+      if (bytes && bytes.length) img = nativeImage.createFromBuffer(Buffer.from(bytes));
+    } else if (source.kind === "url") {
+      const res = await fetch(source.url, { signal: AbortSignal.timeout(15_000) });
+      if (res.ok) img = nativeImage.createFromBuffer(Buffer.from(await res.arrayBuffer()));
+    }
+    if (img && !img.isEmpty()) {
+      clipboard.writeImage(img);
+      return;
+    }
+    fallbackToCoords();
+  } catch {
+    fallbackToCoords();
+  }
+}
+
 /** Pop the right-click menu for an image or video: Save as… / Copy image /
  *  Edit externally / Open file folder. This is the single menu builder — the
  *  native `context-menu` event and the renderer-triggered `image:showMenu` IPC
@@ -591,7 +636,16 @@ function popMediaContextMenu(win: BrowserWindow, opts: { media: "image" | "video
   if (!isVideo) {
     template.push({
       label: MEDIA_MENU_LABELS.copyImage,
-      click: () => win.webContents.copyImageAt(opts.x, opts.y),
+      click: () => {
+        void copyImageToClipboard(win, {
+          src,
+          productionId: opts.edit && "relPath" in opts.edit ? opts.edit.productionId : undefined,
+          relPath: opts.edit && "relPath" in opts.edit ? opts.edit.relPath : undefined,
+          dataUrl: opts.edit && "dataUrl" in opts.edit ? opts.edit.dataUrl : undefined,
+          x: opts.x,
+          y: opts.y,
+        });
+      },
     });
   }
   if (canEditExternally) {
@@ -1054,16 +1108,45 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 function registerIpc() {
   // Every successful generation feeds the expenses ledger, which prices it
   // against the user's rules and keeps the CSV tally in sync.
-  // The `higgsfield` CLI binary (Higgsfield CLI transport): an explicit
-  // Settings path wins; otherwise the PATH probe below (resolved once at
-  // startup — a local `where`/`which`, no network). Lazy so a Settings path
-  // change applies without rebuilding providers.
+  // The CLI binaries (Higgsfield/OpenArt CLI transports): an explicit
+  // Settings path wins; otherwise a PATH probe (`where`/`which`, no network).
+  // Resolution is async AND maps npm `.cmd` shims to their real vendor
+  // binary (spawning a shim shell-free fails with EINVAL), so the sync
+  // getters below serve the last RESOLVED path — never the raw Settings
+  // string. `refresh*CliBinary` re-resolves on startup, on every Settings
+  // path save, and on every status check, so installing a CLI (or fixing
+  // its path) after launch is picked up without a restart. Lazy getters so
+  // a Settings change applies without rebuilding providers.
   let higgsCliPathCache: string | null | undefined;
-  void resolveHiggsfieldCliBinary().then((p) => { higgsCliPathCache = p; }).catch(() => { higgsCliPathCache = null; });
-  const higgsCliBinary = (): string | null => settings.getHiggsfieldCliBinary() ?? higgsCliPathCache ?? null;
+  let higgsCliCustomCache: { raw: string; resolved: string | null } | null = null;
+  const refreshHiggsCliBinary = async (): Promise<string | null> => {
+    const custom = settings.getHiggsfieldCliBinary();
+    const resolved = await resolveHiggsfieldCliBinary(custom).catch(() => null);
+    if (custom) higgsCliCustomCache = { raw: custom, resolved };
+    else higgsCliPathCache = resolved;
+    return resolved;
+  };
+  void refreshHiggsCliBinary();
+  const higgsCliBinary = (): string | null => {
+    const custom = settings.getHiggsfieldCliBinary();
+    if (custom) return higgsCliCustomCache?.raw === custom ? higgsCliCustomCache.resolved : null;
+    return higgsCliPathCache ?? null;
+  };
   let openArtCliPathCache: string | null | undefined;
-  void resolveOpenArtCliBinary().then((p) => { openArtCliPathCache = p; }).catch(() => { openArtCliPathCache = null; });
-  const openArtCliBinary = (): string | null => settings.getOpenArtCliBinary() ?? openArtCliPathCache ?? null;
+  let openArtCliCustomCache: { raw: string; resolved: string | null } | null = null;
+  const refreshOpenArtCliBinary = async (): Promise<string | null> => {
+    const custom = settings.getOpenArtCliBinary();
+    const resolved = await resolveOpenArtCliBinary(custom).catch(() => null);
+    if (custom) openArtCliCustomCache = { raw: custom, resolved };
+    else openArtCliPathCache = resolved;
+    return resolved;
+  };
+  void refreshOpenArtCliBinary();
+  const openArtCliBinary = (): string | null => {
+    const custom = settings.getOpenArtCliBinary();
+    if (custom) return openArtCliCustomCache?.raw === custom ? openArtCliCustomCache.resolved : null;
+    return openArtCliPathCache ?? null;
+  };
   const providers = createProviders(mcp, { onGeneration: (meta) => ledger.recordGeneration(meta, settings.getHiggsfieldCreditUsd()) }, higgsCliBinary, openArtCliBinary);
   // The active media vendor (OpenArt/Higgsfield/Higgsfield CLI) — a global setting resolved
   // per call, so every generation flow follows a Settings change immediately.
@@ -1074,11 +1157,6 @@ function registerIpc() {
   // first model. "auto"/empty defers to the global.
   const mediaFor = (model?: string): MediaProvider =>
     mediaForModel(providers, resolveProviderId(settings.getMediaProvider()), model);
-
-  // 3D AI Studio REST integration (design-page model generator). The API key
-  // is read from encrypted settings on demand; the client's HTTP surface is
-  // testable in isolation (modelgen.ts).
-  const modelgen = new ModelGenClient(() => settings.get3daiApiKey());
 
   // IPC channels are declared in the shared contract (shared/ipc.ts), which the
   // preload adapter also consumes — so adding a channel means editing one map,
@@ -1456,17 +1534,11 @@ function registerIpc() {
     followProduction: settings.getFollowProduction(),
     accent: settings.getAccent(),
     externalEditor: settings.getExternalEditor(),
-    has3daiApiKey: settings.has3daiApiKey(),
   }));
 
   handle("settings:setApiKey", (_e, key: string) => {
     settings.setApiKey(key.trim());
     resetAllAgents();
-  });
-
-  handle("settings:set3daiApiKey", (_e, key: string) => {
-    if (typeof key !== "string") return;
-    settings.set3daiApiKey(key.trim());
   });
 
   handle("settings:getHiddenMediaModels", () => settings.getHiddenMediaModels());
@@ -1715,9 +1787,16 @@ function registerIpc() {
     win.webContents.downloadURL(src);
   });
 
-  handle("image:copy", (_e, x: number, y: number) => {
+  handle("image:copy", (_e, opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string; x?: number; y?: number }) => {
     if (!win) return;
-    win.webContents.copyImageAt(Number(x) || 0, Number(y) || 0);
+    void copyImageToClipboard(win, {
+      src: typeof opts?.src === "string" ? opts.src : undefined,
+      productionId: typeof opts?.productionId === "string" ? opts.productionId : undefined,
+      relPath: typeof opts?.relPath === "string" ? opts.relPath : undefined,
+      dataUrl: typeof opts?.dataUrl === "string" ? opts.dataUrl : undefined,
+      x: typeof opts?.x === "number" ? opts.x : undefined,
+      y: typeof opts?.y === "number" ? opts.y : undefined,
+    });
   });
 
   handle("image:editExternally", (_e, opts: { src?: string; productionId?: string; relPath?: string; dataUrl?: string }) => {
@@ -1970,18 +2049,22 @@ function registerIpc() {
   handle("media:getHiggsCliBinary", async (): Promise<string | null> => settings.getHiggsfieldCliBinary());
   handle("media:setHiggsCliBinary", (_e, p: string | null) => {
     settings.setHiggsfieldCliBinary(typeof p === "string" ? p : null);
+    void refreshHiggsCliBinary();
   });
+  // Fresh-resolve on every check: a CLI installed (or a path fixed) after
+  // launch must be found without restarting the app.
   handle("media:getHiggsCliStatus", async (): Promise<HiggsfieldCliStatus> =>
-    getHiggsfieldCliStatus(higgsCliBinary())
+    getHiggsfieldCliStatus(await refreshHiggsCliBinary())
   );
 
   // OpenArt CLI transport config: custom binary path + read-only status.
   handle("media:getOpenArtCliBinary", async (): Promise<string | null> => settings.getOpenArtCliBinary());
   handle("media:setOpenArtCliBinary", (_e, p: string | null) => {
     settings.setOpenArtCliBinary(typeof p === "string" ? p : null);
+    void refreshOpenArtCliBinary();
   });
   handle("media:getOpenArtCliStatus", async (): Promise<OpenArtCliStatus> =>
-    getOpenArtCliStatus(openArtCliBinary())
+    getOpenArtCliStatus(await refreshOpenArtCliBinary())
   );
 
   // ---- agents ----
@@ -2985,29 +3068,29 @@ function registerIpc() {
       // timed out), so the cost was unbilled. Bill it now, once, using the
       // submit-time resolution/aspect kept on the pending record. Higgsfield
       // rows re-quote their credits from the kept config (best-effort).
-      let reclaimCredits: number | undefined;
+      // The frame is downloaded and recorded: clear the pending record NOW,
+      // before billing, so a billing failure can never strand the shot's
+      // pending tag after a successful reclaim.
+      delete shot.pendingImageGen;
       try {
-        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+        const reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
           model: pending.model, kind: "image",
           ...(pending.resolution ? { resolution: pending.resolution } : {}),
           ...(pending.aspectRatio ? { aspectRatio: pending.aspectRatio } : {}),
           ...(pending.quality ? { quality: pending.quality } : {}),
           ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
         }) ?? undefined;
-      } catch {
-        reclaimCredits = undefined;
-      }
-      ledger.recordGeneration({
-        kind: "image",
-        model: pending.model,
-        resolution: pending.resolution ?? "",
-        aspectRatio: pending.aspectRatio,
-        credits: reclaimCredits,
-        at: Date.now(),
-        productionId: p.meta.id,
-        shotId: shot.id,
-      }, settings.getHiggsfieldCreditUsd());
-      delete shot.pendingImageGen;
+        ledger.recordGeneration({
+          kind: "image",
+          model: pending.model,
+          resolution: pending.resolution ?? "",
+          aspectRatio: pending.aspectRatio,
+          credits: reclaimCredits,
+          at: Date.now(),
+          productionId: p.meta.id,
+          shotId: shot.id,
+        }, settings.getHiggsfieldCreditUsd());
+      } catch { /* billing is best-effort — the reclaim itself succeeded */ }
       emit(`Shot ${shot.number}: frame recovered from the pending generation job.`, "done");
     })
   );
@@ -3092,28 +3175,28 @@ function registerIpc() {
       // The original submit never reached its generation recorder (the wait
       // timed out or the download failed), so the cost was unbilled. Bill it
       // now, once, using the submit-time config kept on the pending record.
-      let reclaimCredits: number | undefined;
+      // The clip is downloaded and recorded: clear the pending record NOW,
+      // before billing, so a billing failure can never strand the shot's
+      // pending tag after a successful reclaim.
+      delete shot.pendingVideoGen;
       try {
-        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+        const reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
           model: pending.model, kind: "video",
           ...(pending.resolution ? { resolution: pending.resolution } : {}),
           ...(pending.durationSec ? { durationSec: pending.durationSec } : {}),
           ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
         }) ?? undefined;
-      } catch {
-        reclaimCredits = undefined;
-      }
-      ledger.recordGeneration({
-        kind: "video",
-        model: pending.model,
-        resolution: pending.resolution ?? "",
-        durationSec: pending.durationSec,
-        credits: reclaimCredits,
-        at: Date.now(),
-        productionId: p.meta.id,
-        shotId: shot.id,
-      }, settings.getHiggsfieldCreditUsd());
-      delete shot.pendingVideoGen;
+        ledger.recordGeneration({
+          kind: "video",
+          model: pending.model,
+          resolution: pending.resolution ?? "",
+          durationSec: pending.durationSec,
+          credits: reclaimCredits,
+          at: Date.now(),
+          productionId: p.meta.id,
+          shotId: shot.id,
+        }, settings.getHiggsfieldCreditUsd());
+      } catch { /* billing is best-effort — the reclaim itself succeeded */ }
       emit(`Shot ${shot.number}: video recovered from the pending generation job.`, "done");
     })
   );
@@ -3155,28 +3238,28 @@ function registerIpc() {
       // The original submit never reached its generation recorder (the wait
       // timed out), so the cost was unbilled. Bill it now, once, using the
       // submit-time resolution/aspect kept on the pending record.
-      let reclaimCredits: number | undefined;
+      // The frame is downloaded and recorded: clear the pending record NOW,
+      // before billing, so a billing failure can never strand the style's
+      // pending tag after a successful reclaim.
+      delete style.pendingImageGen;
       try {
-        reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
+        const reclaimCredits = await mediaFor(pending.model).getGenerationCost?.({
           model: pending.model, kind: "image",
           ...(pending.resolution ? { resolution: pending.resolution } : {}),
           ...(pending.aspectRatio ? { aspectRatio: pending.aspectRatio } : {}),
           ...(pending.quality ? { quality: pending.quality } : {}),
           ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
         }) ?? undefined;
-      } catch {
-        reclaimCredits = undefined;
-      }
-      ledger.recordGeneration({
-        kind: "image",
-        model: pending.model,
-        resolution: pending.resolution ?? "",
-        aspectRatio: pending.aspectRatio,
-        credits: reclaimCredits,
-        at: Date.now(),
-        productionId: p.meta.id,
-      }, settings.getHiggsfieldCreditUsd());
-      delete style.pendingImageGen;
+        ledger.recordGeneration({
+          kind: "image",
+          model: pending.model,
+          resolution: pending.resolution ?? "",
+          aspectRatio: pending.aspectRatio,
+          credits: reclaimCredits,
+          at: Date.now(),
+          productionId: p.meta.id,
+        }, settings.getHiggsfieldCreditUsd());
+      } catch { /* billing is best-effort — the reclaim itself succeeded */ }
       emit(`Style "${style.name || `Style ${style.index}`}": frame recovered from the pending generation job.`, "done");
     })
   );
@@ -3464,7 +3547,14 @@ function registerIpc() {
       const jpg = fs.statSync(assetPath(p, rel));
       const orig = fs.statSync(assetPath(p, originalRel));
       if (orig.mtimeMs <= jpg.mtimeMs) return "up-to-date";
-      return regenerateBoardJpeg(p, originalRel, rel) ? "refreshed" : "missing";
+      if (!regenerateBoardJpeg(p, originalRel, rel)) return "missing";
+      // Consume the watch so the focus sweep doesn't redo this re-encode, and
+      // notify renderers exactly like the sweep does — the storyboard busts
+      // the piped frame's thumbnail now, not on the next window focus.
+      const watch = externalEditWatches.get(assetPath(p, originalRel));
+      if (watch) { watch.mtimeMs = orig.mtimeMs; watch.size = orig.size; }
+      safeSend("board:externalUpdate", { productionId: p.meta.id, jpegRel: rel, originalRel });
+      return "refreshed";
     } catch { return "missing"; }
   });
 
@@ -3566,7 +3656,10 @@ function registerIpc() {
     const aspectRatio: ReferenceImageGenOptions["aspectRatio"] =
       req?.aspectRatio === "1:1" || req?.aspectRatio === "4:3" ? req.aspectRatio : "16:9";
     const provider = mediaFor(modelId);
-    const gen = provider.imageGenFn(p, modelId, resolution, () => {}, aspectRatio);
+    // Provider notices (submission diagnostics, project fallbacks) go to the
+    // production log — discarding them made failed suite downloads
+    // undebuggable from the user's side.
+    const gen = provider.imageGenFn(p, modelId, resolution, (msg) => productionEmit(id, msg), aspectRatio);
     if (!gen) throw new Error(`${provider.displayName} isn't connected (no image-generation tool found), so the suite can't generate in-app.`);
 
     // Edit: the source image is uploaded first (@image1). The source is either
@@ -3648,7 +3741,64 @@ function registerIpc() {
       }
     }
     const params = sanitizeGenParams(req?.params);
-    const buf = await gen(promptText, refs, undefined, params);
+
+    // Pending-job parity with the storyboard: the entry is built up front
+    // (minus its file) so the provider's pending sink can persist the
+    // vendor receipt the moment the job is submitted. If the wait then
+    // outlives the call — or the finished image can't be downloaded — the
+    // entry survives with its receipt and the result is reclaimable via
+    // suite:recheckEntry instead of being paid for twice. (Previously the
+    // suite passed no sink at all, so a timed-out wait orphaned the job.)
+    const entryId = `suite-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const createdAt = new Date().toISOString();
+    const buildEntry = (outputPath: string, pending?: PendingImageGen, error?: string): SuiteEntry => ({
+      id: entryId,
+      parentId: typeof req?.parentId === "string" && req.parentId ? req.parentId : null,
+      kind,
+      createdAt,
+      model: typeof req?.model === "string" ? req.model : "",
+      resolution: resolution ?? req?.resolution ?? "1k",
+      ...(req?.aspectRatio === "1:1" || req?.aspectRatio === "4:3" ? { aspectRatio: req.aspectRatio } : {}),
+      prompt: text,
+      promptRefs: refTagNames(text),
+      outputPath,
+      ...(pending ? { pending } : {}),
+      ...(sourceRef ? { sourceRefId: sourceRef.id } : {}),
+      ...(sourcePath ? { sourcePath } : {}),
+      refIds: Array.isArray(req?.refIds) ? req.refIds.filter((r): r is string => typeof r === "string") : [],
+      ...(style ? { styleId: style.id } : {}),
+      ...(params ? { params: params as GenParams } : {}),
+      ...(typeof req?.quotedCredits === "number" && Number.isFinite(req.quotedCredits) ? { quotedCredits: req.quotedCredits } : {}),
+      ...(error ? { error } : {}),
+    });
+    let lastPending: PendingImageGen | null = null;
+    let pendingPersisted = false;
+    const sink = (rec: PendingImageGen | null): void => {
+      lastPending = rec;
+      if (!rec) return;
+      try {
+        upsertSuiteEntry(id, buildEntry("", rec));
+        pendingPersisted = true;
+      } catch { /* the returned entry is the renderer's fallback */ }
+    };
+
+    let buf: Buffer;
+    try {
+      buf = await gen(promptText, refs, undefined, params, sink);
+    } catch (e) {
+      if (lastPending) {
+        // The job is alive server-side (or its bytes couldn't be fetched):
+        // hand the renderer a pending entry it can Fetch later — never a
+        // dead-end error for a generation the user already paid for.
+        const entry = buildEntry("", lastPending, String(e).replace(/^Error:\s*/, ""));
+        try { upsertSuiteEntry(id, entry); } catch { /* returned entry still reaches the renderer */ }
+        productionEmit(id, `Suite ${kind}: the vendor job outlived the wait — saved as pending; use “Fetch result” in the suite to reclaim it.`, "info");
+        return entry;
+      }
+      // The job died (or never submitted): drop the placeholder receipt.
+      if (pendingPersisted) { try { removeSuiteEntry(id, entryId); } catch { /* best effort */ } }
+      throw e;
+    }
 
     const dir = suiteDirRel(p.assets.outDir);
     fs.mkdirSync(assetPath(p, dir), { recursive: true });
@@ -3656,35 +3806,71 @@ function registerIpc() {
     fs.writeFileSync(assetPath(p, rel), buf);
     productionEmit(id, `Suite ${kind === "edit" ? "edit" : kind === "upscale" ? "upscale" : "generation"} → ${rel}.`, "done");
 
-    const entry: SuiteEntry = {
-      id: `suite-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      parentId: typeof req?.parentId === "string" && req.parentId ? req.parentId : null,
-      kind,
-      createdAt: new Date().toISOString(),
-      model: typeof req?.model === "string" ? req.model : "",
-      resolution: resolution ?? req?.resolution ?? "1k",
-      ...(req?.aspectRatio === "1:1" || req?.aspectRatio === "4:3" ? { aspectRatio: req.aspectRatio } : {}),
-      prompt: text,
-      promptRefs: refTagNames(text),
-      outputPath: rel,
-      ...(sourceRef ? { sourceRefId: sourceRef.id } : {}),
-      ...(sourcePath ? { sourcePath } : {}),
-      refIds: Array.isArray(req?.refIds) ? req.refIds.filter((r): r is string => typeof r === "string") : [],
-      ...(style ? { styleId: style.id } : {}),
-      ...(params ? { params: params as GenParams } : {}),
-      ...(typeof req?.quotedCredits === "number" && Number.isFinite(req.quotedCredits) ? { quotedCredits: req.quotedCredits } : {}),
-    };
+    const entry = buildEntry(rel);
     // Persist the finished entry main-side so the job survives the suite panel
     // unmounting (tab switch) mid-flight: the file is already on disk, and the
     // timeline entry is now durable too — reopening the suite loads it. A
     // persistence failure must not fail the generation itself (the renderer
     // still appends the returned entry to its in-memory session).
     try {
-      appendSuiteEntry(id, entry);
+      upsertSuiteEntry(id, entry);
     } catch {
       /* the renderer-side append is the fallback */
     }
     return entry;
+  });
+
+  // Recheck a suite entry whose vendor job outlived the submit call: re-poll
+  // the receipt and, when the result lands, write the file and complete the
+  // entry in place. Still-rendering returns the entry unchanged; a dead job
+  // clears the receipt and keeps the entry as failed history. Never
+  // resubmits — reclaiming must not spend credits twice.
+  handle("suite:recheckEntry", async (_e, id: string, entryId: string): Promise<SuiteEntry> => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const entry = loadSuiteSession(id).entries.find((e) => e.id === entryId);
+    if (!entry) throw new Error("That suite entry wasn't found.");
+    if (!entry.pending) return entry;
+    const pending = entry.pending;
+    let got: Buffer | null;
+    try {
+      got = await mediaFor(pending.model || entry.model || undefined).recheckPendingImage(pending);
+    } catch (e) {
+      const dead: SuiteEntry = { ...entry, error: String(e).replace(/^Error:\s*/, "") };
+      delete dead.pending;
+      try { upsertSuiteEntry(id, dead); } catch { /* returned entry still reaches the renderer */ }
+      return dead;
+    }
+    if (!got) return entry; // still rendering (or still unfetchable) — Fetch again later
+    const dir = suiteDirRel(p.assets.outDir);
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    const rel = uniqueSuiteRel(dir, suggestSuiteRefName(entry.prompt) || "Suite", imageExtFor(got), (r) => fs.existsSync(assetPath(p, r)));
+    fs.writeFileSync(assetPath(p, rel), got);
+    // The original submit never reached its generation recorder (the wait
+    // timed out), so bill the reclaim once, like a board recheck.
+    try {
+      const credits = await mediaFor(pending.model || entry.model || undefined).getGenerationCost?.({
+        model: pending.model || entry.model, kind: "image",
+        ...(pending.resolution ? { resolution: pending.resolution } : {}),
+        ...(pending.aspectRatio ? { aspectRatio: pending.aspectRatio } : {}),
+        ...(pending.quality ? { quality: pending.quality } : {}),
+        ...(pending.params && Object.keys(pending.params).length ? { params: { ...pending.params } } : {}),
+      }) ?? undefined;
+      ledger.recordGeneration({
+        kind: "image",
+        model: pending.model || entry.model,
+        resolution: pending.resolution ?? entry.resolution,
+        aspectRatio: pending.aspectRatio,
+        credits,
+        at: Date.now(),
+        productionId: id,
+      }, settings.getHiggsfieldCreditUsd());
+    } catch { /* billing is best-effort — the reclaim itself succeeded */ }
+    const done: SuiteEntry = { ...entry, outputPath: rel, error: null };
+    delete done.pending;
+    try { upsertSuiteEntry(id, done); } catch { /* returned entry still reaches the renderer */ }
+    productionEmit(id, `Suite ${entry.kind}: reclaimed the pending generation → ${rel}.`, "done");
+    return done;
   });
 
   // Settings → Models & expenses: probe both vendors and bake every model's
@@ -3697,68 +3883,6 @@ function registerIpc() {
   // in the video-generation dialog). Null when OpenArt isn't connected or the
   // account lookup fails.
   handle("production:openArtCredits", async (): Promise<number | null> => media().getCredits());
-
-  // Step 2: the 3D AI Studio account's remaining credit balance (shown in the
-  // design-page 3D model panel). Null when no key is stored.
-  handle("production:3daiCredits", async (): Promise<number | null> => modelgen.getCredits());
-
-  // Step 2: generate a 3D model via 3D AI Studio (Tencent Hunyuan Pro). The
-  // finished GLB is downloaded into the production's models folder and the
-  // record is appended to prod.models3d. The renderer resolves reference
-  // images / multi-view angles to data URLs before calling.
-  handle("production:generate3dModel", async (_e, id: string, opts: Model3dGenOptions) => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    if (!settings.get3daiApiKey()) throw new Error("Add your 3D AI Studio API key in Settings first.");
-    return runProductionJob(id, "3D model: submitting Tencent Hunyuan Pro generation", async (pq, emit) => {
-      const at = Date.now();
-      const bytes = await modelgen.generate(opts, (status, progress) => {
-        emit(`3D model: ${status}${typeof progress === "number" ? ` (${progress}%)` : ""}…`);
-      });
-      const rel = `${pq.assets.modelsDir}/${modelFileName(opts, at)}`;
-      const abs = assetPath(pq, rel);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, bytes);
-      pq.models3d = [toProductionModel(rel, opts, at), ...(pq.models3d ?? [])];
-      emit(`3D model: saved ${rel}.`, "done");
-    });
-  });
-
-  // Step 2: delete a generated 3D model (removes the .glb file + record).
-  handle("production:delete3dModel", (_e, id: string, modelId: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    const m = (p.models3d ?? []).find((m) => m.id === modelId);
-    if (m) {
-      try {
-        fs.unlinkSync(assetPath(p, m.glbPath));
-      } catch {
-        /* file already gone */
-      }
-      p.models3d = (p.models3d ?? []).filter((x) => x.id !== modelId);
-    }
-    productions.saveProduction(p);
-    return p;
-  });
-
-  // Step 2: copy a generated GLB to a user-chosen location via the native
-  // Save As dialog. Resolves to the saved path, or null when cancelled.
-  handle("production:save3dModel", async (_e, id: string, modelId: string): Promise<string | null> => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    const m = (p.models3d ?? []).find((m) => m.id === modelId);
-    if (!m) throw new Error("Model not found.");
-    const src = assetPath(p, m.glbPath);
-    if (!fs.existsSync(src)) throw new Error("Model file is missing on disk.");
-    const res = await dialog.showSaveDialog(win!, {
-      title: "Save 3D model",
-      defaultPath: path.join(app.getPath("downloads"), path.basename(m.glbPath)),
-      filters: [{ name: "GLB 3D model", extensions: ["glb"] }],
-    });
-    if (res.canceled || !res.filePath) return null;
-    fs.copyFileSync(src, res.filePath);
-    return res.filePath;
-  });
 
   // Step 3 manual workflow: pick generated frames anywhere on disk.
   handle("production:pickBoardImages", async () => {
@@ -4002,6 +4126,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         // Schema-driven extras ride through opaquely; the provider's arg
         // builder drops anything the active model's schema doesn't allow.
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
+        // Classic interface: reference mode — the frame and every @[name]
+        // reference ride the model's reference arrays, never the start/end
+        // frame slots (those belong to the in-betweener). Several Higgsfield
+        // models reject mixing frame slots with reference media outright.
+        refsOnly: true,
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
@@ -4079,14 +4208,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!shot) throw new Error("Shot not found.");
       const nodeId = typeof opts?.nodeId === "string" && opts.nodeId ? opts.nodeId : "vid0";
       const modelChoice = typeof opts?.model === "string" && opts.model.trim() ? opts.model.trim() : "auto";
-      // A Seedance draft submission rides `params.draft`; it maps to the
-      // provider's explicit `draft` flag (forced 480p) and is stripped from the
-      // schema extras so the flag isn't emitted twice. Only the Seedance 2.5
-      // model has this capability — a stale flag on another model is ignored.
-      const draft = isSeedance25Model(modelChoice)
-        && (opts?.params?.draft === true || opts.params?.draft === "true" || opts.params?.draft === "1");
+      // The video node has no draft toggle: a stale persisted `draft` param
+      // (from before its removal) is stripped so it can never submit a
+      // draft — or ride the schema extras as `--draft` — again.
       const paramBag = opts?.params && typeof opts.params === "object" ? { ...opts.params } : undefined;
-      if (paramBag && "draft" in paramBag) delete (paramBag as Record<string, unknown>).draft;
+      if (paramBag) {
+        delete (paramBag as Record<string, unknown>).draft;
+        delete (paramBag as Record<string, unknown>).draft_job_id;
+        delete (paramBag as Record<string, unknown>).draftJobId;
+      }
       const clean: VideoGenOptions = {
         model: modelChoice,
         resolution: typeof opts?.resolution === "string" && opts.resolution.trim() ? opts.resolution.trim() : "1080p",
@@ -4095,7 +4225,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         // Schema-driven extras ride through opaquely; the provider's arg
         // builder drops anything the active model's schema doesn't allow.
         ...(paramBag && Object.keys(paramBag).length ? { params: paramBag } : {}),
-        ...(draft ? { draft: true } : {}),
+        // Video generation node: reference mode — every input rides the
+        // model's reference arrays, never the start/end frame slots (those
+        // belong to the in-betweener). Several Higgsfield models reject
+        // mixing frame slots with reference media outright.
+        refsOnly: true,
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       // Additional references plugged into the video node's open sockets. Both
@@ -4107,11 +4241,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
       clean.onPending = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
       let rel: string;
-      let draftJobId: string | undefined;
       try {
         const res = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
         rel = res.rel;
-        draftJobId = draft ? res.jobId : undefined;
       } catch (e) {
         // Tag the orphaned job so a later Fetch stores the clip on the video
         // generation node (and the output when it feeds it).
@@ -4120,7 +4252,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       // Node-view generation: record on the node only — Frame Output
       // never changes until the user wires this node explicitly.
-      completeVideoGeneration(shot, nodeId, rel, clean.prompt, clean.model, draftJobId, "node");
+      completeVideoGeneration(shot, nodeId, rel, clean.prompt, clean.model, undefined, "node");
       emit(`Shot ${shot.number}: node video ready.`, "done");
     })
   );
@@ -4533,6 +4665,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         durationSec: tweenClampGap(Number(opts?.durationSec) > 0 ? Number(opts.durationSec) : block.durationSec),
         prompt,
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
+        // In-betweener: ALWAYS start/end frame mode (the frameRefs pair
+        // below) — never the reference arrays the generation surfaces use.
+        refsOnly: false,
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
       clean.onPending = pendingVideoSink(id, shotId, { kind: "tween", blockId });
@@ -4945,9 +5080,18 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   handle("modelCustomizer:refresh", (_e, providerId?: string) => {
     if (providerId) {
       providers[resolveProviderId(providerId)].refreshProbes?.();
-      return;
+    } else {
+      for (const pid of PROVIDER_IDS) providers[pid].refreshProbes?.();
     }
-    for (const pid of PROVIDER_IDS) providers[pid].refreshProbes?.();
+    // Tell EVERY window to reload its model lists: the renderer's DOM
+    // event only reaches the window that clicked Refresh, so a detached
+    // canvas window would keep serving the pre-refresh catalog (newly
+    // listed models invisible there) until it remounted.
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        if (!w.isDestroyed()) w.webContents.send("media:modelsChanged");
+      } catch { /* a destroyed window must not break the broadcast */ }
+    }
   });
 
   // Higgsfield credit value ($/credit) for the Expenses total. Saving

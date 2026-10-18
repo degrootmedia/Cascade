@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type { McpManager } from "../mcp.js";
 import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "../pipeline.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
 import type { MediaProvider, ProviderEmit } from "./types.js";
 import { uploadDataUrlReference } from "../openart-upload.js";
 import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
@@ -222,10 +223,14 @@ export function videoRefsAssign(
   opts?: { frames?: boolean; refsOnly?: boolean }
 ): Record<string, unknown> | null {
   if (!refs.length) return null;
+  // Reference mode (every generation surface): the array field only. A
+  // form with NO reference array falls through to a lone start-frame
+  // binding below — never start slot + array together.
+  let startOnlyFallback = false;
   if (opts?.refsOnly === true) {
     const refKey = referenceArrayKey(props);
     if (refKey) return { [refKey]: refs };
-    return null;
+    startOnlyFallback = true;
   }
   const keys = Object.keys(props);
   const fillObject = (ref: Record<string, unknown>, properties: Record<string, unknown>): Record<string, unknown> => {
@@ -273,6 +278,7 @@ export function videoRefsAssign(
       endFilled = true;
     }
   }
+  if (startOnlyFallback) return Object.keys(out).length ? out : null;
   if (opts?.frames === true && Object.keys(out).length && (refs.length < 2 || endFilled)) return out;
   // Pass 2: array-style reference fields — every ref (the source frame plus
   // extras) so positional citation stays aligned and video clips upload. The
@@ -803,16 +809,10 @@ private videoRefsAssign = videoRefsAssign;
     return text.match(/"historyId"\s*:\s*"([^"]+)"/)?.[1] ?? null;
   }
 
-  /** One attempt to fetch an image from a URL/as-image Buffer; null if not an image. */
-  private async fetchImageBuffer(url: string): Promise<Buffer | null> {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const buf = Buffer.from(await res.arrayBuffer());
-      return buf.length ? buf : null;
-    } catch {
-      return null;
-    }
+  /** Fetch result bytes via the shared failsafe downloader (retries,
+   *  timeout, error-page rejection); null when not fetchable yet. */
+  private async fetchImageBuffer(url: string, kind: "image" | "video" = "image"): Promise<Buffer | null> {
+    return (await tryDownloadBytes([url], { attempts: 3, kind }))?.buf ?? null;
   }
 
   /** The finished media bytes out of one creation poll reply, or null when the
@@ -833,15 +833,19 @@ private videoRefsAssign = videoRefsAssign;
     if (status && !OPENART_JOB_DONE_RX.test(status) && !/FAILED|CANCELLED/i.test(status)) return null;
     const urls = openArtCreationResultUrls(res.text, video).filter((u) => !exclude?.urls.has(u));
     if (urls.length) {
-      const buf = await this.fetchImageBuffer(urls[0]);
-      if (buf && !this.isExcludedInput(buf, exclude)) return { buf, url: urls[0] };
+      // Try EVERY result URL (one attempt each per poll — the poll loop is
+      // the outer retry): a dead first CDN URL must not strand a finished
+      // job whose bytes another URL can serve.
+      const got = await tryDownloadBytes(urls, { attempts: 1, timeoutMs: 20_000, kind: video ? "video" : "image" });
+      const buf = got?.buf ?? null;
+      if (buf && !this.isExcludedInput(buf, exclude)) return { buf, url: got!.url };
     }
     const image = this.pickResultImage(res.images, exclude);
     if (image) return { buf: image };
     const direct = (video ? res.text.match(VIDEO_URL_RX)?.[0] : res.text.match(IMAGE_URL_RX)?.[0])
       ?? res.uris.find((u) => (video ? VIDEO_URI_EXT_RX : IMAGE_URI_EXT_RX).test(u));
     if (!direct || exclude?.urls.has(direct)) return null;
-    const buf = await this.fetchImageBuffer(direct);
+    const buf = (await tryDownloadBytes([direct], { attempts: 1, timeoutMs: 20_000, kind: video ? "video" : "image" }))?.buf ?? null;
     return buf && !this.isExcludedInput(buf, exclude) ? { buf, url: direct } : null;
   }
 
@@ -1030,7 +1034,7 @@ private videoRefsAssign = videoRefsAssign;
       }
     }
     if (rec.url) {
-      const buf = await this.fetchImageBuffer(rec.url);
+      const buf = await this.fetchImageBuffer(rec.url, "video");
       return buf ? { buf, ext: this.videoExtFromUrl(rec.url) } : null;
     }
     return null;
@@ -1328,21 +1332,19 @@ private videoRefsAssign = videoRefsAssign;
       // Some MCP image tools return text containing a URL to the result. Read
       // the result fields only (never the echoed reference URLs).
       if (!buffer) {
-        const url =
-          openArtCreationResultUrls(text, false).find((u) => !exclude?.urls.has(u)) ??
-          text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
-        if (!url) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
+        const urls = openArtCreationResultUrls(text, false).filter((u) => !exclude?.urls.has(u));
+        const fallbackUrl = text.match(/https:\/\/[^\s"')\]}>]+/)?.[0];
+        if (fallbackUrl && !urls.includes(fallbackUrl) && !exclude?.urls.has(fallbackUrl)) urls.push(fallbackUrl);
+        if (!urls.length) throw new Error(`OpenArt returned no image (${text.slice(0, 120) || "empty reply"})`);
         let downloaded: Buffer;
         try {
-          const res = await fetch(url);
-          if (!res.ok) throw new Error(`Couldn't download the generated image (HTTP ${res.status})`);
-          downloaded = Buffer.from(await res.arrayBuffer());
+          downloaded = (await downloadBytes(urls, { attempts: 3, kind: "image" })).buf;
         } catch (e) {
           // The image is ready but couldn't be fetched — record the URL so a
           // recheck can retry the download without regenerating. The input
           // identity rides along so a later historyId recheck (or an echo
           // check) can still tell input from output.
-          recordPending({ url, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
+          recordPending({ url: e instanceof DownloadError && e.url ? e.url : urls[0], prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
           throw e;
         }
         if (this.isExcludedInput(downloaded, exclude)) {

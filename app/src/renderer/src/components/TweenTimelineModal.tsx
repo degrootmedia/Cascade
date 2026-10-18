@@ -119,7 +119,16 @@ export function tweenSupportsDuration(
   opts: VideoModelOptions | null | undefined,
   durationSec: number
 ): boolean {
-  if (!opts || !Array.isArray(opts.durations) || opts.durations.length === 0) return true;
+  if (!opts) return true;
+  // Open-integer duration: any whole-second length inside the published
+  // bounds (unbounded sides always pass).
+  if ((!Array.isArray(opts.durations) || opts.durations.length === 0) && opts.durationRange) {
+    const n = Math.round(durationSec);
+    if (typeof opts.durationRange.min === "number" && n < opts.durationRange.min) return false;
+    if (typeof opts.durationRange.max === "number" && n > opts.durationRange.max) return false;
+    return true;
+  }
+  if (!Array.isArray(opts.durations) || opts.durations.length === 0) return true;
   return opts.durations.includes(Math.round(durationSec));
 }
 

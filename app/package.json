@@ -15,7 +15,6 @@
     "package": "electron-vite build && electron-builder --win nsis"
   },
   "dependencies": {
-    "@google/model-viewer": "^4.3.1",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "@xyflow/react": "^12.11.5",
     "dompurify": "^3.1.0",
@@ -23,8 +22,7 @@
     "mammoth": "^1.12.1",
     "marked": "^14.1.0",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^2.4.5",
-    "three": "^0.183.2"
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
     "@electron/fuses": "^1.8.0",

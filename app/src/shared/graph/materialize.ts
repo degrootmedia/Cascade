@@ -163,6 +163,15 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
       addNode(id, "ref", ref?.name ?? m[1]);
     }
   }
+  // The output-piped reference gets a node even when untagged and
+  // unplaced: the pipe names it by id, and without a node its e-ref-out
+  // edge below would be skipped (a directly piped video reference — never
+  // cited in the image prompt — is the usual case). Generation-source refs
+  // keep the tagged-or-placed rule above.
+  if (shot.graphOutputSource === "ref" && shot.graphOutputRefId) {
+    const ref = refs.find((r) => r.id === shot.graphOutputRefId);
+    if (ref) addNode(`ref:${ref.id}`, "ref", ref.name);
+  }
   const hasRefNode = (refId: string): boolean => nodeIds.has(`ref:${refId}`);
 
   // Structural nodes (always on canvas).

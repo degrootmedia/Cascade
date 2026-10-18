@@ -20,3 +20,27 @@ export function isFresh(incomingRev: number, currentRev: number): boolean {
 export function revOf(prod: { rev?: unknown }): number {
   return typeof prod.rev === "number" && Number.isFinite(prod.rev) ? prod.rev : 0;
 }
+
+/**
+ * Whether an IPC failure is the stale-revision conflict a gated structural
+ * command (`deleteShot`, `reorderShot`, …) raises when the document moved
+ * past the caller's base revision. A renderer receives Electron's wrapped
+ * form ("Error invoking remote method '…': Error: Stale edit: …"), so this
+ * matches the marker anywhere in the message — a `startsWith` check against
+ * the cleaned message never fires and the refresh-and-retry recovery is dead.
+ */
+export function isStaleRevisionError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  return msg.includes("Stale edit:");
+}
+
+/**
+ * Adopt the revision a whole-document save stamped on disk onto the local
+ * optimistic snapshot. The save returns the persisted document (rev bumped),
+ * but wholesale-applying it would clobber optimistic edits made while the
+ * save was in flight — so only the rev moves, and only forward. Returns the
+ * same object when the saved revision is not newer (no re-render needed).
+ */
+export function applySavedRevision<T extends { rev?: number }>(current: T, savedRev: number): T {
+  return savedRev > revOf(current) ? { ...current, rev: savedRev } : current;
+}

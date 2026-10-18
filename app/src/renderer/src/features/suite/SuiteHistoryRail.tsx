@@ -64,7 +64,9 @@ export function SuiteHistoryRail({
                 }}
                 title={`${entry.kind === "edit" ? "Edit" : entry.kind === "upscale" ? "Upscale" : "Generate"} · ${entry.model || "auto"} · ${entry.resolution}`}
               >
-                {entry.error ? (
+                {entry.pending ? (
+                  <span className="suite-spinner" aria-label="Still rendering" />
+                ) : entry.error ? (
                   <span className="suite-rail-err" aria-hidden="true">!</span>
                 ) : (
                   <img src={`${cascadeMedia(prodId, entry.outputPath)}?thumb=1`} alt="" loading="lazy" decoding="async" />

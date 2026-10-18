@@ -203,16 +203,31 @@ function baseHandler(extra: Record<string, Handler> = {}): Handler {
   };
 }
 
+/** Live `model get seedance_2_5` shape (probed 2026-10-16): `params`
+ *  vocabulary, duration is an OPEN integer (no enum, no min/max — the
+ *  server enforces its own bounds), media slots are params, no medias. */
 const seedance25Get = () =>
   JSON.stringify({
-    aspect_ratios: ["auto", "16:9", "9:16"],
-    parameters: [
-      { name: "duration", options: [4, 8, 12], default: 4 },
-      { name: "resolution", options: ["480p", "720p", "1080p"], default: "720p" },
-      { name: "mode", options: ["t2v", "omni_reference"], default: "t2v" },
-      { name: "prompt", options: [] },
+    display_name: "Seedance 2.5",
+    job_type: "seedance_2_5",
+    type: "video",
+    params: [
+      { name: "aspect_ratio", type: "string", default: "16:9", required: false, enum: ["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] },
+      { name: "audio_references", type: "array", default: null, required: false },
+      { name: "bitrate_mode", type: "string", default: "standard", required: false, enum: ["standard", "high"] },
+      { name: "draft", type: "boolean", default: false, required: false },
+      { name: "draft_job_id", type: "string|null", default: null, required: false },
+      { name: "duration", type: "integer", default: 5, required: false },
+      { name: "end_image", type: "object|null", default: null, required: false },
+      { name: "extension_mode", type: "string|null", default: null, required: false, enum: ["backward", "forward"] },
+      { name: "generate_audio", type: "boolean", default: true, required: false },
+      { name: "image_references", type: "array", default: null, required: false },
+      { name: "mode", type: "string", default: "t2v", required: false, enum: ["t2v", "omni_reference", "video_edit", "video_extension"] },
+      { name: "prompt", type: "string", default: null, required: true },
+      { name: "resolution", type: "string", default: "720p", required: false, enum: ["480p", "720p", "1080p"] },
+      { name: "start_image", type: "object|null", default: null, required: false },
+      { name: "video_references", type: "array", default: null, required: false },
     ],
-    medias: [{ roles: ["start_image", "end_image"] }, { roles: ["image_references"] }, { roles: ["video_references"] }],
   });
 
 function provider(run: CliRun, binary: string | null = "higgsfield"): HiggsfieldCliProvider {
@@ -308,6 +323,77 @@ describe("HiggsfieldCliProvider.listModelChoices", () => {
   });
 });
 
+describe("HiggsfieldCliProvider catalog caching", () => {
+  it("does not cache a failed list fetch — the next call retries and surfaces new models", async () => {
+    // Regression: a failed `model list` was cached as an EMPTY list for
+    // the whole TTL, so one congested minute hid the catalog (including
+    // brand-new models like nano_banana_2_1) long after the vendor
+    // recovered — Refresh probe then appeared to do nothing.
+    let imageCalls = 0;
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --image": () => {
+          imageCalls++;
+          return imageCalls === 1
+            ? fail("Error: timed out")
+            : ok(JSON.stringify([{ job_type: "nano_banana_2_1", display_name: "Nano Banana 2.1", type: "image" }]));
+        },
+      })
+    );
+    const p = provider(run);
+    const first = await p.listModelChoices();
+    expect(first.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2_1`)).toBe(false);
+    const second = await p.listModelChoices();
+    expect(second.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2_1`)).toBe(true);
+    expect(imageCalls).toBe(2);
+  });
+
+  it("retries after a failed refresh instead of caching the outage", async () => {
+    let down = false;
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --image": () =>
+          down ? fail("Error: timed out") : ok(JSON.stringify([{ job_type: "m1", name: "M1" }])),
+      })
+    );
+    const p = provider(run);
+    await p.listModelChoices();
+    p.refreshProbes();
+    down = true;
+    const during = await p.listModelChoices();
+    expect(during.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}m1`)).toBe(false);
+    down = false;
+    const after = await p.listModelChoices();
+    expect(after.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}m1`)).toBe(true);
+  });
+
+  it("does not cache an empty/garbled list reply — the next call retries and surfaces new models", async () => {
+    // A reply that exits 0 but parses to zero items (truncated/garbled
+    // stdout) is a failed fetch, not an empty catalog: caching it hid
+    // brand-new models (nano_banana_2_1) for the full TTL even though
+    // Refresh appeared to run.
+    let imageCalls = 0;
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --image": () => {
+          imageCalls++;
+          return imageCalls === 1
+            ? ok("[]")
+            : ok(JSON.stringify([{ job_type: "nano_banana_2_1", display_name: "Nano Banana 2.1", type: "image" }]));
+        },
+      })
+    );
+    const p = provider(run);
+    const first = await p.listModelChoices();
+    expect(first.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2_1`)).toBe(false);
+    const second = await p.listModelChoices();
+    expect(second.some((c) => c.id === `${HIGGSFIELD_CLI_ID_PREFIX}nano_banana_2_1`)).toBe(true);
+    // One shared fetch per listModelChoices call (concurrent callers
+    // dedupe onto a single in-flight pair of CLI spawns).
+    expect(imageCalls).toBe(2);
+  });
+});
+
 describe("HiggsfieldCliProvider.getCredits", () => {
   it("reads the signed-in account's credit balance", async () => {
     const { run } = fakeRun(baseHandler());
@@ -327,12 +413,37 @@ describe("HiggsfieldCliProvider.videoModelOptions", () => {
     // Live seedance_2_0: closed resolution enum, open integer duration.
     const first = await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, true);
     expect(first).toMatchObject({ resolutions: ["480p", "720p", "1080p", "4k"], durations: [] });
+    // Open integer duration → an open durationRange, not a closed empty list.
+    expect(first!.durationRange).toEqual({});
     expect(first!.aspectRatios).toEqual(["auto", "16:9", "9:16"]);
     await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, true);
     expect(calls.filter((a) => a[0] === "model" && a[1] === "get").length).toBe(1); // cached
     // Closed string duration enums parse to numbers.
     const lite = await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}veo3_1_lite`, true);
     expect(lite).toMatchObject({ resolutions: ["720p"], durations: [4, 6, 8] });
+    expect(lite!.durationRange).toBeUndefined();
+    // Live seedance_2_5: open integer duration like seedance_2_0.
+    const s25 = await p.videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, true);
+    expect(s25).toMatchObject({ resolutions: ["480p", "720p", "1080p"], durations: [] });
+    expect(s25!.durationRange).toEqual({});
+  });
+
+  it("carries declared min/max bounds into durationRange for an open-integer model", async () => {
+    const { run } = fakeRun(baseHandler({
+      "model get bounded_1": () => ok(JSON.stringify({
+        display_name: "Bounded",
+        job_type: "bounded_1",
+        type: "video",
+        params: [
+          { name: "duration", type: "integer", default: 5, required: false, min: 3, max: 12 },
+          { name: "resolution", type: "string", default: "720p", required: false, enum: ["720p"] },
+          { name: "start_image", type: "object|null", default: null, required: false },
+        ],
+      })),
+    }));
+    const o = await provider(run).videoModelOptions(`${HIGGSFIELD_CLI_ID_PREFIX}bounded_1`, true);
+    expect(o).toMatchObject({ resolutions: ["720p"], durations: [] });
+    expect(o!.durationRange).toEqual({ min: 3, max: 12 });
   });
 
   it("returns null for foreign ids and unknown models", async () => {
@@ -845,7 +956,10 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     const args = seen[0];
     expect(args[args.indexOf("--start-image") + 1]).toMatch(/\.png$/);
     expect(args[args.indexOf("--end-image") + 1]).toMatch(/\.png$/);
-    expect(args).toContain("--image-references");
+    // In-between mode is start/end ONLY: the extra reference never rides a
+    // reference array alongside the frame slots (models reject the mix).
+    expect(args).not.toContain("--image-references");
+    expect(args).not.toContain("--video-references");
     expect(args[args.indexOf("--duration") + 1]).toBe("8");
     expect(args[args.indexOf("--resolution") + 1]).toBe("720p");
     expect(onGeneration).toHaveBeenCalledWith({
@@ -898,6 +1012,70 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     // The returned job id is what a later finalize needs.
     expect(res.jobId).toBe(jobId);
     expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({ kind: "video", resolution: "480p" }));
+  });
+
+  it("translates the vendor's bare 'Not found' draft rejection into an actionable error", async () => {
+    // Live behavior (2026-10-16): `draft: true` is advertised in the
+    // seedance_2_5 schema but the API answers "Error: Not found" wherever
+    // Draft Mode isn't enabled (region-restricted — not offered in the US),
+    // while the identical request without `draft` prices/submits fine.
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_5": () => fail("Error: Not found"),
+      })
+    );
+    const p = provider(run);
+    const prod = prodDir("prod-draft-404");
+    const s = shot();
+    await expect(p.generateVideoClip(
+      prod,
+      s,
+      { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, resolution: "1080p", durationSec: 6, prompt: "animate", draft: true },
+      () => {}
+    )).rejects.toThrow(/Draft Mode isn't available/);
+    // Nothing was submitted — no pending record to reclaim.
+    expect(s.pendingVideoGen).toBeUndefined();
+  });
+
+  it("reports live status between wait slices instead of going silent for the whole wait", async () => {
+    // A slow vendor queue: the first `generate wait` slice elapses with the
+    // job still queued (exit 3, "timed out waiting … (last status
+    // \"queued\")" — verified against the live CLI), the next slice lands
+    // it. The caller must hear "queued" as progress, not silence/failure.
+    const jobId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    let waits = 0;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": () => ok(JSON.stringify({ job_id: jobId })),
+        [`generate wait ${jobId}`]: () => {
+          waits++;
+          return waits === 1
+            ? fail(`Error: timed out waiting for job ${jobId} (last status "queued")`)
+            : ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/out.mp4" }]));
+        },
+      })
+    );
+    const p = provider(run);
+    const prod = prodDir("prod-sliced-wait");
+    const emits: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      arrayBuffer: async () => Uint8Array.from([9]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      const res = await p.generateVideoClip(
+        prod,
+        shot(),
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 8, prompt: "animate" },
+        (m) => emits.push(String(m))
+      );
+      expect(res.rel).toMatch(/\.mp4$/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(waits).toBe(2);
+    expect(emits.some((m) => /video queued/i.test(m))).toBe(true);
   });
 
   it("finalizes a draft via --draft-job-id with no prompt or references", async () => {
@@ -1005,8 +1183,11 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
       globalThis.fetch = realFetch;
     }
     const args = seen[0];
-    // seedance_2_5 carries media only in omni_reference mode (t2v takes none).
-    expect(args).toContain("--start-image");
+    // Generation surfaces use reference mode: the source frame rides the
+    // reference array, never the start slot. seedance_2_5 carries media
+    // only in omni_reference mode (t2v takes none).
+    expect(args).not.toContain("--start-image");
+    expect(args).toContain("--image-references");
     expect(args).toContain("--mode");
     expect(args[args.indexOf("--mode") + 1]).toBe("omni_reference");
   });
@@ -1028,8 +1209,87 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     expect(submitted).toBe(false);
   });
 
-  it("sends a tween end frame through the reference array on models without an end slot", async () => {    const seen: string[][] = [];
-    const jobId = "44444444-5555-6666-7777-888888888888";
+  it("fails loudly when a tween model has no end slot (never falls back to the reference array)", async () => {
+    let submitted = false;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create veo3": () => {
+          submitted = true;
+          return ok(JSON.stringify({ job_id: "x" }));
+        },
+      })
+    );
+    // veo3 declares only the legacy `image` role — in-betweening needs a
+    // real end-image slot, and routing the end frame through a reference
+    // array alongside the start slot is exactly the mix vendors reject.
+    await expect(
+      provider(run).generateVideoClip(prodDir("prod-veo"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}veo3`, resolution: "", durationSec: 5, prompt: "animate",
+      }, () => {}, undefined, undefined, {
+        start: { name: "A", dataUrl: "data:image/png;base64,QQ==" },
+        end: { name: "B", dataUrl: "data:image/png;base64,Qg==" },
+      })
+    ).rejects.toThrow(/doesn't accept an end frame/);
+    expect(submitted).toBe(false);
+  });
+
+  it("never mixes frame slots with reference media on generation surfaces (minimax_h3 / wan shape)", async () => {
+    const seen: string[][] = [];
+    const jobId = "12121212-3434-5656-7878-909090909090";
+    const minimaxGet = JSON.stringify({
+      display_name: "MiniMax H3",
+      job_type: "minimax_h3",
+      type: "video",
+      params: [
+        { name: "duration", type: "integer", default: 5, required: false },
+        { name: "resolution", type: "string", default: "768P", required: false, enum: ["768P", "1080P"] },
+        { name: "start_image", type: "object|null", default: null, required: false },
+        { name: "end_image", type: "object|null", default: null, required: false },
+        { name: "image_references", type: "array", default: null, required: false },
+        { name: "video_references", type: "array", default: null, required: false },
+        { name: "audio_references", type: "array", default: null, required: false },
+        { name: "prompt", type: "string", default: null, required: true },
+      ],
+    });
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --video": () => ok(JSON.stringify([{ job_type: "minimax_h3", name: "MiniMax H3" }])),
+        "model get minimax_h3": () => ok(minimaxGet),
+        "generate create minimax_h3": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/mm.mp4" }])),
+      })
+    );
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([9]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      // Video-node/classic shape: source frame + wired image/video refs.
+      await provider(run).generateVideoClip(prodDir("prod-mm"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}minimax_h3`, resolution: "768P", durationSec: 5, prompt: "animate",
+        refsOnly: true,
+      }, () => {}, undefined, [
+        { name: "Extra", dataUrl: "data:image/png;base64,RXh0cmE=" },
+        { name: "Clip", dataUrl: "data:video/mp4;base64,AAAA" },
+      ]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args).not.toContain("--start-image");
+    expect(args).not.toContain("--end-image");
+    expect(args.filter((a) => a === "--image-references")).toHaveLength(2);
+    expect(args.filter((a) => a === "--video-references")).toHaveLength(1);
+  });
+
+  it("falls back to a lone start frame on start-only models and fails loudly with extra refs", async () => {
+    const seen: string[][] = [];
+    const jobId = "23232323-4545-6767-8989-010101010101";
     const { run } = fakeRun(
       baseHandler({
         "generate create veo3": (args) => {
@@ -1046,21 +1306,28 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
       arrayBuffer: async () => Uint8Array.from([3]).buffer as ArrayBuffer,
     }) as unknown as typeof fetch;
     try {
-      await provider(run).generateVideoClip(prodDir("prod-veo"), shot(), {
+      // veo3 declares only the legacy `image` slot: a single source frame
+      // rides it alone (nothing to mix), with no reference flags at all.
+      await provider(run).generateVideoClip(prodDir("prod-veo-single"), shot(), {
         model: `${HIGGSFIELD_CLI_ID_PREFIX}veo3`, resolution: "", durationSec: 5, prompt: "animate",
-      }, () => {}, undefined, undefined, {
-        start: { name: "A", dataUrl: "data:image/png;base64,QQ==" },
-        end: { name: "B", dataUrl: "data:image/png;base64,Qg==" },
-      });
+        refsOnly: true,
+      }, () => {});
+      const args = seen[0];
+      expect(args).toContain("--image");
+      expect(args).not.toContain("--image-references");
+      expect(args).not.toContain("--start-image");
+      // Extra references have no array to ride — fail before submitting
+      // instead of mixing them beside the start slot.
+      await expect(
+        provider(run).generateVideoClip(prodDir("prod-veo-extra"), shot(), {
+          model: `${HIGGSFIELD_CLI_ID_PREFIX}veo3`, resolution: "", durationSec: 5, prompt: "animate",
+          refsOnly: true,
+        }, () => {}, undefined, [{ name: "Extra", dataUrl: "data:image/png;base64,RXh0cmE=" }])
+      ).rejects.toThrow(/no reference array/);
+      expect(seen).toHaveLength(1);
     } finally {
       globalThis.fetch = realFetch;
     }
-    const args = seen[0];
-    // veo3 declares only the legacy `image` role: start rides --image, the
-    // end frame falls back to the reference array, never --end-image.
-    expect(args).toContain("--image");
-    expect(args).toContain("--image-references");
-    expect(args).not.toContain("--end-image");
   });
 
   it("routes video refs through the 720p downscale into --video-references", async () => {

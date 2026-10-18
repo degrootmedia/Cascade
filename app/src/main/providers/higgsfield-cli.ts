@@ -40,6 +40,7 @@ import {
   type CliRun,
   type CliRunResult,
 } from "./cli-run.js";
+import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
 import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
 import {
   dataUrlToBytes,
@@ -140,6 +141,11 @@ const IMAGE_RECHECK_TIMEOUT_MS = 60_000;
 const VIDEO_WAIT_TIMEOUT_MS = 20 * 60_000;
 const VIDEO_RECHECK_TIMEOUT_MS = 60_000;
 const WAIT_INTERVAL_S = 5;
+/** One `generate wait` slice. The full budget is waited in slices so live
+ *  job status can be reported between them — a single blocking wait emits
+ *  nothing for up to 20 minutes, which looks exactly like a frozen app
+ *  when the vendor queue is slow. */
+const WAIT_SLICE_MS = 30_000;
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -821,7 +827,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
   readonly id = "higgsfield-cli" as const;
   readonly displayName = "Higgsfield CLI";
 
-  private listCache: { at: number; image: CliListItem[]; video: CliListItem[] } | null = null;
+  private listCache: { image?: { at: number; items: CliListItem[] }; video?: { at: number; items: CliListItem[] } } | null = null;
   private detailCache = new Map<string, { at: number; detail: CliModelDetail | null }>();
   /** Normalized per-model schemas (TTL + LRU cap). Last-good entries are
    *  kept past expiry so a transient `model get` failure degrades to
@@ -918,19 +924,51 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
   // ---- catalog --------------------------------------------------------------------
 
+  /** In-flight catalog fetch, shared by concurrent callers so a burst of
+   *  model-list consumers spawns ONE pair of CLI processes, not a pair
+   *  per caller (concurrent `hf` invocations can fail each other). */
+  private listFetch: Promise<void> | null = null;
+
   private async listRaw(kind: "image" | "video"): Promise<CliListItem[]> {
-    const now = Date.now();
-    if (this.listCache && now - this.listCache.at < CATALOG_TTL_MS) {
-      return kind === "image" ? this.listCache.image : this.listCache.video;
-    }
-    // The --image/--video filters classify reliably, so the item shape only
-    // needs id + display fields (no media-type sniffing).
-    const [image, video] = await Promise.all([
-      this.json(["model", "list", "--image"]).then(parseCliList, () => [] as CliListItem[]),
-      this.json(["model", "list", "--video"]).then(parseCliList, () => [] as CliListItem[]),
-    ]);
-    this.listCache = { at: now, image, video };
-    return kind === "image" ? image : video;
+    const hit = this.listCache?.[kind];
+    if (hit && Date.now() - hit.at < CATALOG_TTL_MS) return hit.items;
+    await this.fetchLists();
+    return this.listCache?.[kind]?.items ?? [];
+  }
+
+  private fetchLists(): Promise<void> {
+    if (this.listFetch) return this.listFetch;
+    const run = (async () => {
+      // The --image/--video filters classify reliably, so the item shape
+      // only needs id + display fields (no media-type sniffing). Both
+      // kinds fetch together, but each is cached ONLY on success:
+      // caching a failed fetch as an empty list once hid a provider's
+      // whole catalog (including brand-new models) for the full TTL
+      // after one congested minute. An EMPTY parse is a failure too —
+      // a signed-in catalog is never legitimately empty, so a garbled
+      // or truncated reply must not be cached as "no models". A failed
+      // kind falls back to its stale list and retries next call.
+      const fetchKind = async (flag: string): Promise<CliListItem[] | null> => {
+        try {
+          const items = parseCliList(await this.json(["model", "list", flag], 120_000));
+          return items.length ? items : null;
+        } catch {
+          return null;
+        }
+      };
+      const [image, video] = await Promise.all([fetchKind("--image"), fetchKind("--video")]);
+      const at = Date.now();
+      const next: { image?: { at: number; items: CliListItem[] }; video?: { at: number; items: CliListItem[] } } = { ...(this.listCache ?? {}) };
+      if (image) next.image = { at, items: image };
+      if (video) next.video = { at, items: video };
+      this.listCache = next;
+    })();
+    let tracked: Promise<void>;
+    tracked = run.finally(() => {
+      if (this.listFetch === tracked) this.listFetch = null;
+    });
+    this.listFetch = tracked;
+    return tracked;
   }
 
   private shapeChoices(items: CliListItem[], kind: "image" | "video"): OpenArtModelChoice[] {
@@ -1255,6 +1293,19 @@ export class HiggsfieldCliProvider implements MediaProvider {
     }
     const durParam = HiggsfieldCliProvider.param(detail, "duration", "length", "seconds");
     out.durations.push(...HiggsfieldCliProvider.numericOptions(durParam));
+    // An open-integer duration (a duration param with no closed value set —
+    // e.g. Seedance accepts any integer seconds) is an open range, not an
+    // empty closed list: report it so the UI expands the range into a
+    // per-second dropdown
+    // instead of a hardcoded ladder. Declared bounds ride along when the
+    // CLI publishes them; submit already passes any integer through.
+    if (durParam && durParam.values.length === 0) {
+      out.durationRange = {
+        ...(typeof durParam.min === "number" ? { min: durParam.min } : {}),
+        ...(typeof durParam.max === "number" ? { max: durParam.max } : {}),
+        ...(typeof durParam.step === "number" ? { step: durParam.step } : {}),
+      };
+    }
     out.resolutions = Array.from(new Set(out.resolutions));
     out.durations = Array.from(new Set(out.durations)).sort((a, b) => a - b);
     // Extended surface: aspect ratios + advanced params, projected from the
@@ -1395,16 +1446,10 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return { name: label, dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
   }
 
-  /** One attempt to fetch bytes from a URL; null when not fetchable. */
-  private async fetchBytes(url: string): Promise<Buffer | null> {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const buf = Buffer.from(await res.arrayBuffer());
-      return buf.length ? buf : null;
-    } catch {
-      return null;
-    }
+  /** Fetch result bytes via the shared failsafe downloader (retries,
+   *  timeout, error-page rejection); null when not fetchable yet. */
+  private async fetchBytes(url: string, kind: "image" | "video" = "image"): Promise<Buffer | null> {
+    return (await tryDownloadBytes([url], { attempts: 3, kind }))?.buf ?? null;
   }
 
   /**
@@ -1428,16 +1473,36 @@ export class HiggsfieldCliProvider implements MediaProvider {
         `The Higgsfield CLI returned no job id (${createOut.slice(0, 200) || "empty reply"}) — the submission may not have gone through and no credits should have been spent.`
       );
     }
-    let waitOut: string;
-    try {
-      waitOut = await this.cli(
-        ["generate", "wait", jobId, "--timeout", `${Math.round(timeoutMs / 60000)}m`, "--interval", `${WAIT_INTERVAL_S}s`],
-        timeoutMs + 60_000
-      );
-    } catch (e) {
-      // `generate wait` exits non-zero on a terminal failure — ask the job for
-      // its status + vendor reason so the caller sees why, not just "failed".
-      throw new Error(await this.describeJobFailure(jobId, e));
+    // Wait in short slices, reporting the live job status between them.
+    // A slice that elapses with the job unfinished exits non-zero with
+    // `timed out waiting … (last status "queued")` — that's progress, not
+    // failure, so slice again until the overall deadline. A wait that
+    // RETURNS (terminal, or an early non-terminal progress print) exits
+    // the loop into the status handling below, exactly as the single
+    // long wait used to.
+    const deadline = Date.now() + timeoutMs;
+    let waitOut = "";
+    for (;;) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      const sliceMs = Math.min(remainingMs, WAIT_SLICE_MS);
+      try {
+        waitOut = await this.cli(
+          ["generate", "wait", jobId, "--timeout", `${Math.max(1, Math.round(sliceMs / 1000))}s`, "--interval", `${WAIT_INTERVAL_S}s`],
+          sliceMs + 60_000
+        );
+        break;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "";
+        if (!/timed out waiting/i.test(msg)) {
+          // `generate wait` exits non-zero on a terminal failure — ask the
+          // job for its status + vendor reason so the caller sees why.
+          throw new Error(await this.describeJobFailure(jobId, e));
+        }
+        const last = msg.match(/last status "([^"]+)"/i)?.[1];
+        if (last) onStatus?.(last);
+        if (Date.now() >= deadline) break;
+      }
     }
     const { status, failed, reason } = cliJobStatus(waitOut);
     if (failed) throw new Error(jobFailureMessage(jobId, status, reason));
@@ -1455,16 +1520,22 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (e instanceof Error && /failed|cancel/i.test(e.message)) throw e;
       }
     }
-    const url = urls[0];
-    if (!url) {
+    if (!urls.length) {
       // No result URL and no terminal status = still rendering past the wait
       // cap. Signal it distinctly so callers can record the job id.
       throw new HiggsfieldCliPendingError(jobId);
     }
-    const buf = await this.fetchBytes(url);
-    // The job finished but its result couldn't be downloaded — keep the job id
-    // + URL on the pending error so a recheck can retry the fetch.
-    if (!buf) throw new HiggsfieldCliPendingError(jobId, url);
+    // Try EVERY result URL via the shared failsafe downloader — one dead
+    // CDN URL must not strand a finished, paid job.
+    let downloaded: { buf: Buffer; url: string };
+    try {
+      downloaded = await downloadBytes(urls, { attempts: 3, kind: video ? "video" : "image" });
+    } catch (e) {
+      // The job finished but its result couldn't be downloaded — keep the
+      // job id + URL on the pending error so a recheck can retry the fetch.
+      throw new HiggsfieldCliPendingError(jobId, e instanceof DownloadError && e.url ? e.url : urls[0]);
+    }
+    const { buf, url } = downloaded;
     const ext = (path.extname(new URL(url).pathname) || (video ? ".mp4" : ".png")).replace(/^\./, "").toLowerCase() || (video ? "mp4" : "png");
     if (onStatus && status) onStatus(status);
     return { buf, ext, jobId };
@@ -1689,7 +1760,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (!direct) return null;
         return this.fetchBytes(direct);
       }
-      return this.fetchBytes(urls[0]);
+      return (await tryDownloadBytes(urls, { attempts: 3, kind: "image" }))?.buf ?? null;
     }
     if (rec.url) return this.fetchBytes(rec.url);
     return null;
@@ -1723,13 +1794,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const { failed, status } = cliJobStatus(out);
       if (failed) throw new Error(`Higgsfield generation ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
       const urls = cliResultUrls(out, true);
-      const url = urls[0] ?? out.match(VIDEO_URL_RX)?.[0];
-      if (!url) return null;
-      const buf = await this.fetchBytes(url);
+      const direct = out.match(VIDEO_URL_RX)?.[0];
+      const candidates = direct && !urls.includes(direct) ? [...urls, direct] : urls;
+      if (!candidates.length) return null;
+      const got = await tryDownloadBytes(candidates, { attempts: 3, kind: "video" });
+      const buf = got?.buf ?? null;
+      const url = got?.url ?? candidates[0];
       return buf ? { buf, ext: this.videoExtFromUrl(url) } : null;
     }
     if (rec.url) {
-      const buf = await this.fetchBytes(rec.url);
+      const buf = await this.fetchBytes(rec.url, "video");
       return buf ? { buf, ext: this.videoExtFromUrl(rec.url) } : null;
     }
     return null;
@@ -1737,12 +1811,12 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
   /**
    * Generate one video clip for a shot. Mirrors the MCP generateVideoClip
-   * contract (same args, same { rel } result): the source frame fills
-   * `--start-image`, a tween end keyframe fills `--end-image`, and extra
-   * image/video refs ride the repeatable `--image-references` /
-   * `--video-references` flags the model accepts. With `opts.refsOnly`
-   * (the shot-sequence canvas) every input rides the reference arrays and
-   * no frame slot is set — some models reject mixing the two.
+   * contract (same args, same { rel } result). Media routing never mixes
+   * the two modes several models reject combining: an in-between
+   * (`frameRefs`) fills `--start-image`/`--end-image` ONLY, while every
+   * other surface rides the repeatable `--image-references` /
+   * `--video-references` / `--audio-references` arrays — falling back to
+   * a lone start frame on models that declare no image reference array.
    */
   async generateVideoClip(
     p: Production,
@@ -1828,86 +1902,74 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
       const args = [modelId, "--prompt", fullPrompt];
-      // References-only (the shot-sequence canvas): every input rides the
-      // reference arrays — NO --start-image/--end-image. Some models
-      // (minimax_h3_max) reject mixing reference media with frame slots
-      // outright, and a sequence's member frames are peer references, not
-      // one animated still.
-      const refsOnly = opts.refsOnly === true;
-      if (refsOnly && !accepts(["imagereferences", "image", "videoreferences", "video"])) {
-        throw new Error(`"${modelId}" doesn't accept reference images — pick a reference-capable model for the sequence.`);
-      }
-      if (refsOnly) {
+      // Media routing — two mutually exclusive modes, never mixed (several
+      // models, e.g. minimax_h3 and wan3_0, reject
+      // "start_image/end_image cannot be mixed with reference media"):
+      //  - In-betweener (frameRefs): the start/end frame slots ONLY. The
+      //    end keyframe never falls back to a reference array, and extra
+      //    references never ride along.
+      //  - Every generation surface (video node, classic, sequence):
+      //    reference mode — every input rides the reference arrays. A
+      //    model that declares NO image reference array (veo/grok/kling
+      //    start-only forms) instead takes a lone start frame with no
+      //    reference media mixed in; extra references there fail loudly
+      //    rather than trigger the vendor's mixing rejection.
+      const isVideoRef = (r: { dataUrl: string }) => /^data:video\//i.test(r.dataUrl);
+      const isAudioRef = (r: { dataUrl: string }) => /^data:audio\//i.test(r.dataUrl);
+      const dropRef = (r: { name: string }, i: number, why: string) => {
+        uploaded[i] = null;
+        emit(`Reference "${r.name}" ${why} on ${modelId} — continuing without it.`, "error");
+      };
+      const pushStartFrame = () => {
+        const startPath = paths[0];
+        if (!startPath) return;
+        if (accepts(["startimage"])) args.push("--start-image", startPath);
+        else if (accepts(["image", "inputimage"])) args.push("--image", startPath);
+        else dropRef(refs[0], 0, "has nowhere to go");
+      };
+      if (frameRefs) {
+        pushStartFrame();
+        if (frameRefs.end) {
+          if (roles.length && !roles.includes("endimage")) {
+            throw new Error(`"${modelId}" doesn't accept an end frame — pick an end-frame-capable model for in-betweening. Nothing was submitted.`);
+          }
+          const endPath = paths[1];
+          if (endPath) args.push("--end-image", endPath);
+        }
         refs.forEach((r, i) => {
-          const f = paths[i];
-          if (!f) return;
-          if (/^data:video\//i.test(r.dataUrl)) {
-            if (accepts(["videoreferences", "video"])) {
-              args.push("--video-references", f);
-              return;
-            }
-            uploaded[i] = null;
-            emit(`Video reference "${r.name}" isn't accepted by ${modelId} — continuing without it.`, "error");
-            return;
-          }
-          if (accepts(["imagereferences", "image"])) {
-            args.push("--image-references", f);
-            return;
-          }
-          uploaded[i] = null;
-          emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
+          if (i === 0 || (i === 1 && frameRefs.end)) return;
+          if (!paths[i]) return;
+          dropRef(r, i, "can't ride along in start/end (in-between) mode");
         });
       } else {
-        // Start frame: `--start-image`, falling back to `--image` on models
-        // that only declare the legacy `image` role.
-        const startPath = paths[0];
-        if (startPath) {
-          if (accepts(["startimage"])) args.push("--start-image", startPath);
-          else if (accepts(["image"])) args.push("--image", startPath);
-          else {
-            uploaded[0] = null;
-            emit(`Reference "${refs[0].name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-          }
+        const hasImageArray = !roles.length || roles.some((r) => r === "imagereferences" || r === "inputimages");
+        if (!hasImageArray && refs.length > 1) {
+          throw new Error(`"${modelId}" has no reference array (start-frame only), so it can't carry ${refs.length} references — pick a reference-capable model or remove the extra references. Nothing was submitted.`);
         }
-        // End keyframe: `--end-image` ONLY for a real tween end frame. Models
-        // without the slot still get both frames through the array fallback.
-        // Every other ref rides the reference arrays, never the end slot.
-        const endIsTween = Boolean(frameRefs?.end) && paths.length > 1 && paths[1];
-        refs.forEach((r, i) => {
-          if (i === 0) return;
-          const f = paths[i];
-          if (!f) return;
-          const isVideo = /^data:video\//i.test(r.dataUrl);
-          if (endIsTween && i === 1) {
-            if (accepts(["endimage"])) {
-              args.push("--end-image", f);
-              return;
-            }
-            // Array fallback: the end frame rides the image references.
-            if (accepts(["imagereferences", "image"])) {
-              args.push("--image-references", f);
-              return;
-            }
-            uploaded[i] = null;
-            emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-            return;
+        if (!hasImageArray) {
+          // Lone start frame — nothing else rides, so nothing can mix.
+          if (refs[0] && isVideoRef(refs[0]) && paths[0] && accepts(["videoreferences", "video"])) {
+            args.push("--video-references", paths[0]);
+          } else {
+            pushStartFrame();
           }
-          if (isVideo) {
-            if (accepts(["videoreferences", "video"])) {
-              args.push("--video-references", f);
+        } else {
+          refs.forEach((r, i) => {
+            const f = paths[i];
+            if (!f) return;
+            if (isVideoRef(r)) {
+              if (accepts(["videoreferences", "video"])) args.push("--video-references", f);
+              else dropRef(r, i, "isn't accepted as a video reference");
               return;
             }
-            uploaded[i] = null;
-            emit(`Video reference "${r.name}" isn't accepted by ${modelId} — continuing without it.`, "error");
-            return;
-          }
-          if (accepts(["imagereferences", "image"])) {
+            if (isAudioRef(r)) {
+              if (accepts(["audioreferences", "audio"])) args.push("--audio-references", f);
+              else dropRef(r, i, "isn't accepted as an audio reference");
+              return;
+            }
             args.push("--image-references", f);
-            return;
-          }
-          uploaded[i] = null;
-          emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
-        });
+          });
+        }
       }
 
       // Schema-driven extras (genre, speedramp, batch_size, an explicit
@@ -1984,6 +2046,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
           }
         );
       } catch (e) {
+        // Draft Mode unavailable (region/account): the vendor's bare
+        // "Not found" becomes an actionable message, and no pending
+        // record is kept — nothing was submitted.
+        if (opts.draft) {
+          const draftErr = draftUnavailableError(e, modelId);
+          if (draftErr) throw draftErr;
+        }
         // The job keeps rendering (or finished but couldn't be downloaded) —
         // record it as pending so the clip can be fetched instead of re-paid.
         if (e instanceof HiggsfieldCliPendingError) {
@@ -2210,6 +2279,25 @@ export class HiggsfieldCliPendingError extends Error {
     super(`Higgsfield generation timed out (${jobId.slice(0, 8)}…).`);
     this.name = "HiggsfieldCliPendingError";
   }
+}
+
+/**
+ * Translate the vendor's opaque draft rejection into an actionable error.
+ * Seedance 2.5's schema advertises `draft`, but the API answers
+ * `Error: Not found` for `draft: true` whenever Draft Mode isn't enabled
+ * for the request — it is region-restricted (not available in the US) —
+ * in every mode/resolution/media combination, while the identical
+ * request without `draft` succeeds (verified against the live CLI cost
+ * endpoint, which shares create's validation). Returns null when the
+ * error isn't that rejection, so genuine failures pass through untouched.
+ */
+export function draftUnavailableError(e: unknown, modelId: string): Error | null {
+  if (e instanceof HiggsfieldCliPendingError) return null;
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!/not found/i.test(msg)) return null;
+  return new Error(
+    `Higgsfield rejected the ${modelId} draft ("Not found") — Draft Mode isn't available for this account/region (Seedance 2.5 Draft Mode is not offered in the US). Untick Draft to generate normally; picking 480p without Draft still gives a cheaper preview, just without the one-click 1080p finalize.`
+  );
 }
 
 /** The CLI transport status for Settings (binary, version, auth). Read-only:

@@ -31,8 +31,7 @@ export type JobKind =
   | "referenceImage"
   | "characterSheet"
   | "magicPrompts"
-  | "suite"
-  | "3d";
+  | "suite";
 
 export type JobState = "running" | "succeeded" | "failed" | "interrupted";
 
@@ -161,7 +160,6 @@ export function jobForChannel(channel: string, args: unknown[]): { kind: JobKind
     "production:generateMagicPrompts": "magicPrompts",
     "production:regenerateMagicPrompt": "magicPrompts",
     "suite:generate": "suite",
-    "production:generate3dModel": "3d",
   };
   const kind = kindByChannel[channel];
   if (!kind) return null;
@@ -202,7 +200,6 @@ export function jobLabel(kind: JobKind): string {
     characterSheet: "Generating a character sheet",
     magicPrompts: "Writing Magic Prompts",
     suite: "Generating (Image Suite)",
-    "3d": "Generating a 3D model",
   };
   return labels[kind];
 }

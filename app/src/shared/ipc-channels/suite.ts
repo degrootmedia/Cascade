@@ -5,4 +5,5 @@ export const suiteChannels = {
   "suite:deleteEntry": { method: "deleteSuiteEntry", kind: "invoke" },
   "suite:exportEntry": { method: "exportSuiteEntry", kind: "invoke" },
   "suite:generate": { method: "generateSuiteImage", kind: "invoke" },
+  "suite:recheckEntry": { method: "recheckSuiteEntry", kind: "invoke" },
 } as const;

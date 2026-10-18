@@ -80,6 +80,18 @@ export function appendSuiteEntry(productionId: string, entry: SuiteEntry): Suite
   });
 }
 
+/** Insert or replace one entry by id and select it. The pending→finished
+ *  lifecycle writes the same entry twice (receipt first, file second), so
+ *  this is the write both the generate sink and the recheck use. */
+export function upsertSuiteEntry(productionId: string, entry: SuiteEntry): SuiteSession {
+  const session = loadSuiteSession(productionId);
+  const exists = session.entries.some((e) => e.id === entry.id);
+  const entries = exists
+    ? session.entries.map((e) => (e.id === entry.id ? entry : e))
+    : [...session.entries, entry];
+  return saveSuiteSession(productionId, { ...session, entries, selectedId: entry.id });
+}
+
 /** Remove a production's whole suite document (production hard-delete hook). */
 export function removeSuiteSession(productionId: string): void {
   store.remove(productionId);

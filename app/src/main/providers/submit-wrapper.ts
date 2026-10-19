@@ -1,13 +1,13 @@
 /**
  * submit-wrapper — one choke point every media provider routes through.
  *
- * Assembles prompt order (canonical), normalizes video refs to 720p,
+ * Assembles prompt order (canonical), normalizes refs (native resolution —
+ * a user-approved 720p copy is the only downscale, never an implicit one),
  * cites refs, logs in Dev Mode, and enforces dry-run before any spend.
  * Provider-specific code only maps normalized inputs to its transport.
  */
 import { citePrompt } from "./refs.js";
 import { DryRunError, logSubmission, type RefRecord, type SubmissionRecord } from "../submission-log.js";
-import { resizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 
 export interface NormalizedRef {
   name: string;
@@ -51,30 +51,19 @@ function redactSource(dataUrl: string): string {
   return dataUrl.slice(0, 120);
 }
 
-/** Downscale every video ref to 720p; images pass through untouched. */
+/** Pass every ref through at native resolution, tagging which are video.
+ *  Downscaling is never implicit: the only 720p copy is the user-approved
+ *  duplicate reference (see create720pReference in pipeline.ts). */
 export async function normalizeRefs(
   refs: SubmissionInput["refs"]
 ): Promise<NormalizedRef[]> {
-  const out: NormalizedRef[] = [];
-  for (const r of refs) {
-    if (isVideoDataUrl(r.dataUrl)) {
-      try {
-        const resized = await resizeVideoRef(r.dataUrl);
-        out.push({
-          name: r.name,
-          dataUrl: resized,
-          role: r.role ?? "reference",
-          downscaled: resized !== r.dataUrl,
-          isVideo: true,
-        });
-      } catch {
-        out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false, isVideo: true });
-      }
-    } else {
-      out.push({ name: r.name, dataUrl: r.dataUrl, role: r.role ?? "reference", downscaled: false, isVideo: false });
-    }
-  }
-  return out;
+  return refs.map((r) => ({
+    name: r.name,
+    dataUrl: r.dataUrl,
+    role: r.role ?? "reference",
+    downscaled: false,
+    isVideo: isVideoDataUrl(r.dataUrl),
+  }));
 }
 
 export interface PreparedSubmission {
@@ -114,7 +103,6 @@ export async function prepareSubmission(
       source: redactSource(r.dataUrl),
       bytes: r.dataUrl.length,
       downscaled: r.isVideo ? r.downscaled : undefined,
-      height: r.downscaled ? VIDEO_REF_MAX_HEIGHT : undefined,
     })),
     params: input.params ?? {},
   };

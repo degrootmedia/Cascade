@@ -722,11 +722,28 @@ export interface StoryboardPdfExportResult {
   production: Production;
 }
 
+/** Offer attached to a log line after a video generation failed with an
+ *  oversize (>720p) video reference attached: one click creates a reusable
+ *  `<name>_720p` duplicate reference per ref and retries the submission
+ *  with the duplicates swapped in. `mayHaveBilled` is true when a vendor
+ *  job was created before the failure, so the retry (a new submission) is
+ *  confirmed before it spends. */
+export interface Retry720pAction {
+  kind: "retry720p";
+  shotId: string;
+  nodeId?: string;
+  surface: "classic" | "videoNode" | "editVideoNode";
+  refs: { refId: string; name: string; height: number }[];
+  mayHaveBilled: boolean;
+}
+
 /** Log line streamed to the Production UI while a step runs. */
 export interface ProductionEvent {
   id: string;
   message: string;
   level: "info" | "error" | "done";
+  /** Optional user action rendered on the log line (see Retry720pAction). */
+  action?: Retry720pAction;
 }
 
 /** A reference file was saved over outside Cascade. `shotIds` are the shots

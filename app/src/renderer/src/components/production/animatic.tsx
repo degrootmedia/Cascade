@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
-import { applyShotSequences, type Production, type ProductionShot, type SequenceTimelineItem, type ShotSequence } from "../../../../shared/ipc.js";
+import { applyShotSequences, type Production, type ProductionShot, type Retry720pAction, type SequenceTimelineItem, type ShotSequence } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
@@ -44,6 +44,8 @@ export interface LogLine {
   at: string;
   message: string;
   level: "info" | "error" | "done";
+  /** Optional 720p-retry offer rendered as a button on this line. */
+  action?: Retry720pAction;
 }
 
 const animaticThumbCache = new Map<string, string>();
@@ -1406,9 +1408,10 @@ export function AnimaticTimeline({
   );
 }
 
-export function ProdLog({ lines }: { lines: LogLine[] }) {
+export function ProdLog({ lines, onRetry720p }: { lines: LogLine[]; onRetry720p?: (action: Retry720pAction) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = usePersistedCollapsed("cascade.prodLog.collapsed");
+  const [usedActions, setUsedActions] = useState<ReadonlySet<number>>(() => new Set());
 
   useEffect(() => {
     if (!collapsed) ref.current?.scrollTo?.({ top: ref.current.scrollHeight });
@@ -1432,7 +1435,20 @@ export function ProdLog({ lines }: { lines: LogLine[] }) {
         <div className="prod-log-lines" ref={ref}>
           {lines.map((l, i) => (
             <div key={i} className={"prod-log-line " + l.level}>
-              <span className="prod-log-time">{l.at}</span> {l.message}
+              <span className="prod-log-time">{l.at}</span> {l.message}{" "}
+              {l.action && onRetry720p && (
+                <button
+                  type="button"
+                  className="prod-log-action-btn"
+                  disabled={usedActions.has(i)}
+                  onClick={() => {
+                    setUsedActions((prev) => new Set(prev).add(i));
+                    onRetry720p(l.action!);
+                  }}
+                >
+                  {usedActions.has(i) ? "Retrying…" : "Create 720p copy & retry"}
+                </button>
+              )}
             </div>
           ))}
         </div>

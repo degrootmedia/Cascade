@@ -14,12 +14,12 @@ const LINES: LogLine[] = [
   { id: "2", at: "10:00:40", message: "Frame ready", level: "done" },
 ];
 
-function mount(lines: LogLine[] = LINES) {
+function mount(lines: LogLine[] = LINES, props: Record<string, unknown> = {}) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
   act(() => {
-    root.render(createElement(ProdLog, { lines }));
+    root.render(createElement(ProdLog, { lines, ...props }));
   });
   return { host, root };
 }
@@ -53,6 +53,47 @@ describe("ProdLog", () => {
     expect(caret, "caret element").toBeTruthy();
     expect(caret!.textContent).toBe("");
     expect(caret!.getAttribute("aria-hidden")).toBe("true");
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("renders a 720p-retry button on an action line and fires it once", () => {
+    window.localStorage.removeItem("cascade.prodLog.collapsed");
+    const seen: unknown[] = [];
+    const action = {
+      kind: "retry720p" as const,
+      shotId: "s1",
+      surface: "classic" as const,
+      refs: [{ refId: "r1", name: "Clip", height: 1080 }],
+      mayHaveBilled: false,
+    };
+    const lines: LogLine[] = [
+      { id: "1", at: "10:00:01", message: "video reference over 720p", level: "info", action },
+    ];
+    const { host, root } = mount(lines, { onRetry720p: (a: unknown) => seen.push(a) });
+    const btn = host.querySelector("button.prod-log-action-btn") as HTMLButtonElement;
+    expect(btn, "retry button").toBeTruthy();
+    expect(btn.textContent).toContain("Create 720p copy & retry");
+    expect(btn.disabled).toBe(false);
+
+    act(() => { btn.click(); });
+    expect(seen).toEqual([action]);
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toContain("Retrying…");
+
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("shows no retry button without an action handler", () => {
+    const lines: LogLine[] = [
+      {
+        id: "1", at: "10:00:01", message: "video reference over 720p", level: "info",
+        action: { kind: "retry720p", shotId: "s1", surface: "classic", refs: [{ refId: "r1", name: "Clip", height: 1080 }], mayHaveBilled: false },
+      },
+    ];
+    const { host, root } = mount(lines);
+    expect(host.querySelector("button.prod-log-action-btn")).toBeNull();
     act(() => { root.unmount(); });
     host.remove();
   });

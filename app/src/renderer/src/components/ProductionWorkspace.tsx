@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -58,6 +58,18 @@ const DELETE_SEQUENCE_WARNING =
   "Are you sure you want to delete this shot sequence? This can't be undone.";
 const DELETE_SEQUENCE_VIDEO_WARNING =
   "Are you sure you want to delete this shot sequence? Its generated video will be saved to your references under \"Shot Sequences\". This can't be undone.";
+
+/** Last video-generation attempt per surface target, remembered so the
+ *  activity log's 720p-retry action can resubmit with identical settings
+ *  (plus the freshly created _720p reference swaps). */
+type VideoAttempt =
+  | { surface: "classic"; shotId: string; opts: VideoGenOptions }
+  | { surface: "videoNode"; shotId: string; nodeId: string; model: string; resolution: string; durationSec: number; params?: Record<string, string> }
+  | { surface: "editVideoNode"; shotId: string; nodeId: string; model: string; resolution: string; durationSec: number; prompt: string; params?: Record<string, string> };
+
+function videoAttemptKey(surface: VideoAttempt["surface"], shotId: string, nodeId?: string): string {
+  return `${surface}:${shotId}:${nodeId ?? ""}`;
+}
 
 /** localStorage key remembering the production that was open, so switching to
  *  Chat and back resumes it instead of dropping the user on the picker. */
@@ -140,6 +152,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [list, setList] = useState<ProductionMeta[]>([]);
   const [prod, setProd] = useState<Production | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
+  const videoAttemptsRef = useRef(new Map<string, VideoAttempt>());
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // expenses page (far-right tab) replaces the step content while open
@@ -592,7 +605,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   useEffect(() => {
     void refreshList();
     const off = window.cascade.onProductionEvent((e) => {
-      setLog((prev) => [...prev.slice(-200), { id: e.id, at: new Date().toLocaleTimeString(), message: e.message, level: e.level }]);
+      setLog((prev) => [...prev.slice(-200), { id: e.id, at: new Date().toLocaleTimeString(), message: e.message, level: e.level, ...(e.action ? { action: e.action } : {}) }]);
     });
     return off;
   }, [refreshList]);
@@ -2896,11 +2909,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: run one video generation node (prompt = its prompt
    *  node; source = its piped frame or the shot's frame). */
-  async function runVideoGenNode(shotId: string, nodeId: string, model: string, resolution: string, durationSec: number, params?: Record<string, string>) {
+  async function runVideoGenNode(shotId: string, nodeId: string, model: string, resolution: string, durationSec: number, params?: Record<string, string>, refSwaps?: RefSwap[]) {
     const key = `${shotId}:${nodeId}`;
     if (!prod || nodeVideoBusyIds.has(key)) return;
     setNodeVideoBusyIds((prev) => new Set(prev).add(key));
     setErr(null);
+    videoAttemptsRef.current.set(videoAttemptKey("videoNode", shotId, nodeId), { surface: "videoNode", shotId, nodeId, model, resolution, durationSec, params });
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphVideoNodes ?? []).find((n) => n.id === nodeId) ?? cur?.graphVideoNodes?.[0];
@@ -2924,7 +2938,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const videoPrompt = cur
         ? renderPromptText((node?.prompt ?? "").trim() ? node!.prompt : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, { videoprompt: nodeId }))
         : getPromptTemplate("videoMotion");
-      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { nodeId, prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: node?.refIds ?? [], ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
+      const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { nodeId, prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: node?.refIds ?? [], ...(refSwaps?.length ? { refSwaps } : {}), ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2951,11 +2965,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: run one edit-video node (mandatory source clip +
    *  prompt + references). Its source comes from the node's wiring. */
-  async function runEditVideoNode(shotId: string, nodeId: string, model: string, resolution: string, durationSec: number, prompt: string, params?: Record<string, string>) {
+  async function runEditVideoNode(shotId: string, nodeId: string, model: string, resolution: string, durationSec: number, prompt: string, params?: Record<string, string>, refSwaps?: RefSwap[]) {
     const key = `${shotId}:${nodeId}`;
     if (!prod || nodeEditVideoBusyIds.has(key)) return;
     setNodeEditVideoBusyIds((prev) => new Set(prev).add(key));
     setErr(null);
+    videoAttemptsRef.current.set(videoAttemptKey("editVideoNode", shotId, nodeId), { surface: "editVideoNode", shotId, nodeId, model, resolution, durationSec, prompt, params });
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
@@ -2990,6 +3005,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         sourcePath,
         ...(sourceRefId ? { sourceRefId } : {}),
         refIds: node?.refIds ?? [],
+        ...(refSwaps?.length ? { refSwaps } : {}),
         ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}),
       });
       setProd(next);
@@ -3272,6 +3288,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod || videoBusyIds.includes(shotId)) return;
     setVideoBusyIds((ids) => [...ids, shotId]);
     setErr(null);
+    videoAttemptsRef.current.set(videoAttemptKey("classic", shotId), { surface: "classic", shotId, opts });
     try {
       // Render style/brand from the plugged references at submit time (the
       // stored prompt is content-only) — slice 04's single renderer.
@@ -3286,6 +3303,47 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       setErr(String(e).replace(/^Error:\s*/, ""));
     } finally {
       setVideoBusyIds((ids) => ids.filter((x) => x !== shotId));
+    }
+  }
+
+  /** Activity-log 720p retry: create/reuse the _720p duplicate reference
+   *  for each oversize ref, then resubmit the remembered attempt with the
+   *  duplicates swapped in. When the failed attempt may already have been
+   *  charged (a vendor job was created), confirm the second spend first.
+   *  With no remembered attempt (e.g. the generation ran in another
+   *  window), the duplicates are still created for manual rewiring. */
+  async function retryWith720p(action: Retry720pAction) {
+    if (!prod) return;
+    if (action.mayHaveBilled) {
+      const ok = await confirmDestructive({
+        title: "Retry with a 720p copy?",
+        body: "The failed attempt created a vendor job, so it may already have been charged. Retrying submits a new generation, which may charge again.",
+        confirmLabel: "Create 720p copy & retry",
+      });
+      if (!ok) return;
+    }
+    setErr(null);
+    try {
+      const swaps: RefSwap[] = [];
+      for (const r of action.refs) {
+        const res = await window.cascade.createReference720p(prod.meta.id, r.refId);
+        setProd(res.production);
+        swaps.push({ fromRefId: r.refId, toRefId: res.ref.id });
+      }
+      const attempt = videoAttemptsRef.current.get(videoAttemptKey(action.surface, action.shotId, action.nodeId));
+      if (!attempt) {
+        setErr("Saved the 720p copy in your references — wire it in place of the original and generate again.");
+        return;
+      }
+      if (attempt.surface === "classic") {
+        void runVideoGen(attempt.shotId, { ...attempt.opts, refSwaps: swaps });
+      } else if (attempt.surface === "videoNode") {
+        void runVideoGenNode(attempt.shotId, attempt.nodeId, attempt.model, attempt.resolution, attempt.durationSec, attempt.params, swaps);
+      } else {
+        void runEditVideoNode(attempt.shotId, attempt.nodeId, attempt.model, attempt.resolution, attempt.durationSec, attempt.prompt, attempt.params, swaps);
+      }
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -3986,7 +4044,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             </div>
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
             <ShotTable prod={prod} onMutation={apply} onToggleDisabled={toggleShotDisabled} />
-            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
           </section>
         )}
 
@@ -4314,7 +4372,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               />
             )}
 
-            {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
           </section>
         )}
 
@@ -4587,13 +4645,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               />
               {visibleLog.length > 0 && (
                 <div className="prod-storyboard-log">
-                  <ProdLog lines={visibleLog} />
+                  <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />
                 </div>
               )}
               </div>
             )}
             {shotCount > 0 && <label className="prod-frame-zoom">Frame size <input type="range" min={180} max={440} step={10} value={frameZoom} onChange={(e) => setFrameZoom(Number(e.target.value))} /><span>{frameZoom}px</span></label>}
-            {shotCount === 0 && visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+            {shotCount === 0 && visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
             {graphShotId && (() => {
               const gs = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === graphShotId);
               return gs ? (
@@ -4881,7 +4939,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   />
                 </section>
 
-                {visibleLog.length > 0 && <ProdLog lines={visibleLog} />}
+                {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
               </>
             )}
           </section>

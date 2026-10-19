@@ -68,6 +68,7 @@ import type {
   StoryboardPdfExportOptions,
   StoryboardPdfExportResult,
   ProductionEvent,
+  Retry720pAction,
   ReferencesExternalUpdate,
 } from "./ipc/production.js";
 import type {
@@ -82,6 +83,7 @@ import type {
   ModelParamExposure,
   ModelParamDefaultValue,
   VideoGenOptions,
+  RefSwap,
   GenerationCostRequest,
   VideoModelOptions,
   ImageModelOptions,
@@ -815,6 +817,13 @@ export interface CascadeApi {
    * production.
    */
   saveVideoStill(productionId: string, videoRel: string, timeSec: number): Promise<Production>;
+  /**
+   * Create (or return the existing) 720p duplicate of a video reference:
+   * transcodes its file into referencesDir and appends a reference named
+   * `<name>_720p`. Idempotent per source reference. Returns the updated
+   * production plus the duplicate reference.
+   */
+  createReference720p(productionId: string, refId: string): Promise<{ production: Production; ref: CustomRef }>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
   /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
@@ -853,7 +862,7 @@ export interface CascadeApi {
    * when absent the shot's current frame is used. The result is stored on the
    * video generation node. Returns the updated production.
    */
-  generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  generateVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec: number; sourcePath?: string; refIds?: string[]; refSwaps?: RefSwap[]; params?: GenParams }): Promise<Production>;
   /**
    * Step 3 node graph: finalize a Seedance 2.5 draft take (480p) at 1080p,
    * reusing the draft job's inputs. `rel` identifies the draft take; it is
@@ -1001,7 +1010,7 @@ export interface CascadeApi {
   generationCost(req: GenerationCostRequest): Promise<number | null>;
   /** Step 3 node graph: edit one video (mandatory video source + prompt +
    *  references) and store the result on the shot's edit-video node. */
-  generateEditVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: GenParams }): Promise<Production>;
+  generateEditVideoNode(productionId: string, shotId: string, opts: { nodeId?: string; prompt: string; model: string; resolution: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; refSwaps?: RefSwap[]; params?: GenParams }): Promise<Production>;
   /** Shot sequence canvas: edit one video on one of its edit-mode video nodes
    *  (mandatory source clip + prompt + references). The result is stored on the
    *  sequence's video node take history. */

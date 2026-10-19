@@ -1330,15 +1330,16 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     }
   });
 
-  it("routes video refs through the 720p downscale into --video-references", async () => {
-    const { resizeVideoRef } = await import("../src/main/video-ref.js");
-    expect(typeof resizeVideoRef).toBe("function");
+  it("routes video refs at native resolution into --video-references", async () => {
     const seen: string[][] = [];
+    let videoBytes: Buffer | null = null;
     const jobId = "66666666-7777-8888-9999-aaaaaaaaaaaa";
     const { run } = fakeRun(
       baseHandler({
         "generate create seedance_2_0": (args) => {
           seen.push(args);
+          const at = args.indexOf("--video-references");
+          if (at >= 0) videoBytes = fs.readFileSync(args[at + 1]);
           return ok(JSON.stringify({ job_id: jobId }));
         },
         [`generate wait ${jobId}`]: () =>
@@ -1358,6 +1359,10 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
       globalThis.fetch = realFetch;
     }
     expect(seen[0]).toContain("--video-references");
+    // The temp file handed to the CLI is the source clip bytes untouched —
+    // no submit-time downscale/transcode (720p copies are user-approved).
+    expect(videoBytes).not.toBeNull();
+    expect(videoBytes!.equals(Buffer.from("AAAA", "base64"))).toBe(true);
   });
 
   it("submits every frame as a reference with refsOnly (no start/end slots — the sequence canvas)", async () => {

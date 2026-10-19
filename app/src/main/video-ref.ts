@@ -1,78 +1,64 @@
 /**
- * Video-reference resizing.
+ * Video-reference 720p copies.
  *
- * Every dropped video reference is downscaled to at most 720p before upload,
- * regardless of model — some models cap input video *elements* (e.g. Seedance
- * element2video rejects anything above 720p) even when the generated output can
- * be 4K, and a single ceiling keeps both media vendors on the same path.
- * Pure node — the ffmpeg seam is imported, and any failure (no
- * ffmpeg, unreadable clip) falls through to the original data URL.
+ * Video references upload at native resolution — input-size caps vary per
+ * model/mode/slot (e.g. Seedance element2video rejects anything above 720p)
+ * and are not declared in any schema Cascade can read, so a universal
+ * pre-emptive downscale silently degrades every clip for the few models
+ * that need it. Instead, when a generation fails with an oversize video
+ * reference attached, the user is offered a one-click 720p duplicate
+ * reference + retry. This module is the transcode half of that flow:
+ * file-to-file, with the ffmpeg seam injected (main wires the real binary;
+ * tests fake it), mirroring video-still.ts. Pure node — no Electron import.
  */
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 
-const DATA_URL_RX = /^data:([^;]+);base64,(.+)$/s;
-
-const EXT_FOR_MIME: Record<string, string> = {
-  "video/mp4": "mp4",
-  "video/webm": "webm",
-  "video/quicktime": "mov",
-  "video/x-matroska": "mkv",
-  "video/x-msvideo": "avi",
-};
-
-/** Input-video-reference ceiling: every video ref is capped to this height
- *  before upload, regardless of model. */
+/** Height of the user-approved 720p duplicate, and the threshold above which
+ *  a failed submission offers the duplicate-and-retry action. */
 export const VIDEO_REF_MAX_HEIGHT = 720;
 
-/**
- * Downscale a `data:video/...` URL so its height is at most `maxHeight`,
- * preserving aspect ratio (width rounded to an even number for H.264).
- * Returns the original data URL unchanged for non-video input, when it is
- * already within the limit, when ffmpeg is unavailable, or on any failure.
- */
-export async function resizeVideoRefToHeight(dataUrl: string, maxHeight: number): Promise<string> {
-  const m = DATA_URL_RX.exec(dataUrl);
-  if (!m || !m[1].startsWith("video/")) return dataUrl;
-  if (!Number.isFinite(maxHeight) || maxHeight <= 0) return dataUrl;
-  const bin = await resolveFfmpeg();
-  if (!bin) return dataUrl;
+/** Injected ffmpeg seam (main wires ffmpeg.ts; tests fake it). */
+export interface VideoRef720Deps {
+  resolveBin: () => Promise<string | null>;
+  run: (bin: string, argv: string[]) => Promise<void>;
+  probe: (bin: string, absPath: string) => Promise<{ width: number; height: number } | null>;
+}
 
-  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const ext = EXT_FOR_MIME[m[1]] ?? "mp4";
-  const src = path.join(os.tmpdir(), `cascade-videoref-${tag}.${ext}`);
-  const out = path.join(os.tmpdir(), `cascade-videoref-${tag}-${maxHeight}.mp4`);
-  try {
-    fs.writeFileSync(src, Buffer.from(m[2], "base64"));
-    const size = await probeVideoSize(bin, src);
-    if (!size || size.height <= maxHeight) return dataUrl;
-    await runFfmpeg(bin, [
-      "-hide_banner", "-nostdin", "-y",
-      "-i", src,
-      "-vf", `scale=-2:${maxHeight}`,
-      "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-      "-c:a", "aac",
-      "-movflags", "+faststart",
-      out,
-    ]);
-    const bytes = fs.readFileSync(out);
-    return bytes.length ? `data:video/mp4;base64,${bytes.toString("base64")}` : dataUrl;
-  } catch {
-    return dataUrl;
-  } finally {
-    for (const f of [src, out]) {
-      try { fs.unlinkSync(f); } catch { /* already gone */ }
-    }
-  }
+/** The duplicate reference's display name for a source reference name. */
+export function ref720pName(sourceName: string): string {
+  return `${sourceName.trim() || "Reference"}_720p`;
 }
 
 /**
- * Downscale a `data:video/...` URL to the universal 720p ceiling.
- * Thin wrapper over `resizeVideoRefToHeight` so call sites can't drift
- * per-model — pass only the data URL.
+ * Transcode `absSrc` to `absDest` (an .mp4 path) capped at 720p height
+ * (aspect preserved, width even for H.264), reusing the recipe the retired
+ * submit-time downscaler used. A source already within the cap is
+ * re-encoded without scaling — never byte-copied — so the destination is
+ * a real MP4 even when the source container isn't. Throws when no ffmpeg
+ * is available or the source's dimensions can't be read — callers surface
+ * the error and write nothing.
  */
-export function resizeVideoRef(dataUrl: string): Promise<string> {
-  return resizeVideoRefToHeight(dataUrl, VIDEO_REF_MAX_HEIGHT);
+export async function transcodeVideoFileTo720p(
+  absSrc: string,
+  absDest: string,
+  deps: VideoRef720Deps
+): Promise<void> {
+  let bin: string | null = null;
+  try {
+    bin = await deps.resolveBin();
+  } catch {
+    bin = null;
+  }
+  if (!bin) throw new Error("Couldn't create the 720p copy — no video encoder is available.");
+  const size = await deps.probe(bin, absSrc);
+  if (!size) throw new Error("Couldn't read that video's dimensions, so no 720p copy was made.");
+  const scale = size.height > VIDEO_REF_MAX_HEIGHT ? ["-vf", `scale=-2:${VIDEO_REF_MAX_HEIGHT}`] : [];
+  await deps.run(bin, [
+    "-hide_banner", "-nostdin", "-y",
+    "-i", absSrc,
+    ...scale,
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    "-c:a", "aac",
+    "-movflags", "+faststart",
+    absDest,
+  ]);
 }

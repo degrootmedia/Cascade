@@ -265,6 +265,15 @@ export interface ModelParamOption {
   label?: string;
 }
 
+/** Substitution of one reference for another on a single submission (the
+ *  720p-retry flow: swap an oversize video reference for its `_720p`
+ *  duplicate). Applied by the IPC handler to ref ids and prompt tags
+ *  before the provider call; saved wiring/prompts are never rewritten. */
+export interface RefSwap {
+  fromRefId: string;
+  toRefId: string;
+}
+
 /** Choices made in the per-shot video-generation modal. */
 export interface VideoGenOptions {
   /** OpenArt video model id, or "auto" for Cascade to pick. */
@@ -314,6 +323,8 @@ export interface VideoGenOptions {
    * if the job orphans at the wait, and with `null` when it completes.
    */
   onPending?: (rec: PendingVideoGen | null) => void;
+  /** Per-submission reference substitutions (see RefSwap). */
+  refSwaps?: RefSwap[];
 }
 
 /** Per-config credit quote for one generation (Higgsfield CLI `generate

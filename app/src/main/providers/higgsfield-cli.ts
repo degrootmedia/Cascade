@@ -70,7 +70,6 @@ import {
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
-import { resizeVideoRef } from "../video-ref.js";
 import { buildModelSchema, OWNED_FLAGS, type RawModelParam } from "./model-schema.js";
 import { imagePixelSize } from "./image-size.js";
 
@@ -1880,15 +1879,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
     refs.push(...extras);
 
-    // Every video reference is downscaled to max 720p before upload (mirrors
-    // the MCP transports) — including the start/end frames when they are video.
-    for (const r of refs) {
-      if (/^data:video\//i.test(r.dataUrl)) {
-        try {
-          r.dataUrl = await resizeVideoRef(r.dataUrl);
-        } catch { /* fallback: original, logged as downscaled:false via wrapper */ }
-      }
-    }
+    // Video references upload at native resolution — input-size caps vary
+    // per model, and a size rejection is recoverable via the user-approved
+    // 720p-copy retry the IPC handler offers, not a silent universal downscale.
 
     const modelId = await this.resolveVideoModel(opts.model, items, Boolean(frameRefs?.end));
     if (!modelId) throw new Error("The Higgsfield CLI listed no video models — sign in (`higgsfield auth login`) and retry.");
@@ -2132,15 +2125,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const { resolved, extras } = resolvePromptRefs(p, opts.prompt, refs.length, true);
     refs.push(...extras);
 
-    // Every video reference (including the source) is downscaled to max 720p
-    // before upload, the same ceiling the generate path uses.
-    for (const r of refs) {
-      if (/^data:video\//i.test(r.dataUrl)) {
-        try {
-          r.dataUrl = await resizeVideoRef(r.dataUrl);
-        } catch { /* fallback: original */ }
-      }
-    }
+    // Video references (including the source) upload at native resolution,
+    // the same policy the generate path uses (see generateVideoClip).
 
     const modelId = await this.resolveVideoModel(opts.model, items, false);
     if (!modelId) throw new Error("The Higgsfield CLI listed no video models — sign in (`higgsfield auth login`) and retry.");

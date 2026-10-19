@@ -43,6 +43,8 @@ GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen,
 import * as shotter from "./shotter.js";
 import { extractVideoStillFrame, videoStillName } from "./video-still.js";
 import type { VideoStillDeps } from "./video-still.js";
+import { ref720pName, transcodeVideoFileTo720p } from "./video-ref.js";
+import type { VideoRef720Deps } from "./video-ref.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
@@ -1846,6 +1848,72 @@ export async function saveVideoStillAsReference(
   }
   fs.writeFileSync(assetPath(p, destRel), jpeg);
   const ref: CustomRef = { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+  p.references = [...(p.references ?? []), ref];
+  return ref;
+}
+
+/**
+ * Create the 720p duplicate of a video reference: transcode its file into
+ * referencesDir and append a `CustomRef` named `<name>_720p` pointing at
+ * the copy, so the duplicate is a first-class reference the user can reuse
+ * anywhere (and deleting the original can't orphan it). Idempotent — a
+ * duplicate with its file present is returned as-is, so repeated retry
+ * clicks transcode once. The source's category carries over unless it is a
+ * style category, and `styleOnly` never carries: a duplicate that silently
+ * auto-attached to every submission would surprise. Returns the duplicate;
+ * callers save the production. Throws (writing nothing) when the source is
+ * missing/not a video or the transcode fails.
+ */
+export async function create720pReference(
+  p: Production,
+  refId: string,
+  deps: VideoRef720Deps
+): Promise<CustomRef> {
+  const src = (p.references ?? []).find((r) => r.id === refId);
+  if (!src) throw new Error("That reference no longer exists, so no 720p copy can be made.");
+  if (src.media !== "video" || !src.mediaPath) {
+    throw new Error(`"${src.name}" isn't a video reference, so it has no 720p copy.`);
+  }
+  const wantedName = ref720pName(src.name);
+  const existing = (p.references ?? []).find(
+    (r) => r.media === "video" && r.mediaPath && r.name.trim().toLowerCase() === wantedName.toLowerCase()
+  );
+  if (existing?.mediaPath && fs.existsSync(assetPath(p, existing.mediaPath))) return existing;
+  const srcAbs = assetPath(p, src.mediaPath);
+  if (!fs.existsSync(srcAbs) || !fs.statSync(srcAbs).isFile()) {
+    throw new Error(`That video isn't on disk, so no 720p copy can be made: ${src.mediaPath}`);
+  }
+  const newId = newRefId();
+  const name = uniqueReferenceName(p, newId, wantedName);
+  const fileBase = `${path.parse(src.mediaPath).name}_720p`;
+  const dir = p.assets.referencesDir;
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  let destRel = `${dir}/${fileBase}.mp4`;
+  let i = 2;
+  while (fs.existsSync(assetPath(p, destRel))) {
+    destRel = `${dir}/${fileBase} (${i}).mp4`;
+    i++;
+  }
+  try {
+    await transcodeVideoFileTo720p(srcAbs, assetPath(p, destRel), deps);
+  } catch (e) {
+    try { fs.unlinkSync(assetPath(p, destRel)); } catch { /* nothing was written */ }
+    throw e;
+  }
+  // The transcoded copy registers with the media registry (adopted, like a
+  // saved-as-reference copy) so deleting the original can't orphan it.
+  mediaFiles.register(p, destRel, "video", "adopted");
+  const srcCategory = src.categoryId
+    ? (p.referenceCategories ?? []).find((c) => c.id === src.categoryId)
+    : undefined;
+  const ref: CustomRef = {
+    id: newId,
+    name,
+    media: "video",
+    mediaPath: destRel,
+    shotIds: [],
+    ...(src.categoryId && srcCategory?.kind !== "style" ? { categoryId: src.categoryId } : {}),
+  };
   p.references = [...(p.references ?? []), ref];
   return ref;
 }

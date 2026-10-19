@@ -18,6 +18,7 @@ import { sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -32,11 +33,12 @@ import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
+import { applyRefSwapsToIds, applyRefSwapsToPrompt, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags } from "./video-retry.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
-import { probeMedia, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
+import { probeMedia, probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
 import type { VoiceStatusIpc, WhisperModel } from "../shared/voice.js";
 import { makeVisionTools, type VisionHost } from "./vision-tools.js";
@@ -55,6 +57,7 @@ import { isTrustedSender } from "./ipc/handle.js";
 import { DetachedCanvasController } from "./detached-window.js";
 import { pathToFileURL } from "node:url";
 import { dataUrlToBytes, parsePromptBoxes, refTagNames, stripReferenceClause, addStyleParagraph } from "../shared/prompt-grammar.js";
+import type { RefSwap, Retry720pAction } from "../shared/ipc.js";
 import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
@@ -2112,8 +2115,8 @@ function registerIpc() {
 
   // ---- productions (Production Assistant) ----
   /** Stream a log line to the Production UI. */
-  const productionEmit = (id: string, message: string, level: ProductionEvent["level"] = "info") => {
-    safeSend("production:event", { id, message, level } satisfies ProductionEvent);
+  const productionEmit = (id: string, message: string, level: ProductionEvent["level"] = "info", action?: Retry720pAction) => {
+    safeSend("production:event", { id, message, level, ...(action ? { action } : {}) } satisfies ProductionEvent);
   };
 
   handle("production:list", () => productions.listProductions());
@@ -2821,6 +2824,41 @@ function registerIpc() {
         productions.saveProduction(fresh);
       }).catch(() => {});
     };
+  }
+
+  /** After a failed video submission: if an oversize (>720p) saved video
+   *  reference took part and no vendor job is still pending, offer the
+   *  one-click 720p-copy retry on the production log. Best-effort — a probe
+   *  failure simply means no offer; the original error still surfaces. */
+  async function emit720pRetryOffer(
+    id: string,
+    p: Production,
+    shot: ProductionShot,
+    args: { inputs: ReturnType<typeof videoRefsForIds>; providerId: string; surface: Retry720pAction["surface"]; nodeId?: string; mayHaveBilled: boolean }
+  ): Promise<void> {
+    try {
+      if (!args.inputs.length || shot.pendingVideoGen) return;
+      const bin = await resolveFfmpeg();
+      if (!bin) return;
+      const probed = await probeVideoInputs(p, args.inputs, (abs) => probeVideoSize(bin, abs));
+      const offer = retry720pOffer({
+        inputs: probed,
+        hasPending: !!shot.pendingVideoGen,
+        providerId: args.providerId,
+        shotId: shot.id,
+        nodeId: args.nodeId,
+        surface: args.surface,
+        mayHaveBilled: args.mayHaveBilled,
+      });
+      if (!offer) return;
+      const names = offer.refs.map((r) => `"${r.name}" (${r.height}p)`).join(", ");
+      productionEmit(
+        id,
+        `Shot ${shot.number}: video reference${offer.refs.length === 1 ? "" : "s"} ${names} over 720p — if the model rejected the size, create a 720p copy and retry:`,
+        "info",
+        offer
+      );
+    } catch { /* the offer is best-effort; the real error is rethrown by the caller */ }
   }
 
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
@@ -4096,6 +4134,22 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // Shot sequence canvas: delete one stored take (right-click a take). The
   // file is unlinked and the history entry dropped; a take still feeding the
   // output leaves the sequence unbound (the animatic's slate) when it was last.
+  // Create (or reuse) the 720p duplicate of a video reference — the manual
+  // oversize-recovery flow's transcode half. Returns the updated production
+  // plus the duplicate reference so the renderer can swap it into a retry.
+  handle("production:createReference720p", async (_e, id: string, refId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const ref = await create720pReference(p, String(refId ?? ""), {
+      resolveBin: resolveFfmpeg,
+      run: (bin, argv) => runFfmpeg(bin, argv),
+      probe: (bin, abs) => probeVideoSize(bin, abs),
+    });
+    productions.saveProduction(p);
+    productionEmit(id, `Saved "${ref.name}" as a reference.`, "done");
+    return { production: p, ref };
+  });
+
   handle("production:deleteSequenceTake", (_e, id: string, sequenceId: string, rel: string): Production => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
@@ -4134,14 +4188,23 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       };
       if (!clean.prompt) throw new Error("Describe the motion first (e.g. \"camera pans left, leaves drift\").");
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoPath" });
+      const classicProvider = mediaFor(clean.model);
+      // 720p-retry substitution: swap prompt tags to the duplicate refs for
+      // this submission only (saved prompts/wiring are never rewritten).
+      const classicSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      if (classicSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, classicSwaps);
+      const classicVideoInputs = videoRefsForPromptTags(p, clean.prompt);
+      let classicSubmitted = false;
+      const classicSink = pendingVideoSink(id, shotId, { kind: "videoPath" });
+      clean.onPending = (rec) => { if (rec) classicSubmitted = true; classicSink(rec); };
       let rel: string;
       try {
-        rel = (await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit)).rel;
+        rel = (await classicProvider.generateVideoClip(p, shot, clean, emit)).rel;
       } catch (e) {
         // Tag the orphaned job so a later Fetch applies the clip as the
         // shot's video (the classic flow).
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoPath" };
+        await emit720pRetryOffer(id, p, shot, { inputs: classicVideoInputs, providerId: classicProvider.id, surface: "classic", mayHaveBilled: classicSubmitted });
         throw e;
       }
       // The finished clip replaces any clip the shot showed before (the old
@@ -4202,7 +4265,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // The animated source frame comes from the node's image pipe when one is
   // connected, otherwise the shot's current frame. The clip is stored on the
   // node; it becomes shot.videoPath only when the node is piped to the output.
-  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+  handle("production:generateVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; refIds?: string[]; refSwaps?: RefSwap[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "generating a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -4236,18 +4299,30 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // image artwork and dropped video clips upload as visual references.
       // Direct generation wires (no saved reference) resolve to the wired
       // node's selected take.
-      const extraRefs = resolveGenRefIds(p, shot, opts?.refIds);
+      // 720p-retry substitution for this submission only (see classic flow).
+      const nodeSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      if (nodeSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, nodeSwaps);
+      const effectiveRefIds = applyRefSwapsToIds(opts?.refIds, nodeSwaps);
+      const extraRefs = resolveGenRefIds(p, shot, effectiveRefIds);
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
+      const nodeProvider = mediaFor(clean.model);
+      const nodeVideoInputs = unionVideoInputs(
+        videoRefsForIds(p, effectiveRefIds),
+        videoRefsForPromptTags(p, clean.prompt)
+      );
       emit(`Shot ${shot.number}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""}${extraRefs.length ? ` (${extraRefs.length} reference${extraRefs.length === 1 ? "" : "s"})` : ""}…`);
-      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
+      let nodeSubmitted = false;
+      const nodeSink = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
+      clean.onPending = (rec) => { if (rec) nodeSubmitted = true; nodeSink(rec); };
       let rel: string;
       try {
-        const res = await mediaFor(clean.model).generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
+        const res = await nodeProvider.generateVideoClip(p, shot, clean, emit, sourcePath, extraRefs);
         rel = res.rel;
       } catch (e) {
         // Tag the orphaned job so a later Fetch stores the clip on the video
         // generation node (and the output when it feeds it).
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
+        await emit720pRetryOffer(id, p, shot, { inputs: nodeVideoInputs, providerId: nodeProvider.id, surface: "videoNode", nodeId, mayHaveBilled: nodeSubmitted });
         throw e;
       }
       // Node-view generation: record on the node only — Frame Output
@@ -4416,7 +4491,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // references). The source may be an explicit path (piped from the video
   // node or a generated clip), a video reference id, or the shot's current
   // video. Only providers with a video-edit path (Higgsfield CLI) can run it.
-  handle("production:generateEditVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; params?: Record<string, string | number | boolean | string[]> }) =>
+  handle("production:generateEditVideoNode", (_e, id: string, shotId: string, opts: { nodeId?: string; prompt?: string; model?: string; resolution?: string; durationSec?: number; sourcePath?: string; sourceRefId?: string; refIds?: string[]; refSwaps?: RefSwap[]; params?: Record<string, string | number | boolean | string[]> }) =>
     runVideoJob(id, "editing a video (node graph)", async (p, emit) => {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
@@ -4431,15 +4506,29 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
       if (!clean.prompt) throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
+      // 720p-retry substitution for this submission only (see classic flow):
+      // prompt tags, the source reference, and its file path all follow.
+      const editSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      if (editSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, editSwaps);
       let sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
-      if (!sourcePath && typeof opts?.sourceRefId === "string" && opts.sourceRefId) {
-        const ref = (p.references ?? []).find((r) => r.id === opts.sourceRefId && r.media === "video");
+      if (sourcePath) {
+        const byPath = editSwaps.find((s) => s.fromPath === sourcePath);
+        if (byPath?.toPath) sourcePath = byPath.toPath;
+      }
+      let sourceRefId = typeof opts?.sourceRefId === "string" && opts.sourceRefId ? opts.sourceRefId : undefined;
+      if (sourceRefId) {
+        const byId = editSwaps.find((s) => s.fromId === sourceRefId);
+        if (byId) sourceRefId = byId.toId;
+      }
+      if (!sourcePath && sourceRefId) {
+        const ref = (p.references ?? []).find((r) => r.id === sourceRefId && r.media === "video");
         if (ref?.mediaPath) sourcePath = ref.mediaPath;
       }
       if (!sourcePath) {
         const src = node?.source;
         if (src?.kind === "ref") {
-          const ref = (p.references ?? []).find((r) => r.id === src.refId && r.media === "video");
+          const srcRefId = editSwaps.find((s) => s.fromId === src.refId)?.toId ?? src.refId;
+          const ref = (p.references ?? []).find((r) => r.id === srcRefId && r.media === "video");
           if (ref?.mediaPath) sourcePath = ref.mediaPath;
         } else if (src?.kind === "video") {
           const other = (shot.graphVideoNodes ?? []).find((n) => n.id === src.nodeId);
@@ -4458,9 +4547,17 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // References: @[name] tags resolve inside the provider; direct
       // generation wires + saved refs ride the node's refIds (resolved here,
       // the same pass-through the video-generate submit uses).
-      const extraRefs = resolveGenRefIds(p, shot, opts?.refIds);
+      const editEffectiveRefIds = applyRefSwapsToIds(opts?.refIds, editSwaps);
+      const extraRefs = resolveGenRefIds(p, shot, editEffectiveRefIds);
+      const editVideoInputs = unionVideoInputs(
+        videoRefForEditSource(p, { sourceRefId, sourcePath }),
+        videoRefsForIds(p, editEffectiveRefIds),
+        videoRefsForPromptTags(p, clean.prompt)
+      );
       emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
-      clean.onPending = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
+      let editSubmitted = false;
+      const editSink = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
+      clean.onPending = (rec) => { if (rec) editSubmitted = true; editSink(rec); };
       let rel: string;
       try {
         rel = (await provider.generateVideoEdit(p, shot, clean, emit, sourcePath, extraRefs)).rel;
@@ -4469,6 +4566,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         // video node (and the output when it feeds it). Reuses the video-node
         // pending target so recheckVideo handles it like any video node.
         if (shot.pendingVideoGen) shot.pendingVideoGen.target = { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId };
+        await emit720pRetryOffer(id, p, shot, { inputs: editVideoInputs, providerId: provider.id, surface: "editVideoNode", nodeId, mayHaveBilled: editSubmitted });
         throw e;
       }
       // Node-view generation: record on the node only — Frame Output

@@ -14,7 +14,7 @@ import type { AgentTool } from "@core";
 import type { McpManager } from "../src/main/mcp.js";
 import { OpenArtClient, videoRefsAssign } from "../src/main/providers/openart.js";
 import { openArtCreationResultUrls, openArtCreationStatus } from "../src/main/providers/openart-core.js";
-import { VIDEO_REF_MAX_HEIGHT, resizeVideoRef } from "../src/main/video-ref.js";
+import { VIDEO_REF_MAX_HEIGHT, ref720pName } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { PendingImageGen, PendingVideoGen, Production, ProductionShot } from "../src/shared/ipc.js";
 
@@ -502,14 +502,14 @@ describe("videoRefsAssign", () => {
   });
 });
 
-describe("video-ref 720p ceiling", () => {
-  it("caps every video reference at 720p regardless of model", () => {
+describe("video-ref 720p duplicate", () => {
+  it("keeps 720 as the duplicate-creation / retry-offer height threshold", () => {
     expect(VIDEO_REF_MAX_HEIGHT).toBe(720);
   });
 
-  it("resizeVideoRef is the single-arg 720p wrapper", async () => {
-    // Non-video input passes through untouched.
-    await expect(resizeVideoRef("data:image/png;base64,eA==")).resolves.toBe("data:image/png;base64,eA==");
+  it("names the duplicate reference with a _720p suffix", () => {
+    expect(ref720pName("Gondola clip")).toBe("Gondola clip_720p");
+    expect(ref720pName("  ")).toBe("Reference_720p");
   });
 });
 
@@ -1384,7 +1384,7 @@ describe("OpenArtClient generation recorder", () => {
     fs.writeFileSync(path.join(folder, "references", "clip.mp4"), Buffer.from("mp4-bytes"));
     let seenParams: Record<string, unknown> | undefined;
     const signCalls: Record<string, unknown>[] = [];
-    const resizeCalls: { dataUrl: string }[] = [];
+    const putBodies: Buffer[] = [];
     const base = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
       openart_model_form_get: () =>
@@ -1411,12 +1411,12 @@ describe("OpenArtClient generation recorder", () => {
       return orig(s, t, a);
     };
     const realFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      if (init?.body) putBodies.push(init.body as Buffer);
+      return { ok: true };
+    }) as unknown as typeof fetch;
     try {
-      const client = new OpenArtClient(base, undefined, async (dataUrl) => {
-        resizeCalls.push({ dataUrl });
-        return dataUrl;
-      });
+      const client = new OpenArtClient(base);
       const prod = makeProduction({
         meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
         references: [{ id: "r1", name: "Clip", media: "video", mediaPath: "references/clip.mp4" }],
@@ -1433,10 +1433,12 @@ describe("OpenArtClient generation recorder", () => {
     expect(seenParams?.startFrame).toMatchObject({ type: "image" });
     expect(seenParams?.endFrame).toBeUndefined();
     expect(seenParams?.visualReferences).toHaveLength(2);
-    // The video reference was offered to the resizer (universal 720p ceiling).
-    expect(resizeCalls).toHaveLength(1);
+    // Native resolution: the uploaded bytes are the source clip untouched
+    // (no submit-time downscale — a 720p copy is a user-approved retry).
+    expect(putBodies.some((b) => Buffer.isBuffer(b) && b.equals(Buffer.from("mp4-bytes")))).toBe(true);
     // The video clip is signed as a video, not mislabeled as a `.png` image.
     const videoSign = signCalls.find((c) => c.contentType === "video/mp4");
+    expect(videoSign?.size).toBe(Buffer.from("mp4-bytes").length);
     expect(videoSign?.mediaType).toBe("video");
     expect(videoSign?.purpose).toBe("create-video");
     expect(String(videoSign?.filename)).toMatch(/\.mp4$/);

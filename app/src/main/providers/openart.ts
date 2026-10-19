@@ -21,7 +21,6 @@ import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
 import type { MediaProvider, ProviderEmit } from "./types.js";
 import { uploadDataUrlReference } from "../openart-upload.js";
-import { resizeVideoRef as defaultResizeVideoRef, VIDEO_REF_MAX_HEIGHT } from "../video-ref.js";
 import {
   OPENART_JOB_DONE_RX,
   describeOpenArtDurations,
@@ -307,13 +306,10 @@ export class OpenArtClient implements MediaProvider {
 
   /** A recorder (the expenses ledger) that observes every successful
    *  generation with its resolved metadata. Injected so the tally is testable
-   *  at the same seam as the McpManager fake. `resizeVideoRef` downscales a
-   *  video reference to the universal 720p ceiling; injected so
-   *  the ffmpeg-backed implementation stays out of unit tests. */
+   *  at the same seam as the McpManager fake. */
   constructor(
     private readonly mcp: McpManager,
-    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void },
-    private readonly resizeVideoRef: (dataUrl: string) => Promise<string> = defaultResizeVideoRef
+    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void }
   ) {}
 
   /** Fire the generation recorder; a tally write must never break a
@@ -1500,22 +1496,16 @@ private videoRefsAssign = videoRefsAssign;
 
     // Uploads ride the same positional binding as images (probed live); the
     // sign request uses purpose "create-video" — using the image purpose can
-    // make OpenArt reject the upload and silently drop the reference. Every
-    // video reference is downscaled to the 720p ceiling first, regardless of
-    // model, so an oversized clip doesn't fail the whole submission.
+    // make OpenArt reject the upload and silently drop the reference. Video
+    // references upload at native resolution: input-size caps vary per model,
+    // and an oversized clip failing is recoverable via the user-approved
+    // 720p-copy retry (the IPC handler offers it) instead of a silent
+    // pre-emptive downscale of every clip.
     const uploaded: Record<string, unknown>[] = [];
     const submitted: (string | null)[] = [];
     for (const [i, r] of refs.entries()) {
       try {
-        let dataUrl = r.dataUrl;
-        if (/^data:video\//i.test(dataUrl)) {
-          const resized = await this.resizeVideoRef(dataUrl);
-          if (resized !== dataUrl) {
-            dataUrl = resized;
-            emit(`Shot ${shot.number}: resized video reference "${r.name}" to ${VIDEO_REF_MAX_HEIGHT}p for this model.`);
-          }
-        }
-        const vr = await uploadDataUrlReference(this.mcp, dataUrl, r.name, "create-video");
+        const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name, "create-video");
         uploaded.push(vr);
         submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
       } catch (e) {

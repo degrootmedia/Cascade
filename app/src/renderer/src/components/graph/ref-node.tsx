@@ -48,6 +48,8 @@ export function refSizeStyle(layout: GraphLayout | undefined, id: string, collap
 export interface GraphRef {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to (tag resolution). */
+  aliases?: string[];
   artwork: string;
   media?: "video" | "audio";
   /** Workspace-relative media path (video/audio refs), for cascade-media URLs. */

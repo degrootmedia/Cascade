@@ -293,6 +293,8 @@ export interface ProductionScene {
 export interface CharacterSheet {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to: an `@[Alias]` tag resolves to this entry (see `resolveRefByTagName` in ref-names.ts). */
+  aliases?: string[];
   /** Canonical descriptor prepended to every prompt using this character. */
   key: string;
   /** Reference image (data URL) attached in Step 2. */
@@ -320,12 +322,14 @@ export interface CharacterSheetBuilder {
   params?: Record<string, string | number | boolean | string[]>;
 }
 
-/** A product whose look must stay consistent (label, packaging, hero item). */
+/** A product whose look must stay consistent (label, packaging, hero item). Aliases: script/model names an `@[Alias]` tag may use for it. */
 export interface ProductRef {
   id: string;
   name: string;
   /** Reference image (data URL) attached in Step 2. */
   artwork?: string;
+  /** Script/model names this reference also answers to (`@[Alias]` → this). */
+  aliases?: string[];
   /** Workspace-relative path of the reference image on disk. */
   imagePath?: string;
 }
@@ -351,6 +355,8 @@ export interface CustomRef {
   shotIds?: string[];
   /** User-created category; absent means uncategorized. */
   categoryId?: string;
+  /** Script/model names this reference also answers to (`@[Alias]` → this). */
+  aliases?: string[];
   /** Style-only override: auto-attaches with a style-only clause. */
   styleOnly?: boolean;
 }

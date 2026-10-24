@@ -1,4 +1,4 @@
-﻿# Frequent crashes in chat-agent mode (autonomous production runs)
+# Frequent crashes in chat-agent mode (autonomous production runs)
 
 User report: still frequent crashes in chat agent mode. Evidence: recent crash
 sessions (`mv43c7k8`, `mv43i2fp`) all carry the same "run the full production
@@ -4564,3 +4564,35 @@ Electron here. (3) An externally deleted media file can show "present" for
 up to the 10s bootstrap TTL. One unrelated flake seen under parallel test
 load: `media-registry` outdated-archive rename EPERM (passes alone; no video
 paths involved).
+
+---
+
+# Magic Prompt rearchitecture (branch: magic-prompt-rearchitecture)
+
+Approved plan: replace one-shot-per-call Magic Prompt generation with a
+story-aware two-pass flow, plus reference aliasing/reconciliation for when
+model names differ from user reference names (`@[MainCharacter]` vs `@[Hero]`).
+
+- [ ] Slice 1 — reference aliases: `aliases?` on characters/products/custom
+      refs, one shared case-insensitive resolver (`shared/ref-names.ts`),
+      `shotReferences`/`refTokens`/graph resolution honour aliases,
+      `renameReference` keeps the old name as an alias. Tests.
+- [ ] Slice 2 — Story Bible pass (whole-breakdown analysis: synopsis,
+      entities, assumptions, per-shot plans with must-cite refs) persisted as
+      main-owned `Production.magicBible` + `out/magic-bible.md`; per-scene
+      prompt generation grounded in the bible; alias tags canonicalized;
+      unknown-tag validation warnings; skill file rewritten (no 2000-char
+      truncation). Rewrite `magic-regen.test.ts` pins deliberately.
+- [ ] Slice 3 — reconciliation: shared unresolved-ref computation,
+      `production:assignReferenceAlias` IPC (saves alias + rewrites tags via
+      the rename machinery), Storyboard queue UI (assign / create / dismiss).
+- [ ] Slice 4 — `productions.ts` merge safety for `magicBible`,
+      `production-tools.ts` + `CONTEXT.md` docs, full `npm test` gate.
+
+Preserved safeguards (see tasks/lessons.md 2026-09-25): never send a target
+shot's stale prose (tags only), number-keyed reply matching, gap-fill from
+script visual, keep-previous-on-failure, `magicPrompts` main-owned.
+
+## Review
+
+(pending)

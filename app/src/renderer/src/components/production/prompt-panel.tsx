@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import { composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../../shared/prompt-grammar.js";
+import { resolveRefByTagName } from "../../../../shared/ref-names.js";
 import type { ProductionStyle } from "../../../../shared/ipc.js";
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
@@ -132,7 +133,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
       {tags.length > 0 && (
         <div className="prod-ref-tag-previews">
           {tags.map((tag, i) => {
-            const ref = references.find((r) => r.name.toLowerCase() === tag.toLowerCase());
+            const ref = resolveRefByTagName(references, tag);
             return ref ? <span key={`${ref.id}-${i}`} title={`Reference @[${ref.name}]`}>{ref.artwork ? <img src={ref.artwork} alt={ref.name} /> : <RefMediaGlyph media={ref.media} />}@[{ref.name}]</span> : null;
           })}
         </div>

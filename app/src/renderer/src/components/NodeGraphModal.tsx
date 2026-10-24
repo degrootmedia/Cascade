@@ -40,6 +40,7 @@ import { normalizeSequenceSegments, sequenceTotalDuration, DRAFT_RESOLUTION, isD
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { closestResolution } from "./resolution.js";
 import { composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
+import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed, usePersistedNumber } from "./production/persisted-state.js";
@@ -3253,7 +3254,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const m = new Map<string, { name: string; ref: GraphRef | null }[]>();
     for (const n of editNodes) {
       const names = refTagNames(editPromptValues.get(n.id) ?? n.prompt ?? "");
-      m.set(n.id, names.map((name) => ({ name, ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null })));
+      m.set(n.id, names.map((name) => ({ name, ref: resolveRefByTagName(references, name) ?? null })));
     }
     return m;
   }, [editNodes, editPromptValues, references]);
@@ -3267,7 +3268,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const m = new Map<string, { name: string; ref: GraphRef | null }[]>();
     for (const n of allVideoNodes) {
       const names = refTagNames(videoPromptValues.get(n.id) ?? n.prompt ?? "");
-      m.set(n.id, names.map((name) => ({ name, ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null })));
+      m.set(n.id, names.map((name) => ({ name, ref: resolveRefByTagName(references, name) ?? null })));
     }
     return m;
   }, [allVideoNodes, videoPromptValues, references]);
@@ -3290,14 +3291,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const tagged = useMemo(
     () => taggedNames.map((name) => ({
       name,
-      ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
+      ref: resolveRefByTagName(references, name) ?? null,
     })),
     [taggedNames, references],
   );
   const taggedVideo = useMemo(
     () => taggedVideoNames.map((name) => ({
       name,
-      ref: references.find((r) => r.name.toLowerCase() === name.toLowerCase()) ?? null,
+      ref: resolveRefByTagName(references, name) ?? null,
     })),
     [taggedVideoNames, references],
   );
@@ -3311,10 +3312,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const seen = new Set<string>();
     const out: { name: string; ref: GraphRef | null }[] = [];
     for (const name of [...taggedNames, ...taggedVideoNames, ...taggedEditNames]) {
-      const lc = name.toLowerCase();
+      const ref = resolveRefByTagName(references, name) ?? null;
+      // A canonical name and one of its aliases are the same union entry.
+      const lc = ref ? `id:${ref.id}` : name.toLowerCase();
       if (seen.has(lc)) continue;
       seen.add(lc);
-      out.push({ name, ref: references.find((r) => r.name.toLowerCase() === lc) ?? null });
+      out.push({ name: ref ? ref.name : name, ref });
     }
     return out;
   }, [taggedNames, taggedVideoNames, taggedEditNames, references]);

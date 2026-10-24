@@ -27,6 +27,7 @@ import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStylePar
 import { createStore } from "./store.js";
 import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
+import { sanitizeAliases } from "../shared/ref-names.js";
 
 export interface ProductionFile extends Production {}
 
@@ -43,6 +44,16 @@ function normalize(p: ProductionFile): ProductionFile {
     delete clean.description;
     return clean;
   });
+  // Reference aliases are read-repaired: sanitized/deduped, canonical dropped.
+  for (const pool of [p.characters, p.products, p.references]) {
+    for (const r of pool as { name: string; aliases?: string[] }[]) {
+      if (r.aliases !== undefined) {
+        const clean = sanitizeAliases(r.aliases, r.name ?? "");
+        if (clean.length) r.aliases = clean;
+        else delete r.aliases;
+      }
+    }
+  }
   p.referenceCategories ??= [];
   p.openArt ??= { model: "auto", resolution: "1k" };
   p.status ??= {};
@@ -994,15 +1005,15 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
 function graphRefViews(p: Production): GraphRefView[] {
   const out: GraphRefView[] = [];
   const seen = new Set<string>();
-  const push = (id: string, name: string, media?: "video" | "audio", artwork?: string): void => {
+  const push = (id: string, name: string, aliases?: string[], media?: "video" | "audio", artwork?: string): void => {
     const key = (name ?? "").trim().toLowerCase();
     if (!id || !key || seen.has(key)) return;
     seen.add(key);
-    out.push({ id, name: name.trim(), media, artwork });
+    out.push({ id, name: name.trim(), aliases, media, artwork });
   };
-  for (const c of p.characters ?? []) push(c.id, c.name, undefined, c.artwork ?? c.imagePath);
-  for (const pr of p.products ?? []) push(pr.id, pr.name, undefined, pr.artwork ?? pr.imagePath);
-  for (const r of p.references ?? []) push(r.id, r.name, r.media, r.artwork ?? r.imagePath ?? r.mediaPath);
+  for (const c of p.characters ?? []) push(c.id, c.name, c.aliases, undefined, c.artwork ?? c.imagePath);
+  for (const pr of p.products ?? []) push(pr.id, pr.name, pr.aliases, undefined, pr.artwork ?? pr.imagePath);
+  for (const r of p.references ?? []) push(r.id, r.name, r.aliases, r.media, r.artwork ?? r.imagePath ?? r.mediaPath);
   return out;
 }
 

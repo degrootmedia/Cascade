@@ -84,6 +84,15 @@ describe("renameReference", () => {
     expect((p as unknown as Record<string, { [k: string]: string }>).magicPrompts["shot-0100"]).toBe("hello @[Champion]");
   });
 
+  it("keeps the old name as an alias so stale/external tags still resolve", () => {
+    const shot = makeShot("0100", { prompt: "@[Hero] standing" });
+    const p = makeProduction([shot]);
+
+    renameReference(p, "r1", "Champion", noop);
+
+    expect(p.references?.find((r) => r.id === "r1")?.aliases).toEqual(["Hero"]);
+  });
+
   it("leaves other references' tags alone", () => {
     const shot = makeShot("0100", { prompt: "@[Hero] and @[Sidekick] together" });
     const p = makeProduction([shot]);

@@ -37,7 +37,7 @@ import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } f
 import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../shared/selected-output.js";
-import { nextNumberedRefName, sanitizeReferenceName } from "../shared/ref-names.js";
+import { buildRefNameIndex, canonicalRefName, nextNumberedRefName, refAliasConflict, refLookupKey, sanitizeAliases, sanitizeReferenceName } from "../shared/ref-names.js";
 import type { ReferenceSaveOptions } from "../shared/ipc/production.js";
 import { createMediaService, type MediaService } from "./media.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
@@ -801,7 +801,12 @@ export function refTokens(p: Production, shot: ProductionShot): Map<string, stri
   const offset = styleFrameForShot(p, shot) ? 1 : 0;
   shotReferences(p, shot)
     .filter((r) => r.artwork)
-    .forEach((r, i) => map.set(r.name, refToken(i + offset)));
+    .forEach((r, i) => {
+      const token = refToken(i + offset);
+      map.set(r.name, token);
+      // Alias tags (`@[MainCharacter]` for `@[Hero]`) resolve to the same slot.
+      for (const a of sanitizeAliases(r.aliases, r.name)) map.set(a, token);
+    });
   return map;
 }
 
@@ -1066,6 +1071,8 @@ export interface ShotRef {
    *  used to look up per-shot prompt overrides. */
   id?: string;
   name: string;
+  /** Script/model names this reference also answers to (tag resolution). */
+  aliases?: string[];
   description?: string;
   artwork?: string;
 }
@@ -1138,18 +1145,19 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   // when the shot actually cites the reference. Reading every reference's file
   // for every shot in a batch was a large transient memory spike — a batch of
   // shots each re-read all character sheets / plates / video refs at once.
-  type Candidate = { id?: string; name: string; read: () => string | undefined };
+  type Candidate = { id?: string; name: string; aliases?: string[]; read: () => string | undefined };
   const candidates: Candidate[] = [
-    ...p.characters.map((c) => ({ id: c.id, name: c.name, read: () => refArtworkDataUrl(p, c) })),
-    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, read: () => refArtworkDataUrl(p, pr) })),
-    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, read: () => refArtworkDataUrl(p, r) })),
+    ...p.characters.map((c) => ({ id: c.id, name: c.name, aliases: c.aliases, read: () => refArtworkDataUrl(p, c) })),
+    ...p.products.map((pr) => ({ id: pr.id, name: pr.name, aliases: pr.aliases, read: () => refArtworkDataUrl(p, pr) })),
+    ...(p.references ?? []).map((r) => ({ id: r.id, name: r.name, aliases: r.aliases, read: () => refArtworkDataUrl(p, r) })),
   ];
-  const materialize = (c: Candidate): ShotRef => ({ id: c.id, name: c.name, artwork: c.read() });
+  const materialize = (c: Candidate): ShotRef => ({ id: c.id, name: c.name, aliases: c.aliases, artwork: c.read() });
   const promptForTags = p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()
     ? p.magicPrompts[shot.id]
     : shot.prompt ?? "";
+  const byTagName = buildRefNameIndex(candidates);
   for (const { name } of refTagMatches(promptForTags)) {
-    const ref = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    const ref = byTagName.get(refLookupKey(name));
     if (ref) push(materialize(ref));
   }
   // Style-only refs auto-attach after content refs (no tag required).
@@ -4045,7 +4053,10 @@ export function renameReference(p: Production, refId: string, newName: string, e
   const oldName = ref.name;
   const name = uniqueReferenceName(p, refId, trimmed);
   if (oldName === name) return p;
-  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name } : r));
+  // Keep the old name resolvable: external/older prompts citing `@[oldName]`
+  // still upload this reference via its alias even after the tag rewrite below.
+  const aliases = sanitizeAliases([...(ref.aliases ?? []), oldName], name);
+  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name, aliases: aliases.length ? aliases : undefined } : r));
   const rename = (text: string): string => renameRefTag(text, oldName, name);
   for (const shot of p.scenes.flatMap((s) => s.shots)) {
     if (Array.isArray(shot.graphEditNodes)) {

@@ -9,6 +9,7 @@
 import { refArtworkDataUrl, refMediaDataUrl, refToken } from "../pipeline.js";
 import { refTagMatches } from "../../shared/prompt-grammar.js";
 import type { Production } from "../../shared/ipc.js";
+import { buildRefNameIndex, refLookupKey } from "../../shared/ref-names.js";
 
 /** Lowercased names of style-only refs: per-ref `styleOnly` override wins,
  *  otherwise the ref's category `kind === "style"` flags it. */
@@ -55,22 +56,24 @@ export function resolvePromptRefs(
   includeVideo = false
 ): { resolved: string; extras: { name: string; dataUrl: string }[] } {
   const candidates = [
-    ...p.characters.map((c) => ({ name: c.name, artwork: refArtworkDataUrl(p, c) })),
-    ...p.products.map((pr) => ({ name: pr.name, artwork: refArtworkDataUrl(p, pr) })),
+    ...p.characters.map((c) => ({ name: c.name, aliases: c.aliases, artwork: refArtworkDataUrl(p, c) })),
+    ...p.products.map((pr) => ({ name: pr.name, aliases: pr.aliases, artwork: refArtworkDataUrl(p, pr) })),
     ...(p.references ?? []).map((r) => ({
       name: r.name,
+      aliases: r.aliases,
       artwork:
         includeVideo && r.media === "video"
           ? refMediaDataUrl(p, r) ?? refArtworkDataUrl(p, r)
           : refArtworkDataUrl(p, r),
     })),
-  ].filter((r): r is { name: string; artwork: string } => Boolean(r.name && r.artwork));
+  ].filter((r): r is { name: string; aliases: string[] | undefined; artwork: string } => Boolean(r.name && r.artwork));
   const extras: { name: string; dataUrl: string }[] = [];
   const nameToken = new Map<string, string>();
+  const byTagName = buildRefNameIndex(candidates);
   let resolved = prompt;
   let token = startToken;
   for (const { tag, name } of refTagMatches(prompt)) {
-    const c = candidates.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    const c = byTagName.get(refLookupKey(name));
     if (!c) continue;
     if (!extras.some((e) => e.name === c.name)) extras.push({ name: c.name, dataUrl: c.artwork });
     if (!nameToken.has(c.name)) nameToken.set(c.name, refToken(token++));

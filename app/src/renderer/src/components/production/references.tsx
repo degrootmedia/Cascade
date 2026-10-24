@@ -694,6 +694,8 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
 export interface PromptReference {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to (tag resolution). */
+  aliases?: string[];
   artwork: string;
   media?: "video" | "audio";
   mediaPath?: string;
@@ -719,9 +721,9 @@ export function allPromptRefs(prod: Production): PromptReference[] {
     seen.add(key);
     out.push(r);
   };
-  for (const r of prod.characters) if (r.name && (r.artwork || r.imagePath)) push({ id: r.id, name: r.name, artwork: img(r) });
-  for (const pr of prod.products) if (pr.name && (pr.artwork || pr.imagePath)) push({ id: pr.id, name: pr.name, artwork: img(pr) });
-  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, artwork: img(r), media: r.media, mediaPath: r.mediaPath });
+  for (const r of prod.characters) if (r.name && (r.artwork || r.imagePath)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r) });
+  for (const pr of prod.products) if (pr.name && (pr.artwork || pr.imagePath)) push({ id: pr.id, name: pr.name, aliases: pr.aliases, artwork: img(pr) });
+  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r), media: r.media, mediaPath: r.mediaPath });
   return out;
 }
 

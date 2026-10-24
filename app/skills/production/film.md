@@ -100,11 +100,16 @@ expect to find it.
    look-anchor isn't the intended style, the sheet has the wrong design or broken
    anatomy) before building the storyboard on top of it.
 4. **Wire references (Step 3, before the storyboard).** Call
-   `cascade_generate_magic_prompts` to write a content prompt for every shot
-   that cites the references each shot actually contains. This is what makes the
-   character sheets and prop images upload during generation. If you need finer
-   control, use `cascade_set_shot_prompt` per shot and include `@[Name]` for
-   every reference that appears in that frame.
+   `cascade_generate_magic_prompts`: a Story Bible pass reads the whole script
+   first (synopsis, entities, assumptions, per-shot plans in
+   `out/magic-bible.md`), then content prompts are written per scene citing
+   the references each shot actually contains. This is what makes the
+   character sheets and prop images upload during generation. Check the
+   returned digest's `magic.unresolvedRefs`: those are script/model names with
+   no matching user reference — tell the user to slot their own reference in
+   the storyboard's reconciliation queue (or cite a reference's alias, which
+   also resolves). If you need finer control, use `cascade_set_shot_prompt`
+   per shot and include `@[Name]` for every reference that appears.
 5. **Storyboard (Step 3).** Call `cascade_generate_storyboard`. With no
    `shotIds` it fills every missing frame; pass `shotIds` (from
    `cascade_list_productions`) to regenerate specific shots. Frames are saved in

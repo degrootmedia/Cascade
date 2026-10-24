@@ -4573,20 +4573,20 @@ Approved plan: replace one-shot-per-call Magic Prompt generation with a
 story-aware two-pass flow, plus reference aliasing/reconciliation for when
 model names differ from user reference names (`@[MainCharacter]` vs `@[Hero]`).
 
-- [ ] Slice 1 — reference aliases: `aliases?` on characters/products/custom
+- [x] Slice 1 — reference aliases: `aliases?` on characters/products/custom
       refs, one shared case-insensitive resolver (`shared/ref-names.ts`),
       `shotReferences`/`refTokens`/graph resolution honour aliases,
       `renameReference` keeps the old name as an alias. Tests.
-- [ ] Slice 2 — Story Bible pass (whole-breakdown analysis: synopsis,
+- [x] Slice 2 — Story Bible pass (whole-breakdown analysis: synopsis,
       entities, assumptions, per-shot plans with must-cite refs) persisted as
       main-owned `Production.magicBible` + `out/magic-bible.md`; per-scene
       prompt generation grounded in the bible; alias tags canonicalized;
       unknown-tag validation warnings; skill file rewritten (no 2000-char
       truncation). Rewrite `magic-regen.test.ts` pins deliberately.
-- [ ] Slice 3 — reconciliation: shared unresolved-ref computation,
+- [x] Slice 3 — reconciliation: shared unresolved-ref computation,
       `production:assignReferenceAlias` IPC (saves alias + rewrites tags via
       the rename machinery), Storyboard queue UI (assign / create / dismiss).
-- [ ] Slice 4 — `productions.ts` merge safety for `magicBible`,
+- [x] Slice 4 — `productions.ts` merge safety for `magicBible`,
       `production-tools.ts` + `CONTEXT.md` docs, full `npm test` gate.
 
 Preserved safeguards (see tasks/lessons.md 2026-09-25): never send a target
@@ -4595,4 +4595,13 @@ script visual, keep-previous-on-failure, `magicPrompts` main-owned.
 
 ## Review
 
-(pending)
+Done on `magic-prompt-rearchitecture` (slices 1–4, one commit each, pushed).
+Full gate green: `npm test` 1870 passed / 2 skipped (typecheck included),
+`npm run build` clean. Not yet exercised: (1) live-model quality — the bible
+and per-scene writing are covered by mocked-`ChatClient` tests only; run a
+real Magic pass on an existing production and eyeball `out/magic-bible.md` +
+the resulting frames before merging. (2) The Electron UI pass for the
+reconciliation queue (component tests mount it, but no real click-through in
+the app). Deferred follow-ups: pre-slotting alias editor on Design tiles
+(queue Assign + rename-retains-alias cover slotting today), vision-capable
+bible pass over reference images, optional critic/repair pass.

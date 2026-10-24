@@ -16,6 +16,7 @@
  */
 import type { AgentTool } from "@core";
 import { addRefTag } from "../shared/prompt-grammar.js";
+import { computeUnresolvedMagicRefs } from "../shared/magic-refs.js";
 import type {
   CharacterSheetGenOptions,
   CliModelSchema,
@@ -122,14 +123,22 @@ export function productionDigest(p: Production): Record<string, unknown> {
     characters: (p.characters ?? []).map((c) => ({
       id: c.id,
       name: c.name,
+      aliases: c.aliases ?? [],
       hasSheet: !!(c.imagePath ?? c.artwork),
     })),
     references: (p.references ?? []).map((r) => ({
       id: r.id,
       name: r.name,
+      aliases: r.aliases ?? [],
       categoryId: r.categoryId ?? null,
       imagePath: r.imagePath ?? null,
     })),
+    magic: {
+      enabled: !!p.magicEnabled,
+      bibleSynopsis: p.magicBible?.synopsis ?? null,
+      bibleAssumptions: p.magicBible?.assumptions ?? [],
+      unresolvedRefs: computeUnresolvedMagicRefs(p),
+    },
     scenes: p.scenes.map((sc) => ({ number: sc.number, title: sc.title, shotCount: sc.shots.length })),
     shots: p.scenes.flatMap((sc) =>
       sc.shots.map((s) => ({
@@ -602,7 +611,7 @@ export function makeProductionAgentTools(host: ProductionToolHost): Record<strin
       function: {
         name: "cascade_generate_magic_prompts",
         description:
-          "Step 3: write a content-only storyboard prompt for every shot from the script (one bounded LLM pass). Crucially, this is how references get attached: the pass is told the available reference names and cites the ones that appear in each shot as @[Name] tags, which is what makes cascade_generate_storyboard upload the matching character sheets/prop images. Run this after the script is ingested and the design (style + character sheets) exists, and before the storyboard. It also switches the production into Magic Prompt mode.",
+          "Step 3: write a content-only storyboard prompt for every shot as ONE continuous story. A Story Bible pass first reads the whole script (synopsis, canonical entities, recorded assumptions, per-shot plans — persisted on the production and to out/magic-bible.md), then prompts are written per scene grounded in that bible. Crucially, this is how references get attached: the passes are told the available references (names + descriptors + aliases) and cite the ones visible in each shot as @[Name] tags, which is what makes cascade_generate_storyboard upload the matching character sheets/prop images. A cited name that matches a reference's alias resolves to that reference; unmatched script/model names appear in the digest as magic.unresolvedRefs for the user to slot to their own references in the storyboard queue. Run this after the script is ingested and the design (style + character sheets) exists, and before the storyboard. It also switches the production into Magic Prompt mode.",
         parameters: {
           type: "object",
           properties: {
@@ -614,7 +623,7 @@ export function makeProductionAgentTools(host: ProductionToolHost): Record<strin
     describe: () => ({
       tool: "cascade_generate_magic_prompts",
       summary: "Write storyboard prompts (cites references as @[Name])",
-      detail: "One LLM pass over all shots; enables Magic Prompt mode.",
+      detail: "Story Bible pass + per-scene prompt writing; enables Magic Prompt mode.",
     }),
     run: async (args) => {
       const p = (await host.run("generateMagicPrompts", requireId(host, args))) as Production;

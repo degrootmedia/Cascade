@@ -14,6 +14,8 @@ export const productionChannels = {
   "production:addBoardFrameReference": { method: "addBoardFrameReference", kind: "invoke" },
   "production:deleteReference": { method: "deleteReference", kind: "invoke" },
   "production:renameReference": { method: "renameReference", kind: "invoke" },
+  "production:assignReferenceAlias": { method: "assignReferenceAlias", kind: "invoke" },
+  "production:dismissMagicRef": { method: "dismissMagicRef", kind: "invoke" },
   "production:generateReferenceImage": { method: "generateReferenceImage", kind: "invoke" },
   "production:generateCharacterSheet": { method: "generateCharacterSheet", kind: "invoke" },
   "production:removeReferenceFile": { method: "removeReferenceFile", kind: "invoke" },

@@ -17,7 +17,7 @@ import * as productions from "./productions.js";
 import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
@@ -5609,6 +5609,24 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     renameReference(p, refId, name, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Magic Prompt reconciliation: slot the user's reference where prompts cite
+  // a different name — save it as an alias and rewrite the tags to canonical.
+  handle("production:assignReferenceAlias", (_e, id: string, citedName: string, refId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    assignReferenceAlias(p, citedName, refId, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  handle("production:dismissMagicRef", (_e, id: string, citedName: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    dismissCitedRefName(p, citedName, (m, l) => productionEmit(id, m, l));
     productions.saveProduction(p);
     return p;
   });

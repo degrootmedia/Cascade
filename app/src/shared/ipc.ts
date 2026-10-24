@@ -586,6 +586,17 @@ export interface CascadeApi {
    */
   renameReference(productionId: string, refId: string, name: string): Promise<Production>;
   /**
+   * Magic Prompt reconciliation: save a script/model cited name as an alias
+   * on the chosen character/product/reference and rewrite its `@[cited]`
+   * tags to the canonical `@[Name]` everywhere. Returns the production.
+   */
+  assignReferenceAlias(productionId: string, citedName: string, refId: string): Promise<Production>;
+  /**
+   * Magic Prompt reconciliation: dismiss a cited name as a plain noun — its
+   * tags become plain text everywhere and the name is remembered.
+   */
+  dismissMagicRef(productionId: string, citedName: string): Promise<Production>;
+  /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's
    * current image is edited in place; otherwise a brand-new reference is added

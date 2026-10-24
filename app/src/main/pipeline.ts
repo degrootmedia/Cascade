@@ -25,6 +25,7 @@ import {
   parsePromptBoxes,
   refTagMatches,
   refTagNames,
+  refTagPattern,
   removeRefTag,
   renameRefTag,
   stripBrandParagraph,
@@ -4500,19 +4501,10 @@ export function uniqueReferenceName(p: Production, refId: string, base: string):
  * the old tag dangling and the reference's node "missing" (disconnected).
  * Node/connection identity is id-based, so canvas placement is untouched.
  */
-export function renameReference(p: Production, refId: string, newName: string, emit: EmitFn): Production {
-  const ref = (p.references ?? []).find((r) => r.id === refId);
-  if (!ref) throw new Error("Reference not found.");
-  const trimmed = newName.trim();
-  if (!trimmed) throw new Error("Reference name can't be empty.");
-  const oldName = ref.name;
-  const name = uniqueReferenceName(p, refId, trimmed);
-  if (oldName === name) return p;
-  // Keep the old name resolvable: external/older prompts citing `@[oldName]`
-  // still upload this reference via its alias even after the tag rewrite below.
-  const aliases = sanitizeAliases([...(ref.aliases ?? []), oldName], name);
-  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name, aliases: aliases.length ? aliases : undefined } : r));
-  const rename = (text: string): string => renameRefTag(text, oldName, name);
+/** Apply a text transform across all prompt stores that can cite a
+ *  reference (composer, video, edit, edit-video, edit nodes, tween blocks,
+ *  magic prompts). Shared by rename, alias assignment, and dismissal. */
+function mapPromptStores(p: Production, rename: (text: string) => string): void {
   for (const shot of p.scenes.flatMap((s) => s.shots)) {
     if (Array.isArray(shot.graphEditNodes)) {
       shot.graphEditNodes = shot.graphEditNodes.map((n) => {
@@ -4550,7 +4542,83 @@ export function renameReference(p: Production, refId: string, newName: string, e
       if (typeof value === "string") p.magicPrompts[key] = rename(value);
     }
   }
+}
+
+/** Rewrite every `@[from]` tag to `@[to]` across all prompt stores. */
+function rewriteRefTagEverywhere(p: Production, from: string, to: string): void {
+  mapPromptStores(p, (text) => renameRefTag(text, from, to));
+}
+
+export function renameReference(p: Production, refId: string, newName: string, emit: EmitFn): Production {
+  const ref = (p.references ?? []).find((r) => r.id === refId);
+  if (!ref) throw new Error("Reference not found.");
+  const trimmed = newName.trim();
+  if (!trimmed) throw new Error("Reference name can't be empty.");
+  const oldName = ref.name;
+  const name = uniqueReferenceName(p, refId, trimmed);
+  if (oldName === name) return p;
+  // Keep the old name resolvable: external/older prompts citing `@[oldName]`
+  // still upload this reference via its alias even after the tag rewrite below.
+  const aliases = sanitizeAliases([...(ref.aliases ?? []), oldName], name);
+  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, name, aliases: aliases.length ? aliases : undefined } : r));
+  rewriteRefTagEverywhere(p, oldName, name);
   emit(`Renamed reference "${oldName}" to "${name}".`);
+  return p;
+}
+
+/**
+ * Magic Prompt reconciliation: slot the user's reference where prompts cite
+ * a different (script/model) name. Saves `citedName` as an alias on the
+ * chosen character/product/custom reference AND rewrites existing
+ * `@[citedName]` tags to the canonical `@[Name]` everywhere, so prompts,
+ * graph nodes, and future generations all speak the user's name. A name
+ * another reference already owns is refused — silent mis-binding is worse
+ * than an unresolved tag.
+ */
+export function assignReferenceAlias(p: Production, citedName: string, refId: string, emit: EmitFn): Production {
+  const cited = sanitizeReferenceName(citedName ?? "");
+  if (!cited) throw new Error("The cited name is empty.");
+  const pools: { kind: string; entries: { id: string; name: string; aliases?: string[] }[]; apply: (next: { id: string; name: string; aliases?: string[] }[]) => void }[] = [
+    { kind: "character", entries: p.characters ?? [], apply: (n) => { p.characters = n as Production["characters"]; } },
+    { kind: "product", entries: p.products ?? [], apply: (n) => { p.products = n as Production["products"]; } },
+    { kind: "reference", entries: p.references ?? [], apply: (n) => { p.references = n as Production["references"]; } },
+  ];
+  const pool = pools.find((pl) => pl.entries.some((e) => e.id === refId));
+  const target = pool?.entries.find((e) => e.id === refId);
+  if (!pool || !target) throw new Error("Reference not found.");
+  if (refLookupKey(target.name) === refLookupKey(cited)) return p;
+  const allRefs = pools.flatMap((pl) => pl.entries);
+  const conflict = refAliasConflict(allRefs, refId, cited);
+  if (conflict) throw new Error(`"@[${cited}]" already belongs to ${conflict} — pick a different reference or rename that one first.`);
+  const aliases = sanitizeAliases([...(target.aliases ?? []), cited], target.name);
+  pool.apply(pool.entries.map((e) => (e.id === refId ? { ...e, aliases } : e)));
+  rewriteRefTagEverywhere(p, cited, target.name);
+  // Bind matching bible entities + clear any dismissal of this name.
+  if (p.magicBible) {
+    const key = refLookupKey(cited);
+    for (const e of p.magicBible.entities) {
+      if (!e.refName && (refLookupKey(e.name) === key || (e.aliases ?? []).some((a) => refLookupKey(a) === key))) e.refName = target.name;
+    }
+  }
+  if (p.magicDismissedRefs?.length) {
+    p.magicDismissedRefs = p.magicDismissedRefs.filter((n) => refLookupKey(n) !== refLookupKey(cited));
+  }
+  emit(`Magic Prompt: @[${cited}] now uses your reference @[${target.name}] (saved as an alias).`);
+  return p;
+}
+
+/**
+ * Magic Prompt reconciliation, dismiss path: the cited name is NOT a
+ * reference. Its tags become the plain noun text everywhere and the name is
+ * remembered so the queue never asks about it again.
+ */
+export function dismissCitedRefName(p: Production, citedName: string, emit: EmitFn): Production {
+  const cited = sanitizeReferenceName(citedName ?? "");
+  if (!cited) throw new Error("The cited name is empty.");
+  mapPromptStores(p, (text) => text.replace(refTagPattern(cited), cited));
+  const key = cited.toLowerCase();
+  p.magicDismissedRefs = [...new Set([...(p.magicDismissedRefs ?? []), key])];
+  emit(`Magic Prompt: @[${cited}] dismissed — treated as plain text, not a reference.`);
   return p;
 }
 

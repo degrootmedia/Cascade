@@ -18,6 +18,7 @@ import {
   setVideoPosterDeps,
   thumbDiskPath,
   regenerateRefThumbnails,
+  thumbEdgeForParam,
 } from "../src/main/thumbnails.js";
 
 let tmp: string;
@@ -172,5 +173,136 @@ describe("video posters (ffmpeg seam)", () => {
     clearRefThumbCache();
     setVideoPosterDeps({ resolveBin: async () => "ffmpeg", probe: async () => ({ durationSec: 1, hasAudio: false }), run: async () => { throw new Error("boom"); } });
     expect(await loadRefThumbnail(src)).toBeNull();
+  });
+});
+describe("LOD tiers", () => {
+  it("thumbEdgeForParam whitelists tiers and maps the legacy flag", () => {
+    expect(thumbEdgeForParam("1")).toBe(256);
+    expect(thumbEdgeForParam("256")).toBe(256);
+    expect(thumbEdgeForParam("512")).toBe(512);
+    expect(thumbEdgeForParam("1024")).toBe(1024);
+    expect(thumbEdgeForParam("2048")).toBeNull();
+    expect(thumbEdgeForParam("0")).toBeNull();
+    expect(thumbEdgeForParam("")).toBeNull();
+    expect(thumbEdgeForParam(null)).toBeNull();
+    expect(thumbEdgeForParam("abc")).toBeNull();
+  });
+
+  it("thumbDiskPath separates tiers so they never collide", () => {
+    const st = { mtimeMs: 1000, size: 100 };
+    const p256 = thumbDiskPath(cacheDir, "C:/x/refs/a.png", st, 256);
+    const p1024 = thumbDiskPath(cacheDir, "C:/x/refs/a.png", st, 1024);
+    expect(p256).not.toBe(p1024);
+    // The default edge is the legacy list-tile tier.
+    expect(thumbDiskPath(cacheDir, "C:/x/refs/a.png", st)).toBe(p256);
+  });
+
+  it("caches tiers independently (video poster seam)", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, Buffer.from("fake-video-bytes"));
+    let runs = 0;
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: 4, hasAudio: false }),
+      run: async (_bin, argv) => { runs++; fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster-jpeg")); },
+    });
+
+    expect((await loadRefThumbnail(src, 256))?.toString()).toBe("poster-jpeg");
+    expect((await loadRefThumbnail(src, 1024))?.toString()).toBe("poster-jpeg");
+    // Perf phase 2: tiers derive from ONE master poster extract, not one
+    // ffmpeg run per tier (was 2 here, 3 across a full regenerate).
+    expect(runs).toBe(1);
+    const st = fs.statSync(src);
+    expect(fs.existsSync(thumbDiskPath(cacheDir, src, st, 256))).toBe(true);
+    expect(fs.existsSync(thumbDiskPath(cacheDir, src, st, 1024))).toBe(true);
+
+    // Repeat requests hit memory — no further encodes.
+    expect(await loadRefThumbnail(src, 256)).not.toBeNull();
+    expect(await loadRefThumbnail(src, 1024)).not.toBeNull();
+    expect(runs).toBe(1);
+  });
+
+  it("regenerate keeps every tier entry for a live source", async () => {
+    const keep = path.join(tmp, "keep.png");
+    fs.writeFileSync(keep, Buffer.from("k"));
+    const st = fs.statSync(keep);
+    const entries = [256, 512, 1024].map((edge) => thumbDiskPath(cacheDir, keep, st, edge));
+    for (const entry of entries) fs.writeFileSync(entry, Buffer.from("thumb"));
+
+    await regenerateRefThumbnails([keep]);
+    for (const entry of entries) expect(fs.existsSync(entry)).toBe(true);
+  });
+});
+
+describe("poster encode bounds (perf phase 2)", () => {
+  const VIDEO = Buffer.from("fake-video-bytes");
+
+  it("coalesces concurrent cold requests for one clip+tier into one encode", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, VIDEO);
+    let probes = 0;
+    let runs = 0;
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => { probes++; return { durationSec: 6, hasAudio: false }; },
+      run: async (_bin, argv) => { runs++; fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster")); },
+    });
+    const got = await Promise.all(Array.from({ length: 8 }, () => loadRefThumbnail(src, 512)));
+    expect(got.every((g) => g !== null)).toBe(true);
+    expect(probes).toBe(1);
+    expect(runs).toBe(1);
+  });
+
+  it("regenerating all tiers of one clip extracts the poster once", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, VIDEO);
+    let runs = 0;
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: 6, hasAudio: false }),
+      run: async (_bin, argv) => { runs++; fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster")); },
+    });
+    const res = await regenerateRefThumbnails([src]);
+    expect(res.generated).toBe(1);
+    expect(runs).toBe(1);
+  });
+
+  it("negative-caches a failing clip instead of re-spawning ffmpeg per request", async () => {
+    const src = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(src, VIDEO);
+    let runs = 0;
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: 1, hasAudio: false }),
+      run: async () => { runs++; throw new Error("boom"); },
+    });
+    for (let i = 0; i < 4; i++) expect(await loadRefThumbnail(src, 256)).toBeNull();
+    expect(runs).toBe(1);
+  });
+
+  it("never runs more than POSTER_CONCURRENCY extracts at once", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const srcs: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const src = path.join(tmp, `clip-${i}.mp4`);
+      fs.writeFileSync(src, VIDEO);
+      srcs.push(src);
+    }
+    setVideoPosterDeps({
+      resolveBin: async () => "ffmpeg",
+      probe: async () => ({ durationSec: 2, hasAudio: false }),
+      run: async (_bin, argv) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((r) => setTimeout(r, 15));
+        fs.writeFileSync(argv[argv.length - 1], Buffer.from("poster"));
+        active--;
+      },
+    });
+    const { POSTER_CONCURRENCY } = await import("../src/main/thumbnails.js");
+    await Promise.all(srcs.map((s) => loadRefThumbnail(s, 256)));
+    expect(maxActive).toBeGreaterThan(1);
+    expect(maxActive).toBeLessThanOrEqual(POSTER_CONCURRENCY);
   });
 });

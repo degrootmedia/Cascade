@@ -22,6 +22,7 @@ import regenerateUrl from "../assets/icons/regenerate.svg";
 import searchUrl from "../assets/icons/search.svg";
 import stopButtonUrl from "../assets/icons/stop-button.svg";
 import tokenUrl from "../assets/icons/token.svg";
+import trashUrl from "../assets/icons/trash.svg";
 import videoEditingUrl from "../assets/icons/video-editing.svg";
 import xUrl from "../assets/icons/X.svg";
 
@@ -47,8 +48,10 @@ function Icon({ src, size = 16, className, title, alt = "" }: { src: string } & 
   );
 }
 
-/** Red X — close / remove. */
+/** Red X — close / dismiss a surface (never delete: that's the trashcan). */
 export const XIcon = (p: IconProps) => <Icon src={xUrl} {...p} />;
+/** Red trashcan — delete / remove a thing (references, shots, rows…). */
+export const TrashIcon = (p: IconProps) => <Icon src={trashUrl} {...p} />;
 /** Gold coin — AI credit / token cost. */
 export const TokenIcon = (p: IconProps) => <Icon src={tokenUrl} {...p} />;
 /** Red stop square — stop generation / playback. */

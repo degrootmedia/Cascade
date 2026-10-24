@@ -10,7 +10,7 @@
  * pure `moodboard-layout.ts` module.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { createPortal } from "react-dom";
+
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type {
@@ -20,14 +20,14 @@ import type {
   Production,
   ReferenceCategory,
 } from "../../../../shared/ipc.js";
-import { PlusIcon, XIcon } from "../../components/icons.js";
+import { PlusIcon, TrashIcon } from "../../components/icons.js";
 import { cascadeMedia } from "../../components/production/animatic.js";
 import { MoodboardNode } from "./MoodboardNode.js";
 import { MoodboardFrameView } from "./MoodboardFrame.js";
 import { MoodboardToolbar } from "./MoodboardToolbar.js";
 import { MoodboardMinimap } from "./MoodboardMinimap.js";
 import { MoodboardShelf } from "./MoodboardShelf.js";
-import { SaveVideoStillButton } from "../../components/common/SaveVideoStillButton.js";
+import { MediaLightbox } from "../../components/common/MediaLightbox.js";
 import {
   MB_DEFAULT_H,
   MB_DEFAULT_W,
@@ -52,6 +52,7 @@ import {
   setFrameColor,
   setFrameLabel,
   settleFrameMembership,
+  thumbTierFor,
   snapMove,
   snapRotation,
   snapToGrid,
@@ -120,7 +121,7 @@ const NoteCard = memo(function NoteCard({
     >
       <div className="moodboard-note-head" onPointerDown={(e) => onStartMove(e, note.id)}>
         <span>Note</span>
-        <button className="moodboard-note-del" title="Delete note" onPointerDown={(e) => e.stopPropagation()} onClick={() => onDelete(note.id)}><XIcon size={11} /></button>
+        <button className="moodboard-note-del" title="Delete note" onPointerDown={(e) => e.stopPropagation()} onClick={() => onDelete(note.id)}><TrashIcon size={11} /></button>
       </div>
       {editing ? (
         <textarea
@@ -201,6 +202,18 @@ export function MoodboardCanvas({
     frameRef.current = null;
   }, []);
 
+  // LOD: canvas nodes paint the thumbnail tier matching their on-screen
+  // size, swapped only once zoom settles (250ms quiet) so a zoom gesture
+  // never churns image srcs mid-flight — the current bitmap stretches
+  // briefly instead. Mounts/cull-ins use the settled tier immediately, so
+  // opening zoomed-out never decodes full-res files.
+  const [settledZoom, setSettledZoom] = useState(layout.viewport.zoom);
+  useEffect(() => {
+    const t = setTimeout(() => setSettledZoom(layout.viewport.zoom), 250);
+    return () => clearTimeout(t);
+  }, [layout.viewport.zoom]);
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
@@ -211,8 +224,7 @@ export function MoodboardCanvas({
   marqueeRef.current = marquee;
   const [guides, setGuides] = useState<MoodboardGuide[]>([]);
   const [viewer, setViewer] = useState<CustomRef | null>(null);
-  /** The viewer video's paused position — the still is extracted at exactly it. */
-  const viewerVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const [menu, setMenu] = useState<{ x: number; y: number; refId: string } | null>(null);
   const [frameMenu, setFrameMenu] = useState<{ x: number; y: number; frameId: string } | null>(null);
   const [editingNote, setEditingNote] = useState<string | null>(null);
@@ -736,6 +748,10 @@ export function MoodboardCanvas({
     });
   }, [commit]);
 
+  const setBackground = useCallback((b: "dark" | "mid" | "grid") => commit((l) => ({ ...l, background: b })), [commit]);
+  const removeSelected = useCallback(() => hideNodes([...selectionRef.current]), [hideNodes]);
+  const centerMinimap = useCallback((wx: number, wy: number) => commit((l) => ({ ...l, viewport: { ...l.viewport, x: sizeRef.current.w / 2 - wx * l.viewport.zoom, y: sizeRef.current.h / 2 - wy * l.viewport.zoom } })), [commit]);
+
   const handleAddReference = useCallback(async () => {
     const center = screenToWorld(liveRef.current.viewport, sizeRef.current.w / 2, sizeRef.current.h / 2);
     const id = await onAddReference();
@@ -776,13 +792,13 @@ export function MoodboardCanvas({
   const notes = layout.notes ?? [];
   const background = layout.background ?? "dark";
   const showMinimap = placed.length > MINIMAP_THRESHOLD;
-  const offBoard = useMemo(() => offBoardRefs(layout, refs), [layout, refs]);
+  const offBoard = useMemo(() => offBoardRefs(layout, refs), [layout.nodes, refs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Frames are drawn behind their members: a frame's z sits just under the
   // lowest member node's z (nodes keep their persisted z untouched). A frame
   // with every member hidden is skipped (and reappears via "Show all").
   const frames = layout.frames ?? [];
-  const nodeZ = new Map(layout.nodes.map((n) => [n.refId, n.z]));
+  const nodeZ = useMemo(() => new Map(layout.nodes.map((n) => [n.refId, n.z])), [layout.nodes]);
   const visibleRefIds = useMemo(() => new Set(placed.map((n) => n.refId)), [placed]);
   const frameViews = useMemo(
     () =>
@@ -813,27 +829,28 @@ export function MoodboardCanvas({
         zoom={layout.viewport.zoom}
         hasSelection={selection.size > 0}
         onFilter={setActiveCategory}
-        onBackground={(b) => commit((l) => ({ ...l, background: b }))}
+        onBackground={setBackground}
         onFit={fit}
         onReset={resetZoom}
         onZoom={zoomStep}
         onArrange={arrangeSelected}
         onGroup={groupSelection}
         onUngroup={ungroupSelection}
-        onAddReference={() => void handleAddReference()}
-        onRemoveSelected={() => hideNodes([...selection])}
+        onAddReference={handleAddReference}
+        onRemoveSelected={removeSelected}
         onShowAll={showAll}
       />
       <div className="moodboard-main">
       <MoodboardShelf
         prodId={prodId}
         refs={offBoard}
+        categories={categories}
         onAdd={addFromShelf}
         onZoom={setViewer}
       />
       <div
         ref={canvasRef}
-        className={"moodboard-canvas moodboard-bg-" + background + (spaceRef.current ? " panning" : "")}
+        className={"moodboard-canvas moodboard-bg-" + background + (spaceRef.current ? " panning" : "") + (layout.viewport.zoom < 0.4 ? " moodboard-lowzoom" : "")}
         onPointerDown={onCanvasPointerDown}
         onDragOver={(e) => { if (e.dataTransfer.types.includes("Files") || e.dataTransfer.types.includes("application/x-cascade-reference")) e.preventDefault(); }}
         onDrop={(e) => void handleDrop(e)}
@@ -874,6 +891,7 @@ export function MoodboardCanvas({
                 prodId={prodId}
                 refItem={r}
                 node={n}
+                thumbEdge={thumbTierFor(n.w, n.h, settledZoom, dpr)}
                 selected={selection.has(n.refId)}
                 dimmed={activeCategory !== null && (r.categoryId ?? null) !== activeCategory}
                 onGestureStart={beginMove}
@@ -932,7 +950,7 @@ export function MoodboardCanvas({
             viewport={layout.viewport}
             viewW={size.w}
             viewH={size.h}
-            onCenter={(wx, wy) => commit((l) => ({ ...l, viewport: { ...l.viewport, x: sizeRef.current.w / 2 - wx * l.viewport.zoom, y: sizeRef.current.h / 2 - wy * l.viewport.zoom } }))}
+            onCenter={centerMinimap}
           />
         )}
 
@@ -952,22 +970,18 @@ export function MoodboardCanvas({
       </div>
       </div>
 
-      {viewer && createPortal(
-        <div className="prod-ref-lightbox" onClick={() => setViewer(null)}>
-          <figure className="prod-ref-lightbox-card">
-            {viewer.media === "video" && viewer.mediaPath ? (
-              <video ref={viewerVideoRef} className="prod-ref-lightbox-video" src={cascadeMedia(prodId, viewer.mediaPath)} controls autoPlay loop playsInline />
-            ) : (
-              <img src={viewer.imagePath ? cascadeMedia(prodId, viewer.imagePath) : viewer.artwork} alt={viewer.name} />
-            )}
-            <figcaption>
-              {viewer.name} — click anywhere to close
-              {viewer.media === "video" && viewer.mediaPath && onVideoStillSaved && (
-                <>{" · "}<SaveVideoStillButton productionId={prodId} videoRel={viewer.mediaPath} getTime={() => viewerVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setViewer(null); }} /></>
-              )}
-            </figcaption>
-          </figure>
-        </div>, document.body)}
+      {viewer && (
+        <MediaLightbox
+          name={viewer.name}
+          src={viewer.media === "video" && viewer.mediaPath ? cascadeMedia(prodId, viewer.mediaPath) : (viewer.imagePath ? cascadeMedia(prodId, viewer.imagePath) : (viewer.artwork ?? ""))}
+          kind={viewer.media === "video" && viewer.mediaPath ? "video" : "image"}
+          rel={viewer.media === "video" ? viewer.mediaPath : undefined}
+          productionId={prodId}
+          loop={viewer.media === "video"}
+          onClose={() => setViewer(null)}
+          onVideoStillSaved={onVideoStillSaved}
+        />
+      )}
     </div>
   );
 }

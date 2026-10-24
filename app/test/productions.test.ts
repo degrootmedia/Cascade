@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths } from "../src/main/productions.js";
+import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { assemblyPlan } from "../src/main/assembly.js";
@@ -1302,6 +1302,40 @@ describe("media registry (architecture hardening)", () => {
     const loaded = loadProduction("media-bootstrap")!;
     expect(mediaEntryForPath(loaded.media, "boards/0100/shot-0100-a.jpg")?.state).toBe("present");
     expect(mediaEntryForPath(loaded.media, "boards/0100/shot-0100-gone.jpg")?.state).toBe("missing");
+  });
+
+  it("repeat loads of the unchanged cached document reuse the bootstrap (perf phase 3)", () => {
+    const folder = path.join(dataDir, "media-bootstrap-cache");
+    const file = path.join(folder, "boards", "0100", "shot-0100-a.jpg");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "bytes");
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "media-bootstrap-cache", folder },
+      schemaVersion: 3,
+      scenes: [{ number: 1, title: "S1", shots: [{ id: "s1", number: "0100", audio: "", visual: "v", artwork: "boards/0100/shot-0100-a.jpg" }] }],
+    });
+    resetProductionLoadCacheForTests();
+    saveProduction(doc);
+    expect(mediaEntryForPath(loadProduction("media-bootstrap-cache")!.media, "boards/0100/shot-0100-a.jpg")?.state).toBe("present");
+    // File vanishes externally: an immediate repeat load reuses the sweep
+    // (bounded staleness), a forced re-sweep sees the truth.
+    fs.rmSync(file);
+    expect(mediaEntryForPath(loadProduction("media-bootstrap-cache")!.media, "boards/0100/shot-0100-a.jpg")?.state).toBe("present");
+    resetProductionLoadCacheForTests();
+    expect(mediaEntryForPath(loadProduction("media-bootstrap-cache")!.media, "boards/0100/shot-0100-a.jpg")?.state).toBe("missing");
+  });
+
+  it("generationVideoThumbnailPaths lists every referenced clip, stills excluded", () => {
+    const p = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{
+        id: "s1", number: "0100", audio: "", visual: "v",
+        artwork: "boards/0100/shot-0100-a.jpg",
+        graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "boards/0100/video/shot-0100-x.mp4", prompt: "", model: "", at: "" }] }],
+      }] }],
+    });
+    const paths = generationVideoThumbnailPaths(p as never);
+    expect(paths.some((abs) => abs.endsWith("shot-0100-x.mp4"))).toBe(true);
+    expect(paths.some((abs) => abs.endsWith(".jpg"))).toBe(false);
   });
 });
 

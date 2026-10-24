@@ -58,6 +58,7 @@ import type {
   ProductRef,
   CustomRef,
   ReferenceCategory,
+  ReferenceSaveOptions,
   SuggestedReference,
   OpenArtBoardConfig,
   ImageGenAspectRatio,
@@ -716,6 +717,13 @@ export interface CascadeApi {
    */
   recheckVideo(productionId: string, shotId: string): Promise<Production>;
   /**
+   * Step 3/4: fetch EVERY shot's pending video job at once (the bulk form of
+   * `recheckVideo`), then adopt any clips that downloaded to a shot's
+   * `video/` folder without ever being recorded on the shot. The recovery
+   * button after a batch of generations left some shots unpopulated.
+   */
+  fetchPendingVideos(productionId: string): Promise<Production>;
+  /**
    * Step 3/4: discard a shot's pending vendor job without reclaiming it (the
    * job can't be rechecked afterwards — regenerate to try again). `kind`
    * selects the frame or the video job; omitted clears whichever is pending.
@@ -804,19 +812,19 @@ export interface CascadeApi {
   deleteGeneration(productionId: string, shotId: string, rel: string): Promise<Production>;
   /**
    * Step 3/4: save any stored generated image or clip as a new reference —
-   * copy the file into referencesDir and add a `CustomRef` named "Saved Ref_00"
+   * copy the file into referencesDir and add a `CustomRef` named "Saved Ref_001"
    * (then _01, _02, …), without tagging any prompt. Returns the updated
    * production.
    */
-  saveGenerationAsReference(productionId: string, shotId: string, rel: string, sequenceId?: string): Promise<Production>;
+  saveGenerationAsReference(productionId: string, shotId: string, rel: string, sequenceId?: string, opts?: ReferenceSaveOptions): Promise<Production>;
   /**
    * Any video lightbox: save the frame the video is paused on as a new image
    * reference — main extracts the exact `timeSec` frame via ffmpeg and stores
-   * it as `Video still_00` (then _01, _02, …), without tagging any prompt.
+   * it as `Video still_001` (then _002, _003, …), without tagging any prompt.
    * `videoRel` is the clip's workspace-relative path. Returns the updated
    * production.
    */
-  saveVideoStill(productionId: string, videoRel: string, timeSec: number): Promise<Production>;
+  saveVideoStill(productionId: string, videoRel: string, timeSec: number, opts?: ReferenceSaveOptions): Promise<Production>;
   /**
    * Create (or return the existing) 720p duplicate of a video reference:
    * transcodes its file into referencesDir and appends a reference named
@@ -1103,7 +1111,7 @@ export interface CascadeApi {
   /** Delete one suite entry (and its output file). Returns the session. */
   deleteSuiteEntry(productionId: string, entryId: string): Promise<SuiteSession>;
   /** Copy one entry's output into the production as a reference or board file. */
-  exportSuiteEntry(productionId: string, entryId: string, target: SuiteExportTarget, name?: string): Promise<SuiteExportResult>;
+  exportSuiteEntry(productionId: string, entryId: string, target: SuiteExportTarget, name?: string, categoryId?: string): Promise<SuiteExportResult>;
   /** Run one suite generation/edit through the active `MediaProvider`, writing
    *  the output into the production's suite folder. Vendor-blind. */
   generateSuiteImage(productionId: string, req: SuiteGenerateRequest): Promise<SuiteEntry>;

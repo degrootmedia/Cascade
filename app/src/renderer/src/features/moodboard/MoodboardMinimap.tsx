@@ -4,7 +4,7 @@
  * and draws the current viewport rectangle; dragging the box (or clicking
  * anywhere on the map) recenters the view live as the pointer moves.
  */
-import { useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import type { MoodboardNodeLayout } from "../../../../shared/ipc.js";
 import { contentBounds, screenToWorld, type MoodboardViewport } from "./moodboard-layout.js";
 
@@ -12,7 +12,7 @@ const MAP_W = 180;
 const MAP_H = 120;
 const PAD = 6;
 
-export function MoodboardMinimap({
+export const MoodboardMinimap = memo(function MoodboardMinimap({
   nodes,
   viewport,
   viewW,
@@ -60,6 +60,17 @@ export function MoodboardMinimap({
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
   }, []);
 
+  const nodeSpans = useMemo(() => {
+    if (!bounds) return null;
+    return nodes.map((n) => (
+      <span
+        key={n.refId}
+        className="moodboard-minimap-node"
+        style={{ left: (n.x - bounds.x) * scale + PAD, top: (n.y - bounds.y) * scale + PAD, width: Math.max(1, n.w * scale), height: Math.max(1, n.h * scale) }}
+      />
+    ));
+  }, [nodes, bounds, scale]);
+
   if (!bounds || bounds.w <= 0 || bounds.h <= 0) return null;
   const tx = (wx: number) => (wx - bounds.x) * scale + PAD;
   const ty = (wy: number) => (wy - bounds.y) * scale + PAD;
@@ -80,14 +91,8 @@ export function MoodboardMinimap({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
-      {nodes.map((n) => (
-        <span
-          key={n.refId}
-          className="moodboard-minimap-node"
-          style={{ left: tx(n.x), top: ty(n.y), width: Math.max(1, n.w * scale), height: Math.max(1, n.h * scale) }}
-        />
-      ))}
+      {nodeSpans}
       <span className="moodboard-minimap-view" style={viewRect} />
     </div>
   );
-}
+});

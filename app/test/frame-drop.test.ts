@@ -4,16 +4,26 @@
  * destination shot's prompt with `@[Frame NNNN]`. The reference is reported
  * created but the tag is not reaching the prompt.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+// The frame drop now opens the save-reference popup; auto-confirm it with
+// the pre-filled default so these tests stay about the tagging behavior.
+// (The real popup is covered in ref-names.test.ts and the paste tests.)
+vi.mock("../src/renderer/src/components/NamePromptDialog.js", () => ({
+  askName: async () => null,
+  askReferenceSave: async (opts: { initialName: string }) => ({ name: opts.initialName }),
+  NamePromptHost: () => null,
+}));
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
 (globalThis as Record<string, unknown>).requestAnimationFrame ??= (() => 0) as never;
 (globalThis as Record<string, unknown>).cancelAnimationFrame ??= (() => {}) as never;
+
+
 
 let disk: Record<string, unknown> | null = null;
 const savedProds: Array<Record<string, unknown>> = [];
@@ -119,6 +129,7 @@ function cascadeMock(): Record<string, unknown> {
   };
   return api;
 }
+
 
 function dropOnTarget(): void {
   const frame = document.querySelectorAll(".prod-board-frame")[1] as HTMLElement;

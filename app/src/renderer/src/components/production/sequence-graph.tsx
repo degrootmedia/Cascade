@@ -371,7 +371,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onSelectGraphGen={(kind, index, nodeId) => selectGen(kind, index, nodeId)}
       onCycleGraphGen={(kind, dir, nodeId) => cycleGen(kind, dir, nodeId)}
       onDeleteGeneration={onDeleteGeneration ?? (() => {})}
-      onSaveGenerationAsReference={onSaveGenerationAsReference ?? (async () => null)}
+      onSaveGenerationAsReference={onSaveGenerationAsReference ?? (async () => undefined)}
       onVideoStillSaved={onVideoStillSaved}
       onSaveAsReference={(rel) => { void onSaveGenerationAsReference?.(rel); }}
       // ---- Pipes: the output binding is what replaces the span in the

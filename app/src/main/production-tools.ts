@@ -41,6 +41,7 @@ export type ProductionOp =
   | "regenerateBoards"
   | "generateVideo"
   | "recheckVideo"
+  | "fetchPendingVideos"
   | "listModels"
   | "modelOptions"
   | "videoModelOptions"
@@ -746,6 +747,33 @@ export function makeProductionAgentTools(host: ProductionToolHost): Record<strin
       if (!shotId) throw new Error("cascade_recheck_video: `shotId` is required.");
       const p = (await host.run("recheckVideo", requireId(host, args), shotId)) as Production;
       return digestText("Video recheck finished.", p);
+    },
+  };
+
+  tools.cascade_fetch_pending_videos = {
+    requiresApproval: true,
+    definition: {
+      type: "function",
+      function: {
+        name: "cascade_fetch_pending_videos",
+        description:
+          "Step 4 repair (bulk): fetch EVERY shot's pending video job at once and apply any clips that downloaded without being recorded on their shot. Use after generating many videos when some shots show pendingVideo: true or have no registered clip, instead of rechecking shot by shot. Jobs still rendering stay pending — call again in a minute.",
+        parameters: {
+          type: "object",
+          properties: {
+            productionId: { type: "string", description: "Target production (defaults to the active one)." },
+          },
+        },
+      },
+    },
+    describe: () => ({
+      tool: "cascade_fetch_pending_videos",
+      summary: "Fetch all pending videos",
+      detail: "Re-polls every pending video job and applies unrecorded clips found on disk.",
+    }),
+    run: async (args) => {
+      const p = (await host.run("fetchPendingVideos", requireId(host, args))) as Production;
+      return digestText("Pending-video fetch finished.", p);
     },
   };
 

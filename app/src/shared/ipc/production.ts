@@ -362,6 +362,14 @@ export interface ReferenceCategory {
   kind?: "content" | "style";
 }
 
+/** User-chosen name/category from the save-reference popup. Both optional:
+ *  an omitted name keeps the caller's auto-generated default, and an
+ *  omitted (or unknown) category means uncategorized. */
+export interface ReferenceSaveOptions {
+  name?: string;
+  categoryId?: string;
+}
+
 /** A character or prop found during ingest, awaiting explicit user approval. */
 export interface SuggestedReference {
   id: string;

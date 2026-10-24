@@ -14,10 +14,10 @@ import * as sessions from "./sessions.js";
 import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
-import { sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
+import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
@@ -63,7 +63,7 @@ import { extractModelList, getProvider, normalizeModelList } from "../shared/pro
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
-import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
+import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, ReferenceSaveOptions, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
@@ -304,7 +304,8 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 import { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, serveMediaFile, etagFor, CACHE_REVALIDATE } from "./media-protocol.js";
-import { loadRefThumbnail, setThumbCacheDir, setVideoPosterDeps, regenerateRefThumbnails } from "./thumbnails.js";
+import { loadRefThumbnail, setThumbCacheDir, setVideoPosterDeps, regenerateRefThumbnails, thumbEdgeForParam } from "./thumbnails.js";
+import { setFastStartDeps, queueVideoFilePostProcess } from "./video-faststart.js";
 import { validateExternalEditor, openWithExternalEditor } from "./external-editor.js";
 export { mediaMimeForPath, parseCascadeMediaRange, CSP_PROD, cspForEnv, validateExternalEditor, openWithExternalEditor };
 
@@ -323,7 +324,7 @@ function installCsp(): void {
  * Serve `cascade-media://<productionId>/<urlencoded-relpath>` from disk by
  * streaming with Range support so <audio>/<video> can seek without buffering
  * whole multi-GB files in the main process. `assetPath` confines the path to
- * the production folder (realpath-verified). A `?thumb=1` query serves a
+ * the production folder (realpath-verified). A `?thumb=<tier>` query serves a
  * small compressed JPEG instead of the full file — an image resized to a tile,
  * or a video's middle-frame 720p poster — the node graph and moodboard tiles
  * use it; zoom/lightbox URLs keep the original.
@@ -331,7 +332,7 @@ function installCsp(): void {
 function registerMediaProtocol(): void {
   protocol.handle("cascade-media", async (req) => {
     let abs: string;
-    let thumb = false;
+    let thumbEdge: number | null = null;
     try {
       const url = new URL(req.url);
       // Folder-only resolution: one media request must not load, clone,
@@ -340,21 +341,21 @@ function registerMediaProtocol(): void {
       if (!folder) return new Response("Unknown production", { status: 404 });
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       abs = assetPathInFolder(folder, rel);
-      thumb = url.searchParams.get("thumb") === "1";
+      thumbEdge = thumbEdgeForParam(url.searchParams.get("thumb"));
     } catch {
       return new Response("Forbidden", { status: 403 });
     }
-    if (thumb) {
+    if (thumbEdge !== null) {
       // Thumbs are derived from the source file, so the source's stat is a
       // valid strong validator. Answer a matching If-None-Match with 304 before
       // regenerating (an image resize or an ffmpeg poster) — the renderer then
       // reuses its cached decoded thumbnail.
       let etag: string | null = null;
-      try { etag = etagFor(await fs.promises.stat(abs)); } catch { etag = null; }
+      try { etag = `${etagFor(await fs.promises.stat(abs)).slice(0, -1)}-t${thumbEdge}"`; } catch { etag = null; }
       if (etag && req.headers.get("if-none-match") === etag) {
         return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": CACHE_REVALIDATE } });
       }
-      const jpeg = await loadRefThumbnail(abs);
+      const jpeg = await loadRefThumbnail(abs, thumbEdge);
       if (jpeg) {
         return new Response(new Uint8Array(jpeg), {
           status: 200,
@@ -1983,6 +1984,7 @@ function registerIpc() {
       if (!p) continue;
       projects.add(p.meta.id);
       paths.push(...productions.referenceThumbnailPaths(p));
+      paths.push(...productions.generationVideoThumbnailPaths(p));
     }
     const counts = await regenerateRefThumbnails(paths);
     return { ...counts, projects: projects.size };
@@ -2227,6 +2229,10 @@ function registerIpc() {
       const buf = fs.readFileSync(file);
       if (buf.length > 15 * 1024 * 1024) throw new Error("Image is larger than 15 MB.");
       const ext = path.extname(file).slice(1).toLowerCase().replace("jpg", "jpeg") || "png";
+      // "All files" can pick a clip: never mint a fake `data:image/<video ext>`
+      // (it would be saved as a .png holding video bytes). Videos enter as
+      // media references via drag/paste instead.
+      if (/^(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/.test(ext)) throw new Error("That's a video file — drag it onto the references panel (or a storyboard frame) to add it as a video reference.");
       return `data:image/${ext};base64,${buf.toString("base64")}`;
     } catch (e) {
       throw new Error(`Couldn't read that image: ${e instanceof Error ? e.message : String(e)}`);
@@ -3171,7 +3177,16 @@ function registerIpc() {
       if (!shot) throw new Error("Shot not found.");
       const pending = shot.pendingVideoGen;
       if (!pending) {
-        emit(`Shot ${shot.number}: nothing pending to fetch.`, "info");
+        // No vendor receipt — but the clip may have downloaded without ever
+        // being recorded (an orphan file in the shot's video/ folder, left
+        // by a crash or a dropped commit between the provider's file write
+        // and the job's save). Adopt it so Fetch also repairs that case.
+        const adopted = refreshShotVideos(p, shot.id);
+        if (adopted > 0) {
+          emit(`Shot ${shot.number}: recovered ${adopted} clip${adopted === 1 ? "" : "s"} already on disk that hadn't been applied to the shot.`, "done");
+        } else {
+          emit(`Shot ${shot.number}: nothing pending to fetch.`, "info");
+        }
         return;
       }
       emit(`Shot ${shot.number}: checking the pending video job…`, "info");
@@ -3238,6 +3253,58 @@ function registerIpc() {
       emit(`Shot ${shot.number}: video recovered from the pending generation job.`, "done");
     })
   );
+
+  // Step 3/4: fetch EVERY pending video in the production at once, then adopt
+  // any clips that downloaded to a shot's video/ folder without ever being
+  // recorded. The one-click recovery after a batch of generations left some
+  // shots unpopulated in the node tree / storyboard. Each shot reclaims
+  // through the existing per-shot recheck handler (dispatched in-process,
+  // ledger-wrapped like the agent door), so the apply/billing logic lives in
+  // exactly one place; rechecks run concurrently like the generations
+  // themselves did, and one shot's dead job never stops the others.
+  handle("production:fetchPendingVideos", async (_e, id: string): Promise<Production> => {
+    const p0 = productions.loadProduction(id);
+    if (!p0) throw new Error("Production not found.");
+    const pendingShots = p0.scenes.flatMap((s) => s.shots).filter((s) => s.pendingVideoGen);
+    let recovered = 0;
+    let stillRendering = 0;
+    let dead = 0;
+    if (pendingShots.length) {
+      productionEmit(id, `Fetching ${pendingShots.length} pending video${pendingShots.length === 1 ? "" : "s"}…`);
+      const recheck = ipcListeners.get("production:recheckVideo");
+      if (!recheck) throw new Error("Video fetch is unavailable (no recheck handler registered).");
+      await Promise.all(pendingShots.map(async (shot) => {
+        try {
+          await runWithJobLedger(jobLedger, "production:recheckVideo", [id, shot.id], async () => { await recheck(undefined, id, shot.id); });
+          const now = productions.loadProduction(id)?.scenes.flatMap((s) => s.shots).find((s) => s.id === shot.id);
+          if (now && !now.pendingVideoGen) recovered++;
+          else stillRendering++;
+        } catch {
+          // The vendor job is dead — the recheck already cleared its receipt
+          // and logged the failure per shot; just tally it for the summary.
+          dead++;
+        }
+      }));
+    }
+    let adopted = 0;
+    await enqueueProduction(id, async () => {
+      const fresh = productions.loadProduction(id);
+      if (!fresh) return;
+      adopted = refreshShotVideos(fresh);
+      if (adopted > 0) productions.saveProduction(fresh);
+    });
+    if (recovered + stillRendering + dead + adopted === 0) {
+      productionEmit(id, "Fetch videos: nothing pending and no unrecorded clips on disk — every video is already applied.", "info");
+    } else {
+      const parts: string[] = [];
+      if (recovered) parts.push(`recovered ${recovered}`);
+      if (adopted) parts.push(`applied ${adopted} already-downloaded`);
+      if (stillRendering) parts.push(`${stillRendering} still rendering (fetch again in a minute)`);
+      if (dead) parts.push(`${dead} failed job${dead === 1 ? "" : "s"} cleared (regenerate those)`);
+      productionEmit(id, `Fetch videos: ${parts.join(", ")}.`, recovered + adopted > 0 ? "done" : "info");
+    }
+    return productions.loadProduction(id) ?? p0;
+  });
 
   // Step 2: reclaim a style frame whose async vendor job outlived the
   // generating call. Same contingency as production:recheckBoard, but the
@@ -3645,7 +3712,7 @@ function registerIpc() {
     return removeSuiteEntry(id, entryId);
   });
 
-  handle("suite:exportEntry", (_e, id: string, entryId: string, target: SuiteExportTarget, name?: string): SuiteExportResult => {
+  handle("suite:exportEntry", (_e, id: string, entryId: string, target: SuiteExportTarget, name?: string, categoryId?: string): SuiteExportResult => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const entry = loadSuiteSession(id).entries.find((e) => e.id === entryId);
@@ -3656,17 +3723,21 @@ function registerIpc() {
     const suggested = suggestSuiteRefName(entry.prompt);
     const asked = typeof name === "string" ? sanitizeReferenceName(name) : "";
     const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    const base = target === "references" && asked ? uniqueReferenceName(p, refId, asked) : suggested;
+    const base = target === "references"
+      ? (asked ? uniqueReferenceName(p, refId, asked) : nextNumberedRefName((p.references ?? []).map((r) => r.name), "Image Suite Gen"))
+      : suggested;
     const dir = target === "boards" ? p.assets.boardsDir : p.assets.referencesDir;
     fs.mkdirSync(assetPath(p, dir), { recursive: true });
     const rel = uniqueSuiteRel(dir, base, ext, (r) => fs.existsSync(assetPath(p, r)));
     fs.copyFileSync(src, assetPath(p, rel));
     if (target === "boards") return { path: rel, ref: null, production: p };
+    const validCategoryId = validReferenceCategoryId(p, categoryId);
     const ref: CustomRef = {
       id: refId,
       name: base,
       imagePath: rel,
       shotIds: [],
+      ...(validCategoryId ? { categoryId: validCategoryId } : {}),
     };
     p.references = [...(p.references ?? []), ref];
     productions.saveProduction(p);
@@ -4097,9 +4168,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   });
 
   // Save any stored generated image/clip as a new reference: copy the file
-  // into referencesDir and add a "Saved Ref_NN" reference (no prompt tag).
+  // into referencesDir and add a reference (no prompt tag). The renderer's
+  // save popup supplies the name/category; the default is "Saved Ref_001".
   // The source generation can then be deleted without orphaning the reference.
-  handle("production:saveGenerationAsReference", (_e, id: string, shotId: string, rel: string, sequenceId?: string): Production => {
+  handle("production:saveGenerationAsReference", (_e, id: string, shotId: string, rel: string, sequenceId?: string, opts?: ReferenceSaveOptions): Production => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     // A shot canvas passes its shot id; a sequence canvas passes `sequenceId`
@@ -4110,22 +4182,23 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
     }
-    const ref = saveGenerationAsReference(p, rel);
+    const ref = saveGenerationAsReference(p, rel, opts);
     productions.saveProduction(p);
     productionEmit(id, `Saved "${ref.name}" as a reference.`, "done");
     return p;
   });
 
-  // Any video lightbox: save the paused frame as a new "Video still_NN" image
+  // Any video lightbox: save the paused frame as a new image (default name
+  // "Video still_001"; the popup may override name/category)
   // reference. Main extracts the exact timestamp via ffmpeg — the renderer only
   // sends the clip path + currentTime, so no canvas/CORS pitfalls.
-  handle("production:saveVideoStill", async (_e, id: string, videoRel: string, timeSec: number): Promise<Production> => {
+  handle("production:saveVideoStill", async (_e, id: string, videoRel: string, timeSec: number, opts?: ReferenceSaveOptions): Promise<Production> => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const ref = await saveVideoStillAsReference(p, videoRel, timeSec, {
       resolveBin: resolveFfmpeg,
       run: (bin, argv) => runFfmpeg(bin, argv),
-    });
+    }, opts);
     productions.saveProduction(p);
     productionEmit(id, `Saved "${ref.name}" as a reference.`, "done");
     return p;
@@ -4832,6 +4905,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       shot.graphTweenOutput = rel;
       mediaFiles.register(p, rel, "video", "generated");
+      queueVideoFilePostProcess(assetPath(p, rel));
       emit(`Shot ${shot.number}: continuous shot ready.`, "done");
     })
   );
@@ -5470,6 +5544,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const comma = dataUrl.indexOf(",");
     if (comma === -1) throw new Error("Not a data-URL image.");
     const mime = dataUrl.slice(5, comma).split(";")[0];
+    if (!mime.startsWith("image/")) throw new Error("Not an image — videos and audio are added as media references instead.");
     const ext = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : "png";
     let buf: Buffer;
     try { buf = Buffer.from(dataUrl.slice(comma + 1), "base64"); } catch { throw new Error("Couldn't decode the image."); }
@@ -6002,6 +6077,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     generateBoards: "production:generateBoards",
     regenerateBoards: "production:regenerateBoards",
     recheckVideo: "production:recheckVideo",
+    fetchPendingVideos: "production:fetchPendingVideos",
     listModels: "production:openArtModels",
     modelOptions: "production:modelOptions",
     videoModelOptions: "production:videoModelOptions",
@@ -6440,6 +6516,12 @@ app.whenReady().then(async () => {
     resolveBin: resolveFfmpeg,
     run: (bin, argv) => runFfmpeg(bin, argv),
     probe: (bin, p) => probeMedia(bin, p),
+  });
+  // Generated clips arrive non-faststart (moov at EOF); remux on write so
+  // node-view playback starts from the front instead of a tail seek.
+  setFastStartDeps({
+    resolveBin: resolveFfmpeg,
+    run: (bin, argv) => runFfmpeg(bin, argv),
   });
   registerMediaProtocol();
   // The single detached canvas window (Spec 03), wired before registerIpc() so

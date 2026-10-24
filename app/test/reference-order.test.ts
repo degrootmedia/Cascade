@@ -8,10 +8,11 @@
  *    merging into the existing entry.
  */
 import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+import { NamePromptHost } from "../src/renderer/src/components/NamePromptDialog.js";
 import { uniqueRefName, reorderRefs, reorderRefGroup } from "../src/renderer/src/components/production/references.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
@@ -112,7 +113,7 @@ async function renderWorkspace(): Promise<{ host: HTMLElement; root: ReturnType<
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(createElement(ProductionWorkspace, {}));
+    root.render(createElement(Fragment, null, createElement(ProductionWorkspace, {}), createElement(NamePromptHost)));
     await new Promise((r) => setTimeout(r, 0));
   });
   const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
@@ -186,14 +187,21 @@ async function dropFileOnCategory(host: HTMLElement, file: File): Promise<void> 
     files: [file],
   } as unknown as DataTransfer;
   await act(async () => { panel.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 30)); });
+  // The drop opens the save-reference popup; confirm it with the defaults.
+  const input = document.body.querySelector(".name-prompt-input") as HTMLInputElement | null;
+  expect(input, "save-reference popup shown").toBeTruthy();
+  await act(async () => {
+    input!.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 30));
+  });
 }
 
 describe("uniqueRefName", () => {
   it("leaves a free name untouched and suffixes a taken one", () => {
     expect(uniqueRefName(["Gondola"], "Hero")).toBe("Hero");
-    expect(uniqueRefName(["Gondola"], "Gondola")).toBe("Gondola 01");
-    expect(uniqueRefName(["Gondola", "Gondola 01"], "Gondola")).toBe("Gondola 02");
-    expect(uniqueRefName(["gondola"], "GONDOLA")).toBe("GONDOLA 01");
+    expect(uniqueRefName(["Gondola"], "Gondola")).toBe("Gondola_001");
+    expect(uniqueRefName(["Gondola", "Gondola_001"], "Gondola")).toBe("Gondola_002");
+    expect(uniqueRefName(["gondola"], "GONDOLA")).toBe("GONDOLA_001");
     expect(uniqueRefName([], "")).toBe("Reference");
   });
 });
@@ -296,8 +304,8 @@ describe("design-page duplicate-name drop", () => {
     const file = new File(["image-bytes"], "Ref One.png", { type: "image/png" });
     await dropFileOnCategory(host, file);
 
-    expect(refNames()).toEqual(["Ref One", "Ref Two", "Ref Three", "Ref One 01"]);
-    expect(tileNames(host)).toContain("Ref One 01");
+    expect(refNames()).toEqual(["Ref One", "Ref Two", "Ref Three", "Ref One_001"]);
+    expect(tileNames(host)).toContain("Ref One_001");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

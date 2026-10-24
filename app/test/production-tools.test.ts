@@ -64,6 +64,7 @@ describe("makeProductionAgentTools", () => {
         "cascade_generate_magic_prompts",
         "cascade_generate_storyboard",
         "cascade_generate_style_frame",
+        "cascade_fetch_pending_videos",
         "cascade_generate_video",
         "cascade_import_production",
         "cascade_ingest_script",
@@ -376,6 +377,13 @@ describe("models / animatic / recheck", () => {
     run.mockResolvedValueOnce(prod());
     await call(makeProductionAgentTools(host).cascade_recheck_video, { shotId: "sh1" });
     expect(run).toHaveBeenCalledWith("recheckVideo", "p1", "sh1");
+  });
+
+  it("fetches all pending videos in bulk", async () => {
+    const { host, run } = makeHost({ activeId: () => "p1" });
+    run.mockResolvedValueOnce(prod());
+    await call(makeProductionAgentTools(host).cascade_fetch_pending_videos, {});
+    expect(run).toHaveBeenCalledWith("fetchPendingVideos", "p1");
   });
 
   it("warns when a generated shot has no registered clip", async () => {

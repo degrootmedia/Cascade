@@ -6,10 +6,11 @@
  * newer save.
  */
 import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+import { NamePromptHost } from "../src/renderer/src/components/NamePromptDialog.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
@@ -111,7 +112,7 @@ describe("paste after dismissing a suggestion", () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     await act(async () => {
-      root.render(createElement(ProductionWorkspace, {}));
+      root.render(createElement(Fragment, null, createElement(ProductionWorkspace, {}), createElement(NamePromptHost)));
       await new Promise((r) => setTimeout(r, 0));
     });
     const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
@@ -127,11 +128,18 @@ describe("paste after dismissing a suggestion", () => {
     expect((savedProds[savedProds.length - 1]?.suggestedReferences as unknown[] | undefined)?.length ?? 0).toBe(0);
 
     // Paste an image into the reference panel.
-    await act(async () => { pasteImage(); await new Promise((r) => setTimeout(r, 30)); });
+    await act(async () => { pasteImage(); await new Promise((r) => setTimeout(r, 10)); });
+    // The paste opens the save-reference popup; confirm it with the defaults.
+    const nameInput = document.body.querySelector(".name-prompt-input") as HTMLInputElement | null;
+    expect(nameInput, "save-reference popup shown").toBeTruthy();
+    await act(async () => {
+      nameInput!.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 30));
+    });
 
     // The paste created a reference, but the dismissed suggestion stays gone.
     const last = savedProds[savedProds.length - 1];
-    expect((last?.references as Array<Record<string, unknown>> | undefined)?.some((r) => r.name === "Ref-001")).toBe(true);
+    expect((last?.references as Array<Record<string, unknown>> | undefined)?.some((r) => r.name === "Ref_001")).toBe(true);
     expect((last?.suggestedReferences as unknown[] | undefined)?.length ?? 0).toBe(0);
     expect(host.querySelectorAll(".prod-suggestion").length).toBe(0);
 

@@ -4,8 +4,8 @@
  * The renderer reads the paused `currentTime` from the lightbox's `<video>`
  * element and sends it with the video's workspace-relative path; main extracts
  * exactly that frame via ffmpeg (accurate output-seeking, full resolution) and
- * stores it as an image reference named `Video still_00`, `_01`, … (the same
- * first-free-suffix scheme as `savedRefName`, starting at 00 per the user's
+ * stores it as an image reference named `Video still_001`, `_002`, … (the same
+ * first-free-suffix scheme as `savedRefName`, starting at 001 per the user's
  * choice). Pure node — no Electron import — so it loads in vitest; the ffmpeg
  * binary/runner arrive through the injected seam (same shape as the thumbnail
  * poster's deps, minus the probe, which a still doesn't need).
@@ -24,15 +24,15 @@ export interface VideoStillDeps {
 const VIDEO_STILL_JPEG_QUALITY = 2;
 
 /**
- * The reference name for a saved video still: "Video still_00", then
- * "Video still_01", … — the first suffix no existing reference already uses
+ * The reference name for a saved video still: "Video still_001", then
+ * "Video still_002", … — the first suffix no existing reference already uses
  * (case-insensitive). Pure; exposed for tests.
  */
 export function videoStillName(existingNames: Iterable<string>): string {
   const taken = new Set<string>();
   for (const n of existingNames) taken.add(n.trim().toLowerCase());
-  for (let i = 0; ; i++) {
-    const candidate = `Video still_${String(i).padStart(2, "0")}`;
+  for (let i = 1; ; i++) {
+    const candidate = `Video still_${String(i).padStart(3, "0")}`;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
 }

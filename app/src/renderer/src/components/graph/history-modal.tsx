@@ -80,7 +80,7 @@ export function GraphHistoryModal({ target, items, selected, media, onSelect, on
                   onDoubleClick={() => onZoom(target.title, it.url, media, it.path)}
                   onContextMenu={(e) => genMenu.open(e, it.path, { src: it.url, media })}
                 >
-                  <img src={refThumbUrl(it.url)} alt="" draggable={false} />
+                  <img src={refThumbUrl(it.url)} alt="" draggable={false} loading="lazy" decoding="async" />
                   <span className="prod-graph-history-badge">{i + 1}</span>
                   {it.draftJobId && onUpgradeDraft && (
                     <span

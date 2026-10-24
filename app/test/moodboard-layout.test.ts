@@ -15,6 +15,7 @@ import {
   MB_MAX_ZOOM,
   MB_MIN_ZOOM,
   MB_MIN_SIZE,
+  thumbTierFor,
   autoLayoutNodes,
   clamp,
   contentBounds,
@@ -351,5 +352,28 @@ describe("moodboard frames", () => {
     const hidden = { ...grouped, nodes: grouped.nodes.map((n) => (n.refId === "b" ? { ...n, hidden: true } : n)) };
     const settled = settleFrameMembership(hidden, ["a", "b"], false);
     expect(new Set(settled.frames?.[0].refIds)).toEqual(new Set(["a", "b"]));
+  });
+});
+
+describe("thumbTierFor (canvas LOD)", () => {
+  it("picks the smallest tier covering the on-screen long edge", () => {
+    expect(thumbTierFor(220, 180, 0.2, 1)).toBe(256);
+    expect(thumbTierFor(220, 180, 1, 1)).toBe(256);
+    expect(thumbTierFor(220, 180, 2, 1)).toBe(512);
+    expect(thumbTierFor(220, 180, 4, 1)).toBe(1024);
+    expect(thumbTierFor(220, 180, 8, 1)).toBe(0);
+  });
+
+  it("accounts for devicePixelRatio and the node's long edge", () => {
+    expect(thumbTierFor(220, 180, 1, 2)).toBe(512);
+    expect(thumbTierFor(180, 900, 1, 1)).toBe(1024);
+    expect(thumbTierFor(4000, 3000, 0.1, 1)).toBe(512);
+  });
+
+  it("never returns a tier smaller than needed at tier boundaries", () => {
+    expect(thumbTierFor(256, 100, 1, 1)).toBe(256);
+    expect(thumbTierFor(257, 100, 1, 1)).toBe(512);
+    expect(thumbTierFor(1024, 100, 1, 1)).toBe(1024);
+    expect(thumbTierFor(1025, 100, 1, 1)).toBe(0);
   });
 });

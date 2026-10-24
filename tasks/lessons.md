@@ -1,4 +1,18 @@
-﻿## 2026-10-10 — a third-party download URL is a runtime dependency: probe it, don't assume it
+﻿## 2026-10-21 - Lightbox close icon rendered giant (broad `img` rule vs icon <img>)
+
+- Symptom: the new shared lightbox showed a giant red X in the corner. The
+  close button's `XIcon` is an `<img class="cascade-icon" width=13>`, but the
+  lightbox card's media rule (`.prod-ref-lightbox-card img { width:auto; ... }`)
+  outranks the width attribute, so the 365pt source SVG painted near full size.
+- Rules:
+  1. Any container rule that styles content `img`s must exclude `.cascade-icon`
+     (`img:not(.cascade-icon)`) — the shelf/poster rules already did; the
+     lightbox card rule predated icons living inside it. When adding an icon
+     button inside a media container, check its `img` rules first.
+  2. Icon semantics: X = close/dismiss a surface, trashcan = delete/remove a
+     thing. Sharing one glyph for both reads as a bug to users.
+
+## 2026-10-10 — a third-party download URL is a runtime dependency: probe it, don't assume it
 
 - Symptom (caught before shipping voice input): `ensureWhisperModel` built the
   ggml URL as `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/models/

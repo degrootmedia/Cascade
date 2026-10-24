@@ -4312,3 +4312,255 @@ adoption flows; files written by raw provider download paths still land in
 the registry via their write choke points (`writeBoardFrame`/`writeShotVideo`
 are every provider's finish line). Suite outputs (Image Suite) live outside
 production fields and aren't registered yet.
+
+---
+
+# Design video black frames + larger/zoomable lightboxes + moodboard LOD
+
+User report (3 issues): (1) In Design (Step 2) reference categories, hover-play
+videos - the first two show black frames and won't play even expanded, while
+Storyboard is fine. (2) Lightboxes are smaller than they need to be; wants
+larger + image zoom/pan. (3) Moodboard gets very slow zoomed out with many
+images; suggests thumbnail LODs.
+
+## Findings
+
+- **#1 is a regression in `a92fb00` ("performance optimized")**: the row tile
+  in `references.tsx` (`RefFigure`) lazy-mounts `<video preload="none"
+  autoPlay onMouseLeave={pause}>` with **no mouse-enter play, no first-frame
+  seek, no `onError` fallback**. Hover-leave before first frame sticks it
+  paused at t=0 (black on fade-from-black clips); re-hover does nothing.
+  Storyboard (`boards.tsx`) still has the working pattern: eager
+  `preload="metadata"`, seek 0.05, enter-play every hover, error -> still.
+  Media protocol (`media-protocol.ts` ranges) is shared and exonerated.
+- **User's data (4398_Cedar, diagnosed 2026-10-21):** all video refs are
+  correctly `media:"video"` (no misclassification). "Full Res Videos" refs
+  `0100`/`0200` point at `references/0100.mp4`/`0200.mp4` which **do not
+  exist** (copies live in `Openart DLs/`) - literal first-two black tiles
+  (404, swallowed). The rest of that category is HEVC 10-bit (Chromium decode
+  depends on GPU HW support); Storyboard plays shot clips, not these paths,
+  and masks failures behind stills - hence "works in Storyboard".
+- **#2:** no shared component - 8 copy-pasted lightboxes sharing one CSS
+  block (`.prod-ref-lightbox*`): card `min(80vw, 900px)`, media `70vh`. All
+  already load full-res. No zoom/pan anywhere; moodboard `zoomAt` is the
+  reusable math. Clicking a lightbox video's own controls closes it (no
+  stopPropagation).
+- **#3:** moodboard canvas nodes are the app's only deliberate full-res
+  surface (`RefFigure` node variant) - at fit-all zoom each visible ref holds
+  a natural-size bitmap (~16 MB per 2048^2) and pan/zoom re-rasters all of
+  them. Culling/rAF-coalescing/memo are already in place; culling can't help
+  zoomed-out. Thumbnails are single-tier 256px (`thumbnails.ts`) but
+  parameterize cleanly; cache keys (memory/disk/ETag) must gain the tier.
+
+## Plan
+
+- [x] Step 1 diagnosed (above). No data migration needed.
+- [x] Slice A `references.tsx`: align tile `<video>` with boards
+  (`preload="metadata"`, enter-play, seek 0.05) keeping the lazy mount;
+  `onError` -> `?thumb=1` poster fallback + reset so retry works; lightbox
+  card stopPropagation; treat video-extension paths as video (classification
+  hardening); jsdom tests in `design-ref-thumbs.test.ts`.
+- [x] Slice B `styles.css`: lightbox card ~96vw/96vh, drop 900px cap, media
+  fills minus caption (flex-column card). Covers all 8 lightboxes.
+- [x] Slice C moodboard quick wins: `decoding="async"` on node/shelf imgs;
+  memoize Shelf/Minimap/Toolbar + stable props; hide node chrome at low zoom.
+- [x] Slice D shared `MediaLightbox` (pure zoom math + tests): wheel
+  zoom-to-cursor, drag pan, dbl-click toggle, toolbar, Esc/x/backdrop close,
+  owns SaveVideoStillButton; rewire all 8 sites.
+- [x] Slice E LOD: `?thumb=<edge>` tiers 256/512/1024/full in
+  `thumbnails.ts` + protocol + `refThumbUrl`; tier from node size x zoom x
+  dpr, swapped on zoom-settle (debounce), threaded canvas->node->RefFigure;
+  tier-picker + cache-key tests; CONTEXT.md doctrine update.
+
+## Review
+
+All slices landed. Slice A: tile re-aligned with boards (`preload="metadata"`,
+seek 0.05, enter-play per hover) behind the existing lazy mount; `onError` →
+poster with click-to-retry; extension-based video classification
+(`VIDEO_REF_PATH_RX`) covers flag-less refs; `pickReferenceImage` rejects
+video files and `addReferenceImage` requires `image/*` so a clip can never
+be stored as a fake `.png` again. Slice B: one CSS block, 96vw/96vh card.
+Slice C: async decode, memoized Shelf/Minimap/Toolbar with stable props,
+node chrome hidden below 40% zoom. Slice D: new shared `MediaLightbox`
+(+ pure `media-lightbox-math`) replaced all 8 lightboxes — image wheel
+zoom-to-cursor/drag pan/dbl-click/toolbar, backdrop/x/Esc close, video
+poster fallback; boards keep <-/-> via `onNavigate`, graph keeps its
+right-click `GenerationMenu` (boards' panel menu z bumped 60→130 for the
+portal). Slice E: `?thumb=<256|512|1024>` tiers end-to-end (whitelist,
+per-tier memory/disk/ETag keys, byte-bounded cache, regenerate pre-warms
+all tiers); canvas picks the tier from settled zoom (250ms debounce) via
+pure `thumbTierFor`, full-res past the top tier and always in the lightbox.
+
+Verify: app typecheck clean; full suite **1810 passed + 2 skipped** (169
+files; new: `media-lightbox.test.ts`, `media-lightbox-math.test.ts`, video
+cases in `design-ref-thumbs.test.ts`, tier cases in `thumbnails.test.ts` +
+`moodboard-layout.test.ts`; portal-query updates in `board-history`,
+`graph-shelf`, `ref-thumb` — assertions unchanged); `npm run build` clean.
+Main-process changes (thumbnails/protocol/import guards) — fully restart
+the app before testing. Not run: a live Electron pass (hover a
+fade-from-black clip in Design; pan a zoomed frame; fps on the Cedar
+board zoomed out).
+
+**User data note (not code):** Cedar's "Full Res Videos" refs `0100`/`0200`
+point at `references/0100.mp4`/`0200.mp4`, which don't exist (copies are in
+`Openart DLs/`) — they now show the poster + "couldn't be played" note
+instead of a stuck black tile, but the refs stay broken until the files are
+copied into `references/` or re-added. The rest of that category is HEVC
+10-bit: Chromium playback depends on GPU HW decode; undecodable clips get
+the same poster fallback. Transcode-on-import remains a possible follow-up.
+
+**Follow-ups (same day, user-reported):** (1) The new lightbox's close X
+rendered giant — the card's media rule (`.prod-ref-lightbox-card img`)
+overrode the icon's 13px box and the X artwork is 365pt. Rule now excludes
+`.cascade-icon` (the pattern shelf/poster rules already used). (2) Delete
+actions no longer share the close X: new `TrashIcon` (`assets/icons/trash.svg`)
+on every delete/remove-a-thing button (references, style/frame, shot, note,
+expense row, production, VO/music); X remains close/dismiss/detach only
+(incl. moodboard remove-from-board and frame ungroup). (3) The moodboard
+shelf groups by the Design categories (`groupShelfRefs`, Uncategorized
+first, production order) with collapsible headers sharing the Design
+panel's persisted collapse key. Verify: typecheck clean, 1813 passed +
+2 skipped, build clean.
+
+---
+
+# Refresh/fetch videos that didn't download or populate the shot
+
+User report: when generating numerous videos, some don't download or apply
+to the shot node tree/thumbnail properly. Need a way to refresh/fetch them.
+
+## Findings (existing recovery + the gaps)
+
+- Per-shot Fetch already exists (`production:recheckVideo`): re-polls a
+  shot's `pendingVideoGen` receipt, downloads the clip, applies it by
+  `target` (classic/node/edit/tween), bills the reclaim. Gaps:
+- (a) Storyboard only shows the video-pending badge/Fetch button when
+  `target.kind === "videoPath"` — node/tween pendings are invisible outside
+  the node graph, so missed downloads look like nothing happened.
+- (b) No bulk fetch: with many shots pending, each must be fetched
+  shot-by-shot (node ones only from inside each shot's node graph).
+- (c) Clips that DID download to `boards/<number>/video/` but never got
+  recorded (crash/failed commit between `writeShotVideo` and the job's
+  save, or a concurrent same-shot job's sink clearing the receipt) are
+  orphan files: no `gens` entry, no pending receipt — no recovery at all.
+  `refreshBoardLinks` is image-only.
+
+## Plan
+
+- [x] `pipeline.ts`: `refreshShotVideos(p, onlyShotId?)` — video counterpart
+  of `refreshBoardLinks`. Scan each shot's `video/` folder; adopt
+  unregistered `shot-<number>[-edit|-tween]-*.{mp4,mov,webm,m4v}` clips
+  into node history (plain → first/`vid0` video node, `edit` → `ev0`,
+  `tween` → `graphTweenOutput` when unset), newest-first, register with
+  the media registry, hook to output only when the shot shows no clip.
+  Idempotent; returns adopted count. Model sentinel `"refresh"` like the
+  image path.
+- [x] `index.ts`: (adjusted during implementation — no extraction; the bulk
+  handler dispatches the existing per-shot recheck via `ipcListeners`, so the
+  tested clear-before-billing ordering in `recheckVideo` is untouched) from
+  `recheckVideo` (same semantics: dead job clears receipt); single-shot
+  handler keeps its throw-on-dead behavior, and when nothing is pending it
+  falls back to disk adoption for that shot. New
+  `production:fetchPendingVideos` handler: reclaim every shot's pending
+  video (parallel, per-shot failure isolation), then adopt orphan clips,
+  emit a summary.
+- [x] IPC wiring: `fetchPendingVideos` in `shared/ipc.ts` +
+  `ipc-channels/production.ts`, job-ledger kind/label in
+  `shared/ipc/jobs.ts`.
+- [x] Renderer (`ProductionWorkspace.tsx`): "Fetch videos" toolbar button
+  beside Refresh Storyboard Images, with the pending count when > 0;
+  completion goes through `applySnapshot` + `bustAll` so thumbnails
+  repaint. Board card `videoPending` becomes any `pendingVideoGen`.
+- [x] Agent door: `cascade_fetch_pending_videos` production tool.
+- [x] Tests: `app/test/refresh-shot-videos.test.ts` (adoption, routing,
+  idempotence, no-displace, ordering) + handler/board-prop source guards.
+  Then typecheck + focused tests + full suite.
+
+## Review
+
+Implemented as planned (one adjustment: bulk fetch dispatches the existing
+per-shot `recheckVideo` listener in-process instead of extracting a helper,
+so its billing/ordering guarantees and the `recheck-refresh-guards` test are
+untouched). What shipped:
+
+- **Fetch videos** button (storyboard toolbar, beside Refresh Storyboard
+  Images; shows `(N pending)`): downloads every pending video job at once,
+  applies each to its submitting node/field, then applies any clips found
+  downloaded-but-unrecorded on disk. Summary (recovered / applied / still
+  rendering / failed-cleared) lands in the production log; thumbnails repaint
+  via `applySnapshot` + `bustAll`.
+- Storyboard cards now badge + offer Fetch for **any** pending video
+  (node/edit/tween targets included, previously only classic).
+- `recheckVideo` with no pending receipt now falls back to disk adoption for
+  that shot, so the node-graph Fetch button also repairs downloaded-but-
+  unrecorded clips.
+- `refreshShotVideos` (pipeline): adopts orphan
+  `shot-<number>[-edit|-tween]-*` clips into node history; never moves a
+  selection the shot is already showing; skips zero-byte partial writes;
+  idempotent.
+- `cascade_fetch_pending_videos` agent tool over the same handler; CONTEXT.md
+  + film skill updated.
+
+Verify: new RED→GREEN suite `refresh-shot-videos.test.ts` (14 tests) +
+`production-tools` inventory/behavior additions; `npm test` (typecheck +
+full vitest) 1828 passed / 2 skipped; `npm run build` clean. No vendor call
+was made locally (needs credits) — the recheck path itself is unchanged
+production code, only fanned out.
+
+---
+
+# Performance: video-heavy projects + node view while videos load
+
+Plan executed 2026-10-23 (phases 0-4 from the perf plan; inline plan in
+session). Baseline measured BEFORE changes on real data + a synthetic bench:
+
+- Real project profile: largest production JSON 636 KB, 33 shots, 372 media
+  entries, 101 video takes, 65 clips / 191 MB on Dropbox.
+- Vendor clips are NOT faststart (all 9 sampled: `mdat` at ~21 KB, `moov`
+  after 2-16 MB; incl. a 1900x1090 HEVC edit clip).
+- 8 concurrent cold poster requests for one clip spawned 8 probes + 8 ffmpeg;
+  regenerate spawned 3+3 per clip (one per tier); a failing clip spawned
+  ffmpeg on every request.
+- `loadProduction` (runs on nearly every IPC handler) cost 46ms / 452ms /
+  2731ms per load at 40 / 396 / 2400 referenced files (bootstrap stats every
+  referenced file + walks, every load).
+
+## Shipped
+
+- [x] Phase 1 - poster-first node previews: `VideoPreview`
+  (`components/graph/video-preview.tsx`) renders the cached `?thumb=512`
+  poster and mounts a real `<video>` only on hover (ref nodes) / play click
+  (gen/edit/output nodes), under a global 3-live-video LRU cap; ReactFlow
+  `onlyRenderVisibleElements`; history strip/modal tiles thumbnailed + lazy.
+- [x] Phase 2 - `thumbnails.ts`: in-flight coalescing per tile, max 3
+  concurrent ffmpeg poster extracts, one cached 720p master per clip
+  version for all tiers, 30s negative cache; posters pre-warm when a clip
+  lands (`writeShotVideo`/`writeSequenceVideo`/`importBoardVideo`/tween
+  stitch); Settings regenerate now includes generation clips
+  (`generationVideoThumbnailPaths`).
+- [x] Phase 3 - `productions.ts`: repeat loads of the identical cached
+  document reuse the bootstrap/backfill/graph sweep for 10s (post-save and
+  external-JSON-change loads always re-sweep via object identity). The
+  per-caller structuredClone is unchanged.
+- [x] Phase 4 (evidence-gated, confirmed) - `video-faststart.ts`: box-order
+  detection + lossless `-movflags +faststart` remux queued on clip write
+  (max 2, failure leaves the original byte-identical), poster pre-warm after.
+  Skipped as not implicated by Phase 0 measurements: log/job emit throttling
+  and protocol chunk-size changes.
+
+## Review
+
+After-numbers on the same bench: poster spawns 8->1 (concurrent), 3->1
+(regenerate), 4->1 (failing clip); repeat `loadProduction` 452ms -> 1.1ms at
+real-project scale (first/post-save load still sweeps, by design). Node-view
+open now issues poster JPEGs instead of demuxing every take; live decoders
+capped at 3. Residual risks: (1) the background faststart/poster pass briefly
+opens a just-written clip - a folder move (renumber/archive) in that same
+instant can still race on Windows, same class as generating while moving;
+the remux itself fails safe. (2) `onlyRenderVisibleElements` + this canvas's
+manual node measurement needs a real-app pass (connection drag from
+just-placed nodes, fit-view) - covered by unit suites but not eyeballed in
+Electron here. (3) An externally deleted media file can show "present" for
+up to the 10s bootstrap TTL. One unrelated flake seen under parallel test
+load: `media-registry` outdated-archive rename EPERM (passes alone; no video
+paths involved).

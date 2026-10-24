@@ -158,6 +158,22 @@ export function productionFolder(id: string): string | null {
   return getProductionMeta(id)?.folder ?? null;
 }
 
+/** Perf phase 3: how long a load may reuse the previous load's media
+ *  bootstrap for the SAME cached document object. `loadProduction` runs on
+ *  nearly every IPC handler, and the bootstrap stats every referenced media
+ *  file — measured at ~450ms per load on a real video-heavy project
+ *  (372 referenced files), paid again by every click. The store hands back
+ *  the identical cached object until a save or an external JSON change
+ *  replaces it, so identity + a short TTL bounds the only staleness: a file
+ *  deleted externally shows "present" for at most this long. */
+const BOOTSTRAP_TTL_MS = 10_000;
+const lastBootstrap = new Map<string, { obj: unknown; at: number }>();
+
+/** Test seam — forget every remembered bootstrap so the next load re-sweeps. */
+export function resetProductionLoadCacheForTests(): void {
+  lastBootstrap.clear();
+}
+
 export function loadProduction(id: string): ProductionFile | null {
   const p = store.load(id);
   if (!p) return null;
@@ -179,8 +195,8 @@ export function loadProduction(id: string): ProductionFile | null {
   // finished generation is recorded onto orphaned objects and never
   // persisted (file on disk, nothing in history). Cloning here closes that
   // whole class: holders can never share, and rebase merges by value.
-  // The file is small (tens of KB) so the copy is microseconds; the cache
-  // still skips the JSON.parse on hits.
+  // (Video-heavy documents reach ~600KB — the clone is still far cheaper
+  // than the per-load media sweep the bootstrap cache below bounds.)
   // Perf 1.2: post-migration loads skip the full-board walk entirely. The
   // >= keeps a downgrade from silently stamping a newer document down.
   if (typeof p.schemaVersion === "number" && p.schemaVersion >= PRODUCTION_SCHEMA_VERSION) {
@@ -191,9 +207,16 @@ export function loadProduction(id: string): ProductionFile | null {
     // ids stay stable across loads — a move re-points the path, never the id.
     // Same pattern for the stored node graphs: every canvas must own its
     // wiring at load so the canvas reads stored nodes/edges only.
-    mediaFiles.bootstrap(p, productionMediaRefs(p));
-    backfillGenerationMediaIds(p);
-    ensureShotGraphs(p);
+    // Perf phase 3: all three sweeps are idempotent repairs of the cached
+    // document — repeat loads of the identical cached object within the TTL
+    // skip them (the clone below is still per-caller, unchanged).
+    const seen = lastBootstrap.get(id);
+    if (!seen || seen.obj !== p || Date.now() - seen.at >= BOOTSTRAP_TTL_MS) {
+      mediaFiles.bootstrap(p, productionMediaRefs(p));
+      backfillGenerationMediaIds(p);
+      ensureShotGraphs(p);
+      lastBootstrap.set(id, { obj: p, at: Date.now() });
+    }
     return structuredClone(p);
   }
   // One-time migrations run on a COPY: validate the result, keep a
@@ -295,6 +318,17 @@ export function writePreMigrationBackup(id: string, fromVersion: number, origina
  *  (characters, products, custom references) and video references' clips —
  *  feeding the thumbnail-cache regenerator so the node graph's tiles (and the
  *  moodboard shelf's video posters) are pre-generated for older projects. */
+/** Absolute paths of every generated/imported video clip a production
+ *  references (shot takes, tween blocks/output, sequences, video refs) —
+ *  the video half of the thumbnail-cache regenerator: node previews are
+ *  poster-first (perf phase 1), so pre-encoding these posters removes the
+ *  first-view ffmpeg extract for generation clips, not just references. */
+export function generationVideoThumbnailPaths(p: ProductionFile): string[] {
+  return productionMediaRefs(p)
+    .filter((rel) => /\.(mp4|m4v|mov|webm|mkv)$/i.test(rel))
+    .map((rel) => assetPath(p, rel));
+}
+
 export function referenceThumbnailPaths(p: ProductionFile): string[] {
   const imagePaths = [...(p.characters ?? []), ...(p.products ?? []), ...(p.references ?? [])]
     .filter((r) => !!r.imagePath)

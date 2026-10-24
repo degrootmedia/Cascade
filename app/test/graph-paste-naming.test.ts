@@ -1,14 +1,15 @@
 /**
  * Pasting images into the node editor must auto-number the created references
- * (Ref-001, Ref-002, …) exactly like the Design page — clipboard files usually
+ * (Ref_001, Ref_002, …) exactly like the Design page — clipboard files usually
  * share a generic name ("image.png"), so naming them from the file would make
  * every paste collide on one reference.
  */
 import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+import { NamePromptHost } from "../src/renderer/src/components/NamePromptDialog.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
@@ -109,6 +110,19 @@ function cascadeMock(): Record<string, unknown> {
   };
 }
 
+/** Confirm the save-reference popup (waiting for it to appear). */
+async function confirmSavePopup(): Promise<void> {
+  for (let i = 0; i < 100 && !document.body.querySelector(".name-prompt-input"); i++) {
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+  }
+  const input = document.body.querySelector(".name-prompt-input") as HTMLInputElement | null;
+  expect(input, "save-reference popup shown").toBeTruthy();
+  await act(async () => {
+    input!.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 10));
+  });
+}
+
 /** Paste one clipboard item per name (all with generic "image" names). */
 function pasteImages(names: string[]): void {
   const items = names.map((n) => {
@@ -131,7 +145,7 @@ describe("node-editor paste reference naming", () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     await act(async () => {
-      root.render(createElement(ProductionWorkspace, {}));
+      root.render(createElement(Fragment, null, createElement(ProductionWorkspace, {}), createElement(NamePromptHost)));
       await new Promise((r) => setTimeout(r, 0));
     });
     const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
@@ -151,12 +165,16 @@ describe("node-editor paste reference naming", () => {
     expect(host.querySelector(".prod-graph-overlay")).toBeTruthy();
 
     // Two clipboard images both named "image.png" — they must NOT collide.
-    await act(async () => { pasteImages(["image.png", "image.png"]); await new Promise((r) => setTimeout(r, 60)); });
+    await act(async () => { pasteImages(["image.png", "image.png"]); await new Promise((r) => setTimeout(r, 10)); });
+    // Each paste prompts in turn; confirm both with their defaults.
+    await confirmSavePopup();
+    await confirmSavePopup();
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
 
     const last = savedProds[savedProds.length - 1];
     const names = ((last?.references as Array<Record<string, unknown>> | undefined) ?? []).map((r) => r.name);
-    expect(names).toContain("Ref-005");
-    expect(names).toContain("Ref-006");
+    expect(names).toContain("Ref_005");
+    expect(names).toContain("Ref_006");
     expect(names).not.toContain("image");
 
     await act(async () => { root.unmount(); });

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LedgerView } from "../../../../shared/ipc.js";
-import { ExpensesIcon, TokenIcon, XIcon } from "../icons.js";
+import { ExpensesIcon, TokenIcon, TrashIcon } from "../icons.js";
 import { formatGenerationCost } from "./generation-cost.js";
 
 function formatPrice(p: number): string {
@@ -144,7 +144,7 @@ export function ExpensesPanel({ productionId }: { productionId: string }) {
               <td className="num"><RowPrice credits={e.credits} price={e.price} rate={rate} /></td>
               <td>
                 <button className="prod-btn inline" onClick={() => void remove(e.id)} title="Remove row" disabled={busy}>
-                  <XIcon size={12} />
+                  <TrashIcon size={12} />
                 </button>
               </td>
             </tr>

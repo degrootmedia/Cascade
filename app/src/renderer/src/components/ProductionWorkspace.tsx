@@ -9,7 +9,10 @@ import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "..
 import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { ShotTable } from "./ShotTable.js";
+import { MediaLightbox } from "./common/MediaLightbox.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
+import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
+import { nextNumberedRefName } from "../../../shared/ref-names.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
@@ -43,7 +46,7 @@ import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selec
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../../../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
-import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "./icons.js";
+import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "./icons.js";
 
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
@@ -235,6 +238,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [recheckIds, setRecheckIds] = useState<Set<string>>(new Set());
   /** Shot ids whose pending video job is being fetched. */
   const [videoRecheckIds, setVideoRecheckIds] = useState<Set<string>>(new Set());
+  /** A bulk "Fetch videos" pass (every pending video + disk recovery) is running. */
+  const [fetchVideosBusy, setFetchVideosBusy] = useState(false);
   // Regeneration batches are dispatched via `regenerateBoards` (one shared
   // production → parallel workers → a single save). Overlapping batches would
   // each load/save the whole production and clobber each other, so batches run
@@ -1269,30 +1274,45 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   }
 
   /** Add a brand-new custom reference (materials, textures, hero props). A
-   *  dragged-in name that already exists gets a two-digit suffix so the drop
-   *  never silently merges into (or collides with) the existing reference. */
+   *  name that already exists gets a numbered suffix so a save never silently
+   *  merges into (or collides with) the existing reference. Drops (artwork
+   *  present) go through the save popup first — pre-filled with the file name
+   *  and the panel's category; the inline "Add reference" form already
+   *  collected both, so it saves directly. */
   async function addRef(name: string, categoryId?: string, artwork?: string) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const imagePath = artwork ? await persistRefImage(artwork, trimmed) : undefined;
+    let chosenName = trimmed;
+    let chosenCategoryId = categoryId;
+    if (artwork) {
+      const prodId = prodRef.current?.meta.id;
+      const choice = await promptReferenceSave(trimmed, { title: "Save dropped image as reference", defaultCategoryId: categoryId });
+      if (!choice || prodRef.current?.meta.id !== prodId) return;
+      chosenName = choice.name;
+      chosenCategoryId = choice.categoryId;
+    }
+    const imagePath = artwork ? await persistRefImage(artwork, chosenName) : undefined;
     const current = prodRef.current;
     if (!current) return;
-    const finalName = uniqueRefName((current.references ?? []).map((r) => r.name), trimmed);
-    saveField({ references: [...(current.references ?? []), { id: uid("ref"), name: finalName, categoryId, imagePath, shotIds: [] }] });
+    const finalName = uniqueRefName((current.references ?? []).map((r) => r.name), chosenName);
+    saveField({ references: [...(current.references ?? []), { id: uid("ref"), name: finalName, categoryId: chosenCategoryId, imagePath, shotIds: [] }] });
   }
-  /** Reference Moodboard: pick one image and add it as a new reference,
-   *  returning the id so the board can place the node where the user is. */
+  /** Reference Moodboard: pick one image and add it as a new reference via
+   *  the save popup, returning the id so the board can place the node where
+   *  the user is. Cancelling either prompt saves nothing. */
   async function addMoodboardReference(): Promise<string | undefined> {
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return undefined;
-    const base = "Reference";
-    const imagePath = await persistRefImage(dataUrl, base);
+    const prodId = prodRef.current?.meta.id;
+    const choice = await promptReferenceSave(nextRefName(), { title: "Save picked image as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return undefined;
+    const imagePath = await persistRefImage(dataUrl, choice.name);
     if (!imagePath) return undefined;
     const latest = prodRef.current;
     if (!latest) return undefined;
-    const finalName = uniqueRefName((latest.references ?? []).map((r) => r.name), base);
+    const finalName = uniqueRefName((latest.references ?? []).map((r) => r.name), choice.name);
     const id = uid("ref");
-    saveField({ references: [...(latest.references ?? []), { id, name: finalName, imagePath, shotIds: [] }] });
+    saveField({ references: [...(latest.references ?? []), { id, name: finalName, ...(choice.categoryId ? { categoryId: choice.categoryId } : {}), imagePath, shotIds: [] }] });
     return id;
   }
   /** Reference Moodboard: dropped files become references (image/video/audio),
@@ -1658,14 +1678,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Next auto-generated reference name (Ref-001, Ref-002, …). */
+  /** Next auto-generated reference name (Ref_001, Ref_002, …). Continues
+   *  after the highest existing Ref number (legacy "Ref-001" counts too). */
   function nextRefName(): string {
     let max = 0;
     for (const r of prodRef.current?.references ?? []) {
-      const m = /^Ref-(\d+)$/.exec(r.name);
+      const m = /^Ref[-_](\d+)$/.exec(r.name);
       if (m) max = Math.max(max, Number(m[1]));
     }
-    return `Ref-${String(max + 1).padStart(3, "0")}`;
+    return `Ref_${String(max + 1).padStart(3, "0")}`;
+  }
+
+  /** The save-reference popup: name + category for a brand-new reference.
+   *  Null means the user cancelled — callers must create nothing. */
+  async function promptReferenceSave(initialName: string, opts?: { title?: string; defaultCategoryId?: string }): Promise<ReferenceSaveChoice | null> {
+    const current = prodRef.current;
+    if (!current) return null;
+    return askReferenceSave({
+      title: opts?.title ?? "Save reference",
+      label: "This name is how prompts cite the reference (@[name]).",
+      confirmLabel: "Save reference",
+      initialName,
+      categories: current.referenceCategories ?? [],
+      defaultCategoryId: opts?.defaultCategoryId,
+    });
   }
 
   /** Shared: read a File as a data URL. */
@@ -1715,9 +1751,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     await styleFromImageDataUrl(dataUrl);
   }
 
-  /** Create a pasted image as a new reference with an auto-generated name (Ref-001…).
-   *  Returns the created reference (for the node graph to place it on the canvas). */
-  async function createReferenceFromFile(file: File, forcedName?: string): Promise<{ id: string; name: string; artwork: string } | null> {
+  /** Create a pasted image as a new reference: the save popup names and
+   *  categorizes it first (defaulting to the next Ref_001-style name and
+   *  Uncategorized), so cancelling saves nothing. Returns the created
+   *  reference (for the node graph to place it on the canvas). */
+  async function createReferenceFromFile(file: File): Promise<{ id: string; name: string; artwork: string } | null> {
     if (!prodRef.current) return null;
     if (file.size > 15 * 1024 * 1024) {
       setErr("That image is larger than 15 MB — use a smaller one.");
@@ -1727,7 +1765,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       setErr(`${file.name}: not an image file.`);
       return null;
     }
-    const name = forcedName ?? nextRefName();
+    const prodId = prodRef.current.meta.id;
+    const choice = await promptReferenceSave(nextRefName(), { title: "Save pasted image as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return null;
+    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
     let dataUrl: string;
     try {
       dataUrl = await fileToDataUrl(file);
@@ -1737,28 +1778,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
     const imagePath = await persistRefImage(dataUrl, name);
     if (!imagePath) { setErr("Couldn't save the pasted image."); return null; }
-    const prodId = prodRef.current.meta.id;
     const id = uid("ref");
-    saveField({ references: [...(prodRef.current?.references ?? []), { id, name, imagePath, shotIds: [] }] });
+    saveField({ references: [...(prodRef.current?.references ?? []), { id, name, ...(choice.categoryId ? { categoryId: choice.categoryId } : {}), imagePath, shotIds: [] }] });
     return { id, name, artwork: cascadeMedia(prodId, imagePath) };
   }
 
-  function batchRefNames(count: number): string[] {
-    let max = 0;
-    for (const r of prodRef.current?.references ?? []) {
-      const m = /^Ref-(\d+)$/.exec(r.name);
-      if (m) max = Math.max(max, Number(m[1]));
-    }
-    return Array.from({ length: count }, (_, i) => `Ref-${String(max + 1 + i).padStart(3, "0")}`);
-  }
-
-  // Step 2: while the Design panel is open, Ctrl+V with an image creates a reference (Ref-001…).
+  // Step 2: while the Design panel is open, Ctrl+V with an image creates a
+  // reference via the save popup (one prompt per image, sequentially).
   // Text pastes are untouched. When the node graph is open, it owns paste (see NodeGraphModal).
   useEffect(() => {
     if (prod?.currentStep !== 2) return;
     const onPaste = (e: ClipboardEvent) => {
       // If the node graph modal is open, let it handle paste (creates a ref via its own handler).
       if (document.querySelector(".prod-graph-overlay")) return;
+      // Never hijack a paste aimed at a text field (the save popup included).
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files: File[] = [];
@@ -1770,8 +1805,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       }
       if (!files.length) return;
       e.preventDefault();
-      const names = batchRefNames(files.length);
-      files.forEach((f, i) => void createReferenceFromFile(f, names[i]));
+      void (async () => {
+        for (const f of files) await createReferenceFromFile(f);
+      })();
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
@@ -1971,6 +2007,27 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         n.delete(shotId);
         return n;
       });
+    }
+  }
+
+  /** Fetch EVERY pending video at once and apply any clips that downloaded
+   *  without being recorded — the recovery pass after a batch of video
+   *  generations left shots unpopulated. Main tallies recovered / still
+   *  rendering / failed in the production log; here we just apply the fresh
+   *  snapshot and repaint every thumbnail. */
+  async function fetchPendingVideos() {
+    if (!prod || fetchVideosBusy) return;
+    setErr(null);
+    setFetchVideosBusy(true);
+    try {
+      const next = await window.cascade.fetchPendingVideos(prod.meta.id);
+      applySnapshot(next);
+      bustAll();
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setFetchVideosBusy(false);
     }
   }
 
@@ -2266,7 +2323,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Create/reuse a reference, optionally recording its shot association.
  *  Returns the new references array (undefined when the production is gone). */
-  function upsertReference(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }, shotId?: string): Production["references"] | undefined {
+  function upsertReference(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string; categoryId?: string }, shotId?: string): Production["references"] | undefined {
     const current = prodRef.current;
     if (!current) return undefined;
     const existing = (current.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
@@ -2280,13 +2337,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ...(shotId ? { shotIds: Array.from(new Set([...(r.shotIds ?? []), shotId])) } : {}),
       } : r);
     }
-    return [...(current.references ?? []), { id: uid("ref"), name, artwork: ref.artwork, imagePath: ref.imagePath, media: ref.media, mediaPath: ref.mediaPath, ...(shotId ? { shotIds: [shotId] } : {}) }];
+    return [...(current.references ?? []), { id: uid("ref"), name, artwork: ref.artwork, imagePath: ref.imagePath, media: ref.media, mediaPath: ref.mediaPath, ...(ref.categoryId ? { categoryId: ref.categoryId } : {}), ...(shotId ? { shotIds: [shotId] } : {}) }];
   }
 
   /** Step 3: attach a reference (image file, or an on-disk video/audio file)
    *  to a shot and tag it at the end of that shot's prompt, reusing an
    *  existing reference of the same name. Used by frame drops. */
-  async function attachReferenceToPrompt(shotId: string, name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }) {
+  async function attachReferenceToPrompt(shotId: string, name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string; categoryId?: string }) {
     if (!prod) return;
     setErr(null);
     try {
@@ -2331,7 +2388,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Create/reuse a dropped reference WITHOUT tagging the prompt — node-graph
    *  drops just add the reference node, and connecting it to the prompt is an
    *  explicit socket action. Returns the reference id for canvas placement. */
-  function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): string | undefined {
+  function saveRefOnly(name: string, ref: { artwork?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string; categoryId?: string }): string | undefined {
     const current = prodRef.current;
     if (!current) return undefined;
     const existing = (current.references ?? []).find((r) => r.name.trim().toLowerCase() === name.toLowerCase());
@@ -2361,10 +2418,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function dropFrameAsReference(shotId: string, source: { prodId: string; shotId: string; number: number }) {
     if (!prod) return;
     try {
-      const name = `Frame ${String(source.number).padStart(4, "0")}`;
-      const saved = await window.cascade.addBoardFrameReference(prod.meta.id, source.prodId, source.shotId, name);
+      const prodId = prod.meta.id;
+      const choice = await promptReferenceSave(`Frame ${String(source.number).padStart(4, "0")}`, { title: "Save frame as reference" });
+      if (!choice || prodRef.current?.meta.id !== prodId) return;
+      const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
+      const saved = await window.cascade.addBoardFrameReference(prodId, source.prodId, source.shotId, name);
       if (!saved?.path) { setErr("Couldn't load the dropped frame."); return; }
-      await attachReferenceToPrompt(shotId, name, { imagePath: saved.path });
+      await attachReferenceToPrompt(shotId, name, { imagePath: saved.path, categoryId: choice.categoryId });
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -2375,15 +2435,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  referencesDir on disk. The reference is NOT tagged into the prompt —
    *  connecting it to the prompt node is an explicit socket action.
    *  Returns the created reference so the graph can place its node. */
-  async function addFileReference(shotId: string, file: File, forcedName?: string): Promise<GraphRef | null> {
+  async function addFileReference(shotId: string, file: File, opts?: { defaultName?: string; title?: string }): Promise<GraphRef | null> {
     if (!prod) return null;
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
     if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return null; }
-    const baseName = forcedName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
-    // A dropped name that already exists becomes "Name 01", "Name 02", … so a
-    // fresh drop is always a distinct reference (saveRefOnly would otherwise
+    const baseName = opts?.defaultName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
+    // The save popup names + categorizes the new reference before any file
+    // is written; cancelling drops nothing onto the canvas either.
+    const prodId = prod.meta.id;
+    const choice = await promptReferenceSave(baseName, { title: opts?.title ?? "Save dropped file as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return null;
+    // A chosen name that already exists gets a numbered suffix so a fresh
+    // drop is always a distinct reference (saveRefOnly would otherwise
     // merge it into the same-named one).
-    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), baseName);
+    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
     try {
       if (kind === "image") {
         const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -2394,13 +2459,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         });
         const imagePath = await persistRefImage(dataUrl, name);
         if (!imagePath) { setErr("Couldn't save the dropped image."); return null; }
-        const id = saveRefOnly(name, { imagePath });
+        const id = saveRefOnly(name, { imagePath, categoryId: choice.categoryId });
         if (!id) return null;
         return { id, name, artwork: cascadeMedia(prod.meta.id, imagePath) };
       } else {
         const saved = await window.cascade.addReferenceMedia(prod.meta.id, file.name, file.type, await file.arrayBuffer());
         if (!saved) { setErr("Couldn't save the dropped media file."); return null; }
-        const id = saveRefOnly(name, { media: saved.kind, mediaPath: saved.path });
+        const id = saveRefOnly(name, { media: saved.kind, mediaPath: saved.path, categoryId: choice.categoryId });
         if (!id) return null;
         return { id, name, artwork: "", media: saved.kind, mediaPath: saved.path };
       }
@@ -2410,15 +2475,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Pasted files become auto-numbered references (Ref-001, Ref-002, …) so a
-   *  batch of clipboard images never collides on a generic file name — the same
-   *  naming the Design page's paste uses. Returns the created refs so the node
-   *  graph can place a node for each. */
+  /** Pasted files prompt one at a time, defaulting to auto-numbered names
+   *  (Ref_001, Ref_002, …) so a batch of clipboard images never collides on a
+   *  generic file name — the same naming the Design page's paste uses.
+   *  Returns the created refs so the node graph can place a node for each. */
   async function addPastedReferences(shotId: string, files: File[]): Promise<GraphRef[]> {
-    const names = batchRefNames(files.length);
     const refs: GraphRef[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const ref = await addFileReference(shotId, files[i], names[i]);
+    for (const file of files) {
+      const ref = await addFileReference(shotId, file, { defaultName: nextRefName(), title: "Save pasted file as reference" });
       if (ref) refs.push(ref);
     }
     return refs;
@@ -3630,14 +3694,23 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return apply(window.cascade.deleteGeneration(current.meta.id, shotId, rel));
   }
 
+  /** The next "Saved Ref_001"-style default for the save popup, mirroring
+   *  main's `savedRefName` (main re-resolves it authoritatively). */
+  function nextSavedRefName(): string {
+    return nextNumberedRefName((prodRef.current?.references ?? []).map((r) => r.name), "Saved Ref");
+  }
+
   /** Step 3/4: copy any generated image or clip into the production as a new
-   *  "Saved Ref_NN" reference (right-click → Save as reference on a board frame,
-   *  node-graph take, or tween take). Main does the copy + naming; the updated
-   *  production comes back through `apply`. */
-  function saveAsReference(shotId: string, rel: string) {
+   *  reference (right-click → Save as reference on a board frame, node-graph
+   *  take, or tween take). The save popup names + categorizes it first; main
+   *  does the copy; the updated production comes back through `apply`. */
+  async function saveAsReference(shotId: string, rel: string) {
     const current = prodRef.current;
     if (!current || !rel) return;
-    apply(window.cascade.saveGenerationAsReference(current.meta.id, shotId, rel));
+    const prodId = current.meta.id;
+    const choice = await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return;
+    apply(window.cascade.saveGenerationAsReference(prodId, shotId, rel, undefined, choice));
   }
 
   /** Same copy as `saveAsReference`, but resolves the created reference so the
@@ -3645,8 +3718,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function saveGenerationAsReferenceRef(shotId: string, rel: string): Promise<GraphRef | null> {
     const current = prodRef.current;
     if (!current || !rel) return null;
+    const prodId = current.meta.id;
+    const choice = await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return null;
     try {
-      const next = await window.cascade.saveGenerationAsReference(current.meta.id, shotId, rel);
+      const next = await window.cascade.saveGenerationAsReference(prodId, shotId, rel, undefined, choice);
       applySnapshot(next);
       void refreshList();
       const refs = next.references ?? [];
@@ -3671,8 +3747,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function saveSequenceGenerationAsReference(sequenceId: string, rel: string): Promise<GraphRef | null> {
     const current = prodRef.current;
     if (!current || !rel) return null;
+    const prodId = current.meta.id;
+    const choice = await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
+    if (!choice || prodRef.current?.meta.id !== prodId) return null;
     try {
-      const next = await window.cascade.saveGenerationAsReference(current.meta.id, "", rel, sequenceId);
+      const next = await window.cascade.saveGenerationAsReference(prodId, "", rel, sequenceId, choice);
       applySnapshot(next);
       void refreshList();
       const refs = next.references ?? [];
@@ -3900,7 +3979,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     {m.shotCount} shots{m.stepDone ? ` · step ${m.stepDone} done` : ""} · {new Date(m.updatedAt).toLocaleDateString()}
                   </span>
                 </button>
-                <button className="prod-card-remove" title="Remove from Cascade (files on disk are untouched)" onClick={() => void remove(m.id)}><XIcon size={14} /></button>
+                <button className="prod-card-remove" title="Remove from Cascade (files on disk are untouched)" onClick={() => void remove(m.id)}><TrashIcon size={14} /></button>
               </div>
             ))}
           </div>
@@ -3912,6 +3991,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const shotCount = prod.scenes.reduce((n, s) => n + s.shots.length, 0);
   const visibleLog = log.filter((l) => l.id === prod.meta.id);
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => resolveShotDisplay(s).path || s.graphImageGens?.length).length;
+  /** Shots with a video job still unclaimed (rendering or undownloaded). */
+  const pendingVideoCount = prod.scenes.flatMap((s) => s.shots).filter((s) => s.pendingVideoGen).length;
   const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
   const totalRuntime = applyShotSequences(prod.scenes.flatMap((s) => s.shots), prod.shotSequences ?? [], prod.references).reduce((n, item) => n + item.durationSec, 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
@@ -4085,12 +4166,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                         <span className="prod-style-frame-empty" title={s.pendingImageGen ? "This style frame is still rendering — recheck to download it when ready" : "No style frame — boards generate from text only"}>{s.pendingImageGen ? "pending…" : "no frame"}</span>
                       )}
                       {styleZoom === s.id && s.imagePath && (
-                        <div className="prod-ref-lightbox" onClick={() => setStyleZoom(null)}>
-                          <figure className="prod-ref-lightbox-card">
-                            <img src={cascadeMedia(prod.meta.id, s.imagePath)} alt={`Style frame for ${s.name || `Style ${s.index}`}`} />
-                            <figcaption>{s.name || `Style ${s.index}`} — click anywhere to close</figcaption>
-                          </figure>
-                        </div>
+                        <MediaLightbox name={s.name || `Style ${s.index}`} src={cascadeMedia(prod.meta.id, s.imagePath)} kind="image" onClose={() => setStyleZoom(null)} />
                       )}
                       <div className="prod-style-fields">
                         <div className="prod-style-head">
@@ -4165,7 +4241,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                               title="Remove this style's frame (boards fall back to text only)"
                               onClick={() => { setStyle(i, { imagePath: undefined, frameSource: undefined }); }}
                             >
-                              <XIcon size={12} />
+                              <TrashIcon size={12} />
                             </button>
                           )}
                         </div>
@@ -4220,7 +4296,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                       >
                         {refiningStyleId === s.id ? "…" : <MagicIcon size={13} />}
                       </button>
-                      <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}><XIcon size={12} /></button>
+                      <button className="prod-style-remove" title="Remove this style" onClick={() => removeStyle(i)}><TrashIcon size={12} /></button>
                     </div>
                   ))}
                 </div>
@@ -4500,6 +4576,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
                   Refresh Storyboard Images
                 </button>
+                <button disabled={fetchVideosBusy || boardsBusy || importBusy || !shotCount} onClick={() => void fetchPendingVideos()} title="Download every pending video job and apply clips that finished downloading without landing on their shot">
+                  {fetchVideosBusy ? "Fetching videos…" : pendingVideoCount > 0 ? `Fetch videos (${pendingVideoCount} pending)` : "Fetch videos"}
+                </button>
                 <span className="hint">{boardsDone}/{shotCount} shots have frames</span>
               </div>
             </div>
@@ -4542,7 +4621,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     videoBusy={videoBusyIds.includes(shot.id) || nodeVideoBusyShots.has(shot.id) || tweenBusyAll[shot.id] !== undefined || tweenStitchingAll.has(shot.id)}
                     pending={!!shot.pendingImageGen}
                     rechecking={recheckIds.has(shot.id)}
-                    videoPending={shot.pendingVideoGen?.target?.kind === "videoPath"}
+                    videoPending={!!shot.pendingVideoGen}
                     videoRechecking={videoRecheckIds.has(shot.id)}
                     onRegenerate={boardActions.onRegenerate}
                     onRecheck={boardActions.onRecheck}
@@ -4864,7 +4943,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                             >
                               Replace…
                             </button>
-                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}><XIcon size={12} /></button>
+                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}><TrashIcon size={12} /></button>
                           </div>
                         ) : (
                           <div className="prod-audio-file">
@@ -4894,7 +4973,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                               title="Background music volume"
                             />
                             <button onClick={() => void importMusic()}>Replace…</button>
-                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}><XIcon size={12} /></button>
+                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}><TrashIcon size={12} /></button>
                           </div>
                         ) : (
                           <div className="prod-audio-file">

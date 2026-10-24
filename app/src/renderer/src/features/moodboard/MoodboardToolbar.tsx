@@ -3,9 +3,10 @@
  * background, and the add/remove actions. Pure presentation — the canvas owns
  * the state and hands down callbacks.
  */
+import { memo } from "react";
 import type { ReferenceCategory } from "../../../../shared/ipc.js";
 
-export function MoodboardToolbar({
+export const MoodboardToolbar = memo(function MoodboardToolbar({
   count,
   hiddenCount,
   categories,
@@ -97,4 +98,4 @@ export function MoodboardToolbar({
       </div>
     </div>
   );
-}
+});

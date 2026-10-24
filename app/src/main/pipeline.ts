@@ -37,11 +37,14 @@ import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } f
 import { isBrandAttached, promptRefsFor, renderPromptText, renderShotPrompt, stripSharedSections, styleEdgePresent } from "../shared/graph/render.js";
 import { videoNodesFor } from "../shared/graph/materialize.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../shared/selected-output.js";
+import { nextNumberedRefName, sanitizeReferenceName } from "../shared/ref-names.js";
+import type { ReferenceSaveOptions } from "../shared/ipc/production.js";
 import { createMediaService, type MediaService } from "./media.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
 GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractVideoStillFrame, videoStillName } from "./video-still.js";
+import { queueVideoFilePostProcess } from "./video-faststart.js";
 import type { VideoStillDeps } from "./video-still.js";
 import { ref720pName, transcodeVideoFileTo720p } from "./video-ref.js";
 import type { VideoRef720Deps } from "./video-ref.js";
@@ -1246,6 +1249,9 @@ export function writeShotVideo(
   fs.mkdirSync(assetPath(p, shotVideoDir(p, shot)), { recursive: true });
   fs.writeFileSync(assetPath(p, rel), bytes);
   mediaFiles.register(p, rel, "video", "generated");
+  // Perf: faststart remux + poster pre-warm in the background so the first
+  // node-view paint never pays a tail-seek metadata load or an ffmpeg extract.
+  queueVideoFilePostProcess(assetPath(p, rel));
   return rel;
 }
 
@@ -1275,6 +1281,7 @@ export function writeSequenceVideo(
   fs.mkdirSync(assetPath(p, sequenceVideoDir(p, seq)), { recursive: true });
   fs.writeFileSync(assetPath(p, rel), bytes);
   mediaFiles.register(p, rel, "video", "generated");
+  queueVideoFilePostProcess(assetPath(p, rel));
   return rel;
 }
 
@@ -1773,16 +1780,27 @@ export function deleteGeneration(p: Production, shot: ProductionShot, rel: strin
 /** Extensions treated as video (not image) when a saved reference is stored. */
 const VIDEO_REF_EXTS = new Set([".mp4", ".mov", ".webm", ".m4v", ".mkv", ".avi"]);
 
-/** The reference name for a "Save as reference" action: "Saved Ref_00", then
- *  "Saved Ref_01", … — the first suffix no existing reference already uses
- *  (case-insensitive). Pure; exposed for tests. */
+/** The reference name for a "Save as reference" action: "Saved Ref_001",
+ *  then "Saved Ref_002", … — the first suffix no existing reference already
+ *  uses (case-insensitive). Pure; exposed for tests. */
 export function savedRefName(existingNames: Iterable<string>): string {
-  const taken = new Set<string>();
-  for (const n of existingNames) taken.add(n.trim().toLowerCase());
-  for (let i = 0; ; i++) {
-    const candidate = `Saved Ref_${String(i).padStart(2, "0")}`;
-    if (!taken.has(candidate.toLowerCase())) return candidate;
-  }
+  return nextNumberedRefName(existingNames, "Saved Ref");
+}
+
+/** A popup-chosen category id, kept only when the production still has that
+ *  category — anything else (omitted, stale, non-string) is uncategorized. */
+export function validReferenceCategoryId(p: Production, categoryId: unknown): string | undefined {
+  return typeof categoryId === "string" && categoryId && (p.referenceCategories ?? []).some((c) => c.id === categoryId)
+    ? categoryId
+    : undefined;
+}
+
+/** Resolve a save popup's name against the auto-generated default: a usable
+ *  user name is sanitized and de-duplicated; an absent or unusable one keeps
+ *  the default. `newId` is the not-yet-added reference's id. */
+function resolveReferenceSaveName(p: Production, newId: string, asked: unknown, fallback: string): string {
+  const cleaned = typeof asked === "string" ? sanitizeReferenceName(asked) : "";
+  return cleaned ? uniqueReferenceName(p, newId, cleaned) : fallback;
 }
 
 /**
@@ -1792,14 +1810,16 @@ export function savedRefName(existingNames: Iterable<string>): string {
  * reference. The reference is NOT tagged into any prompt — attaching it is an
  * explicit action. Returns the created reference. Callers save the production.
  */
-export function saveGenerationAsReference(p: Production, rel: string): CustomRef {
+export function saveGenerationAsReference(p: Production, rel: string, opts?: ReferenceSaveOptions): CustomRef {
   const src = assetPath(p, rel);
   if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
     throw new Error(`That file isn't on disk, so it can't be saved as a reference: ${rel}`);
   }
   const ext = path.extname(rel).toLowerCase() || ".png";
   const media = VIDEO_REF_EXTS.has(ext) ? "video" as const : "image" as const;
-  const name = savedRefName((p.references ?? []).map((r) => r.name));
+  const refId = newRefId();
+  const name = resolveReferenceSaveName(p, refId, opts?.name, savedRefName((p.references ?? []).map((r) => r.name)));
+  const categoryId = validReferenceCategoryId(p, opts?.categoryId);
   const dir = p.assets.referencesDir;
   fs.mkdirSync(assetPath(p, dir), { recursive: true });
   let destRel = `${dir}/${name}${ext}`;
@@ -1813,8 +1833,8 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
   // survives deleting the source generation and any later move re-points it.
   mediaFiles.register(p, destRel, media === "video" ? "video" : "image", "adopted");
   const ref: CustomRef = media === "video"
-    ? { id: newRefId(), name, media, mediaPath: destRel, shotIds: [] }
-    : { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+    ? { id: refId, name, media, mediaPath: destRel, shotIds: [], ...(categoryId ? { categoryId } : {}) }
+    : { id: refId, name, imagePath: destRel, shotIds: [], ...(categoryId ? { categoryId } : {}) };
   p.references = [...(p.references ?? []), ref];
   return ref;
 }
@@ -1822,7 +1842,7 @@ export function saveGenerationAsReference(p: Production, rel: string): CustomRef
 /**
  * Save the frame a video is paused on as a new image reference: extract the
  * exact `timeSec` frame via ffmpeg and store it in referencesDir as
- * `Video still_00.jpg` (then _01, …), appended as a `CustomRef`. The reference
+ * `Video still_001.jpg` (then _002, …), appended as a `CustomRef`. The reference
  * is NOT tagged into any prompt — attaching it is an explicit action. Returns
  * the created reference. Callers save the production.
  */
@@ -1831,13 +1851,16 @@ export async function saveVideoStillAsReference(
   videoRel: string,
   timeSec: number,
   deps: VideoStillDeps,
+  opts?: ReferenceSaveOptions,
 ): Promise<CustomRef> {
   const src = assetPath(p, videoRel);
   if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
     throw new Error(`That video isn't on disk, so no frame can be saved from it: ${videoRel}`);
   }
   const jpeg = await extractVideoStillFrame(src, timeSec, deps);
-  const name = videoStillName((p.references ?? []).map((r) => r.name));
+  const refId = newRefId();
+  const name = resolveReferenceSaveName(p, refId, opts?.name, videoStillName((p.references ?? []).map((r) => r.name)));
+  const categoryId = validReferenceCategoryId(p, opts?.categoryId);
   const dir = p.assets.referencesDir;
   fs.mkdirSync(assetPath(p, dir), { recursive: true });
   let destRel = `${dir}/${name}.jpg`;
@@ -1847,7 +1870,7 @@ export async function saveVideoStillAsReference(
     i++;
   }
   fs.writeFileSync(assetPath(p, destRel), jpeg);
-  const ref: CustomRef = { id: newRefId(), name, imagePath: destRel, shotIds: [] };
+  const ref: CustomRef = { id: refId, name, imagePath: destRel, shotIds: [], ...(categoryId ? { categoryId } : {}) };
   p.references = [...(p.references ?? []), ref];
   return ref;
 }
@@ -2595,6 +2618,102 @@ export function refreshBoardLinks(p: Production): number {
     }
   }
   return repaired;
+}
+
+
+/** Adopt generated clips that reached disk but were never recorded on their
+ *  shot — the video counterpart of `refreshBoardLinks`. A provider writes
+ *  the finished clip into `boards/<number>/video/` (see `writeShotVideo`)
+ *  BEFORE the generating job records it, so a crash or a dropped commit in
+ *  between leaves an orphan file with no node-history entry and no pending
+ *  receipt to Fetch. This rescans each shot's `video/` folder and records
+ *  every unregistered clip: plain takes on the (first) video node, `-edit-`
+ *  takes on `ev0`, a `-tween-` stitch as `graphTweenOutput` when none is
+ *  set. When the shot currently shows a clip whose file exists, recovered
+ *  takes join history without moving the selection; otherwise the newest
+ *  recovered take is applied as the output feed, exactly as the lost
+ *  generation would have. Empty (partial-write) files are skipped.
+ *  Idempotent; returns the number of clips adopted. */
+export function refreshShotVideos(p: Production, onlyShotId?: string): number {
+  let adopted = 0;
+  const registeredPaths = (shot: ProductionShot): Set<string> => {
+    const paths = new Set<string>();
+    if (shot.videoPath) paths.add(shot.videoPath);
+    if (shot.graphTweenOutput) paths.add(shot.graphTweenOutput);
+    for (const g of shot.graphVideoGens ?? []) paths.add(g.path);
+    for (const n of shot.graphVideoNodes ?? []) for (const g of n.gens ?? []) paths.add(g.path);
+    for (const b of shot.graphTweenBlocks ?? []) for (const g of b.gens ?? []) paths.add(g.path);
+    return paths;
+  };
+
+  for (const sc of p.scenes) {
+    for (const shot of sc.shots) {
+      if (onlyShotId && shot.id !== onlyShotId) continue;
+      const dirRel = shotVideoDir(p, shot);
+      let files: string[];
+      try {
+        files = fs.readdirSync(assetPath(p, dirRel));
+      } catch { continue; }
+      const rx = new RegExp(`^shot-${shot.number}(?:-(edit|tween))?-[^/]+\\.(?:mp4|mov|webm|m4v)$`, "i");
+      const known = registeredPaths(shot);
+      const orphans: Array<{ rel: string; variant: "edit" | "tween" | undefined; mtime: number; name: string }> = [];
+      for (const f of files) {
+        const m = rx.exec(f);
+        if (!m) continue;
+        const rel = `${dirRel}/${f}`;
+        if (known.has(rel)) continue;
+        try {
+          const st = fs.statSync(assetPath(p, rel));
+          if (!st.isFile() || st.size <= 0) continue; // a partial write is not a clip
+          orphans.push({ rel, variant: m[1]?.toLowerCase() as "edit" | "tween" | undefined, mtime: st.mtimeMs, name: f });
+        } catch { /* unreadable entry — skip */ }
+      }
+      if (!orphans.length) continue;
+      // Oldest first: recording unshifts, so the newest orphan ends selected.
+      orphans.sort((a, b) => a.mtime - b.mtime || (a.name < b.name ? -1 : 1));
+
+      // A clip already on screen (with its file present) keeps its
+      // selection — recovery must not silently swap the shown take.
+      const display = resolveShotDisplay(shot);
+      const showingClip = display.media === "clip" && !!display.path && fs.existsSync(assetPath(p, display.path));
+
+      const plainNodeId = getVideoNode(shot)?.id ?? "vid0";
+      const hadTweenOutput = !!shot.graphTweenOutput;
+      let newestApplied: { nodeId: string } | null = null;
+      for (const orphan of orphans) {
+        if (orphan.variant === "tween") {
+          // An orphaned stitch stands in for a lost stitch commit only when
+          // no stitch output is recorded; the newest one wins, counted once.
+          if (hadTweenOutput) continue;
+          if (!shot.graphTweenOutput) adopted++;
+          shot.graphTweenOutput = orphan.rel;
+          mediaFiles.register(p, orphan.rel, "video", "generated");
+          continue;
+        }
+        const nodeId = orphan.variant === "edit" ? "ev0" : plainNodeId;
+        mediaFiles.register(p, orphan.rel, "video", "generated");
+        if (showingClip) {
+          // Record without moving the node's selection off the shown take.
+          const node = getVideoNode(shot, nodeId);
+          const selectedPath = node?.gens?.[node.genIndex ?? 0]?.path;
+          recordGraphVideoGen(shot, nodeId, orphan.rel, "", "refresh");
+          const after = getVideoNode(shot, nodeId);
+          if (after && selectedPath) {
+            const at = (after.gens ?? []).findIndex((g) => g.path === selectedPath);
+            if (at >= 0) after.genIndex = at;
+          }
+        } else {
+          recordGraphVideoGen(shot, nodeId, orphan.rel, "", "refresh");
+          newestApplied = { nodeId };
+        }
+        adopted++;
+      }
+      // The lost generation would have fed the output — apply the newest
+      // recovered take so the storyboard and node tree show it.
+      if (!showingClip && newestApplied) hookVideoGenToOutput(shot, newestApplied.nodeId);
+    }
+  }
+  return adopted;
 }
 
 /** How many generations each node-graph generation node keeps. */
@@ -3784,6 +3903,7 @@ export function importBoardVideo(
   }
   fs.writeFileSync(assetPath(p, rel), buf);
   mediaFiles.register(p, rel, "video", "imported");
+  queueVideoFilePostProcess(assetPath(p, rel));
   const name = parsed.name.trim().replace(/\s+/g, " ").slice(0, 60) || "Dropped clip";
   const refId = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   p.references = [...(p.references ?? []), { id: refId, name, media: "video" as const, mediaPath: rel, shotIds: [] }];

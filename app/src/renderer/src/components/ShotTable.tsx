@@ -19,7 +19,7 @@ import { shotHasContent } from "../../../shared/ipc.js";
 import { revOf } from "../../../shared/snapshot-freshness.js";
 import { uid } from "./production/hex.js";
 import { AutoTextarea } from "./AutoTextarea.js";
-import { DragHandleIcon, PlusIcon, XIcon } from "./icons.js";
+import { DragHandleIcon, PlusIcon, TrashIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 
@@ -551,7 +551,7 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
           title="Delete this shot (numbers keep their gaps)"
           onClick={handleDelete}
         >
-          <XIcon size={13} />
+          <TrashIcon size={13} />
         </button>
       </span>
     </div>

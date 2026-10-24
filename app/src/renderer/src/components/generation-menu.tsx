@@ -40,7 +40,7 @@ function targetIsVideo(t: GenerationMenuTarget): boolean {
 export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onRefresh, onEditInSuite, extra }: {
   menu: GenerationMenuTarget | null;
   onClose: () => void;
-  /** Copy this take into referencesDir as a new "Saved Ref_NN" reference. */
+  /** Copy this take into referencesDir as a new reference (via the save popup). */
   onSaveAsReference?: (rel: string) => void;
   /** Permanently delete this take (confirmation lives in the workspace). */
   onDelete?: (rel: string) => void;

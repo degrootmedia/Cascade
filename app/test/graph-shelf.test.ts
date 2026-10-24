@@ -1008,7 +1008,7 @@ describe("node-graph shelf full-res zoom", () => {
     const zoom = host.querySelector(".prod-graph-shelf-zoom") as HTMLButtonElement;
     expect(zoom).toBeTruthy();
     await act(async () => { zoom.click(); await new Promise((r) => setTimeout(r, 0)); });
-    const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
+    const lightboxImg = document.body.querySelector(".prod-graph-lightbox .media-lightbox-stage img") as HTMLImageElement;
     expect(lightboxImg?.getAttribute("src")).toBe("cascade-media://p1/references/photo.png");
 
     await act(async () => { root.unmount(); });

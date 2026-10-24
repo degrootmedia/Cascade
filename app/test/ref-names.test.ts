@@ -7,8 +7,8 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
-import { sanitizeReferenceName, referenceNameError, suggestSuiteRefName } from "../src/shared/ref-names.js";
-import { askName, NamePromptHost } from "../src/renderer/src/components/NamePromptDialog.js";
+import { sanitizeReferenceName, referenceNameError, suggestSuiteRefName, nextNumberedRefName } from "../src/shared/ref-names.js";
+import { askName, askReferenceSave, NamePromptHost, type ReferenceSaveChoice } from "../src/renderer/src/components/NamePromptDialog.js";
 
 describe("reference name helpers", () => {
   it("sanitizer strips tag/path-hostile characters and collapses space", () => {
@@ -22,6 +22,13 @@ describe("reference name helpers", () => {
     expect(referenceNameError("Hero [1]")).toMatch(/tags/);
     expect(referenceNameError("a/b")).toMatch(/saved file/);
     expect(referenceNameError("Hero pose")).toBeNull();
+  });
+
+  it("numbered names start at _001 and take the first free suffix", () => {
+    expect(nextNumberedRefName([], "Ref")).toBe("Ref_001");
+    expect(nextNumberedRefName(["Ref_001"], "Ref")).toBe("Ref_002");
+    expect(nextNumberedRefName(["ref_001", "Ref_002"], "Ref")).toBe("Ref_003");
+    expect(nextNumberedRefName(["Image Suite Gen_001"], "Image Suite Gen")).toBe("Image Suite Gen_002");
   });
 
   it("suggestion comes from the prompt's first line, else Suite", () => {
@@ -85,6 +92,59 @@ describe("NamePromptDialog", () => {
     });
     expect(resolved).toBe(false);
     expect(document.body.querySelector(".name-prompt-error")?.textContent).toMatch(/required/);
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("reference-save variant resolves name + category, defaulting to Uncategorized", async () => {
+    const { host, root } = mount();
+    const cats = [{ id: "cat-1", name: "Characters" }, { id: "cat-2", name: "Props" }];
+    const setSelect = (el: HTMLSelectElement, v: string) => {
+      const proto = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+      proto?.call(el, v);
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    // Default: Uncategorized (no categoryId), name as pre-filled.
+    let first: ReferenceSaveChoice | null | undefined;
+    let p1!: Promise<ReferenceSaveChoice | null>;
+    act(() => { p1 = askReferenceSave({ title: "Save reference", initialName: "Ref_001", categories: cats }); });
+    p1.then((v) => { first = v; });
+    const select = document.body.querySelector(".name-prompt-select") as HTMLSelectElement;
+    expect(select, "category dropdown rendered").toBeTruthy();
+    expect(select.value).toBe("");
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Uncategorized", "Characters", "Props"]);
+    const input = document.body.querySelector(".name-prompt-input") as HTMLInputElement;
+    expect(input.value).toBe("Ref_001");
+    await act(async () => {
+      input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await p1;
+    });
+    expect(first).toEqual({ name: "Ref_001", categoryId: undefined });
+
+    // Chosen category + a defaultCategoryId pre-selection.
+    let second: ReferenceSaveChoice | null | undefined;
+    let p2!: Promise<ReferenceSaveChoice | null>;
+    act(() => { p2 = askReferenceSave({ title: "Save reference", initialName: "Hero", categories: cats, defaultCategoryId: "cat-2" }); });
+    p2.then((v) => { second = v; });
+    const select2 = document.body.querySelector(".name-prompt-select") as HTMLSelectElement;
+    expect(select2.value).toBe("cat-2");
+    await act(async () => { setSelect(select2, "cat-1"); });
+    const input2 = document.body.querySelector(".name-prompt-input") as HTMLInputElement;
+    await act(async () => {
+      input2.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await p2;
+    });
+    expect(second).toEqual({ name: "Hero", categoryId: "cat-1" });
+
+    // Cancel resolves null.
+    let cancelled: ReferenceSaveChoice | null | undefined;
+    let p3!: Promise<ReferenceSaveChoice | null>;
+    act(() => { p3 = askReferenceSave({ title: "Save reference", initialName: "X", categories: cats }); });
+    p3.then((v) => { cancelled = v; });
+    const cancel = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Cancel");
+    await act(async () => { cancel!.click(); await p3; });
+    expect(cancelled).toBeNull();
     act(() => { root.unmount(); });
     host.remove();
   });

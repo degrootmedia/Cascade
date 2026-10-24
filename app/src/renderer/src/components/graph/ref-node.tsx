@@ -16,6 +16,7 @@ import {
 import type { GraphLayout } from "../../../../shared/ipc.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { refThumbUrl } from "../production/thumb-url.js";
+import { VideoPreview } from "./video-preview.js";
 import { EyeIcon, EyeOffIcon, MagnifyIcon } from "../icons.js";
 
 /** Split a `cascade-media://` URL into the production id + workspace-relative
@@ -140,7 +141,7 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
   const mediaEl = (src: string) => data.artwork
     ? <img src={src} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} />
     : data.media === "video" && data.mediaUrl
-      ? <video className="prod-graph-ref-video" src={data.mediaUrl} muted loop playsInline preload="metadata" onMouseEnter={(e) => { try { e.currentTarget.play(); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable={false} />
+      ? <VideoPreview instanceId={`ref:${id}`} className="prod-graph-ref-video" url={data.mediaUrl} hoverActivate />
       : data.media
         ? <div className="prod-graph-ref-blank" title={data.media === "audio" ? "Audio reference" : "Video reference"}>{data.media === "audio" ? "\u266A" : "\u25B6"}</div>
         : <div className="prod-graph-ref-blank" title="Reference has no image">?</div>;

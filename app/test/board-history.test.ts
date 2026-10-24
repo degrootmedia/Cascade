@@ -328,24 +328,24 @@ describe("BoardCard history", () => {
     expect(host.querySelector(".prod-board-frame-video")?.getAttribute("src")).toBe(videoSrc);
     expect(button(".prod-board-zoom").title).toBe("Play this shot's video");
     await click(".prod-board-zoom");
-    expect(host.querySelector(".prod-ref-lightbox-video")?.getAttribute("src")).toBe(videoSrc);
+    expect(document.body.querySelector(".prod-ref-lightbox-video")?.getAttribute("src")).toBe(videoSrc);
     expect(boardImageFull).not.toHaveBeenCalled();
-    await act(async () => { host.querySelector<HTMLElement>(".prod-ref-lightbox")!.click(); });
+    await act(async () => { document.body.querySelector<HTMLElement>(".prod-ref-lightbox")!.click(); });
 
     await click(".prod-board-hist.prev");
     expectFrame(EDIT);
     expect(button(".prod-board-zoom").title).toBe("Enlarge this frame");
     await click(".prod-board-zoom");
     expect(boardImageFull.mock.calls).toEqual([["prod1", "shot1", EDIT]]);
-    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(EDIT));
-    expect(host.querySelector(".prod-ref-lightbox video")).toBeNull();
-    await act(async () => { host.querySelector<HTMLElement>(".prod-ref-lightbox")!.click(); });
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")?.getAttribute("src")).toBe(fullImage(EDIT));
+    expect(document.body.querySelector(".prod-ref-lightbox video")).toBeNull();
+    await act(async () => { document.body.querySelector<HTMLElement>(".prod-ref-lightbox")!.click(); });
 
     await click(".prod-board-hist.next");
     expect(button(".prod-board-zoom").title).toBe("Play this shot's video");
     await click(".prod-board-zoom");
-    expect(host.querySelector(".prod-ref-lightbox-video")?.getAttribute("src")).toBe(videoSrc);
-    expect(host.querySelector(".prod-ref-lightbox img")).toBeNull();
+    expect(document.body.querySelector(".prod-ref-lightbox-video")?.getAttribute("src")).toBe(videoSrc);
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")).toBeNull();
     expect(boardImageFull).toHaveBeenCalledTimes(1);
     expect(onPromptFocus).not.toHaveBeenCalled();
   });
@@ -377,7 +377,7 @@ describe("BoardCard history", () => {
     expect(button(".prod-board-hist.prev").title).toBe("Previous frame (2 in history)");
     await click(".prod-board-zoom");
     expect(boardImageFull.mock.calls).toEqual([["prod1", "shot1", undefined]]);
-    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(newPrimary));
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")?.getAttribute("src")).toBe(fullImage(newPrimary));
   });
 
   it("steps the enlarged frame between shots with the arrow keys, skipping blanks", async () => {
@@ -397,23 +397,23 @@ describe("BoardCard history", () => {
     expect(zooms[1].disabled).toBe(true);
     expect(zooms[0].disabled).toBe(false);
     await act(async () => { zooms[0].click(); });
-    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(firstArt));
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")?.getAttribute("src")).toBe(fullImage(firstArt));
 
     // The blank panel in between is skipped — the lightbox lands on shot2.
     await act(async () => {
       window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight" }));
     });
-    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(secondArt));
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")?.getAttribute("src")).toBe(fullImage(secondArt));
     expect(boardImageFull).toHaveBeenLastCalledWith("prod1", "shot2", undefined);
 
     await act(async () => {
       window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft" }));
     });
-    expect(host.querySelector(".prod-ref-lightbox img")?.getAttribute("src")).toBe(fullImage(firstArt));
+    expect(document.body.querySelector(".prod-ref-lightbox .media-lightbox-stage img")?.getAttribute("src")).toBe(fullImage(firstArt));
 
     await act(async () => {
       window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
     });
-    expect(host.querySelector(".prod-ref-lightbox")).toBeNull();
+    expect(document.body.querySelector(".prod-ref-lightbox")).toBeNull();
   });
 });

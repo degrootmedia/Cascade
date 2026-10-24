@@ -281,6 +281,7 @@ const validators: Record<string, (args: unknown[]) => void> = {
     checkPathString(args[1], "entryId", 256);
     if (args[2] !== "references" && args[2] !== "boards") throw new Error("IPC validation: suite export target must be 'references' or 'boards'");
     if (args[3] !== undefined && (typeof args[3] !== "string" || args[3].length > 128)) throw new Error("IPC validation: suite export name must be a string of at most 128 chars");
+    if (args[4] !== undefined && (typeof args[4] !== "string" || args[4].length > 256)) throw new Error("IPC validation: suite export categoryId must be a string of at most 256 chars");
   },
   "suite:recheckEntry": (args) => {
     checkPathString(args[0], "productionId", 256);

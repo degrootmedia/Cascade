@@ -5,7 +5,7 @@
  * shows a live credit quote for quotable models.
  */
 import { useMemo, useState } from "react";
-import { createPortal } from "react-dom";
+
 import type { CliModelSchema, CustomRef, OpenArtModelChoice, Production } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, UPSCALE_UNAVAILABLE_HINT, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { withSuiteStyle } from "./suite-style.js";
@@ -15,6 +15,7 @@ import { rememberMediaDefault } from "../../components/production/media-defaults
 import { cascadeMedia } from "../../components/production/animatic.js";
 import { refThumbUrl } from "../../components/production/thumb-url.js";
 import { MagnifyIcon } from "../../components/icons.js";
+import { MediaLightbox } from "../../components/common/MediaLightbox.js";
 import { GenerationCostSuffix } from "../../components/production/generation-cost-label.js";
 import { costAspect, isQuotableCostModel } from "../../components/production/generation-cost.js";
 import { resolveSuiteModel, resolveSuiteSurfacePool } from "./suite-models.js";
@@ -256,14 +257,8 @@ export function SuitePromptPanel({
             ? "The source image is uploaded and enhanced by an upscale model; the result is saved to the suite (the source is untouched). Ctrl+Enter to submit."
             : "The result is saved to the suite's own folder — no reference is created. Ctrl+Enter to submit."}
       </p>
-      {zoom && createPortal(
-        <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
-          <figure className="prod-ref-lightbox-card">
-            <img src={zoom.url} alt={zoom.name} />
-            <figcaption>{zoom.name} — click anywhere to close</figcaption>
-          </figure>
-        </div>,
-        document.body
+      {zoom && (
+        <MediaLightbox name={zoom.name} src={zoom.url} kind="image" onClose={() => setZoom(null)} />
       )}
     </section>
   );

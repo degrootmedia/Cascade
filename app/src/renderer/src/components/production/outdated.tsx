@@ -8,14 +8,14 @@
  * full-res in an overlay, and every panel can be Restored (back into the active
  * storyboard with a fresh number) or Deleted.
  */
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
 import type { Production, ProductionShot } from "../../../../shared/ipc.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { revOf } from "../../../../shared/snapshot-freshness.js";
 import { cascadeMedia } from "./animatic.js";
 import { confirmDestructive } from "../ConfirmDialog.js";
 import { refThumbUrl } from "./thumb-url.js";
-import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
+import { MediaLightbox } from "../common/MediaLightbox.js";
 
 interface Props {
   prod: Production;
@@ -101,8 +101,7 @@ const OutdatedCard = memo(function OutdatedCard({
 export function OutdatedSection({ prod, onMutate }: Props) {
   const shots = prod.outdatedShots ?? [];
   const [zoom, setZoom] = useState<{ url: string; kind: "image" | "video"; rel: string; label: string } | null>(null);
-  // The zoomed video's paused position — the still is extracted at exactly it.
-  const zoomVideoRef = useRef<HTMLVideoElement | null>(null);
+
   if (!shots.length) return null;
   return (
     <section className="prod-outdated">
@@ -119,19 +118,15 @@ export function OutdatedSection({ prod, onMutate }: Props) {
         ))}
       </div>
       {zoom && (
-        <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
-          <figure className="prod-ref-lightbox-card">
-            {zoom.kind === "video"
-              ? <video ref={zoomVideoRef} className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay playsInline />
-              : <img src={zoom.url} alt={zoom.label} />}
-            <figcaption>
-              {zoom.label} — click anywhere to close
-              {zoom.kind === "video" && (
-                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={zoom.rel} getTime={() => zoomVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onMutate(Promise.resolve(next)); setZoom(null); }} /></>
-              )}
-            </figcaption>
-          </figure>
-        </div>
+        <MediaLightbox
+          name={zoom.label}
+          src={zoom.url}
+          kind={zoom.kind}
+          rel={zoom.kind === "video" ? zoom.rel : undefined}
+          productionId={prod.meta.id}
+          onClose={() => setZoom(null)}
+          onVideoStillSaved={(next) => onMutate(Promise.resolve(next))}
+        />
       )}
     </section>
   );

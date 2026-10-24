@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+
 import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
@@ -11,14 +11,14 @@ import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import type { PromptContentHandle } from "../TriplePrompt.js";
-import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, XIcon } from "../icons.js";
+import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 import { refThumbUrl } from "./thumb-url.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
-import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
+import { MediaLightbox } from "../common/MediaLightbox.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
@@ -30,6 +30,11 @@ interface RefItem {
 /** HTML5 drag payload types. `REF_DRAG_MIME` carries the primary tile id (the
  *  legacy single-ref payload the drop targets have always read);
  *  `REFS_DRAG_MIME` carries the whole multi-selection as a JSON id array. */
+/** Video containers a reference path may carry (mirrors the main-side
+ *  thumbnail module's list). Used to recognize a clip stored without the
+ *  `media: "video"` flag. */
+export const VIDEO_REF_PATH_RX = /\.(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/i;
+
 export const REF_DRAG_MIME = "application/x-cascade-reference";
 export const REFS_DRAG_MIME = "application/x-cascade-references";
 
@@ -58,8 +63,8 @@ export function hasRefDrag(types: readonly string[] | DOMStringList): boolean {
 }
 
 /** Resolve a dragged-in reference's name against the existing ones: a base
- *  name that is already taken gets a two-digit suffix ("Gondola" → "Gondola
- *  01", then "Gondola 02", …). Matching is case-insensitive; the base is
+ *  name that is already taken gets a numbered suffix ("Gondola" → "Gondola_001",
+ *  then "Gondola_002", …). Matching is case-insensitive; the base is
  *  trimmed and falls back to "Reference" when empty. */
 export function uniqueRefName(existingNames: Iterable<string>, base: string): string {
   const trimmed = base.trim() || "Reference";
@@ -67,7 +72,7 @@ export function uniqueRefName(existingNames: Iterable<string>, base: string): st
   for (const n of existingNames) taken.add(n.trim().toLowerCase());
   if (!taken.has(trimmed.toLowerCase())) return trimmed;
   for (let n = 1; ; n++) {
-    const candidate = `${trimmed} ${String(n).padStart(2, "0")}`;
+    const candidate = `${trimmed}_${String(n).padStart(3, "0")}`;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
 }
@@ -130,7 +135,7 @@ function RefSection({ title, items, emptyHint, onAttach, onRemove, onAdd, addKin
             <figure key={i.id} className="prod-ref">
               <img src={i.artwork} alt={i.name} />
               <div className="prod-ref-actions">
-                <button className="prod-ref-remove" title="Remove this reference" onClick={() => onRemove(i.id)}><XIcon size={12} /></button>
+                <button className="prod-ref-remove" title="Remove this reference" onClick={() => onRemove(i.id)}><TrashIcon size={12} /></button>
               </div>
               <figcaption>{i.name}</figcaption>
             </figure>
@@ -209,9 +214,9 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
 </figcaption>
             <div className="prod-ref-actions">
               {i.artwork
-                ? <button className="prod-ref-remove" title="Remove reference image" onClick={() => onRemoveImage(i.id)}><XIcon size={12} /></button>
+                ? <button className="prod-ref-remove" title="Remove reference image" onClick={() => onRemoveImage(i.id)}><TrashIcon size={12} /></button>
                 : <button className="prod-ref-addimg" title="Import a reference image" onClick={() => void onAttach(i.id)}><ImportIcon size={12} /></button>}
-              <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(i.id)}><XIcon size={12} /></button>
+              <button className="prod-ref-del" title="Delete this reference" onClick={() => onRemove(i.id)}><TrashIcon size={12} /></button>
             </div>
           </figure>
         ))}
@@ -460,7 +465,7 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, variant = "row" }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, variant = "row", thumbEdge }: {
   prodId: string;
   refItem: CustomRef;
   /** This tile is part of the section's multi-selection. */
@@ -482,19 +487,30 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
    *  surface, like the node graph canvas. Every `ref-*` class is reused either
    *  way. */
   variant?: "row" | "node";
+  /** Node variant only: LOD thumbnail long-edge for the canvas bitmap
+   *  (0/undefined = full resolution). The moodboard derives it from the
+   *  settled zoom so a zoomed-out board decodes screen-sized bitmaps;
+   *  zoom/lightbox/context-menu keep the full-res URL regardless. */
+  thumbEdge?: number;
 }) {
   const isNode = variant === "node";
   const r = refItem;
   const imgUrl = r.imagePath ? cascadeMedia(prodId, r.imagePath) : r.artwork;
-  const isVideo = r.media === "video" && !!r.mediaPath;
+  // A video is the stored media flag OR a video-container path: refs adopted
+  // before the flag existed (or hand-placed files) can carry the clip under
+  // `imagePath`/`mediaPath` with no `media`, and must still play as video
+  // rather than render as a broken <img>. Audio keeps its own treatment.
+  const videoPath = r.mediaPath ?? (r.imagePath && VIDEO_REF_PATH_RX.test(r.imagePath) ? r.imagePath : undefined);
+  const isVideo = r.media !== "audio" && !!videoPath && (r.media === "video" || VIDEO_REF_PATH_RX.test(videoPath));
   const hasImage = !!imgUrl && !isVideo;
   // Perf: the sidebar/grid tile is 140px wide, so the row variant paints the
   // compressed `?thumb=1` JPEG instead of decoding the full-resolution file
   // (a large library otherwise holds one full-size bitmap per visible tile).
-  // The node variant is a working canvas and keeps full resolution; zoom and
+  // The node variant is a working canvas: full resolution by default, or
+  // the canvas-supplied LOD tier (`thumbEdge`) when zoomed out. Zoom and
   // the context menu also use the full-res `imgUrl` below.
-  const displayUrl = isNode ? imgUrl : refThumbUrl(imgUrl ?? "");
-  const videoUrl = isVideo ? cascadeMedia(prodId, r.mediaPath!) : undefined;
+  const displayUrl = isNode ? (thumbEdge ? refThumbUrl(imgUrl ?? "", thumbEdge) : imgUrl) : refThumbUrl(imgUrl ?? "");
+  const videoUrl = isVideo ? cascadeMedia(prodId, videoPath!) : undefined;
   const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean; rel?: string } | null>(null);
   // Which edge a dragged tile currently hovers — drives the insert marker.
   const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
@@ -502,6 +518,12 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   // static glyph stands in (no metadata fetch storm for large libraries).
   const [videoActive, setVideoActive] = useState(false);
   const activateVideo = useCallback(() => setVideoActive(true), []);
+  // A clip that fails to load/decode (missing file, codec Chromium can't
+  // play) drops to the poster fallback instead of a permanent black box.
+  const [videoFailed, setVideoFailed] = useState(false);
+  const retryVideo = useCallback(() => { setVideoFailed(false); setVideoActive(true); }, []);
+
+
   // The canvas (node variant) draws a middle-frame poster instead of playing.
   // The poster is generated on demand main-side (ffmpeg), so a slow or
   // transient failure must not stick: the film glyph sits behind the image as
@@ -511,6 +533,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   useEffect(() => {
     setPosterAttempt(0);
     setPosterGaveUp(false);
+    setVideoFailed(false);
   }, [videoUrl]);
   const menu = useImageContextMenu({
     src: imgUrl ?? undefined,
@@ -520,11 +543,10 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   });
   const handleZoom = useCallback(() => {
     const url = isVideo ? videoUrl : imgUrl;
-    if (url) setZoom({ name: r.name, url, video: isVideo, rel: isVideo ? r.mediaPath : undefined });
-  }, [r.name, r.mediaPath, imgUrl, isVideo, videoUrl]);
+    if (url) setZoom({ name: r.name, url, video: isVideo, rel: isVideo ? videoPath : undefined });
+  }, [r.name, videoPath, imgUrl, isVideo, videoUrl]);
   const handleCloseZoom = useCallback(() => setZoom(null), []);
-  // The lightbox video's paused position — the still is extracted at exactly it.
-  const zoomVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const handleAttach = useCallback(() => void onAttach(r.id), [onAttach, r.id]);
   const handleRemove = useCallback(() => onRemove(r.id), [onRemove, r.id]);
   // Rename commits once (on blur/Enter), not per keystroke: main rewrites the
@@ -580,6 +602,26 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
     if (target.closest("input, button, textarea, select, a")) return;
     onSelect(r.id, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "single");
   }, [onSelect, r.id]);
+  // Poster fallback for a failed row preview: the middle-frame still over the
+  // film glyph (same treatment as the canvas node); a click retries the video.
+  const videoPosterWithRetry = (
+    <div className="prod-ref-video-thumb" title="Video preview unavailable — click to retry, or use the magnifier to play" onClick={retryVideo}>
+      <span className="prod-ref-video-placeholder"><FilmStripIcon size={14} /></span>
+      {!posterGaveUp && videoUrl && (
+        <img
+          key={posterAttempt}
+          src={refThumbUrl(videoUrl) + (posterAttempt ? `&r=${posterAttempt}` : "")}
+          alt={r.name}
+          draggable={false}
+          onError={() => {
+            if (posterAttempt < 2) window.setTimeout(() => setPosterAttempt((a) => a + 1), 1500);
+            else setPosterGaveUp(true);
+          }}
+        />
+      )}
+      <FilmStripIcon size={14} className="prod-ref-video-badge" />
+    </div>
+  );
   return (
     <figure
       className={"prod-ref" + (isNode ? " prod-ref-node" : "") + (selected && !isNode ? " selected" : "") + (dropSide ? ` drop-${dropSide}` : "")}
@@ -591,7 +633,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
       onDrop={isNode ? undefined : handleTileDrop}
     >
       {hasImage
-        ? <img src={displayUrl} alt={r.name} draggable={!isNode} onDragStart={isNode ? undefined : handleDragStart} onContextMenu={menu.onContextMenu} />
+        ? <img src={displayUrl} alt={r.name} decoding="async" draggable={!isNode} onDragStart={isNode ? undefined : handleDragStart} onContextMenu={menu.onContextMenu} />
         : isVideo
           ? (isNode
             ? <div className="prod-ref-video-thumb" title="Video reference — use the magnifier to play">
@@ -599,7 +641,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
                 {!posterGaveUp && videoUrl && (
                   <img
                     key={posterAttempt}
-                    src={refThumbUrl(videoUrl) + (posterAttempt ? `&r=${posterAttempt}` : "")}
+                    src={refThumbUrl(videoUrl, thumbEdge) + (posterAttempt ? `&r=${posterAttempt}` : "")}
                     alt={r.name}
                     draggable={false}
                     onError={() => {
@@ -610,8 +652,10 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
                 )}
                 <FilmStripIcon size={14} className="prod-ref-video-badge" />
               </div>
-            : (videoActive
-              ? <video className="prod-ref-video" src={videoUrl} muted loop playsInline preload="none" autoPlay onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} draggable onDragStart={handleDragStart} />
+            : (videoFailed
+              ? videoPosterWithRetry
+              : videoActive
+              ? <video className="prod-ref-video" src={videoUrl} poster={videoUrl ? refThumbUrl(videoUrl) : undefined} muted loop playsInline preload="metadata" autoPlay onLoadedMetadata={(e) => { try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {} }} onMouseEnter={(e) => { try { void e.currentTarget.play().catch(() => {}); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} onError={() => setVideoFailed(true)} draggable onDragStart={handleDragStart} />
               : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>))
           : <div className="prod-ref-blank">＋</div>}
       <div className="prod-ref-actions">
@@ -619,29 +663,28 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
         {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
         {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
         {hasImage && <OpenInSuiteButton productionId={prodId} seed={{ mode: "edit", sourceRefId: r.id }} className="prod-ref-suite" label="◨" title="Open this reference in the Image Suite" />}
-        <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}><XIcon size={12} /></button>
+        <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}>{isNode ? <XIcon size={12} /> : <TrashIcon size={12} />}</button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
-      {zoom && createPortal(
-        <div className="prod-ref-lightbox" onClick={handleCloseZoom}>
-          <figure className="prod-ref-lightbox-card">
-            {zoom.video
-              ? <video ref={zoomVideoRef} className="prod-ref-lightbox-video" src={zoom.url} controls autoPlay loop playsInline />
-              : <img src={zoom.url} alt={zoom.name} />}
-            <figcaption>
-              {zoom.name} — click anywhere to close
-              {zoom.video && zoom.rel && onVideoStillSaved && (
-                <>{" · "}<SaveVideoStillButton productionId={prodId} videoRel={zoom.rel} getTime={() => zoomVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setZoom(null); }} /></>
-              )}
-            </figcaption>
-          </figure>
-        </div>, document.body)}
+      {zoom && (
+        <MediaLightbox
+          name={zoom.name}
+          src={zoom.url}
+          kind={zoom.video ? "video" : "image"}
+          rel={zoom.rel}
+          productionId={prodId}
+          loop={zoom.video}
+          onClose={handleCloseZoom}
+          onVideoStillSaved={onVideoStillSaved}
+        />
+      )}
     </figure>
   );
 }, (prev, next) =>
   prev.prodId === next.prodId &&
   areRefItemsEqual(prev.refItem, next.refItem) &&
   prev.variant === next.variant &&
+  prev.thumbEdge === next.thumbEdge &&
   prev.selected === next.selected &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
@@ -951,12 +994,7 @@ export function CharacterBuilderSection({ prodId, characters, models, references
         </div>
       </div>
       {zoom && (
-        <div className="prod-ref-lightbox" onClick={() => setZoom(null)}>
-          <figure className="prod-ref-lightbox-card">
-            <img src={zoom.url} alt={zoom.name} />
-            <figcaption>{zoom.name} — click anywhere to close</figcaption>
-          </figure>
-        </div>
+        <MediaLightbox name={zoom.name} src={zoom.url} kind="image" onClose={() => setZoom(null)} />
       )}
     </div>
   );

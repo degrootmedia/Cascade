@@ -24,7 +24,7 @@ import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
 import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
-import { SaveVideoStillButton } from "../common/SaveVideoStillButton.js";
+import { MediaLightbox } from "../common/MediaLightbox.js";
 import { useClampedMenuStyle } from "../menu-position.js";
 
 function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, onToggleDisabled, zoomOpen, onZoomChange, onZoomNavigate }: {
@@ -109,8 +109,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   const [img, setImg] = useState<string | null>(null);
   const [expandedImg, setExpandedImg] = useState<string | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<string | null>(null);
-  // The lightbox video's paused position — the still is extracted at exactly it.
-  const expandedVideoRef = useRef<HTMLVideoElement | null>(null);
+
   // The lightbox is workspace-owned (see the prop docs): this card only renders
   // it while `zoomOpen`, which lets the arrows hand it to a neighbouring card.
   const expanded = !!zoomOpen;
@@ -225,18 +224,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     return () => { live = false; };
   }, [expanded, histPath, prod.meta.id, shot.id, clipRel, videoFailed]);
 
-  // Left/right arrows step the enlarged frame through the storyboard; Escape
-  // (like a click) closes it. Only the card hosting the lightbox listens.
-  useEffect(() => {
-    if (!expanded) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { onZoomChange?.(null); return; }
-      if (e.key === "ArrowLeft") { e.preventDefault(); onZoomNavigate?.(shot.id, -1); }
-      else if (e.key === "ArrowRight") { e.preventDefault(); onZoomNavigate?.(shot.id, 1); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [expanded, shot.id, onZoomChange, onZoomNavigate]);
+
 
   // Right-click → native image menu, with the full-res file pinned for "Edit in <editor>".
   const relForExternal = histPath ?? stillRel;
@@ -649,34 +637,24 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
         </div>
       )}
       {expanded && (expandedImg || expandedVideo) && (
-        <div className="prod-ref-lightbox" onClick={() => onZoomChange?.(null)} onContextMenu={openPanelMenu}>
-          <figure className="prod-ref-lightbox-card">
-            {expandedVideo ? (
-              <video
-                ref={expandedVideoRef}
-                className="prod-ref-lightbox-video"
-                src={expandedVideo}
-                controls
-                autoPlay
-                playsInline
-              />
-            ) : expandedImg ? (
-              <img src={expandedImg} alt={`Shot ${shot.number}`} />
-            ) : null}
-            <figcaption>
-              Shot {shot.number} — use ← → to move between shots · click anywhere to close
-              {expandedVideo && clipRel && onVideoStillSaved && (
-                <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={clipRel} getTime={() => expandedVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); onZoomChange?.(null); }} /></>
-              )}
-            </figcaption>
-          </figure>
-        </div>
+        <MediaLightbox
+          name={`Shot ${shot.number}`}
+          src={expandedVideo ?? expandedImg ?? ""}
+          kind={expandedVideo ? "video" : "image"}
+          rel={expandedVideo ? clipRel : undefined}
+          productionId={prod.meta.id}
+          hint="use ← → to move between shots"
+          onClose={() => onZoomChange?.(null)}
+          onNavigate={(dir) => onZoomNavigate?.(shot.id, dir)}
+          onContextMenu={openPanelMenu}
+          onVideoStillSaved={onVideoStillSaved}
+        />
       )}
       {menu && hasPanelMenu && (
         <div
           ref={menuRef}
           className="session-context-menu"
-          style={{ ...menuStyle, zIndex: 60 }}
+          style={{ ...menuStyle, zIndex: 130 }}
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >

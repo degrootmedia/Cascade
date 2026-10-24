@@ -128,7 +128,7 @@ describe("node-graph reference thumbnails", () => {
     const media = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media") as HTMLElement;
     expect(media).toBeTruthy();
     await act(async () => { media.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await new Promise((r) => setTimeout(r, 0)); });
-    const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
+    const lightboxImg = document.body.querySelector(".prod-graph-lightbox .media-lightbox-stage img") as HTMLImageElement;
     expect(lightboxImg).toBeTruthy();
     expect(lightboxImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png");
 
@@ -202,7 +202,7 @@ describe("node-graph reference thumbnails", () => {
 
     const media = placed.closest(".prod-graph-ref-media") as HTMLElement;
     await act(async () => { media.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await new Promise((r) => setTimeout(r, 0)); });
-    const lightboxImg = host.querySelector(".prod-graph-lightbox img") as HTMLImageElement;
+    const lightboxImg = document.body.querySelector(".prod-graph-lightbox .media-lightbox-stage img") as HTMLImageElement;
     expect(lightboxImg.getAttribute("src")).toBe("cascade-media://p1/references/villain.png");
 
     await act(async () => { root.unmount(); });

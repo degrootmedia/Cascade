@@ -23,6 +23,7 @@ export type JobKind =
   | "sequenceVideo"
   | "sequenceEditVideo"
   | "recheckVideo"
+  | "fetchVideos"
   | "tweenBlock"
   | "stitch"
   | "unstitch"
@@ -150,6 +151,7 @@ export function jobForChannel(channel: string, args: unknown[]): { kind: JobKind
     "production:generateSequenceVideo": "sequenceVideo",
     "production:generateSequenceEditVideo": "sequenceEditVideo",
     "production:recheckVideo": "recheckVideo",
+    "production:fetchPendingVideos": "fetchVideos",
     "production:generateTweenBlock": "tweenBlock",
     "production:stitchTween": "stitch",
     "production:unstitchTween": "unstitch",
@@ -191,6 +193,7 @@ export function jobLabel(kind: JobKind): string {
     sequenceVideo: "Generating a sequence video",
     sequenceEditVideo: "Editing a sequence video",
     recheckVideo: "Fetching a video",
+    fetchVideos: "Fetching pending videos",
     tweenBlock: "Generating an in-between clip",
     stitch: "Stitching in-between clips",
     unstitch: "Unstitching in-between clips",

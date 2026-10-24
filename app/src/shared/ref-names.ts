@@ -25,6 +25,18 @@ export function referenceNameError(raw: string): string | null {
   return null;
 }
 
+/** The next auto-generated reference name for `base`: "<base>_001", then
+ *  "_002", … — the first suffix no existing reference already uses
+ *  (case-insensitive). The one numbering convention every save path uses. */
+export function nextNumberedRefName(existingNames: Iterable<string>, base: string): string {
+  const taken = new Set<string>();
+  for (const n of existingNames) taken.add(n.trim().toLowerCase());
+  for (let i = 1; ; i++) {
+    const candidate = `${base}_${String(i).padStart(3, "0")}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 /** The pre-filled suggestion for a suite export: the prompt's first line,
  *  cleaned, falling back to "Suite" (the historical automatic name). */
 export function suggestSuiteRefName(prompt: string): string {

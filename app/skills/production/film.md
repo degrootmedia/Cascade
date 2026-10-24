@@ -153,6 +153,7 @@ expect to find it.
 | `cascade_plan_animatic` | 4 | Assign per-shot durations (`durationSec`) for a target runtime. |
 | `cascade_generate_video` | 4 | Generate a shot's clip from its frame (style applied; cite refs). |
 | `cascade_recheck_video` | 4 | Reclaim a still-rendering clip so it registers. |
+| `cascade_fetch_pending_videos` | 4 | Fetch every pending/unregistered clip at once after a batch of video generations. |
 | `cascade_assemble` | 5 | Build the export package (and optionally render MP4); warns on missing clips. |
 
 `view_image` is not a `cascade_*` tool — it is your on-demand eyes, offered when

@@ -1497,8 +1497,11 @@ body {
 }
 .prod-ref-lightbox-card {
   margin: 0;
-  max-width: min(80vw, 900px);
-  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 96vw;
+  max-height: 96vh;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1508,22 +1511,74 @@ body {
 /* Scoped under .prod-ref-lightbox and explicit width/height:auto so the card's
    thumbnail rules (.prod-ref img { width:100%; height:110px }) can never leak
    in and shrink the enlarged image back to thumbnail size. */
-.prod-ref-lightbox .prod-ref-lightbox-card img {
+.prod-ref-lightbox .prod-ref-lightbox-card img:not(.cascade-icon) {
   width: auto;
   height: auto;
-  max-width: 100%;
-  max-height: 70vh;
+  max-width: calc(96vw - 20px);
+  max-height: calc(96vh - 64px);
   object-fit: contain;
   display: block;
   border-radius: 8px;
 }
 .prod-ref-lightbox-video {
-  max-width: 100%;
-  max-height: 70vh;
+  max-width: calc(96vw - 20px);
+  max-height: calc(96vh - 64px);
   display: block;
   border-radius: 8px;
   background: #000;
 }
+/* Shared MediaLightbox stage: once the natural size is known (.ready) the
+   stage takes the exact fit size and the image is centered + transformed
+   (translate/scale from media-lightbox-math). Before that the image flows
+   normally under the card img caps above. */
+.prod-ref-lightbox-card { position: relative; }
+.media-lightbox-stage.ready { position: relative; overflow: hidden; border-radius: 8px; touch-action: none; }
+.media-lightbox-stage.ready.zoomed { cursor: grab; }
+.media-lightbox-stage.ready.panning { cursor: grabbing; }
+.media-lightbox-stage.ready > img { position: absolute; left: 50%; top: 50%; user-select: none; -webkit-user-drag: none; }
+.media-lightbox-tools {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 6px;
+  color: #fff;
+  font-size: 0.78rem;
+}
+.media-lightbox-tools button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+.media-lightbox-tools button:hover { background: rgba(255, 255, 255, 0.16); }
+.media-lightbox-pct { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
+.media-lightbox-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+.media-lightbox-close:hover { border-color: var(--accent); color: var(--accent); }
 .prod-ref-lightbox-card figcaption {
   font-size: 0.85rem;
   color: var(--text);
@@ -2236,6 +2291,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-ref.selected figcaption { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .prod-ref > img { width: 100%; height: 110px; object-fit: cover; display: block; }
 .prod-ref-video { width: 100%; height: 110px; object-fit: cover; display: block; background: #000; }
+/* Row tiles reuse the canvas poster block when a clip can't play; the row
+   figure isn't flex, so the poster needs the tile media height explicitly. */
+.prod-ref:not(.prod-ref-node) > .prod-ref-video-thumb { height: 110px; }
 .prod-ref figcaption {
   padding: 6px 8px;
   font-size: 0.8rem;
@@ -3217,6 +3275,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .name-prompt-input:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .name-prompt-error { color: var(--danger); font-size: 0.82rem; margin: 8px 0 0; }
+.name-prompt-label { display: block; margin-top: 12px; font-size: 0.85rem; font-weight: 600; }
+.name-prompt-select:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 /* ---------- settings ---------- */
 .settings label { display: block; margin: 16px 0 6px; font-weight: 600; }
@@ -4893,6 +4953,15 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-gen-preview.blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.72rem; border-style: dashed; }
 /* Preview wrapper carries the zoom button (same magnifier as reference nodes). */
 .prod-graph-gen-preview-wrap { position: relative; width: 100%; flex: 0 0 auto; }
+/* Poster-first video preview: small JPEG + play affordance until the real
+   <video> mounts on intent (see graph/video-preview.tsx). */
+.prod-graph-video-poster { position: relative; display: block; width: 100%; height: 100%; flex: 1 1 auto; min-height: 0; }
+.prod-graph-video-poster > img { display: block; }
+.prod-graph-ref-media .prod-graph-video-poster > img { width: 100%; height: 100%; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-raised); }
+.prod-graph-video-poster > .prod-graph-output-img { height: 100%; }
+.prod-graph-video-poster-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); background: var(--bg-raised); }
+.prod-graph-video-play { position: absolute; inset: 0; margin: auto; width: 34px; height: 34px; padding: 0 0 0 2px; border-radius: 999px; border: 1px solid var(--border); background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 0.8rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.prod-graph-video-play:hover { background: rgba(0, 0, 0, 0.78); }
 .prod-graph-gen-zoom { position: absolute; top: 6px; left: 6px; background: color-mix(in srgb, var(--bg-raised) 85%, transparent); }
 .prod-graph-gen-cycle { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); font-size: 0.72rem; }
 .prod-graph-gen-hint { font-size: 0.68rem; color: var(--text-dim); }
@@ -5377,6 +5446,13 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .moodboard-content { position: absolute; top: 0; left: 0; transform-origin: 0 0; pointer-events: none; }
 
 .moodboard-node { position: absolute; pointer-events: auto; }
+/* Zoomed far out, per-node chrome (name field, action buttons, handles) is
+   unreadable but still laid out and rastered for every visible node. The
+   canvas adds .moodboard-lowzoom below 40% zoom; hide the chrome, keep art. */
+.moodboard-lowzoom .prod-ref-actions,
+.moodboard-lowzoom .prod-ref-node figcaption,
+.moodboard-lowzoom .moodboard-node-rotate,
+.moodboard-lowzoom .moodboard-node-resize { display: none; }
 .moodboard-node.selected { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
 .moodboard-node.dimmed { opacity: 0.28; }
 .moodboard-node .prod-ref { width: 100%; height: 100%; }
@@ -5720,6 +5796,35 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--text-dim);
 }
 .moodboard-shelf-count { font-size: 0.68rem; color: var(--text-dim); }
+/* Category groups (shared with the Design panel): a caret + name + count
+   header over the group's tiles. */
+.moodboard-shelf-group { display: flex; flex-direction: column; gap: 6px; }
+.moodboard-shelf-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.moodboard-shelf-group-head:hover { color: var(--accent); }
+.moodboard-shelf-caret { flex-shrink: 0; transition: transform 0.12s; }
+.moodboard-shelf-caret.open { transform: rotate(90deg); }
+.moodboard-shelf-group-name {
+  flex: 1;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .moodboard-shelf-toggle {
   flex-shrink: 0;
   display: inline-flex;

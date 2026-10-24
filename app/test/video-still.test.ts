@@ -17,7 +17,7 @@ vi.mock("../src/main/scripting.js", () => ({
 import { saveVideoStillAsReference } from "../src/main/pipeline.js";
 import { extractVideoStillFrame, videoStillName } from "../src/main/video-still.js";
 
-function makeProduction(folder: string, references: Production["references"] = []): Production {
+function makeProduction(folder: string, references: Production["references"] = [], referenceCategories: Production["referenceCategories"] = []): Production {
   const shot: ProductionShot = { id: "shot-0100", number: "0100", audio: "", visual: "" };
   return {
     meta: { id: "prod-1", name: "Test", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 1 },
@@ -28,6 +28,7 @@ function makeProduction(folder: string, references: Production["references"] = [
     characters: [],
     products: [],
     references,
+    referenceCategories,
     openArt: { model: "auto", resolution: "1k" },
     status: {},
     assets: { scriptMd: "script.md", boardsDir: "boards", voiceoverDir: "voiceover", musicDir: "music", outDir: "out", referencesDir: "references", assemblyDir: "assembly", modelsDir: "models" },
@@ -45,10 +46,10 @@ function fakeDeps(captured: string[][], bytes = "still-jpeg") {
 }
 
 describe("videoStillName", () => {
-  it("starts at Video still_00 and skips taken suffixes (case-insensitive)", () => {
-    expect(videoStillName([])).toBe("Video still_00");
-    expect(videoStillName(["Video still_00"])).toBe("Video still_01");
-    expect(videoStillName(["video STILL_00", "Video still_01"])).toBe("Video still_02");
+  it("starts at Video still_001 and skips taken suffixes (case-insensitive)", () => {
+    expect(videoStillName([])).toBe("Video still_001");
+    expect(videoStillName(["Video still_001"])).toBe("Video still_002");
+    expect(videoStillName(["video STILL_001", "Video still_002"])).toBe("Video still_003");
   });
 });
 
@@ -78,7 +79,7 @@ describe("extractVideoStillFrame", () => {
 });
 
 describe("saveVideoStillAsReference", () => {
-  it("stores the extracted frame as an image reference named Video still_00", async () => {
+  it("stores the extracted frame as an image reference named Video still_001", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-still-"));
     try {
       const src = path.join(root, "boards/0100/video/clip.mp4");
@@ -89,8 +90,8 @@ describe("saveVideoStillAsReference", () => {
 
       const ref = await saveVideoStillAsReference(p, "boards/0100/video/clip.mp4", 4.25, fakeDeps(captured));
 
-      expect(ref.name).toBe("Video still_00");
-      expect(ref.imagePath).toBe("references/Video still_00.jpg");
+      expect(ref.name).toBe("Video still_001");
+      expect(ref.imagePath).toBe("references/Video still_001.jpg");
       expect(ref.media).toBeUndefined();
       expect(p.references).toHaveLength(1);
       expect(fs.readFileSync(path.join(root, ref.imagePath!), "utf8")).toBe("still-jpeg");
@@ -99,7 +100,26 @@ describe("saveVideoStillAsReference", () => {
 
       // A second still gets the next suffix.
       const ref2 = await saveVideoStillAsReference(p, "boards/0100/video/clip.mp4", 1, fakeDeps(captured));
-      expect(ref2.name).toBe("Video still_01");
+      expect(ref2.name).toBe("Video still_002");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("honors a popup-chosen name + category", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-still-"));
+    try {
+      const src = path.join(root, "boards/0100/video/clip.mp4");
+      fs.mkdirSync(path.dirname(src), { recursive: true });
+      fs.writeFileSync(src, "clip-bytes");
+      const p = makeProduction(root, [], [{ id: "cat-1", name: "Stills" }]);
+      const captured: string[][] = [];
+
+      const ref = await saveVideoStillAsReference(p, "boards/0100/video/clip.mp4", 2, fakeDeps(captured), { name: "Hero frame", categoryId: "cat-1" });
+
+      expect(ref.name).toBe("Hero frame");
+      expect(ref.categoryId).toBe("cat-1");
+      expect(ref.imagePath).toBe("references/Hero frame.jpg");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

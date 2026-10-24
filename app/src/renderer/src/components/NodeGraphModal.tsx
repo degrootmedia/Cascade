@@ -46,13 +46,14 @@ import { usePersistedCollapsed, usePersistedNumber } from "./production/persiste
 import { refThumbUrl } from "./production/thumb-url.js";
 import { mediaRev, bumpMediaRev } from "./production/media-rev.js";
 import { RefNodeView, refSizeStyle, REF_COLLAPSED_WIDTH, REF_DEFAULT_WIDTH, type GraphRef, type RefData, type RefFlowNode } from "./graph/ref-node.js";
+import { VideoPreview } from "./graph/video-preview.js";
 import { RefShelf } from "./graph/ref-shelf.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
 import { DurationField, clampDurationSec, snapDurationSec } from "./production/duration-field.js";
 import { getPromptTemplate } from "./production/prompt-templates.js";
 import { openSettings } from "./settings/open-settings.js";
 import { OpenInSuiteButton } from "./common/OpenInSuiteButton.js";
-import { SaveVideoStillButton } from "./common/SaveVideoStillButton.js";
+import { MediaLightbox } from "./common/MediaLightbox.js";
 import { openImageSuite } from "../features/suite/suite-handoff.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./production/gen-queue.js";
 import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
@@ -943,7 +944,7 @@ const BrandNodeView = memo(function BrandNodeView({}: NodeProps<BrandFlowNode>) 
   );
 });
 
-const OutputNodeView = memo(function OutputNodeView({ data, selected }: NodeProps<OutputFlowNode>) {
+const OutputNodeView = memo(function OutputNodeView({ id, data, selected }: NodeProps<OutputFlowNode>) {
   return (
     <>
       <NodeResizer isVisible={selected} minWidth={240} minHeight={200} lineClassName="prod-graph-resize-line" handleClassName="prod-graph-resize-handle" />
@@ -951,7 +952,7 @@ const OutputNodeView = memo(function OutputNodeView({ data, selected }: NodeProp
         <Handle id="in-out" type="target" position={Position.Left} title="Primary output — pipe a generation or reference in" />
         <div className="prod-graph-node-title">Frame output</div>
         {data.previewKind === "video" && data.previewUrl
-          ? <video className="prod-graph-output-img nodrag" src={data.previewUrl} controls muted loop playsInline preload="metadata" />
+          ? <VideoPreview instanceId={`out:${id}`} className="prod-graph-output-img nodrag" url={data.previewUrl} controls />
           : data.previewUrl
             ? <img className="prod-graph-output-img" src={data.previewUrl} alt={`Shot ${data.shotNumber}`} draggable={false} />
             : <div className="prod-graph-output-blank">No output yet</div>}
@@ -1232,7 +1233,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
             title="Right-click for save, copy, edit, reference, or delete options"
             onContextMenu={(e) => genMenu.open(e, data.items[data.selected].path, { src: data.items[data.selected].url, media: "video" })}
           >
-            <video className="prod-graph-gen-preview nodrag" src={data.items[data.selected].url} controls muted loop playsInline preload="metadata" />
+            <VideoPreview instanceId={`vid:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls />
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
@@ -1424,7 +1425,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
             title="Right-click for save, copy, edit, reference, or delete options"
             onContextMenu={(e) => genMenu.open(e, data.items[data.selected].path, { src: data.items[data.selected].url, media: "video" })}
           >
-            <video className="prod-graph-gen-preview nodrag" src={data.items[data.selected].url} controls muted loop playsInline preload="metadata" />
+            <VideoPreview instanceId={`ev:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls />
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
@@ -2443,7 +2444,7 @@ function GenHistoryStrip({ items, selected, media, onSelect, onContextMenu, hist
           onClick={() => onSelect(i)}
           onContextMenu={(e) => onContextMenu(e, it)}
         >
-          {media === "image" ? <img src={it.url} alt="" draggable={false} /> : <span>{i + 1}</span>}
+          {media === "image" ? <img src={refThumbUrl(it.url)} alt="" draggable={false} loading="lazy" decoding="async" /> : <span>{i + 1}</span>}
         </button>
       ))}
       {items.length > HISTORY_STRIP_LIMIT && (
@@ -2695,7 +2696,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* ------------------------------------------------------------------ */
 
 export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagicShot, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, videoEditUnavailable = false, draftUpgradeAvailable = false, hiddenTools, hidePalette = false, subjectLabel, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onUpgradeDraft = async () => {}, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, cameraGridBusy = false, upscaleBusy = false, videoBusyNodeIds = [], editVideoBusyNodeIds = [], editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {},
-  onSaveGenerationAsReference = async () => null, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
+  onSaveGenerationAsReference = async () => undefined, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -2721,7 +2722,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  Resolves to the created reference so the graph can place its node. (Paste
    *  prefers onPasteFiles; this is its fallback.) */
   onDropFile: (file: File) => Promise<GraphRef | null> | void;
-  /** A batch of pasted files. The parent names them (auto-numbered, Ref-001…)
+  /** A batch of pasted files. The parent prompts for each (defaults auto-numbered, Ref_001…)
    *  so clipboard pastes never collide, and resolves to the created refs so the
    *  graph places a node for each. Falls back to onDropFile when absent. */
   onPasteFiles?: (files: File[]) => Promise<GraphRef[]> | void;
@@ -2820,7 +2821,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Copy a stored take into the production as a new reference and resolve the
    *  created reference, so dragging a generation output onto a prompt's
    *  reference socket can wire the new node in place. */
-  onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null>;
+  /** Resolves the created ref; `null` = handled but nothing saved (popup
+   *  cancelled or an error the caller already surfaced); `undefined` = not
+   *  wired, fall back to `onSaveAsReference`. */
+  onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null | undefined>;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
   /** Update one edit node's prompt text. */
@@ -3070,8 +3074,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ name: string; artwork: string; kind?: "image" | "video"; rel?: string } | null>(null);
-  /** The lightbox video's paused position — the still is extracted at exactly it. */
-  const lightboxVideoRef = useRef<HTMLVideoElement | null>(null);
+
   /** Right-click menu for the enlarged generation in the lightbox. */
   const lightboxMenu = useGenerationMenu();
   /** In-betweener timeline window (stacked above the graph). */
@@ -3628,7 +3631,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       void (async () => {
         const saved = await cb.current.onSaveGenerationAsReference(rel);
         if (saved) revealShelfRef(saved.id);
-        else cb.current.onSaveAsReference(rel);
+        // Only an unwired resolver (undefined) falls back — a null means the
+        // save popup was cancelled (or already errored), so saving again
+        // here would undo the cancel.
+        else if (saved === undefined) cb.current.onSaveAsReference(rel);
       })();
     },
     /** Open a shelf tile's full-res media in the lightbox (the tile itself
@@ -5684,10 +5690,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
 
   // Ctrl+V with an image creates a reference AND places its node on the
   // canvas — same as dropping the file, but at the viewport center. Pasted
-  // files are auto-numbered (Ref-001…) by the parent so a batch never collides
+  // files prompt via the parent with auto-numbered defaults (Ref_001…) so a batch never collides
   // on a generic clipboard file name. Text pastes are untouched.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
+      // Never hijack a paste aimed at a text field (the save popup included).
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files: File[] = [];
@@ -5937,6 +5946,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               panOnDrag={[1, 2]}
               selectionOnDrag
               deleteKeyCode={["Backspace", "Delete"]}
+              onlyRenderVisibleElements
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} />
@@ -5962,25 +5972,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             </div>
           )}
           {lightbox && (
-            <div
-              className="prod-ref-lightbox prod-graph-lightbox"
-              onClick={() => setLightbox(null)}
+            <MediaLightbox
+              name={lightbox.name}
+              src={lightbox.artwork}
+              kind={lightbox.kind === "video" ? "video" : "image"}
+              rel={lightbox.rel}
+              productionId={prod.meta.id}
+              backdropClassName="prod-graph-lightbox"
+              hint={lightbox.kind === "video" ? (lightbox.rel ? "right-click for options" : "") : (lightbox.rel ? "scroll to zoom · drag to pan · right-click for options" : undefined)}
+              onClose={() => setLightbox(null)}
               onContextMenu={(e) => { if (lightbox.rel) lightboxMenu.open(e, lightbox.rel, { src: lightbox.artwork, media: lightbox.kind }); }}
-            >
-              <figure className="prod-ref-lightbox-card">
-                {lightbox.kind === "video" ? (
-                  <video ref={lightboxVideoRef} className="prod-ref-lightbox-video" src={lightbox.artwork} controls autoPlay playsInline />
-                ) : (
-                  <img src={lightbox.artwork} alt={lightbox.name} />
-                )}
-                <figcaption>
-                  {lightbox.name} — click anywhere to close{lightbox.rel ? " — right-click for options" : ""}
-                  {lightbox.kind === "video" && lightbox.rel && onVideoStillSaved && (
-                    <>{" · "}<SaveVideoStillButton productionId={prod.meta.id} videoRel={lightbox.rel} getTime={() => lightboxVideoRef.current?.currentTime ?? 0} onSaved={(next) => { onVideoStillSaved(next); setLightbox(null); }} /></>
-                  )}
-                </figcaption>
-              </figure>
-            </div>
+              onVideoStillSaved={onVideoStillSaved}
+            />
           )}
           <GenerationMenu menu={lightboxMenu.menu} onClose={lightboxMenu.close} onSaveAsReference={stable.onSaveAsRef} onRefresh={stable.onRefreshGen} onEditInSuite={stable.onEditInSuite} />
           {historyTarget && (() => {

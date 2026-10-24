@@ -72,6 +72,19 @@ function normalize(p: ProductionFile): ProductionFile {
   p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
   p.magicPrompts ??= {};
   if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
+  // The Story Bible is main-normalized on generation; read repair only drops
+  // a corrupt shape so a bad file can't poison generation or the merge.
+  if (p.magicBible !== undefined) {
+    const b = p.magicBible as unknown as Record<string, unknown> | null;
+    if (!b || typeof b !== "object" || b.version !== 1 || typeof b.inputHash !== "string" || !Array.isArray(b.shotPlans) || !Array.isArray(b.entities) || !Array.isArray(b.scenes)) {
+      delete (p as { magicBible?: unknown }).magicBible;
+    }
+  }
+  if (p.magicDismissedRefs !== undefined) {
+    p.magicDismissedRefs = Array.isArray(p.magicDismissedRefs)
+      ? [...new Set(p.magicDismissedRefs.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()).filter(Boolean))]
+      : [];
+  }
   // Clean stale magic entries for deleted shots and non-string values
   if (p.magicPrompts && typeof p.magicPrompts === "object") {
     // Outdated panels are preserved verbatim, so their magic prompts count as
@@ -804,6 +817,13 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.magicPrompts =
     fresh.magicPrompts && typeof fresh.magicPrompts === "object" ? { ...fresh.magicPrompts } : {};
   if (typeof p.magicEnabled === "boolean") fresh.magicEnabled = p.magicEnabled;
+  // magicBible is main-owned like magicPrompts (written by the bulk Magic
+  // pass main-side): deliberately not copied from the renderer snapshot, so
+  // the fresh on-disk bible always wins. magicDismissedRefs IS renderer-owned
+  // (the reconciliation queue's dismissals ride ordinary saves).
+  if (Array.isArray(p.magicDismissedRefs)) {
+    fresh.magicDismissedRefs = [...new Set(p.magicDismissedRefs.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()).filter(Boolean))];
+  }
   // The reference moodboard (node placements, viewport, notes) is renderer-owned
   // like the shot graph layouts. Its shape is repaired on read by the renderer's
   // `normalizeMoodboardLayout`; main only stores it verbatim so a save never

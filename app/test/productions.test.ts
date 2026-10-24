@@ -817,6 +817,19 @@ describe("applyRendererState", () => {
     expect(merged.magicPrompts).toEqual({ shot1: "fresh generated", shot2: "untouched" });
   });
 
+  it("keeps the main-owned magicBible over a whole-document save, but takes renderer dismissals", () => {
+    // The bible is written by the bulk Magic pass main-side; a renderer
+    // snapshot can predate it, so the fresh bible always wins. Dismissals
+    // from the reconciliation queue ARE renderer-owned and must land.
+    const bible = { version: 1 as const, synopsis: "fresh", assumptions: [], scenes: [], entities: [], shotPlans: [], inputHash: "h1", generatedAt: "2026-01-01" };
+    const stale = { ...bible, synopsis: "stale", inputHash: "h0" };
+    const fresh = baseProduction({ magicBible: bible });
+    const incoming = baseProduction({ magicBible: stale, magicDismissedRefs: [" MysteryFigure ", "mysteryfigure"] });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.magicBible?.synopsis).toBe("fresh");
+    expect(merged.magicDismissedRefs).toEqual(["mysteryfigure"]);
+  });
+
   it("rebases only the magic keys a job changed, preserving concurrent edits", () => {
     // A generation job holds a snapshot from before it ran. Rebasing must fold
     // back ONLY the keys it changed (shot1), never its stale copy of keys

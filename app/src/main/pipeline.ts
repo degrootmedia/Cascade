@@ -5,6 +5,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 // Soft dependency: JPEG conversion needs Electron's nativeImage, but this
 // module must also load outside Electron (vitest). Files still save without
 // it — only the JPEG conversion falls back to the original bytes.
@@ -50,7 +51,8 @@ import { ref720pName, transcodeVideoFileTo720p } from "./video-ref.js";
 import type { VideoRef720Deps } from "./video-ref.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
-import type { CharacterSheet, CharacterSheetView, ProductRef, SuggestedReference } from "../shared/ipc.js";
+import type { CharacterSheet, CharacterSheetView, MagicBible, MagicBibleShotPlan, ProductRef, SuggestedReference } from "../shared/ipc.js";
+import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -557,77 +559,404 @@ export function magicShotNumberKey(raw: unknown): string {
   return String(parseInt(digits, 10));
 }
 
+/**
+ * Magic Prompt Story Bible — the whole-script analysis pass.
+ *
+ * One bounded call reads the ENTIRE breakdown + reference roster and plans
+ * the storyboard as a single story (synopsis, canonical entities, recorded
+ * assumptions, per-shot purpose + must-cite references). The per-scene
+ * writing pass is then grounded in this bible, so shots agree on who/what
+ * things are and which references appear — while each shot's own script
+ * visual stays authoritative for what that shot depicts (see the builder
+ * below). The bible is persisted on the production (main-owned) and as a
+ * human-readable artifact, so assumptions are visible and per-shot
+ * regeneration can reuse it without re-deriving the story.
+ */
+
+function capStr(raw: unknown, max: number): string {
+  return typeof raw === "string" ? raw.trim().slice(0, max) : "";
+}
+
+function strList(raw: unknown, maxItems: number, maxLen: number): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const v of raw) {
+    const s = capStr(v, maxLen);
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+/** The roster as the model-facing lines every Magic pass shares: canonical
+ *  citable name, kind, descriptor, aliases, and whether an image exists.
+ *  Style-only refs are listed separately as never-cite (they auto-attach). */
+function magicRosterLines(p: Production): { citeLines: string; styleOnlyNames: string[] } {
+  const roster = magicRefRoster(p);
+  const lines: string[] = [];
+  const styleOnlyNames: string[] = [];
+  for (const e of roster) {
+    if (e.styleOnly) { styleOnlyNames.push(e.name); continue; }
+    const bits: string[] = [e.kind];
+    if (e.descriptor) bits.push(e.descriptor);
+    if (e.category) bits.push(`category: ${e.category}`);
+    if (e.aliases.length) bits.push(`also called: ${e.aliases.join(", ")}`);
+    bits.push(e.hasArtwork ? "reference image attached" : "no reference image yet");
+    lines.push(`- @[${e.name}] (${bits.join("; ")})`);
+  }
+  return { citeLines: lines.length ? lines.join("\n") : "(none)", styleOnlyNames };
+}
+
+/** Hash of everything the bible was derived from; a script edit or roster
+ *  change flips it, marking the stored bible stale. Pure. */
+export function magicBibleInputHash(p: Production): string {
+  const payload = {
+    scenes: (p.scenes ?? []).map((sc) => ({
+      n: sc.number,
+      t: sc.title,
+      shots: sc.shots.map((s) => [s.number, s.audio, s.visual]),
+    })),
+    roster: magicRefRoster(p).map((e) => [e.kind, e.name, e.descriptor, e.aliases, e.hasArtwork, e.styleOnly]),
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 16);
+}
+
+export function isMagicBibleStale(p: Production): boolean {
+  return !p.magicBible || p.magicBible.inputHash !== magicBibleInputHash(p);
+}
+
+/** The bible shot plan for one shot number (numeric-value keyed), if any. */
+function shotPlanFor(bible: MagicBible | null | undefined, shotNumber: string): MagicBibleShotPlan | undefined {
+  if (!bible) return undefined;
+  const key = magicShotNumberKey(shotNumber);
+  return bible.shotPlans.find((sp) => magicShotNumberKey(sp.number) === key);
+}
+
+/** Pure builder for the Story Bible request — the whole breakdown (via the
+ *  same `scriptMarkdown` artifact the user sees) + the rich roster. The
+ *  stale magic prose is never sent (parrot safeguard). */
+export function buildMagicBibleMessages(p: Production, skillText: string | null): MagicPromptMessages {
+  const { citeLines, styleOnlyNames } = magicRosterLines(p);
+  const styleNames = (p.styles ?? []).map((s) => s.name).filter(Boolean);
+  const systemContent =
+    "You are a storyboard director analyzing a full script breakdown for an animation pipeline. " +
+    "Reply with JSON only — no prose, no markdown fences. You plan CONTENT only — never style language." +
+    (skillText ? "\n\nSKILL:\n" + skillText.slice(0, 12000) : "");
+  const userContent =
+    "Build the STORY BIBLE for this production. Read the WHOLE breakdown first and understand the story as one flow — who is who, where things happen, what is established early and paid off late — then plan every shot as part of that single story.\n\n" +
+    "Rules:\n" +
+    "- Entities: every character, product, location, and recurring prop. Give each ONE canonical visual descriptor the storyboard will reuse verbatim. Bind an entity to a user reference with \"refName\" ONLY when it is clearly that reference (the roster lists each reference's descriptor and aliases — a script name matching a reference's alias binds to that reference). Omit \"refName\" when no reference fits.\n" +
+    "- Shot plans: one per shot number. \"purpose\" = what the shot does in the story (establish, reveal, reaction, payoff…). \"framing\" should progress with rhythm across cuts, not repeat the same size. \"mustCite\" lists canonical reference names (roster `@[Name]`, without brackets) VISIBLE in that frame — only names from the roster, never invented ones.\n" +
+    "- Where the script is silent (exact location dressing, who else is in frame, time of day), make a sensible choice and record it in \"assumptions\" so every shot can agree with it.\n" +
+    "- CONTENT ONLY in descriptors: no medium/palette/rendering style words.\n" +
+    (styleOnlyNames.length ? `- Never cite these style-only references (they attach automatically): ${styleOnlyNames.join(", ")}.\n` : "") +
+    "\nFULL SCRIPT BREAKDOWN:\n" + scriptMarkdown(p.meta.name, p.scenes).slice(0, 60000) +
+    "\nREFERENCES AVAILABLE (cite exactly as @[Name]):\n" + citeLines +
+    (styleNames.length ? `\n\nPRODUCTION STYLES (tone context only — do not describe them): ${styleNames.join(", ")}` : "") +
+    "\n\nReply with JSON only:\n" +
+    "{\n" +
+    '  "synopsis": "2-4 sentence story summary",\n' +
+    '  "assumptions": ["choice made where the script was silent", ...],\n' +
+    '  "scenes": [ { "number": 1, "title": "...", "location": "...", "timeOfDay": "...", "beat": "what happens/changes" } ],\n' +
+    '  "entities": [ { "name": "script name", "kind": "character|product|location|prop|other", "descriptor": "canonical visual descriptor", "refName": "roster name or omit", "aliases": ["other script names"] } ],\n' +
+    '  "shotPlans": [ { "number": "0100", "purpose": "...", "framing": "wide/medium/closeup + angle", "present": ["entity names"], "mustCite": ["roster names"] } ]\n' +
+    "}";
+  return { systemContent, userContent };
+}
+
+/** The normalized bible body (hash/stamps are added by the generator). */
+export type ParsedMagicBible = Omit<MagicBible, "version" | "inputHash" | "generatedAt" | "model">;
+
+/**
+ * Normalize a bible reply against the production. Trust boundaries:
+ * `refName`/`mustCite` survive only when they resolve to the roster (by name
+ * or alias → canonicalized); shot plans for unknown numbers drop; every
+ * string is capped. Returns null when the reply carries nothing usable.
+ */
+export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBible | null {
+  const parsed = parseJsonLooseObject(text) as Record<string, unknown> | null;
+  if (!parsed) return null;
+  const roster = magicRefRoster(p);
+  const citable = roster.filter((e) => !e.styleOnly);
+  const canonical = (raw: unknown): string | undefined => {
+    const name = capStr(raw, 120);
+    return name ? canonicalRefName(citable, name) : undefined;
+  };
+  const shotNumbers = new Map(
+    (p.scenes ?? []).flatMap((sc) => sc.shots).map((s) => [magicShotNumberKey(s.number), s.number])
+  );
+  const sceneNumbers = new Set((p.scenes ?? []).map((sc) => sc.number));
+
+  const scenes: MagicBible["scenes"] = [];
+  for (const raw of Array.isArray(parsed.scenes) ? parsed.scenes : []) {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const number = Number(o.number);
+    if (!Number.isFinite(number) || !sceneNumbers.has(number)) continue;
+    scenes.push({
+      number,
+      title: capStr(o.title, 120) || `Scene ${number}`,
+      location: capStr(o.location, 160) || undefined,
+      timeOfDay: capStr(o.timeOfDay, 80) || undefined,
+      beat: capStr(o.beat, 400),
+    });
+  }
+  const kinds = new Set(["character", "product", "location", "prop", "other"]);
+  const entities: MagicBible["entities"] = [];
+  for (const raw of Array.isArray(parsed.entities) ? parsed.entities : []) {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const name = capStr(o.name, 120);
+    if (!name) continue;
+    const refName = canonical(o.refName);
+    entities.push({
+      name,
+      kind: (kinds.has(String(o.kind)) ? String(o.kind) : "other") as MagicBible["entities"][number]["kind"],
+      descriptor: capStr(o.descriptor, 300),
+      ...(refName ? { refName } : {}),
+      ...(strList(o.aliases, 8, 80).length ? { aliases: strList(o.aliases, 8, 80) } : {}),
+    });
+    if (entities.length >= 60) break;
+  }
+  const shotPlans: MagicBibleShotPlan[] = [];
+  const seenPlans = new Set<string>();
+  for (const raw of Array.isArray(parsed.shotPlans) ? parsed.shotPlans : []) {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const number = shotNumbers.get(magicShotNumberKey(o.number));
+    if (!number || seenPlans.has(number)) continue;
+    seenPlans.add(number);
+    const mustCite: string[] = [];
+    for (const m of Array.isArray(o.mustCite) ? o.mustCite : []) {
+      const c = canonical(m);
+      if (c && !mustCite.includes(c)) mustCite.push(c);
+    }
+    shotPlans.push({
+      number,
+      purpose: capStr(o.purpose, 300),
+      framing: capStr(o.framing, 140) || undefined,
+      present: strList(o.present, 10, 100),
+      mustCite,
+    });
+  }
+  const synopsis = capStr(parsed.synopsis, 1200);
+  if (!synopsis && !scenes.length && !entities.length && !shotPlans.length) return null;
+  return { synopsis, assumptions: strList(parsed.assumptions, 20, 300), scenes, entities, shotPlans };
+}
+
+/** Human-readable bible artifact (`out/magic-bible.md`) — assumptions first,
+ *  so the user can spot a wrong fill-in before it propagates to frames. */
+export function magicBibleMarkdown(p: Production): string {
+  const b = p.magicBible;
+  if (!b) return "";
+  const lines: string[] = [`# ${p.meta.name} — Magic Prompt Story Bible`, "", `Generated ${b.generatedAt}${b.model ? ` (model: ${b.model})` : ""}.`, "", "## Synopsis", "", b.synopsis || "(none)", ""];
+  if (b.assumptions.length) lines.push("## Assumptions (script was silent — check these)", "", ...b.assumptions.map((a) => `- ${a}`), "");
+  if (b.entities.length) {
+    lines.push("## Entities", "", "| Name | Kind | Reference | Descriptor |", "|---|---|---|---|");
+    for (const e of b.entities) lines.push(`| ${e.name} | ${e.kind} | ${e.refName ? `@[${e.refName}]` : "—"} | ${e.descriptor} |`);
+    lines.push("");
+  }
+  for (const sc of b.scenes) {
+    lines.push(`## Scene ${sc.number} — ${sc.title}${sc.location ? ` (${sc.location}${sc.timeOfDay ? `, ${sc.timeOfDay}` : ""})` : ""}`, "", sc.beat, "");
+  }
+  if (b.shotPlans.length) {
+    lines.push("## Shot plans", "", "| Shot | Purpose | Framing | Must cite |", "|---|---|---|---|");
+    for (const sp of b.shotPlans) lines.push(`| ${sp.number} | ${sp.purpose} | ${sp.framing ?? ""} | ${sp.mustCite.map((n) => `@[${n}]`).join(", ")} |`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** One bounded call: build + store the Story Bible (and its artifact). */
+export async function generateMagicBible(
+  p: Production,
+  apiKey: string,
+  model: string,
+  emit: EmitFn,
+  baseUrl?: string,
+  skillText?: string | null
+): Promise<MagicBible> {
+  emit(`Magic Prompt: reading the full script to build the Story Bible (model: ${model})…`);
+  const { systemContent, userContent } = buildMagicBibleMessages(p, skillText ?? loadMagicSkillText());
+  const gab = new ChatClient(apiKey, baseUrl);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      { role: "system", content: systemContent },
+      { role: "user", content: userContent },
+    ],
+    8000
+  );
+  const parsed = parseMagicBibleReply(text, p);
+  if (!parsed) throw new Error("The Story Bible came back unusable — the model reply had no story plan.");
+  const bible: MagicBible = {
+    version: 1,
+    ...parsed,
+    inputHash: magicBibleInputHash(p),
+    generatedAt: new Date().toISOString(),
+    model,
+  };
+  p.magicBible = bible;
+  try {
+    const mdPath = assetPath(p, `${p.assets.outDir}/magic-bible.md`);
+    fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+    fs.writeFileSync(mdPath, magicBibleMarkdown(p), "utf8");
+  } catch { /* the artifact is best-effort; the stored bible is the source of truth */ }
+  emit(
+    `Magic Prompt: Story Bible ready — ${bible.entities.length} entit${bible.entities.length === 1 ? "y" : "ies"}, ${bible.shotPlans.length} shot plan(s)` +
+    `${bible.assumptions.length ? `, ${bible.assumptions.length} recorded assumption(s) (see ${p.assets.outDir}/magic-bible.md)` : ""}.`
+  );
+  return bible;
+}
+
+/** Hard reference constraints for one shot, from user wiring (not the model):
+ *  explicit `refIds` + custom refs toggled onto the shot MUST be cited;
+ *  `refExcluded` entries must NOT. Canonical roster names. */
+function shotHardRefs(p: Production, shot: ProductionShot): { mustCite: string[]; mustNotCite: string[] } {
+  const roster = magicRefRoster(p);
+  const byId = new Map(roster.map((e) => [e.id, e.name]));
+  const mustCite = new Set<string>();
+  for (const id of shot.refIds ?? []) { const n = byId.get(id); if (n) mustCite.add(n); }
+  for (const r of p.references ?? []) if ((r.shotIds ?? []).includes(shot.id)) mustCite.add(r.name);
+  const mustNotCite = new Set<string>();
+  for (const id of shot.refExcluded ?? []) { const n = byId.get(id); if (n) mustNotCite.add(n); }
+  for (const n of mustNotCite) mustCite.delete(n);
+  return { mustCite: [...mustCite], mustNotCite: [...mustNotCite] };
+}
+
 /** The two message bodies sent to the model for Magic Prompt generation. */
 export interface MagicPromptMessages {
   systemContent: string;
   userContent: string;
 }
 
+/** Extra story context a Magic writing call may carry beyond its target
+ *  shots: the bible, the owning scene, and flanking shots as continuity. */
+export interface MagicPromptBuildOptions {
+  bible?: MagicBible | null;
+  scene?: ProductionScene | null;
+  contextBefore?: ProductionShot[];
+  contextAfter?: ProductionShot[];
+}
+
+function magicContextLine(s: ProductionShot): string {
+  const audio = s.audio.trim() ? s.audio.trim().slice(0, 160) : "(no dialogue)";
+  const visual = s.visual.trim() ? s.visual.trim().slice(0, 260) : "(no visual direction)";
+  return `${s.number} | audio: ${audio} | visual: ${visual}`;
+}
+
+/** Distilled bible block for a writing call: synopsis + assumptions + the
+ *  canonical entity descriptors + this scene's beat. Bounded. */
+function magicBibleContext(bible: MagicBible, scene?: ProductionScene | null): string {
+  const lines: string[] = [`Synopsis: ${bible.synopsis}`];
+  if (bible.assumptions.length) lines.push(`Assumptions (keep every shot consistent with these): ${bible.assumptions.join(" ")}`);
+  if (bible.entities.length) {
+    lines.push("Canonical entities (reuse these descriptors verbatim):");
+    for (const e of bible.entities) {
+      lines.push(`- ${e.name}${e.refName ? ` = @[${e.refName}]` : ""} (${e.kind})${e.descriptor ? `: ${e.descriptor}` : ""}${e.aliases?.length ? ` [also: ${e.aliases.join(", ")}]` : ""}`);
+    }
+  }
+  const bs = scene ? bible.scenes.find((x) => x.number === scene.number) : undefined;
+  if (bs) lines.push(`This scene: ${bs.title}${bs.location ? ` — ${bs.location}` : ""}${bs.timeOfDay ? `, ${bs.timeOfDay}` : ""}. Beat: ${bs.beat}`);
+  return lines.join("\n").slice(0, 6000);
+}
+
 /**
  * Pure builder for the Magic Prompt model request — no LLM, no IO, so the
  * grounding is unit-testable.
  *
- * Two rules learned the hard way:
- *  - The pre-existing draft's PROSE is never sent. Sending it let a wrong entry
- *    be parroted back on every regeneration (shot 0400 kept a neighboring
- *    shot's "constellation" text forever). Only the draft's reference TAG
- *    NAMES survive, so the tags stay stable without anchoring the wording.
- *  - The script audio/visual is the sole ground truth. Adjacent similar shots
- *    are generated in separate calls (one shot per call in the generator), so
- *    one shot's beat can't bleed into the next.
+ * Story-aware, with the hard-won safeguards intact:
+ *  - The pre-existing draft's PROSE is never sent (the 0400 "constellation"
+ *    parrot). Only its reference TAG NAMES survive, as hints.
+ *  - Each target shot's script audio/visual is AUTHORITATIVE for what that
+ *    shot depicts. The Story Bible + flanking shots are CONTEXT ONLY: they
+ *    fix who/what things are, continuity, and framing rhythm — their beats
+ *    must never be depicted in the target shot.
+ *  - Citations come only from the roster, in canonical `@[Name]` form;
+ *    user-wired must-cite / must-not-cite constraints are hard rules.
  */
 export function buildMagicPromptMessages(
   p: Production,
   shots: ProductionShot[],
   skillText: string | null,
+  opts: MagicPromptBuildOptions = {},
 ): MagicPromptMessages {
+  const bible = opts.bible ?? null;
   const shotLines = shots.map((s) => {
     const boxes = parsePromptBoxes(effectivePrompt(p, s));
     const curContent = boxes.content.trim() || s.visual.trim() || "";
     const draftTags = Array.from(new Set(refTagNames(curContent))).map((n) => `@[${n}]`).join(" ");
-    const audio = s.audio.trim() ? s.audio.trim().slice(0, 220) : "(no dialogue)";
-    const visual = s.visual.trim() ? s.visual.trim().slice(0, 400) : "(no visual direction)";
-    return `${s.number} | script audio: ${audio} | script visual (AUTHORITATIVE): ${visual} | reference tags previously cited for this shot (keep only those that belong in THIS shot's frame): ${draftTags || "(none)"}`;
+    const audio = s.audio.trim() ? s.audio.trim().slice(0, 300) : "(no dialogue)";
+    const visual = s.visual.trim() ? s.visual.trim().slice(0, 600) : "(no visual direction)";
+    const plan = shotPlanFor(bible, s.number);
+    const hard = shotHardRefs(p, s);
+    const mustCite = [...new Set([...(plan?.mustCite ?? []), ...hard.mustCite])].filter((n) => !hard.mustNotCite.includes(n));
+    const planBits = [
+      plan?.purpose ? `story purpose: ${plan.purpose}` : "",
+      plan?.framing ? `planned framing: ${plan.framing}` : "",
+      plan?.present?.length ? `present: ${plan.present.join(", ")}` : "",
+      mustCite.length ? `MUST cite: ${mustCite.map((n) => `@[${n}]`).join(", ")}` : "",
+      hard.mustNotCite.length ? `MUST NOT cite: ${hard.mustNotCite.map((n) => `@[${n}]`).join(", ")}` : "",
+    ].filter(Boolean).join(" | ");
+    return `${s.number} | script audio: ${audio} | script visual (AUTHORITATIVE): ${visual}${planBits ? ` | plan: ${planBits}` : ""} | reference tags previously cited for this shot (keep only those that belong in THIS shot's frame): ${draftTags || "(none)"}`;
   }).join("\n");
 
-  const refNames = [
-    ...p.characters.map((c) => c.name).filter(Boolean),
-    ...p.products.map((pr) => pr.name).filter(Boolean),
-    ...(p.references ?? []).map((r) => r.name).filter(Boolean),
-  ];
-  const refList = refNames.length ? refNames.map((n) => `@[${n}]`).join(", ") : "(none)";
+  const { citeLines, styleOnlyNames } = magicRosterLines(p);
 
-  // Use skill file as instruction source when available (fallback embedded)
-  const skillPrefix = skillText ? skillText.slice(0, 2000) : "";
+  // The skill file is the maintainer-editable instruction source; send it in
+  // full (bounded) — a truncated prefix once silently dropped its rules.
+  const skillPrefix = skillText ? skillText.slice(0, 12000) : "";
   const systemContent = skillPrefix
-    ? "You are a cinematic storyboard prompt engineer. Reply with JSON only — no prose, no markdown fences. Follow the MAGIC PROMPT skill instructions verbatim. Content prompts only — never style language.\n\nSKILL:\n" + skillPrefix
+    ? "You are a cinematic storyboard prompt engineer. Reply with JSON only — no prose, no markdown fences. Follow the MAGIC PROMPT skill instructions. Content prompts only — never style language.\n\nSKILL:\n" + skillPrefix
     : "You are a cinematic storyboard prompt engineer for an animation pipeline. Reply with JSON only — no prose, no markdown fences. You write CONTENT prompts only — never style language.";
 
   const single = shots.length === 1;
-  const userContent =
-    "You are a storyboard image-prompt generator. Produce a CONTENT-ONLY prompt for the shot below.\n\n" +
+  const sections: string[] = [
+    `You are a storyboard image-prompt generator. Produce CONTENT-ONLY prompt${single ? "" : "s"} for the shot${single ? "" : "s"} below, as one continuous visual story.\n`,
     "Rules:\n" +
     "- CONTENT ONLY: Describe subject, framing, action, camera (wide/medium/closeup), composition, key props and characters, setting, time of day, mood conveyed by content.\n" +
     "- NEVER include style words: no medium, palette, lighting style, line treatment, rendering, brush, painterly, photorealistic, 3D, anime, etc. The style system will handle that.\n" +
-    "- Keep it to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
-    "- Ground the prompt STRICTLY in this shot's script audio/visual. Do NOT import beats, subjects, or framing from any other shot in the script.\n" +
-    "- Include ALL elements needed in the frame: foreground/background elements, character count and placement, key objects from references when tagged, and any text-implied visuals (e.g. SFX sources).\n" +
-    "- Carry over any previously cited @[Name] reference tag only when that reference actually appears in THIS shot's frame; otherwise omit it.\n" +
-    "- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.\n\n" +
-    (single ? "Shot:\n" : "Shots (in order):\n") + shotLines + "\n\n" +
-    "References available (name — will be inserted as @[Name] where needed):\n" + refList + "\n\n" +
+    "- Keep each prompt to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
+    "- Depict ONLY each target shot's own beat, grounded in its AUTHORITATIVE script audio/visual. Use the STORY BIBLE and CONTEXT shots for continuity — who is present, where we are, canonical descriptions, framing progression across cuts — but never depict a context shot's beat, subject, or action in a target shot.\n" +
+    "- Tell the story across the shots: maintain character presence, location, props, screen direction, and action continuity from shot to shot; reuse the bible's canonical descriptors verbatim; follow each shot's plan (purpose + framing) when given.\n" +
+    "- Include ALL elements needed in the frame: foreground/background elements, character count and placement, key objects, and any text-implied visuals (e.g. SFX sources).\n" +
+    "- References: cite ONLY roster references, in their canonical @[Name] form, exactly when that subject is visible in the frame. Honour every MUST cite / MUST NOT cite on the shot line. Never invent a @[Name] that is not in the roster — describe unreferenced subjects as plain nouns.\n" +
+    "- Carry over a previously cited @[Name] tag only when that reference actually appears in THIS shot's frame; otherwise omit it.\n" +
+    "- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.\n",
+  ];
+  if (bible) sections.push("STORY BIBLE (continuity ground truth):\n" + magicBibleContext(bible, opts.scene) + "\n");
+  if (opts.scene) sections.push(`SCENE ${opts.scene.number} — ${opts.scene.title}\n`);
+  if (opts.contextBefore?.length) sections.push("CONTEXT ONLY — previous shots (continuity; do NOT depict their beats):\n" + opts.contextBefore.map(magicContextLine).join("\n") + "\n");
+  sections.push((single ? "SHOT TO WRITE:\n" : "SHOTS TO WRITE (in order):\n") + shotLines + "\n");
+  if (opts.contextAfter?.length) sections.push("CONTEXT ONLY — following shots (continuity; do NOT depict their beats):\n" + opts.contextAfter.map(magicContextLine).join("\n") + "\n");
+  sections.push(
+    "REFERENCES AVAILABLE (cite exactly as @[Name]):\n" + citeLines +
+    (styleOnlyNames.length ? `\n(Style-only, never cite in content: ${styleOnlyNames.join(", ")})` : "") + "\n\n" +
     (single
       ? 'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." } ] }'
-      : 'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOrder must match the shot numbers given, one entry per shot.');
-  return { systemContent, userContent };
+      : 'Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }\nOne entry per shot to write, keyed by its exact shot number.')
+  );
+  return { systemContent, userContent: sections.join("\n") };
+}
+
+/** Shots per writing call within one scene (output-token bound). */
+const MAGIC_SCENE_CHUNK = 8;
+
+/** Post-process one generated prompt before it is stored: rewrite alias
+ *  tags to canonical form and strip user-excluded references. Unknown tags
+ *  stay visible in the text (the reconciliation queue resolves them). */
+function finalizeMagicPrompt(p: Production, shot: ProductionShot, roster: MagicRefRosterEntry[], prompt: string): string {
+  let out = canonicalizeMagicPromptTags(roster, prompt).text;
+  for (const name of shotHardRefs(p, shot).mustNotCite) out = removeRefTag(out, name);
+  return out.trim().slice(0, 600);
 }
 
 /**
- * Bounded LLM calls that generate CONTENT-ONLY prompts for shots. Each shot is
- * generated in its OWN call so adjacent similar shots can't bleed into each
- * other (the 0400/0500 "constellation" conflation). Regenerating is a merge:
- * with `shotIds` only those entries are replaced; otherwise every shot is
- * replaced. A failed shot keeps its previous text rather than being corrupted.
+ * Generate CONTENT-ONLY prompts as one continuous story:
+ *  - Bulk: a Story Bible pass over the whole script (built or refreshed
+ *    when missing/stale), then one writing call per scene chunk grounded
+ *    in that bible. A scene whose reply matches nothing falls back to
+ *    per-shot calls; a shot the model skipped keeps its previous text.
+ *  - Per-shot (`shotIds`): reuses the stored bible (never rebuilds it) with
+ *    the shot's scene + neighbours as continuity context.
+ * Regenerating is a merge; untouched entries are preserved.
  */
 export async function generateMagicPrompts(
   p: Production,
@@ -640,6 +969,9 @@ export async function generateMagicPrompts(
   const allShots = p.scenes.flatMap((s) => s.shots);
   if (!allShots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
   const byId = new Map(allShots.map((s) => [s.id, s]));
+  const flatIndex = new Map(allShots.map((s, i) => [s.id, i]));
+  const sceneOf = new Map<string, ProductionScene>();
+  for (const sc of p.scenes) for (const s of sc.shots) sceneOf.set(s.id, sc);
   let targets: ProductionShot[];
   if (shotIds && shotIds.length) {
     targets = [];
@@ -651,30 +983,123 @@ export async function generateMagicPrompts(
   } else {
     targets = allShots;
   }
+  const perShotMode = Boolean(shotIds && shotIds.length);
 
   const skillText = loadMagicSkillText();
+  const roster = magicRefRoster(p);
   const next: Record<string, string> = { ...(p.magicPrompts ?? {}) };
   let replaced = 0;
   let failed = 0;
-  for (let i = 0; i < targets.length; i++) {
-    const shot = targets[i];
-    if (targets.length > 1) emit(`Magic Prompt: shot ${shot.number} (${i + 1}/${targets.length})…`);
-    try {
-      const prompt = await generateOneMagicPrompt(p, shot, skillText, apiKey, model, baseUrl);
-      if (prompt) {
-        next[shot.id] = prompt;
-        replaced++;
-      } else {
-        failed++;
-        if (!next[shot.id]?.trim()) next[shot.id] = (shot.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
-        emit(`Magic Prompt: the model returned no usable prompt for shot ${shot.number} — kept the previous text.`, "info");
+
+  const keepOnFailure = (shot: ProductionShot): void => {
+    failed++;
+    if (!next[shot.id]?.trim()) next[shot.id] = (shot.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
+  };
+  const neighbours = (shot: ProductionShot): { before: ProductionShot[]; after: ProductionShot[] } => {
+    const i = flatIndex.get(shot.id) ?? 0;
+    return {
+      before: i > 0 ? [allShots[i - 1]] : [],
+      after: i < allShots.length - 1 ? [allShots[i + 1]] : [],
+    };
+  };
+
+  if (perShotMode) {
+    const bible = p.magicBible ?? null;
+    if (bible && isMagicBibleStale(p)) {
+      emit("Magic Prompt: the Story Bible is out of date for this script — regenerate all Magic Prompts to refresh it. Using it as continuity context for now.", "info");
+    }
+    for (const shot of targets) {
+      const { before, after } = neighbours(shot);
+      try {
+        const prompt = await generateOneMagicPrompt(p, shot, skillText, apiKey, model, baseUrl, {
+          bible, scene: sceneOf.get(shot.id) ?? null, contextBefore: before, contextAfter: after,
+        });
+        if (prompt) {
+          next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt);
+          replaced++;
+        } else {
+          keepOnFailure(shot);
+          emit(`Magic Prompt: the model returned no usable prompt for shot ${shot.number} — kept the previous text.`, "info");
+        }
+      } catch (e) {
+        keepOnFailure(shot);
+        emit(`Magic Prompt: shot ${shot.number} failed — ${e instanceof Error ? e.message : String(e)} — kept the previous text.`, "error");
       }
-    } catch (e) {
-      failed++;
-      if (!next[shot.id]?.trim()) next[shot.id] = (shot.visual.trim() || "Establishing frame for this moment.").slice(0, 600);
-      emit(`Magic Prompt: shot ${shot.number} failed — ${e instanceof Error ? e.message : String(e)} — kept the previous text.`, "error");
+    }
+  } else {
+    let bible: MagicBible | null = p.magicBible ?? null;
+    if (!bible || isMagicBibleStale(p)) {
+      try {
+        bible = await generateMagicBible(p, apiKey, model, emit, baseUrl, skillText);
+      } catch (e) {
+        bible = null;
+        emit(`Magic Prompt: Story Bible failed (${e instanceof Error ? e.message : String(e)}) — continuing scene-by-scene without it.`, "error");
+      }
+    }
+    const targetIds = new Set(targets.map((t) => t.id));
+    for (const scene of p.scenes) {
+      const sceneTargets = scene.shots.filter((s) => targetIds.has(s.id));
+      for (let c = 0; c < sceneTargets.length; c += MAGIC_SCENE_CHUNK) {
+        const chunk = sceneTargets.slice(c, c + MAGIC_SCENE_CHUNK);
+        emit(`Magic Prompt: scene ${scene.number} (${scene.title}) — shot${chunk.length === 1 ? "" : "s"} ${chunk.map((s) => s.number).join(", ")}…`);
+        let applied: MagicApplyResult | null = null;
+        try {
+          applied = await generateSceneMagicPrompts(p, scene, chunk, skillText, apiKey, model, baseUrl, bible, {
+            before: c > 0 ? [sceneTargets[c - 1]] : neighbours(chunk[0]).before,
+            after: c + chunk.length < sceneTargets.length ? [sceneTargets[c + chunk.length]] : neighbours(chunk[chunk.length - 1]).after,
+          });
+        } catch (e) {
+          emit(`Magic Prompt: scene ${scene.number} call failed (${e instanceof Error ? e.message : String(e)}) — retrying shot by shot.`, "error");
+        }
+        if (applied && applied.matched > 0) {
+          const skipped = new Set(applied.skipped.map((n) => magicShotNumberKey(n)));
+          for (const shot of chunk) {
+            if (skipped.has(magicShotNumberKey(shot.number))) {
+              keepOnFailure(shot);
+              emit(`Magic Prompt: no prompt returned for shot ${shot.number} — kept the previous text.`, "info");
+            } else {
+              next[shot.id] = finalizeMagicPrompt(p, shot, roster, applied.generated[shot.id]);
+              replaced++;
+            }
+          }
+        } else {
+          // Scene call produced nothing usable: per-shot fallback keeps the
+          // run alive (and is the anti-bleed path for a bad scene reply).
+          for (const shot of chunk) {
+            const { before, after } = neighbours(shot);
+            try {
+              const prompt = await generateOneMagicPrompt(p, shot, skillText, apiKey, model, baseUrl, {
+                bible, scene, contextBefore: before, contextAfter: after,
+              });
+              if (prompt) {
+                next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt);
+                replaced++;
+              } else keepOnFailure(shot);
+            } catch {
+              keepOnFailure(shot);
+            }
+          }
+        }
+      }
+    }
+    // Validation summary: unmatched citations go to the reconciliation
+    // queue; missing must-cites are surfaced, never silently "fixed".
+    const unresolved = computeUnresolvedMagicRefs({ ...p, magicPrompts: next });
+    for (const u of unresolved.slice(0, 10)) {
+      emit(`Magic Prompt: @[${u.citedName}] (shots ${u.shotNumbers.join(", ")}) matches no reference — assign or dismiss it in the storyboard's reference queue.`, "info");
+    }
+    if (bible) {
+      const missing: string[] = [];
+      for (const sp of bible.shotPlans) {
+        const shot = allShots.find((s) => magicShotNumberKey(s.number) === magicShotNumberKey(sp.number));
+        if (!shot || !next[shot.id]) continue;
+        const cited = new Set(refTagNames(next[shot.id]).map((n) => refLookupKey(n)));
+        for (const name of sp.mustCite) if (!cited.has(refLookupKey(name))) missing.push(`${sp.number}: @[${name}]`);
+      }
+      if (missing.length) emit(`Magic Prompt: ${missing.length} planned reference(s) not cited (${missing.slice(0, 5).join("; ")}${missing.length > 5 ? "; …" : ""}) — check those frames before generating.`, "info");
     }
   }
+
   if (!replaced) throw new Error("Magic Prompt generation produced no replies — check the API key and try again.");
   p.magicPrompts = next;
   p.magicEnabled = true;
@@ -682,6 +1107,35 @@ export async function generateMagicPrompts(
     ? `Magic Prompt: shot ${targets[0].number} updated.`
     : `Magic Prompt updated ${replaced} of ${targets.length} prompt(s)${failed ? ` (${failed} kept)` : ""} — enabled.`, "done");
   return p;
+}
+
+/** One bounded writing call for a scene chunk; reply folded number-keyed. */
+async function generateSceneMagicPrompts(
+  p: Production,
+  scene: ProductionScene,
+  shots: ProductionShot[],
+  skillText: string | null,
+  apiKey: string,
+  model: string,
+  baseUrl: string | undefined,
+  bible: MagicBible | null,
+  flank: { before: ProductionShot[]; after: ProductionShot[] },
+): Promise<MagicApplyResult> {
+  const { systemContent, userContent } = buildMagicPromptMessages(p, shots, skillText, {
+    bible, scene, contextBefore: flank.before, contextAfter: flank.after,
+  });
+  const gab = new ChatClient(apiKey, baseUrl);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      { role: "system", content: systemContent },
+      { role: "user", content: userContent },
+    ],
+    Math.min(8000, 1200 + shots.length * 450)
+  );
+  const arr = parseMagicPromptsReply(text);
+  if (!arr || !arr.length) return { generated: {}, matched: 0, skipped: shots.map((s) => s.number) };
+  return applyMagicModelReply(shots, arr);
 }
 
 /** Extract the prompt array from a Magic Prompt model reply, tolerating the
@@ -704,8 +1158,9 @@ async function generateOneMagicPrompt(
   apiKey: string,
   model: string,
   baseUrl?: string,
+  opts: MagicPromptBuildOptions = {},
 ): Promise<string | null> {
-  const { systemContent, userContent } = buildMagicPromptMessages(p, [shot], skillText);
+  const { systemContent, userContent } = buildMagicPromptMessages(p, [shot], skillText, opts);
   const gab = new ChatClient(apiKey, baseUrl);
   const { text } = await gab.completeOnce(
     model,

@@ -607,6 +607,70 @@ export interface MoodboardLayout {
   frames?: MoodboardFrame[];
 }
 
+/** One entity in the Magic Prompt Story Bible: a character, product,
+ *  location, or prop the whole storyboard must describe consistently.
+ *  `refName` binds it to the user's reference (canonical citable name);
+ *  absent means the script needs it but no reference exists yet. */
+export interface MagicBibleEntity {
+  name: string;
+  kind: "character" | "product" | "location" | "prop" | "other";
+  /** Canonical one-line visual descriptor every shot reuses verbatim. */
+  descriptor: string;
+  refName?: string;
+  /** Other names the script uses for this entity. */
+  aliases?: string[];
+}
+
+/** Per-scene beat in the Magic Prompt Story Bible. */
+export interface MagicBibleScene {
+  number: number;
+  title: string;
+  location?: string;
+  timeOfDay?: string;
+  beat: string;
+}
+
+/** Per-shot storytelling plan in the Magic Prompt Story Bible. */
+export interface MagicBibleShotPlan {
+  /** Displayed 4-digit shot number ("0100"). */
+  number: string;
+  /** What this shot does in the story (establish / reveal / payoff / …). */
+  purpose: string;
+  /** Framing intent (wide/medium/closeup, angle) for rhythm across cuts. */
+  framing?: string;
+  /** Entity names (bible names) visible in frame. */
+  present?: string[];
+  /** Canonical reference names this shot MUST cite as `@[Name]`. */
+  mustCite: string[];
+}
+
+/** The whole-script analysis Magic Prompt generation is grounded in.
+ *  Main-owned (generated main-side in one bounded pass over the full
+ *  breakdown; whole-document renderer saves never overwrite it). */
+export interface MagicBible {
+  version: 1;
+  synopsis: string;
+  /** Fill-ins the model chose where the script was silent — user-visible. */
+  assumptions: string[];
+  scenes: MagicBibleScene[];
+  entities: MagicBibleEntity[];
+  shotPlans: MagicBibleShotPlan[];
+  /** Hash of the inputs (shots + reference roster); mismatch = stale. */
+  inputHash: string;
+  generatedAt: string;
+  model?: string;
+}
+
+/** One cited name no reference resolves (Magic Prompt reconciliation). */
+export interface MagicUnresolvedRef {
+  /** The name as cited, e.g. "MainCharacter" from `@[MainCharacter]`. */
+  citedName: string;
+  /** Shot numbers (display) citing it, in storyboard order. */
+  shotNumbers: string[];
+  /** Deterministically suggested existing reference (canonical name). */
+  suggestedRefName?: string;
+}
+
 export interface Production {
   meta: ProductionMeta;
   /** Pipeline step the user is focused on (1..5). */
@@ -662,6 +726,14 @@ export interface Production {
    *  remain separate. The original prompts stay in `shot.prompt` untouched. */
   magicPrompts?: Record<string, string>;
   magicEnabled?: boolean;
+  /** Magic Prompt Story Bible: the whole-script analysis (synopsis,
+   *  entities, assumptions, per-shot plans) the bulk Magic pass writes and
+   *  per-scene/per-shot generation is grounded in. Main-owned like
+   *  `magicPrompts`; absent on productions that never ran the new pass. */
+  magicBible?: MagicBible;
+  /** Cited names the user dismissed in Magic reconciliation ("plain noun,
+   *  not a reference") — stored lowercased; renderer-owned via saves. */
+  magicDismissedRefs?: string[];
   /** Board-wide storyboard seed: fixed once per production so the same style
    *  frame + frozen model/resolution repeats as closely as the vendor allows. */
   lookSeed?: number;

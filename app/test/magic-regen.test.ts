@@ -1,14 +1,16 @@
 /**
  * Magic Prompt regeneration robustness.
  *
- * Two hard-won rules, both pinned here:
+ * Hard-won rules, pinned here (the story-aware rearchitecture keeps them):
  *  - A stale entry must never survive a regeneration. The old gap-fill
  *    re-read the shot's current effective prompt — which in magic mode IS the
  *    stale entry — and the request re-sent that stale PROSE as "current
  *    content", so the model parroted it back forever (shot 0400 kept a
  *    neighboring shot's "constellation" text through every regeneration).
- *  - Each shot is generated in its OWN call, so adjacent similar shots can't
- *    bleed into one another.
+ *  - A target shot depicts ONLY its own beat. Generation is now per-scene
+ *    (grounded in the Story Bible), so the anti-bleed guard moved into the
+ *    grounding contract: bible + neighbours are CONTEXT ONLY, each shot's
+ *    script visual is AUTHORITATIVE, and replies fold by shot number.
  */
 import { describe, it, expect, vi } from "vitest";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
@@ -19,16 +21,20 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-// Capture every model request and answer with a fresh prompt for the shot the
-// request names, so the per-shot loop + merge can be exercised without network.
+// Capture every model request: bible calls get a minimal bible, writing
+// calls get one fresh prompt per shot row named — so the bible + per-scene
+// flow and the merge can be exercised without network.
 const modelCalls = vi.hoisted(() => [] as string[]);
 vi.mock("@core", () => ({
   ChatClient: class {
     async completeOnce(_model: string, messages: Array<{ role: string; content: string }>): Promise<{ text: string }> {
       const user = messages.find((m) => m.role === "user")?.content ?? "";
       modelCalls.push(user);
-      const num = user.match(/(\d{4})\s*\|/)?.[1] ?? "0100";
-      return { text: JSON.stringify({ prompts: [{ number: num, prompt: `Fresh ${num} content.` }] }) };
+      if (user.includes("Build the STORY BIBLE")) {
+        return { text: JSON.stringify({ synopsis: "Pieces rise, then form a constellation.", assumptions: [], scenes: [], entities: [], shotPlans: [] }) };
+      }
+      const nums = [...user.matchAll(/^(\d{4}) \|/gm)].map((m) => m[1]);
+      return { text: JSON.stringify({ prompts: (nums.length ? nums : ["0100"]).map((n) => ({ number: n, prompt: `Fresh ${n} content.` })) }) };
     }
   },
 }));
@@ -165,11 +171,12 @@ describe("buildMagicPromptMessages", () => {
     expect(userContent).toContain("@[Cascade]");
   });
 
-  it("marks the script visual authoritative and forbids cross-shot bleed", () => {
+  it("marks the script visual authoritative; context may inform, never be depicted", () => {
     const { p, shots } = prodWithStaleMagic();
     const { userContent } = buildMagicPromptMessages(p, shots, null);
     expect(userContent).toContain("script visual (AUTHORITATIVE)");
-    expect(userContent).toContain("Do NOT import beats, subjects, or framing from any other shot");
+    expect(userContent).toContain("Depict ONLY each target shot's own beat");
+    expect(userContent).toContain("never depict a context shot's beat");
   });
 
   it("grounds each shot line in its own visual", () => {
@@ -181,7 +188,7 @@ describe("buildMagicPromptMessages", () => {
   });
 });
 
-describe("generateMagicPrompts (per-shot)", () => {
+describe("generateMagicPrompts (bible + per-scene, per-shot regen)", () => {
   function prod(): Production {
     return {
       meta: { id: "p1", name: "T" },
@@ -203,16 +210,18 @@ describe("generateMagicPrompts (per-shot)", () => {
     expect(p.magicPrompts?.s500).toBe("stale web text");
   });
 
-  it("regenerates ALL shots in separate calls (no cross-contamination)", async () => {
+  it("regenerates ALL shots via one bible call + one scene call", async () => {
     modelCalls.length = 0;
     const p = prod();
     await generateMagicPrompts(p, "key", "model", () => {});
+    // Bible first (whole story), then the single scene's writing call carrying
+    // both target rows under SHOTS TO WRITE.
     expect(modelCalls.length).toBe(2);
-    // Each call carries exactly one shot row.
-    for (const call of modelCalls) {
-      const rows = call.split("\n").filter((l) => /^\d{4}\s*\|/.test(l));
-      expect(rows.length).toBe(1);
-    }
+    expect(modelCalls[0]).toContain("Build the STORY BIBLE");
+    const writing = modelCalls[1].split("SHOTS TO WRITE")[1] ?? "";
+    const rows = writing.split("\n").filter((l) => /^\d{4}\s*\|/.test(l));
+    expect(rows.length).toBe(2);
+    expect(p.magicBible?.synopsis).toContain("constellation");
     expect(p.magicPrompts?.s400).toBe("Fresh 0400 content.");
     expect(p.magicPrompts?.s500).toBe("Fresh 0500 content.");
   });

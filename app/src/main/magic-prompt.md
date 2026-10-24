@@ -1,61 +1,73 @@
-# Magic Prompt — AI assisted storyboard content prompts
+# Magic Prompt — story-aware storyboard content prompts
 
-Generates content-only image prompts for the full storyboard by analyzing the script and its visual direction. The style system stays separate — these prompts must NOT include any style language.
+Generates content-only image prompts for the full storyboard by reading the
+WHOLE script first. The style system stays separate — these prompts must NOT
+include any style language.
 
-## Purpose
-Turn the entire shot list (audio + visual direction + references) into cohesive, production-ready **content** prompts. Each prompt describes *what* is in the frame, not *how* it should be rendered.
+Two identical copies of this file ship (`app/src/main/magic-prompt.md` and
+`app/skills/magic-prompt.md`); edit both or neither. `pipeline.ts` sends the
+file in full (bounded to 12k chars) as instruction context for every pass.
 
-## When to use
-- User clicks "Magic Prompt" in Storyboard (Step 3) to generate/enable content prompts for all shots at once.
-- User clicks refresh to regenerate the set.
+## How it runs (pipeline.ts owns the structure; this file is the craft)
 
-## Generation parameters
+1. **Story Bible pass** (`buildMagicBibleMessages` / `generateMagicBible`):
+   one call over the entire breakdown + reference roster produces a synopsis,
+   canonical entities, recorded assumptions, and a per-shot plan (purpose,
+   framing, must-cite references). Stored on the production and written to
+   `out/magic-bible.md`. Refreshed only when the script/roster changes.
+2. **Writing pass** (`buildMagicPromptMessages`): one call per scene chunk
+   (≤8 shots), grounded in the bible. Each shot's own script audio/visual is
+   AUTHORITATIVE for what it depicts; the bible and flanking shots are
+   continuity context only — never depict another shot's beat.
+3. **Post-processing** (deterministic, in code): replies are matched to shots
+   by number (never positionally), style leakage is stripped, alias tags are
+   canonicalized to the user's reference names, user-excluded references are
+   removed, and unmatched `@[Name]` citations are reported to the storyboard
+   reconciliation queue instead of failing silently.
+4. **Per-shot regeneration** reuses the stored bible with the shot's scene
+   and neighbours as context; it never rebuilds the bible.
 
-### Model
-- Use the production's configured chat model (`settings.getModel()` via ChatClient) — a fast, JSON-capable model of the active provider. No image input needed.
-- Temperature: default (0.7). Max tokens: ~8000 for full storyboard (scale with shot count).
+## Content rules (both passes)
 
-### System message
-You are a cinematic storyboard prompt engineer for an animation pipeline.
-You reply with JSON only — no prose, no markdown fences.
-You write CONTENT prompts only — never style language.
+- CONTENT ONLY: subject, framing, action, camera (wide/medium/closeup),
+  composition, key props and characters, setting, time of day, mood conveyed
+  by content. NEVER style words (medium, palette, lighting style, rendering,
+  painterly, photorealistic, 3D, anime, …) — the style system handles that.
+- One continuous story: track character presence, location progression,
+  props, screen direction, and action continuity across cuts. Framing should
+  progress with rhythm (establish → medium → close), not repeat one size.
+- Reuse the bible's canonical entity descriptors verbatim so the same
+  person/place/prop reads identically in every frame.
+- Cite ONLY roster references, in canonical `@[Name]` form, exactly when the
+  subject is visible. A script name that matches a reference's alias means
+  that reference. Never invent a `@[Name]`; unreferenced subjects are plain
+  nouns. Style-only references are never cited in content.
+- Honour each shot's MUST cite / MUST NOT cite constraints absolutely.
+- Where the script is silent, choose sensibly and (in the bible pass) record
+  the choice under `assumptions` so later shots agree with it.
+- Do NOT invent dialogue or off-screen elements. Audio implies what should
+  be visible (speaker, mouth, context) — never quote it.
+- Writing pass: 1–3 concrete, visual sentences per shot, suitable to append
+  after a "Style:" paragraph. Include foreground/background elements,
+  character count and placement, and text-implied visuals (SFX sources).
 
-### User prompt template
-```
-You are a storyboard image-prompt generator. Analyze the full script and visual direction and produce a CONTENT-ONLY prompt for each shot.
+## Model + reply contracts
 
-Rules:
-- CONTENT ONLY: Describe subject, framing, action, camera (wide/medium/closeup), composition, key props and characters, setting, time of day, mood conveyed by content. 
-- NEVER include style words: no medium, palette, lighting style, line treatment, rendering, brush, painterly, photorealistic, 3D, anime, etc. The style system will handle that.
-- Keep each prompt to 1-3 sentences, concrete and visual, suitable to append after a "Style:" paragraph.
-- Understand flow: track continuity across shots — maintain character presence, location progression, action continuity, and shot-to-shot rhythm. Adjacent shots should read as a visual sequence, not isolated images.
-- Include ALL elements needed in each frame: foreground/background elements, character count and placement, key objects from references when tagged, and any text-implied visuals (e.g. SFX sources).
-- Respect @[Name] reference tags if present — keep them verbatim when that reference should appear in the frame; omit when not needed for this shot's content.
-- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.
-
-Shots (in order):
-{{SHOT_LIST}}
-
-References available (name — will be inserted as @[Name] where needed):
-{{REF_LIST}}
-
-Reply with JSON only: { "prompts": [ { "number": "0100", "prompt": "..." }, ... ] }
-Order must match the shot numbers given, one entry per shot.
-```
-
-Where `{{SHOT_LIST}}` is each shot as `number | audio: ... | visual: ... | currentContent: ...` (currentContent is the auto-derived or manually edited content paragraph, stripped of Style/Brand).
-Where `{{REF_LIST}}` is the union of characters/products/references names.
-
-### Post-processing
-- Validate JSON via parseJsonLooseObject. Expect { prompts: [] }.
-- Trim each prompt to ≤ 600 chars, strip leading "Style:" or "Brand identity:" if model leaked them.
-- Missing shots: fall back to the shot's visual text.
-- Return Record<shotId, contentPrompt> by matching number→shot.id.
-
-### Example (abridged)
-Input shot 0100: audio "Hello there." visual "Wide shot of a market at dawn, stalls opening."
-Output 0100 content: "Wide establishing shot of a dawn market, stalls half-open, early light, a single figure at center mid-distance, crates and canvas awnings in midground, quiet street depth behind."
+- Model: the production's configured chat model (`settings.getModel()`).
+  Bible call ≤8000 output tokens; writing calls scale with chunk size.
+- Bible reply JSON: `{ synopsis, assumptions[], scenes[{number,title,
+  location,timeOfDay,beat}], entities[{name,kind,descriptor,refName?,
+  aliases[]}], shotPlans[{number,purpose,framing,present[],mustCite[]}] }`.
+  `refName`/`mustCite` entries that don't resolve to the roster are dropped.
+- Writing reply JSON: `{ "prompts": [ { "number": "0100", "prompt": "…" } ] }`,
+  one entry per shot to write, keyed by exact shot number.
 
 ## Notes for maintainers
-- To tweak tone, length, or camera vocabulary, edit this file only — pipeline.ts loads it at runtime (fallback embedded).
-- Keep prompts content-only; any style leakage will be stripped, but costs tokens.
+
+- Tune craft guidance here; JSON shapes, chunking, and safeguards live in
+  `pipeline.ts` (`buildMagicBibleMessages`, `parseMagicBibleReply`,
+  `buildMagicPromptMessages`, `applyMagicModelReply`) with tests in
+  `app/test/magic-bible.test.ts` and `app/test/magic-regen.test.ts`.
+- Safeguards that must not regress: a target shot's stale magic prose is
+  never sent (tag names only), gaps fill from the script visual, and a
+  failed shot keeps its previous prompt.

@@ -1,0 +1,184 @@
+/**
+ * Magic Prompt reference bookkeeping shared by main (generation + validation)
+ * and the renderer (the reconciliation queue). Pure and dependency-free
+ * (types + prompt grammar + the alias resolver only) so both sides agree on
+ * what "this cited name resolves" means.
+ */
+import type { MagicUnresolvedRef, Production } from "./ipc.js";
+import { refTagMatches, renameRefTag } from "./prompt-grammar.js";
+import { canonicalRefName, refLookupKey, resolveRefByTagName, sanitizeAliases } from "./ref-names.js";
+
+/** One citable reference in the production's roster, with the context the
+ *  Magic passes need to cite it correctly. Order is the canonical citation
+ *  order: characters → products → custom references. */
+export interface MagicRefRosterEntry {
+  id: string;
+  name: string;
+  kind: "character" | "product" | "reference";
+  /** One-line visual descriptor (character `key`/builder text) when known. */
+  descriptor: string;
+  aliases: string[];
+  /** True when citing it will actually upload an image. */
+  hasArtwork: boolean;
+  /** Style-only refs auto-attach downstream; content prompts never cite them. */
+  styleOnly: boolean;
+  category?: string;
+}
+
+/** The production's full citable roster (deduplicated by canonical name,
+ *  first occurrence wins — the same precedence as tag resolution). */
+export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
+  const out: MagicRefRosterEntry[] = [];
+  const seen = new Set<string>();
+  const styleCats = new Set(
+    (p.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id)
+  );
+  const catName = new Map((p.referenceCategories ?? []).map((c) => [c.id, c.name]));
+  const push = (e: MagicRefRosterEntry): void => {
+    const key = refLookupKey(e.name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(e);
+  };
+  for (const c of p.characters ?? []) {
+    push({
+      id: c.id,
+      name: c.name,
+      kind: "character",
+      descriptor: (c.key || c.builder?.description || "").trim(),
+      aliases: sanitizeAliases(c.aliases, c.name),
+      hasArtwork: Boolean(c.artwork || c.imagePath),
+      styleOnly: false,
+    });
+  }
+  for (const pr of p.products ?? []) {
+    push({
+      id: pr.id,
+      name: pr.name,
+      kind: "product",
+      descriptor: "",
+      aliases: sanitizeAliases(pr.aliases, pr.name),
+      hasArtwork: Boolean(pr.artwork || pr.imagePath),
+      styleOnly: false,
+    });
+  }
+  for (const r of p.references ?? []) {
+    push({
+      id: r.id,
+      name: r.name,
+      kind: "reference",
+      descriptor: "",
+      aliases: sanitizeAliases(r.aliases, r.name),
+      hasArtwork: Boolean(r.artwork || r.imagePath || r.mediaPath),
+      styleOnly: r.styleOnly === true || Boolean(r.categoryId && styleCats.has(r.categoryId)),
+      category: r.categoryId ? catName.get(r.categoryId) : undefined,
+    });
+  }
+  return out;
+}
+
+/** Resolve a cited name against the roster (canonical name or alias). */
+export function resolveRosterRef(roster: readonly MagicRefRosterEntry[], citedName: string): MagicRefRosterEntry | undefined {
+  return resolveRefByTagName(roster, citedName);
+}
+
+/** Words in a name/descriptor, split on punctuation and camelCase humps. */
+function nameTokens(text: string): string[] {
+  return (text ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3);
+}
+
+/**
+ * Deterministically suggest an existing reference for an unmatched cited
+ * name: token overlap with the canonical name (strong), its aliases, and its
+ * descriptor (weak), plus substring containment. Returns the canonical name
+ * only when one entry is the clear winner — a wrong suggestion is worse
+ * than none, and the user always confirms in the queue.
+ */
+export function suggestRefForCitedName(
+  roster: readonly MagicRefRosterEntry[],
+  citedName: string,
+  hintText = ""
+): string | undefined {
+  const citedTokens = new Set([...nameTokens(citedName), ...nameTokens(hintText)]);
+  if (!citedTokens.size) return undefined;
+  const citedKey = refLookupKey(citedName).replace(/\s+/g, "");
+  let best: { name: string; score: number } | undefined;
+  let tied = false;
+  for (const e of roster) {
+    let score = 0;
+    for (const t of nameTokens(e.name)) if (citedTokens.has(t)) score += 3;
+    for (const a of e.aliases) for (const t of nameTokens(a)) if (citedTokens.has(t)) score += 2;
+    for (const t of nameTokens(e.descriptor)) if (citedTokens.has(t)) score += 1;
+    const nameKey = refLookupKey(e.name).replace(/\s+/g, "");
+    if (citedKey && nameKey && (citedKey.includes(nameKey) || nameKey.includes(citedKey))) score += 2;
+    if (!score) continue;
+    if (!best || score > best.score) { best = { name: e.name, score }; tied = false; }
+    else if (score === best.score) tied = true;
+  }
+  return best && !tied && best.score >= 2 ? best.name : undefined;
+}
+
+/**
+ * Rewrite alias tags in a prompt to their canonical `@[Name]` form and
+ * report the cited names that resolve to nothing. Pure; the input text is
+ * only changed where an alias tag actually appears.
+ */
+export function canonicalizeMagicPromptTags(
+  roster: readonly MagicRefRosterEntry[],
+  text: string
+): { text: string; unresolved: string[] } {
+  let out = text;
+  const unresolved: string[] = [];
+  const seenUnresolved = new Set<string>();
+  for (const { name } of refTagMatches(text)) {
+    const canonical = canonicalRefName(roster, name);
+    if (!canonical) {
+      const key = refLookupKey(name);
+      if (key && !seenUnresolved.has(key)) { seenUnresolved.add(key); unresolved.push(name); }
+      continue;
+    }
+    if (canonical !== name) out = renameRefTag(out, name, canonical);
+  }
+  return { text: out, unresolved };
+}
+
+/**
+ * Every cited name in the production's Magic prompts that no reference
+ * resolves, grouped with the shots citing it (storyboard order). Dismissed
+ * names are excluded. Each entry carries a deterministic suggestion the
+ * reconciliation queue can pre-select (never auto-applied).
+ */
+export function computeUnresolvedMagicRefs(p: Production): MagicUnresolvedRef[] {
+  const roster = magicRefRoster(p);
+  const dismissed = new Set((p.magicDismissedRefs ?? []).map((n) => refLookupKey(n)));
+  const hints = new Map<string, string>();
+  for (const e of p.magicBible?.entities ?? []) hints.set(refLookupKey(e.name), e.descriptor);
+  const byKey = new Map<string, MagicUnresolvedRef>();
+  for (const scene of p.scenes ?? []) {
+    for (const shot of scene.shots) {
+      const text = p.magicPrompts?.[shot.id] ?? "";
+      if (!text) continue;
+      for (const { name } of refTagMatches(text)) {
+        if (canonicalRefName(roster, name)) continue;
+        const key = refLookupKey(name);
+        if (!key || dismissed.has(key)) continue;
+        let entry = byKey.get(key);
+        if (!entry) {
+          entry = {
+            citedName: name,
+            shotNumbers: [],
+            suggestedRefName: suggestRefForCitedName(roster, name, hints.get(key) ?? ""),
+          };
+          if (!entry.suggestedRefName) delete entry.suggestedRefName;
+          byKey.set(key, entry);
+        }
+        if (!entry.shotNumbers.includes(shot.number)) entry.shotNumbers.push(shot.number);
+      }
+    }
+  }
+  return [...byKey.values()];
+}

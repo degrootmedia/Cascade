@@ -221,6 +221,27 @@ describe("Junk Drawer-shaped binding (generic roster names, no descriptors)", ()
     expect(bible!.shotPlans[0].mustCite).toEqual(expect.arrayContaining(["Main Character", "Villain 1", "Villain 2", "Environment 02"]));
   });
 
+  it("citation discipline: one environment max, primary refs, budget, title shots cite nothing", () => {
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "small", refNames: ["Main Character"] },
+        { name: "safety pin gang", kind: "character", descriptor: "A gang of pins.", refNames: ["Villain 1", "Villain 2"] },
+        { name: "city street", kind: "location", descriptor: "street", refNames: ["Environment 02", "Environment 01"] },
+        { name: "the drawer", kind: "location", descriptor: "container", refNames: ["Environment 02"] },
+        { name: "JUNK DRAWER Title", kind: "other", descriptor: "words" },
+      ],
+      shotPlans: [
+        { number: "0100", purpose: "fight", present: ["city street", "the drawer", "little paperclip", "safety pin gang"], mustCite: ["Environment 01", "Environment 02"] },
+        { number: "0200", purpose: "title", present: ["JUNK DRAWER Title"], mustCite: [] },
+      ],
+    }), junkProd());
+    const fight = bible!.shotPlans[0].mustCite;
+    // Characters first (gang capped at 2), exactly ONE environment ref total.
+    expect(fight).toEqual(["Main Character", "Villain 1", "Villain 2", "Environment 02"]);
+    expect(bible!.shotPlans[1].mustCite).toEqual([]);
+  });
+
   it("protagonist bind: the most-present unbound character takes the 'Main Character' ref", () => {
     const p = junkProd();
     p.scenes[0].shots.push(

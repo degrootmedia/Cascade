@@ -42,6 +42,7 @@ vi.mock("@core", () => ({
 import {
   applyMagicModelReply,
   buildMagicPromptMessages,
+  capMagicPromptText,
   generateMagicPrompts,
   magicShotNumberKey,
   parseMagicPromptsReply,
@@ -67,6 +68,18 @@ describe("magicShotNumberKey", () => {
     expect(magicShotNumberKey("")).toBe("");
     expect(magicShotNumberKey("next")).toBe("");
     expect(magicShotNumberKey(null)).toBe("");
+  });
+});
+
+describe("capMagicPromptText", () => {
+  it("never severs a sentence or a tag at the cap", () => {
+    const long = "A ".repeat(200) + "fight with @[Binder Clip Hero] and @[Villain 1] rages on breathlessly through the alley";
+    const capped = capMagicPromptText(long, 120);
+    expect(capped.length).toBeLessThanOrEqual(120);
+    expect(capped).not.toMatch(/@\[[^\]]*$/);
+    const tagged = capMagicPromptText("Intro. " + "word ".repeat(60) + "@[Binder Clip Her", 80);
+    expect(tagged).not.toContain("@[");
+    expect(capMagicPromptText("short", 600)).toBe("short");
   });
 });
 

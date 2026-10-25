@@ -778,6 +778,63 @@ function fallbackBindEntity(
   return top.score >= 6 && top.score > (second?.score ?? 0) ? [top.name] : [];
 }
 
+/** A group entity (gang/team/heroes) may depict through several refs. */
+export function isGroupBibleEntity(e: { name: string; descriptor?: string }): boolean {
+  return /\b(gang|team|group|squad|heroes|villains)\b/i.test(e.name) || /^a (team|gang|group) of/i.test(e.descriptor ?? "");
+}
+
+/** Max reference citations a planned shot may carry into generation. */
+export const MAGIC_CITATION_BUDGET = 5;
+
+/**
+ * Derive each shot plan's mustCite deterministically with citation
+ * discipline (the model's own list both under- and over-cites in practice):
+ * characters/products first (primary ref each; groups up to 2), then
+ * EXACTLY ONE environment ref (the first bound location present — the
+ * immediate set wins over a container/world entity, which is only cited
+ * when it is the sole location), then props (primary each). Model-listed
+ * extras are kept only when they aren't a second environment. Budget-capped.
+ * Mutates the plans; shared by the parser and user-decision reapplication.
+ */
+export function deriveMagicMustCite(
+  p: Production,
+  entities: MagicBible["entities"],
+  bibleScenes: MagicBible["scenes"],
+  shotPlans: MagicBibleShotPlan[],
+): void {
+  const entityByKey = new Map<string, MagicBible["entities"][number]>();
+  for (const e of entities) {
+    entityByKey.set(refLookupKey(e.name), e);
+    for (const a of e.aliases ?? []) if (!entityByKey.has(refLookupKey(a))) entityByKey.set(refLookupKey(a), e);
+  }
+  const bound = (e: MagicBible["entities"][number]): string[] => e.refNames?.length ? e.refNames : e.refName ? [e.refName] : [];
+  const boundLocations = entities.filter((e) => e.kind === "location" && bound(e).length > 0);
+  const locationRefKeys = new Set(boundLocations.flatMap((e) => bound(e).map((n) => refLookupKey(n))));
+  const shotSceneNumber = new Map<string, number>();
+  for (const sc of p.scenes ?? []) for (const s of sc.shots) shotSceneNumber.set(magicShotNumberKey(s.number), sc.number);
+  for (const plan of shotPlans) {
+    const present = (plan.present ?? []).map((n) => entityByKey.get(refLookupKey(n))).filter((e): e is MagicBible["entities"][number] => Boolean(e));
+    if (present.length && present.every((e) => e.kind === "other")) { plan.mustCite = []; continue; }
+    const derived: string[] = [];
+    const add = (names: string[]): void => { for (const n of names) if (!derived.includes(n)) derived.push(n); };
+    for (const e of present) {
+      if (e.kind === "character" || e.kind === "product") add(bound(e).slice(0, isGroupBibleEntity(e) ? 2 : 1));
+    }
+    let env = present.find((e) => e.kind === "location" && bound(e).length > 0);
+    if (!env && boundLocations.length) {
+      const sceneNum = shotSceneNumber.get(magicShotNumberKey(plan.number));
+      const bs = bibleScenes.find((x) => x.number === sceneNum);
+      const sceneTokens = new Set([...bibleTokens(bs?.location ?? ""), ...bibleTokens(bs?.title ?? "")]);
+      env = boundLocations.find((e) => [...bibleTokens(e.name), ...(e.aliases ?? []).flatMap(bibleTokens)].some((t) => sceneTokens.has(t)))
+        ?? (boundLocations.length === 1 ? boundLocations[0] : undefined);
+    }
+    if (env) add(bound(env).slice(0, 1));
+    for (const e of present) if (e.kind === "prop") add(bound(e).slice(0, 1));
+    for (const n of plan.mustCite) if (!locationRefKeys.has(refLookupKey(n))) add([n]);
+    plan.mustCite = derived.slice(0, MAGIC_CITATION_BUDGET);
+  }
+}
+
 /** The normalized bible body (hash/stamps are added by the generator). */
 export type ParsedMagicBible = Omit<MagicBible, "version" | "inputHash" | "generatedAt" | "model">;
 
@@ -894,40 +951,7 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
       }
     }
   }
-  // Derive mustCite deterministically: the model's own list under-cites
-  // badly in practice (Junk Drawer: 9/28 plans non-empty, whole climax with
-  // zero citations). Every bound entity in `present` contributes its refs,
-  // and the shot's bound location entity is cited in every shot.
-  const entityByKey = new Map<string, MagicBible["entities"][number]>();
-  for (const e of entities) {
-    entityByKey.set(refLookupKey(e.name), e);
-    for (const a of e.aliases ?? []) if (!entityByKey.has(refLookupKey(a))) entityByKey.set(refLookupKey(a), e);
-  }
-  const boundLocations = entities.filter((e) => e.kind === "location" && (e.refNames?.length ?? 0) > 0);
-  const shotSceneNumber = new Map<string, number>();
-  for (const sc of p.scenes ?? []) for (const s of sc.shots) shotSceneNumber.set(magicShotNumberKey(s.number), sc.number);
-  for (const plan of shotPlans) {
-    const derived: string[] = [];
-    const add = (names: string[]): void => { for (const n of names) if (!derived.includes(n)) derived.push(n); };
-    let citesLocation = false;
-    for (const presentName of plan.present ?? []) {
-      const e = entityByKey.get(refLookupKey(presentName));
-      if (!e?.refNames?.length) continue;
-      add(e.refNames);
-      if (e.kind === "location") citesLocation = true;
-    }
-    if (!citesLocation && boundLocations.length) {
-      const sceneNum = shotSceneNumber.get(magicShotNumberKey(plan.number));
-      const bs = scenes.find((x) => x.number === sceneNum);
-      const sceneTokens = new Set([...bibleTokens(bs?.location ?? ""), ...bibleTokens(bs?.title ?? "")]);
-      const matched = boundLocations.filter((e) =>
-        [...bibleTokens(e.name), ...(e.aliases ?? []).flatMap(bibleTokens)].some((t) => sceneTokens.has(t)));
-      const chosen = matched.length ? matched : boundLocations.length === 1 ? boundLocations : [];
-      for (const e of chosen) add(e.refNames ?? []);
-    }
-    add(plan.mustCite);
-    plan.mustCite = derived.slice(0, 8);
-  }
+  deriveMagicMustCite(p, entities, scenes, shotPlans);
   const synopsis = capStr(parsed.synopsis, 1200);
   if (!synopsis && !scenes.length && !entities.length && !shotPlans.length) return null;
   const worldPremise = capStr(parsed.worldPremise, 400) || undefined;
@@ -1117,7 +1141,7 @@ export function buildMagicPromptMessages(
     "- STANDALONE PROMPTS: each prompt is sent ALONE to an image model that has never seen the script, this bible, or any other shot. Every prompt must therefore restate, in compressed form, (1) the world premise (scale + what the world is made of), (2) where we are and what the immediate surroundings are made of, and (3) who is visible with their identifying descriptor — before/with the action. Never write a bare 'street', 'alley', or 'city' without saying what it is in this world.\n" +
     "- Tell the story across the shots: maintain character presence, location, props, screen direction, and action continuity from shot to shot; reuse the bible's canonical descriptors (identifying features only — drop comparisons to characters who are not in this frame); follow each shot's plan (purpose + framing) when given.\n" +
     "- Include ALL elements needed in the frame: foreground/background elements, character count and placement, key objects, and any text-implied visuals (e.g. SFX sources).\n" +
-    "- References: cite ONLY roster references, in their canonical @[Name] form, exactly when that subject is visible in the frame. Honour every MUST cite / MUST NOT cite on the shot line. Never invent a @[Name] that is not in the roster — describe unreferenced subjects as plain nouns.\n" +
+    "- References: cite ONLY roster references, in their canonical @[Name] form, exactly when that subject is visible in the frame. Cite each reference AT MOST ONCE, inline where its subject first appears in the sentence — never as a list of tags at the end, and never use a tag as a place/setting noun (write the setting in words, with the environment tag attached once). Honour every MUST cite / MUST NOT cite on the shot line. Never invent a @[Name] that is not in the roster — describe unreferenced subjects as plain nouns.\n" +
     "- Carry over a previously cited @[Name] tag only when that reference actually appears in THIS shot's frame; otherwise omit it.\n" +
     "- Do NOT invent dialogue or off-screen elements. If audio is provided, use it only to infer what should be visible (speaker, mouth, context) — don't quote it.\n",
   ];
@@ -1184,8 +1208,16 @@ function finalizeMagicPrompt(
     const cited = new Set(refTagNames(out).map((n) => refLookupKey(n)));
     for (const name of wanted) if (!cited.has(refLookupKey(name))) out = addRefTag(out, name);
   }
+  // One citation per reference: later repeats become the plain name.
+  const seenTags = new Set<string>();
+  out = out.replace(/@\[([^\]]+)\]/g, (tag, name: string) => {
+    const key = refLookupKey(name);
+    if (seenTags.has(key)) return name;
+    seenTags.add(key);
+    return tag;
+  });
   out = ensureSettingAnchor(out, magicSettingAnchor(bible, scene));
-  return out.trim().slice(0, 900);
+  return capMagicPromptText(out, 900);
 }
 
 /**
@@ -1436,6 +1468,23 @@ export interface MagicApplyResult {
  * which previously let a skipped shot keep its old text through every
  * regeneration.
  */
+/** Cap a magic prompt without severing a sentence or an `@[Name]` tag
+ *  (the old hard slice stored prompts ending mid-word/mid-tag). */
+export function capMagicPromptText(text: string, max = 600): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  let cut = t.slice(0, max);
+  const lastSentence = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+  if (lastSentence >= max * 0.5) cut = cut.slice(0, lastSentence + 1);
+  else {
+    const lastSpace = cut.lastIndexOf(" ");
+    if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  }
+  const openTag = cut.lastIndexOf("@[");
+  if (openTag >= 0 && !cut.slice(openTag).includes("]")) cut = cut.slice(0, openTag).trimEnd();
+  return cut.trim();
+}
+
 export function applyMagicModelReply(shots: ProductionShot[], arr: unknown[]): MagicApplyResult {
   const byNumber = new Map(shots.map((s) => [s.number, s]));
   const byNumberLoose = new Map(shots.map((s) => [s.number.padStart(4, "0"), s]));
@@ -1453,7 +1502,7 @@ export function applyMagicModelReply(shots: ProductionShot[], arr: unknown[]): M
     if (!shot || seen.has(shot.id)) continue;
     let prompt = String(o.prompt ?? o.content ?? o.text ?? "").trim();
     if (!prompt) continue;
-    prompt = stripMagicLeakage(prompt).slice(0, 600);
+    prompt = capMagicPromptText(stripMagicLeakage(prompt));
     if (!prompt) continue;
     generated[shot.id] = prompt;
     seen.add(shot.id);

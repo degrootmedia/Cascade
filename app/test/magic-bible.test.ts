@@ -68,7 +68,7 @@ import {
   magicBibleInputHash,
   parseMagicBibleReply,
 } from "../src/main/pipeline.js";
-import { computeUnresolvedMagicRefs, magicRefRoster } from "../src/shared/magic-refs.js";
+import { computeUnresolvedMagicRefs, inferReferencePurpose, isMagicCitablePurpose, magicRefRoster } from "../src/shared/magic-refs.js";
 
 function shot(id: string, number: string, visual: string, audio = ""): ProductionShot {
   return { id, number, audio, visual } as ProductionShot;
@@ -270,6 +270,43 @@ describe("computeUnresolvedMagicRefs", () => {
     expect(unresolved).toHaveLength(1);
     expect(unresolved[0].citedName).toBe("MysteryFigure");
     expect(unresolved[0].shotNumbers).toEqual(["0100", "0200"]);
+  });
+
+  it("reference purposes: a Blender blockout is layout and never castable (Ref-001 regression)", () => {
+    expect(inferReferencePurpose("Ref-001", "Blender Blockouts")).toBe("layout");
+    expect(inferReferencePurpose("LookDev 01", "LookDev")).toBe("style");
+    expect(inferReferencePurpose("Environment 02", "Environment")).toBe("environment");
+    expect(inferReferencePurpose("Gondola", "Props")).toBe("subject");
+    expect(isMagicCitablePurpose("layout")).toBe(false);
+    expect(isMagicCitablePurpose("environment")).toBe(true);
+
+    const p = prod();
+    p.references = [
+      { id: "r-blk", name: "Ref-001", categoryId: "cat-blk", imagePath: "references/blk.png", shotIds: [] },
+      { id: "r-env", name: "Environment 02", categoryId: "cat-env", imagePath: "references/env.png", shotIds: [] },
+      { id: "r-force", name: "Blockout Hero", categoryId: "cat-blk", purpose: "subject", imagePath: "references/h.png", shotIds: [] },
+    ] as unknown as Production["references"];
+    p.referenceCategories = [
+      { id: "cat-blk", name: "Blender Blockouts" },
+      { id: "cat-env", name: "Environment" },
+    ] as unknown as Production["referenceCategories"];
+    const roster = magicRefRoster(p);
+    const byName = new Map(roster.map((e) => [e.name, e]));
+    expect(byName.get("Ref-001")?.purpose).toBe("layout");
+    expect(byName.get("Ref-001")?.purposeInferred).toBe(true);
+    expect(byName.get("Environment 02")?.purpose).toBe("environment");
+    // An explicit user purpose always wins over inference.
+    expect(byName.get("Blockout Hero")?.purpose).toBe("subject");
+    expect(byName.get("Blockout Hero")?.purposeInferred).toBe(false);
+
+    // The parser can never bind the blockout, even if the model asks for it.
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [{ name: "drawer interior", kind: "location", descriptor: "inside a drawer", refNames: ["Ref-001", "Environment 02"] }],
+      shotPlans: [{ number: "0100", purpose: "establish", present: ["drawer interior"], mustCite: ["Ref-001"] }],
+    }), p);
+    expect(bible!.entities[0].refNames).toEqual(["Environment 02"]);
+    expect(bible!.shotPlans[0].mustCite).toEqual(["Environment 02"]);
   });
 
   it("roster carries descriptors, aliases, and artwork presence", () => {

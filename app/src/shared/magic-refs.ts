@@ -4,7 +4,7 @@
  * (types + prompt grammar + the alias resolver only) so both sides agree on
  * what "this cited name resolves" means.
  */
-import type { MagicUnresolvedRef, Production } from "./ipc.js";
+import type { MagicUnresolvedRef, Production, ReferencePurpose } from "./ipc.js";
 import { refTagMatches, renameRefTag } from "./prompt-grammar.js";
 import { canonicalRefName, refLookupKey, resolveRefByTagName, sanitizeAliases } from "./ref-names.js";
 
@@ -23,6 +23,33 @@ export interface MagicRefRosterEntry {
   /** Style-only refs auto-attach downstream; content prompts never cite them. */
   styleOnly: boolean;
   category?: string;
+  /** Effective purpose (explicit, else inferred from strong name/category
+   *  signals, else `subject`). Characters/products are always `subject`. */
+  purpose: ReferencePurpose;
+  /** True when `purpose` was inferred rather than set by the user. */
+  purposeInferred: boolean;
+}
+
+/** Strong-signal purpose inference from a reference's name + category.
+ *  Deliberately narrow: only unambiguous signals (blockout/layout/style/
+ *  lookdev/mood/environment words) override the `subject` default — a
+ *  Blender blockout category must never be cast as a subject, but an
+ *  ordinary name like "Gondola" stays a subject. */
+export function inferReferencePurpose(name: string, categoryName = "", categoryKind?: string, styleOnly?: boolean): ReferencePurpose {
+  if (styleOnly || categoryKind === "style") return "style";
+  const text = ` ${name} ${categoryName} `.toLowerCase();
+  const has = (...words: string[]): boolean => words.some((w) => text.includes(w));
+  if (has("blockout", "block-out", "layout", "blender", "previz", "pre-viz", "plate")) return "layout";
+  if (has("lookdev", "look dev", "look-dev", "style frame", "style image")) return "style";
+  if (has("moodboard", "mood board", "inspiration", "inspo")) return "inspiration";
+  if (has("environment", "location", "backdrop", "set design")) return "environment";
+  return "subject";
+}
+
+/** Magic may auto-cast/cite only subjects and environments. Layout,
+ *  style, and inspiration refs still resolve when the USER cites them. */
+export function isMagicCitablePurpose(purpose: ReferencePurpose): boolean {
+  return purpose === "subject" || purpose === "environment";
 }
 
 /** The production's full citable roster (deduplicated by canonical name,
@@ -34,6 +61,7 @@ export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
     (p.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id)
   );
   const catName = new Map((p.referenceCategories ?? []).map((c) => [c.id, c.name]));
+  const catKind = new Map((p.referenceCategories ?? []).map((c) => [c.id, c.kind]));
   const push = (e: MagicRefRosterEntry): void => {
     const key = refLookupKey(e.name);
     if (!key || seen.has(key)) return;
@@ -49,6 +77,8 @@ export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
       aliases: sanitizeAliases(c.aliases, c.name),
       hasArtwork: Boolean(c.artwork || c.imagePath),
       styleOnly: false,
+      purpose: "subject",
+      purposeInferred: false,
     });
   }
   for (const pr of p.products ?? []) {
@@ -60,18 +90,25 @@ export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
       aliases: sanitizeAliases(pr.aliases, pr.name),
       hasArtwork: Boolean(pr.artwork || pr.imagePath),
       styleOnly: false,
+      purpose: "subject",
+      purposeInferred: false,
     });
   }
   for (const r of p.references ?? []) {
+    const category = r.categoryId ? catName.get(r.categoryId) : undefined;
+    const styleOnly = r.styleOnly === true || Boolean(r.categoryId && styleCats.has(r.categoryId));
+    const purpose: ReferencePurpose = r.purpose ?? inferReferencePurpose(r.name, category ?? "", r.categoryId ? catKind.get(r.categoryId) : undefined, r.styleOnly);
     push({
       id: r.id,
       name: r.name,
       kind: "reference",
-      descriptor: "",
+      descriptor: (r.visualSummary ?? "").trim(),
       aliases: sanitizeAliases(r.aliases, r.name),
       hasArtwork: Boolean(r.artwork || r.imagePath || r.mediaPath),
-      styleOnly: r.styleOnly === true || Boolean(r.categoryId && styleCats.has(r.categoryId)),
-      category: r.categoryId ? catName.get(r.categoryId) : undefined,
+      styleOnly: styleOnly || purpose === "style",
+      category,
+      purpose,
+      purposeInferred: !r.purpose,
     });
   }
   return out;

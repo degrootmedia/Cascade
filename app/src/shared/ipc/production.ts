@@ -334,6 +334,15 @@ export interface ProductRef {
   imagePath?: string;
 }
 
+/** What a reference is FOR — governs whether Magic may cast/cite it:
+ *  - `subject`: a character, product, or prop that appears in frame.
+ *  - `environment`: a set/location/backdrop.
+ *  - `style`: look only; auto-attaches as style, never a subject.
+ *  - `layout`: blockouts/composition plates; generation inputs, never cast.
+ *  - `inspiration`: mood only; never uploaded as a subject.
+ *  Absent = infer from name/category (strong signals only), else `subject`. */
+export type ReferencePurpose = "subject" | "environment" | "style" | "layout" | "inspiration";
+
 /** A user-added reference (material, texture, mood, hero prop) that must be
  *  applied to specific shots. Created in Step 2; associated to shots in Step 3. */
 export interface CustomRef {
@@ -359,6 +368,11 @@ export interface CustomRef {
   aliases?: string[];
   /** Style-only override: auto-attaches with a style-only clause. */
   styleOnly?: boolean;
+  /** What this reference is for (Magic casting/citation). See ReferencePurpose. */
+  purpose?: ReferencePurpose;
+  /** One-line "what this image shows" card for Magic binding and tooltips.
+   *  User-editable; may be auto-drafted by vision. NOT prompt direction. */
+  visualSummary?: string;
 }
 
 export interface ReferenceCategory {

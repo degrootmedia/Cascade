@@ -5163,6 +5163,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-magic-reconcile-name small { color: var(--text-dim); }
 .prod-magic-reconcile-select { max-width: 260px; }
 .prod-magic-reconcile-dismiss { margin-left: auto; }
+.prod-ref-purpose-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.prod-ref-purpose { flex: 1; min-width: 0; font-size: 11px; padding: 2px 4px; }
+.prod-ref-purpose-inferred { font-size: 10px; color: var(--text-dim); }
+.prod-ref-describe { font-size: 11px; padding: 2px 6px; white-space: nowrap; }
 .prod-prompt-sidepanel.magic-active .prompt-content-editor {
   position: relative;
   border: 1.5px solid transparent;

@@ -20,6 +20,7 @@ import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider,
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { MagicReconcileQueue } from "./production/magic-reconcile.js";
+import { askName } from "./NamePromptDialog.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { OutdatedSection } from "./production/outdated.js";
 import { SequenceBarChrome, SequenceBarLayer, SequenceCreateStrip, type SequenceBarTarget } from "./production/sequence-bar.js";
@@ -1437,6 +1438,41 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   function renameCategory(id: string, name: string) {
     if (!prod || !name.trim()) return;
     saveField({ referenceCategories: (prod.referenceCategories ?? []).map((c) => c.id === id ? { ...c, name: name.trim() } : c) });
+  }
+
+  function setRefPurpose(id: string, purpose: CustomRef["purpose"]) {
+    if (!prod) return;
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, purpose, styleOnly: purpose === "style" ? true : r.styleOnly } : r)) });
+  }
+
+  /** Edit a reference's one-line "what this shows" card (Magic binding aid).
+   *  Empty input clears it; when empty, offer a vision auto-draft first. */
+  function describeRef(ref: CustomRef) {
+    if (!prod) return;
+    void (async () => {
+      let initial = ref.visualSummary ?? "";
+      if (!initial && (ref.artwork || ref.imagePath)) {
+        try {
+          const drafted = await window.cascade.describeReference(prod.meta.id, ref.id);
+          applySnapshot(drafted); void refreshList();
+          const fresh = (drafted.references ?? []).find((r) => r.id === ref.id);
+          initial = fresh?.visualSummary ?? "";
+          if (initial) return;
+        } catch { /* fall through to manual entry */ }
+      }
+      const text = await askName({
+        title: `What does “${ref.name}” show?`,
+        label: "One line Magic uses to cast this reference correctly (not prompt direction). Clear it to remove.",
+        initial,
+        confirmLabel: "Save card",
+        validate: () => null,
+      });
+      if (text === null) return;
+      const latest = prodRef.current;
+      if (!latest) return;
+      const clean = text.trim().slice(0, 300);
+      saveField({ references: (latest.references ?? []).map((r) => (r.id === ref.id ? { ...r, visualSummary: clean || undefined } : r)) });
+    })();
   }
 
   function moveReference(ids: string[], categoryId?: string) {
@@ -4466,6 +4502,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
                 onRescan={rescanRefFolder}
+                onSetPurpose={setRefPurpose}
+                onDescribe={describeRef}
                 onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
             </DesignSection>

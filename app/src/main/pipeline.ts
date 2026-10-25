@@ -54,7 +54,7 @@ import type { VideoRef720Deps } from "./video-ref.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, MagicBible, MagicBibleShotPlan, ProductRef, SuggestedReference } from "../shared/ipc.js";
-import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
+import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, isMagicCitablePurpose, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -505,6 +505,54 @@ export async function stylePromptFromImage(
 }
 
 /**
+ * Draft a reference's one-line "what this shows" card from its image
+ * (vision). Used for Magic casting/explanations only — never prompt text.
+ * Sets `visualSummary` on the reference when empty and returns the
+ * production. Throws when the reference has no readable image or the
+ * model returns nothing usable (the UI falls back to manual entry).
+ */
+export async function describeReference(
+  p: Production,
+  refId: string,
+  apiKey: string,
+  model: string,
+  emit: EmitFn,
+  baseUrl?: string,
+): Promise<Production> {
+  const ref = (p.references ?? []).find((r) => r.id === refId);
+  if (!ref) throw new Error("Reference not found.");
+  if (ref.visualSummary?.trim()) return p;
+  const imageDataUrl = refArtworkDataUrl(p, ref);
+  if (!imageDataUrl) throw new Error("This reference has no image to describe yet.");
+  const gab = new ChatClient(apiKey, baseUrl);
+  const { text } = await gab.completeOnce(
+    model,
+    [
+      { role: "system", content: "You catalog reference images for an animation pipeline. Reply with JSON only — no markdown fences, no prose." },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "Look at the attached production reference image and catalog it.\n" +
+              'Return exactly: { "summary": one line (max 20 words) saying what the image SHOWS — the subject/set and its form, e.g. "Grey 3D blockout of a drawer interior, top-down" or "Red paperclip character, three-quarter view". No style words beyond form. }',
+          },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ],
+      },
+    ],
+    300
+  );
+  const parsed = parseJsonLooseObject(text);
+  const summary = String(parsed?.summary ?? "").trim().slice(0, 300);
+  if (!summary) throw new Error("The model could not describe this reference — write the card manually.");
+  p.references = (p.references ?? []).map((r) => (r.id === refId ? { ...r, visualSummary: summary } : r));
+  emit(`Reference card drafted for ${ref.name}: ${summary}`);
+  return p;
+}
+
+/**
  * Magic Prompt — content-only generation for the full storyboard.
  * The style system stays separate (Style:/Brand paragraphs are not included).
  * Generation parameters (prompt template, rules) live in the magic-prompt
@@ -591,15 +639,16 @@ function strList(raw: unknown, maxItems: number, maxLen: number): string[] {
 }
 
 /** The roster as the model-facing lines every Magic pass shares: canonical
- *  citable name, kind, descriptor, aliases, and whether an image exists.
- *  Style-only refs are listed separately as never-cite (they auto-attach). */
+ *  citable name, purpose, descriptor, aliases, and whether an image exists.
+ *  Non-citable refs (style/layout/inspiration) are named only so the model
+ *  knows they exist and must never be cast or cited as subjects. */
 function magicRosterLines(p: Production): { citeLines: string; styleOnlyNames: string[] } {
   const roster = magicRefRoster(p);
   const lines: string[] = [];
   const styleOnlyNames: string[] = [];
   for (const e of roster) {
-    if (e.styleOnly) { styleOnlyNames.push(e.name); continue; }
-    const bits: string[] = [e.kind];
+    if (!isMagicCitablePurpose(e.purpose)) { styleOnlyNames.push(`${e.name} (${e.purpose})`); continue; }
+    const bits: string[] = [e.purpose === "environment" ? "environment" : e.kind];
     if (e.descriptor) bits.push(e.descriptor);
     if (e.category) bits.push(`category: ${e.category}`);
     if (e.aliases.length) bits.push(`also called: ${e.aliases.join(", ")}`);
@@ -621,7 +670,7 @@ export function magicBibleInputHash(p: Production): string {
       t: sc.title,
       shots: sc.shots.map((s) => [s.number, s.audio, s.visual]),
     })),
-    roster: magicRefRoster(p).map((e) => [e.kind, e.name, e.descriptor, e.aliases, e.hasArtwork, e.styleOnly]),
+    roster: magicRefRoster(p).map((e) => [e.kind, e.name, e.descriptor, e.aliases, e.hasArtwork, e.styleOnly, e.purpose]),
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 16);
 }
@@ -742,7 +791,7 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
   const parsed = parseJsonLooseObject(text) as Record<string, unknown> | null;
   if (!parsed) return null;
   const roster = magicRefRoster(p);
-  const citable = roster.filter((e) => !e.styleOnly);
+  const citable = roster.filter((e) => isMagicCitablePurpose(e.purpose));
   const canonical = (raw: unknown): string | undefined => {
     const name = capStr(raw, 120);
     return name ? canonicalRefName(citable, name) : undefined;

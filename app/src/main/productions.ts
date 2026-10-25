@@ -44,6 +44,13 @@ function normalize(p: ProductionFile): ProductionFile {
     delete clean.description;
     return clean;
   });
+  for (const r of p.references) {
+    if (r.purpose !== undefined && !["subject", "environment", "style", "layout", "inspiration"].includes(r.purpose)) delete r.purpose;
+    if (r.visualSummary !== undefined) {
+      const clean = typeof r.visualSummary === "string" ? r.visualSummary.trim().slice(0, 300) : "";
+      if (clean) r.visualSummary = clean; else delete r.visualSummary;
+    }
+  }
   // Reference aliases are read-repaired: sanitized/deduped, canonical dropped.
   for (const pool of [p.characters, p.products, p.references]) {
     for (const r of pool as { name: string; aliases?: string[] }[]) {

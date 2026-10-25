@@ -596,6 +596,8 @@ export interface CascadeApi {
    * tags become plain text everywhere and the name is remembered.
    */
   dismissMagicRef(productionId: string, citedName: string): Promise<Production>;
+  /** Draft a reference's one-line visual-summary card from its image (vision). */
+  describeReference(productionId: string, refId: string): Promise<Production>;
   /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's

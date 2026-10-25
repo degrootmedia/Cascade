@@ -16,6 +16,7 @@ export const productionChannels = {
   "production:renameReference": { method: "renameReference", kind: "invoke" },
   "production:assignReferenceAlias": { method: "assignReferenceAlias", kind: "invoke" },
   "production:dismissMagicRef": { method: "dismissMagicRef", kind: "invoke" },
+  "production:describeReference": { method: "describeReference", kind: "invoke" },
   "production:generateReferenceImage": { method: "generateReferenceImage", kind: "invoke" },
   "production:generateCharacterSheet": { method: "generateCharacterSheet", kind: "invoke" },
   "production:removeReferenceFile": { method: "removeReferenceFile", kind: "invoke" },

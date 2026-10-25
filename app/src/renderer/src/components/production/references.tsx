@@ -4,6 +4,7 @@ import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
+import { inferReferencePurpose } from "../../../../shared/magic-refs.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { isQuotableCostModel } from "./generation-cost.js";
 import { GenerationCostSuffix } from "./generation-cost-label.js";
@@ -229,7 +230,7 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved }: {
+export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
@@ -248,6 +249,8 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   /** Open the reference-image generation modal targeting a category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
   /** Rescan the production's references folder: adopt images added externally. */
   onRescan: () => Promise<void> | void;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
@@ -337,7 +340,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -362,7 +365,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
@@ -380,6 +383,8 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
   onEditRef?: (ref: CustomRef) => void;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
@@ -409,7 +414,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -448,7 +453,9 @@ function areRefItemsEqual(a: CustomRef, b: CustomRef): boolean {
     (a.artwork ?? null) === (b.artwork ?? null) &&
     (a.media ?? null) === (b.media ?? null) &&
     (a.mediaPath ?? null) === (b.mediaPath ?? null) &&
-    (a.categoryId ?? "") === (b.categoryId ?? "")
+    (a.categoryId ?? "") === (b.categoryId ?? "") &&
+    (a.purpose ?? "") === (b.purpose ?? "") &&
+    (a.visualSummary ?? "") === (b.visualSummary ?? "")
   );
 }
 
@@ -465,9 +472,13 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, variant = "row", thumbEdge }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge }: {
   prodId: string;
   refItem: CustomRef;
+  categoryName?: string;
+  categoryKind?: string;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
   /** This tile is part of the section's multi-selection. */
   selected?: boolean;
   /** The whole multi-selection — dragging a selected tile drags all of them. */
@@ -666,6 +677,24 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
         <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}>{isNode ? <XIcon size={12} /> : <TrashIcon size={12} />}</button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
+      {!isNode && onSetPurpose && (
+        <div className="prod-ref-purpose-row" title={r.visualSummary ? `Shows: ${r.visualSummary}` : "What Magic may use this reference for"}>
+          <select
+            className="prod-ref-purpose"
+            value={r.purpose ?? inferReferencePurpose(r.name, categoryName ?? "", categoryKind, r.styleOnly)}
+            onChange={(e) => onSetPurpose(r.id, e.target.value as CustomRef["purpose"])}
+            title={r.purpose ? "Reference purpose (Magic casting)" : "Reference purpose — inferred, change to confirm"}
+          >
+            <option value="subject">Subject</option>
+            <option value="environment">Environment</option>
+            <option value="style">Style only</option>
+            <option value="layout">Layout / blockout</option>
+            <option value="inspiration">Inspiration</option>
+          </select>
+          {!r.purpose && <span className="prod-ref-purpose-inferred">auto</span>}
+          {onDescribe && <button className="prod-ref-describe" title={r.visualSummary ? `Shows: ${r.visualSummary} — click to edit` : "Add a one-line 'what this shows' card (helps Magic cast it correctly)"} onClick={() => onDescribe(r)}>{r.visualSummary ? "✎ card" : "+ card"}</button>}
+        </div>
+      )}
       {zoom && (
         <MediaLightbox
           name={zoom.name}
@@ -688,6 +717,9 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   prev.selected === next.selected &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
+  prev.categoryName === next.categoryName &&
+  (prev.onSetPurpose ? 1 : 0) === (next.onSetPurpose ? 1 : 0) &&
+  (prev.onDescribe ? 1 : 0) === (next.onDescribe ? 1 : 0) &&
   (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0) &&
   (prev.onVideoStillSaved ? 1 : 0) === (next.onVideoStillSaved ? 1 : 0));
 

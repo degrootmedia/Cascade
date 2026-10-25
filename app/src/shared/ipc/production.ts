@@ -640,6 +640,9 @@ export interface MagicBibleEntity {
   confidence?: "high" | "medium" | "low";
   /** Plain-language why ("Matched Villains category", "You mapped this"). */
   bindReason?: string;
+  /** The user explicitly confirmed this mapping ("Looks right"). Mapping
+   *  edits alone do NOT confirm — the row stays in review until then. */
+  confirmed?: boolean;
   /** Other names the script uses for this entity. */
   aliases?: string[];
 }
@@ -700,6 +703,9 @@ export interface MagicRefDecision {
   /** Mapped reference ids (empty when text-only or pending creation). */
   refIds: string[];
   textOnly?: boolean;
+  /** Explicitly confirmed via "Looks right". Absent on legacy decisions
+   *  (treated as confirmed); mapping edits write `false` until confirmed. */
+  confirmed?: boolean;
   /** User went off to create this reference (suite/RefGen) — resumable. */
   pendingCreate?: boolean;
   updatedAt: string;

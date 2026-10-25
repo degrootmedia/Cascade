@@ -33,14 +33,18 @@ function statusLine(need: MagicCastNeed): string {
   if (need.status === "unmapped") return "No reference matched. Map one of yours, create it, or mark text-only.";
   if (need.purposeWarning) return need.purposeWarning;
   const by = need.boundBy === "user" ? "you mapped this" : need.boundBy === "auto" ? "auto-matched" : "model matched";
-  return `Using ${need.refNames.map((n) => `@[${n}]`).join(", ")} — ${need.bindReason ?? by}${need.confidence ? ` · ${need.confidence} confidence` : ""}.`;
+  const confirmHint = need.boundBy === "user" && need.status === "review" ? " Not confirmed yet — click Looks right when you're happy." : "";
+  return `Using ${need.refNames.map((n) => `@[${n}]`).join(", ")} — ${need.bindReason ?? by}${need.confidence ? ` · ${need.confidence} confidence` : ""}.${confirmHint}`;
 }
 
-export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite, onClose, onWrite }: {
+export function MagicCastReview({ prod, busy, onMap, onConfirm, onTextOnly, onCreateInSuite, onClose, onWrite }: {
   prod: Production;
   /** Entity name currently being saved (disables its row). */
   busy: string | null;
+  /** Edit the mapping only — does NOT confirm; the row stays in review. */
   onMap: (entityName: string, refIds: string[]) => void;
+  /** Explicitly confirm the mapping ("Looks right") — moves it to Ready. */
+  onConfirm: (entityName: string, refIds: string[]) => void;
   onTextOnly: (entityName: string) => void;
   onCreateInSuite: (need: MagicCastNeed) => void;
   onClose: () => void;
@@ -141,7 +145,7 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
           ))}
           <div className="prod-cast-actions">
             {need.status !== "ready" && need.status !== "text-only" && need.refNames.length > 0 && !need.purposeWarning && (
-              <button className="prod-btn" disabled={isBusy} onClick={() => onMap(need.entityName, mapped.map((e) => e.id))}>Looks right</button>
+              <button className="prod-btn" disabled={isBusy} onClick={() => onConfirm(need.entityName, mapped.map((e) => e.id))}>Looks right</button>
             )}
             <button className="prod-btn" disabled={isBusy} onClick={() => openPicker(need, mapped.map((e) => e.id))}>
               {need.refNames.length ? "Add / change references" : "Use my reference"}

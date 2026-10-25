@@ -19,7 +19,6 @@ import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
-import { MagicReconcileQueue } from "./production/magic-reconcile.js";
 import { MagicCastReview } from "./production/magic-cast-review.js";
 import { magicCastReviewCount, type MagicCastNeed } from "../../../shared/magic-refs.js";
 import { askName } from "./NamePromptDialog.js";
@@ -274,8 +273,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [boardDropTarget, setBoardDropTarget] = useState<string | null>(null);
   const boardDragRef = useRef<string | null>(null);
   const [magicBusy, setMagicBusy] = useState(false);
-  /** Cited name the Magic reconciliation queue is currently resolving. */
-  const [magicReconcileBusy, setMagicReconcileBusy] = useState<string | null>(null);
   /** Cast & Sets review modal visibility + the entity currently saving. */
   const [castReviewOpen, setCastReviewOpen] = useState(false);
   const [castBusy, setCastBusy] = useState<string | null>(null);
@@ -2658,11 +2655,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
   }
 
-  /** One Cast & Sets decision (map / text-only / pending create). */
-  function decideCast(entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean) {
+  /** One Cast & Sets decision (map / text-only / pending create). Mapping
+   *  edits pass confirmed=false: only "Looks right" moves a row to Ready. */
+  function decideCast(entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed = false) {
     if (!prod || castBusy) return;
     setCastBusy(entityName); setErr(null);
-    void window.cascade.setMagicRefDecision(prod.meta.id, entityName, refIds, textOnly, pendingCreate).then((next) => {
+    void window.cascade.setMagicRefDecision(prod.meta.id, entityName, refIds, textOnly, pendingCreate, confirmed).then((next) => {
       applySnapshot(next); void refreshList();
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setCastBusy(null));
   }
@@ -2672,7 +2670,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   function createCastInSuite(need: MagicCastNeed) {
     if (!prod || castBusy) return;
     setCastBusy(need.entityName); setErr(null);
-    void window.cascade.setMagicRefDecision(prod.meta.id, need.entityName, [], false, true).then((next) => {
+    void window.cascade.setMagicRefDecision(prod.meta.id, need.entityName, [], false, true, false).then((next) => {
       applySnapshot(next); void refreshList();
       setCastReviewOpen(false);
       openImageSuite(prod.meta.id, {
@@ -2703,41 +2701,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       applySnapshot(next); void refreshList();
       void refreshPromptAfterMagic(next);
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
-  }
-
-  /** Magic reconciliation: slot the user's reference where prompts cite a
-   *  script/model name. Main saves the alias + rewrites the tags atomically;
-   *  both prompt views refresh like after any Magic change. */
-  function assignMagicAlias(citedName: string, refId: string) {
-    if (!prod || !refId || magicReconcileBusy) return;
-    setMagicReconcileBusy(citedName); setErr(null);
-    void window.cascade.assignReferenceAlias(prod.meta.id, citedName, refId).then((next) => {
-      applySnapshot(next); void refreshList();
-      void refreshPromptAfterMagic(next);
-    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicReconcileBusy(null));
-  }
-
-  /** Magic reconciliation: create an empty reference slot under the cited
-   *  name (the user attaches its image in Step 2). Renderer-owned save. */
-  function createMagicRef(citedName: string) {
-    if (!prod || magicReconcileBusy) return;
-    setMagicReconcileBusy(citedName); setErr(null);
-    try {
-      saveField({ references: [...(prod.references ?? []), { id: uid("ref"), name: citedName, shotIds: [] }] });
-    } finally {
-      setMagicReconcileBusy(null);
-    }
-  }
-
-  /** Magic reconciliation: dismiss a cited name as a plain noun. Main
-   *  strips its tags to plain text everywhere and remembers the name. */
-  function dismissMagicRef(citedName: string) {
-    if (!prod || magicReconcileBusy) return;
-    setMagicReconcileBusy(citedName); setErr(null);
-    void window.cascade.dismissMagicRef(prod.meta.id, citedName).then((next) => {
-      applySnapshot(next); void refreshList();
-      void refreshPromptAfterMagic(next);
-    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicReconcileBusy(null));
   }
 
   /** Step 3: persist a shot's Audio/Visual direction edited on its board card
@@ -4619,20 +4582,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               <MagicCastReview
                 prod={prod}
                 busy={castBusy}
-                onMap={(entityName, refIds) => decideCast(entityName, refIds, false, false)}
-                onTextOnly={(entityName) => decideCast(entityName, [], true, false)}
+                onMap={(entityName, refIds) => decideCast(entityName, refIds, false, false, false)}
+                onConfirm={(entityName, refIds) => decideCast(entityName, refIds, false, false, true)}
+                onTextOnly={(entityName) => decideCast(entityName, [], true, false, false)}
                 onCreateInSuite={createCastInSuite}
                 onClose={() => setCastReviewOpen(false)}
                 onWrite={() => { setCastReviewOpen(false); regenMagic(); }}
-              />
-            )}
-            {prod.magicEnabled && (
-              <MagicReconcileQueue
-                prod={prod}
-                busy={magicReconcileBusy}
-                onAssign={assignMagicAlias}
-                onCreate={createMagicRef}
-                onDismiss={dismissMagicRef}
               />
             )}
             <div className="prod-boards-controls">

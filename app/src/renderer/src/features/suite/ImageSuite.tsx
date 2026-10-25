@@ -392,9 +392,9 @@ export function ImageSuite({
             ?? (next.references ?? []).find((r) => r.name === name);
           if (created) {
             try {
-              next = await window.cascade.setMagicRefDecision(prodId, pendingEntity, [created.id], false, false);
+              next = await window.cascade.setMagicRefDecision(prodId, pendingEntity, [created.id], false, false, false);
               setSession((s) => ({ ...s, draft: { ...s.draft, pendingEntity: undefined } }));
-              setNotice(`Mapped: ${pendingEntity} → @[${created.name}]. Back in Cast & Sets it's ready.`);
+              setNotice(`Mapped: ${pendingEntity} → @[${created.name}]. Confirm it with “Looks right” in Cast & Sets.`);
             } catch { /* mapping can still be done manually in Cast & Sets */ }
           }
         }

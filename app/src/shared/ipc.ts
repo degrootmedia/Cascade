@@ -601,7 +601,7 @@ export interface CascadeApi {
   /** Magic Stage 1: build/refresh the Story Bible only (Cast & Sets review follows). */
   generateMagicBible(productionId: string): Promise<Production>;
   /** Record a Cast & Sets decision for one bible entity (map / text-only / pending create). */
-  setMagicRefDecision(productionId: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean): Promise<Production>;
+  setMagicRefDecision(productionId: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed: boolean): Promise<Production>;
   /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's

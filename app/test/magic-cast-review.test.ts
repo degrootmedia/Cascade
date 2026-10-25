@@ -31,7 +31,7 @@ function prod(): Production {
       entities: [
         { name: "Ada", kind: "character", descriptor: "young woman in a red cloak" },
         { name: "Drawer Alley Set", kind: "location", descriptor: "narrow alley", refName: "Drawer Alley", refNames: ["Drawer Alley"], boundBy: "auto", confidence: "medium", bindReason: "Matched an environment reference by name/category" },
-        { name: "Heroine", kind: "character", descriptor: "lead", refName: "Hero", refNames: ["Hero"], boundBy: "user", confidence: "high", bindReason: "You mapped this in Cast & Sets" },
+        { name: "Heroine", kind: "character", descriptor: "lead", refName: "Hero", refNames: ["Hero"], boundBy: "user", confidence: "high", confirmed: true, bindReason: "You mapped this in Cast & Sets" },
       ],
       shotPlans: [{ number: "0100", purpose: "x", present: ["Ada", "Drawer Alley Set", "Heroine"], mustCite: [] }],
       inputHash: "h", generatedAt: "2026-01-01",
@@ -42,6 +42,7 @@ function prod(): Production {
 describe("MagicCastReview", () => {
   it("explains needs, hides ready behind a toggle, and wires the actions", async () => {
     const onMap = vi.fn();
+    const onConfirm = vi.fn();
     const onTextOnly = vi.fn();
     const onCreateInSuite = vi.fn();
     const onWrite = vi.fn();
@@ -50,7 +51,7 @@ describe("MagicCastReview", () => {
     const root = createRoot(host);
     act(() => {
       root.render(createElement(MagicCastReview, {
-        prod: prod(), busy: null, onMap, onTextOnly, onCreateInSuite, onClose: () => {}, onWrite,
+        prod: prod(), busy: null, onMap, onConfirm, onTextOnly, onCreateInSuite, onClose: () => {}, onWrite,
       }));
     });
     const body = document.body.textContent ?? "";
@@ -77,6 +78,12 @@ describe("MagicCastReview", () => {
     expect(apply).toBeTruthy();
     await act(async () => { apply.click(); });
     expect(onMap).toHaveBeenCalledWith("Ada", ["c1", "c2"]);
+
+    // "Looks right" is the only path to Ready — it uses onConfirm, not onMap.
+    const looksRight = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Looks right") as HTMLButtonElement;
+    expect(looksRight).toBeTruthy();
+    await act(async () => { looksRight.click(); });
+    expect(onConfirm).toHaveBeenCalledWith("Drawer Alley Set", ["r-env"]);
 
     const buttons2 = [...document.body.querySelectorAll("button")];
     await act(async () => { buttons2.find((b) => b.textContent === "Create in Image Suite")!.click(); });

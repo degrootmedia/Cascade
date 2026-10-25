@@ -922,6 +922,7 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
         ...(refNames.length ? { refName: refNames[0], refNames } : {}),
         boundBy: "user" as const, confidence: "high" as const,
         bindReason: decision.textOnly ? "You marked this text-only" : "You mapped this in Cast & Sets",
+        ...(decision.confirmed !== undefined ? { confirmed: decision.confirmed } : {}),
         ...(e.aliases.length ? { aliases: e.aliases } : {}),
       };
     }
@@ -1005,7 +1006,7 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
 export function applyMagicRefDecision(
   p: Production,
   entityName: string,
-  decision: { refIds?: string[]; textOnly?: boolean; pendingCreate?: boolean },
+  decision: { refIds?: string[]; textOnly?: boolean; pendingCreate?: boolean; confirmed?: boolean },
   emit: EmitFn,
 ): Production {
   const cleanName = sanitizeReferenceName(entityName ?? "");
@@ -1021,6 +1022,9 @@ export function applyMagicRefDecision(
       entityName: cleanName,
       refIds: decision.textOnly ? [] : refIds,
       ...(decision.textOnly ? { textOnly: true } : {}),
+      // Mapping edits are NOT confirmation: only an explicit "Looks right"
+      // (confirmed: true) moves the row to Ready.
+      confirmed: decision.confirmed === true,
       ...(decision.pendingCreate && !refIds.length && !decision.textOnly ? { pendingCreate: true } : {}),
       updatedAt: new Date().toISOString(),
     },
@@ -1045,8 +1049,9 @@ export function applyMagicRefDecision(
       entity.refNames = refNames.length ? refNames : undefined;
       entity.boundBy = "user";
       entity.confidence = "high";
+      entity.confirmed = decision.confirmed === true;
       entity.bindReason = decision.textOnly ? "You marked this text-only" : refNames.length ? "You mapped this in Cast & Sets" : entity.bindReason;
-      if (!refNames.length && !decision.textOnly) { entity.boundBy = undefined; entity.confidence = undefined; }
+      if (!refNames.length && !decision.textOnly) { entity.boundBy = undefined; entity.confidence = undefined; entity.confirmed = undefined; }
       deriveMagicMustCite(p, bible.entities, bible.scenes, bible.shotPlans);
     }
   }
@@ -1290,7 +1295,7 @@ function ensureSettingAnchor(prompt: string, anchor: string): string {
  *  deterministic backstops the model keeps missing in practice — append
  *  any planned must-cite tags it omitted (environment included) and ensure
  *  the standalone setting anchor is present. Unknown tags stay visible in
- *  the text (the reconciliation queue resolves them). */
+ *  the text (Cast & Sets + alias matching resolve them). */
 function finalizeMagicPrompt(
   p: Production,
   shot: ProductionShot,
@@ -1465,7 +1470,7 @@ export async function generateMagicPrompts(
     // queue; missing must-cites are surfaced, never silently "fixed".
     const unresolved = computeUnresolvedMagicRefs({ ...p, magicPrompts: next });
     for (const u of unresolved.slice(0, 10)) {
-      emit(`Magic Prompt: @[${u.citedName}] (shots ${u.shotNumbers.join(", ")}) matches no reference — assign or dismiss it in the storyboard's reference queue.`, "info");
+      emit(`Magic Prompt: @[${u.citedName}] (shots ${u.shotNumbers.join(", ")}) matches no reference — map it in Cast & Sets or add the name as an alias on your reference in Step 2.`, "info");
     }
     if (bible) {
       const missing: string[] = [];

@@ -344,10 +344,16 @@ describe("Cast & Sets decisions + provenance", () => {
     expect(magicCastNeeds(p)[0].status).toBe("unmapped");
     expect(magicCastReviewCount(p)).toBe(1);
     applyMagicRefDecision(p, "Ada", { refIds: ["c1"] }, () => {});
-    expect(p.magicBible.entities[0]).toMatchObject({ refNames: ["Hero"], boundBy: "user" });
+    expect(p.magicBible.entities[0]).toMatchObject({ refNames: ["Hero"], boundBy: "user", confirmed: false });
     expect(p.magicBible.shotPlans[0].mustCite).toEqual(["Hero"]);
     expect(p.characters[0].aliases).toContain("Ada");
+    // Mapping alone does NOT confirm: the row stays in review until "Looks right".
+    expect(magicCastNeeds(p)[0].status).toBe("review");
+    applyMagicRefDecision(p, "Ada", { refIds: ["c1"], confirmed: true }, () => {});
     expect(magicCastNeeds(p)[0]).toMatchObject({ status: "ready", shotNumbers: ["0100"] });
+    // Removing a ref (chip ×) edits the mapping and un-confirms it again.
+    applyMagicRefDecision(p, "Ada", { refIds: [] }, () => {});
+    expect(magicCastNeeds(p)[0].status).toBe("unmapped");
     applyMagicRefDecision(p, "Ada", { textOnly: true }, () => {});
     expect(magicCastNeeds(p)[0].status).toBe("text-only");
     expect(p.magicBible.shotPlans[0].mustCite).toEqual([]);

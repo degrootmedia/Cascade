@@ -5138,31 +5138,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   box-shadow: 0 0 0 2px color-mix(in srgb, #a78bfa 35%, transparent);
 }
 .prod-magic-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-/* Reconciliation queue: cited names with no matching user reference. */
-.prod-magic-reconcile {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 12px 0;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-panel);
-}
-.prod-magic-reconcile-head { display: flex; flex-direction: column; gap: 2px; }
-.prod-magic-reconcile-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 10px;
-  background: var(--bg-raised);
-  border-radius: 7px;
-}
-.prod-magic-reconcile-name { display: flex; align-items: baseline; gap: 8px; min-width: 180px; }
-.prod-magic-reconcile-name small { color: var(--text-dim); }
-.prod-magic-reconcile-select { max-width: 260px; }
-.prod-magic-reconcile-dismiss { margin-left: auto; }
 .prod-ref-purpose-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 .prod-ref-purpose { flex: 1; min-width: 0; font-size: 11px; padding: 2px 4px; }
 .prod-ref-purpose-inferred { font-size: 10px; color: var(--text-dim); }

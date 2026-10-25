@@ -5658,10 +5658,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return productions.loadProduction(id) ?? p;
   });
 
-  handle("production:setMagicRefDecision", (_e, id: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean) => {
+  handle("production:setMagicRefDecision", (_e, id: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed: boolean) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
-    applyMagicRefDecision(p, entityName, { refIds: Array.isArray(refIds) ? refIds : [], textOnly: textOnly === true, pendingCreate: pendingCreate === true }, (m, l) => productionEmit(id, m, l));
+    applyMagicRefDecision(p, entityName, { refIds: Array.isArray(refIds) ? refIds : [], textOnly: textOnly === true, pendingCreate: pendingCreate === true, confirmed: confirmed === true }, (m, l) => productionEmit(id, m, l));
     productions.saveProduction(p);
     return p;
   });

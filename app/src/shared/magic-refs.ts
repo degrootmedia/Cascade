@@ -231,11 +231,16 @@ export function magicCastNeeds(p: Production): MagicCastNeed[] {
       }
     }
     let status: MagicCastNeed["status"];
+    // A user mapping is only "ready" once explicitly confirmed ("Looks
+    // right"); editing the mapping (add/remove a ref) un-confirms it.
+    // Legacy decisions predate the flag and count as confirmed.
+    const userConfirmed = e.boundBy === "user" && (e.confirmed === true || (e.confirmed === undefined && decision?.confirmed !== false && decision !== undefined) || decision?.confirmed === true);
     if (decision?.textOnly) status = "text-only";
     else if (decision?.pendingCreate && !refNames.length) status = "pending-create";
     else if (!refNames.length) status = "unmapped";
     else if (purposeWarning) status = "review";
-    else if (e.boundBy === "user" || (e.boundBy === "model" && e.confidence === "high")) status = "ready";
+    else if (decision?.confirmed === false) status = "review";
+    else if (userConfirmed || (e.boundBy === "model" && e.confidence === "high")) status = "ready";
     else status = "review";
     needs.push({
       entityName: e.name, kind: e.kind, descriptor: e.descriptor,

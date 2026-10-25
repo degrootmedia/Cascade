@@ -823,7 +823,9 @@ export function deriveMagicMustCite(
     const derived: string[] = [];
     const add = (names: string[]): void => { for (const n of names) if (!derived.includes(n)) derived.push(n); };
     for (const e of present) {
-      if (e.kind === "character" || e.kind === "product") add(bound(e).slice(0, isGroupBibleEntity(e) ? 2 : 1));
+      // A user's explicit multi-map wins over the primary-only discipline
+      // (they chose several refs for this subject in Cast & Sets).
+      if (e.kind === "character" || e.kind === "product") add(e.boundBy === "user" ? bound(e) : bound(e).slice(0, isGroupBibleEntity(e) ? 2 : 1));
     }
     let env = present.find((e) => e.kind === "location" && bound(e).length > 0);
     if (!env && boundLocations.length) {
@@ -833,8 +835,8 @@ export function deriveMagicMustCite(
       env = boundLocations.find((e) => [...bibleTokens(e.name), ...(e.aliases ?? []).flatMap(bibleTokens)].some((t) => sceneTokens.has(t)))
         ?? (boundLocations.length === 1 ? boundLocations[0] : undefined);
     }
-    if (env) add(bound(env).slice(0, 1));
-    for (const e of present) if (e.kind === "prop") add(bound(e).slice(0, 1));
+    if (env) add(env.boundBy === "user" ? bound(env).slice(0, 2) : bound(env).slice(0, 1));
+    for (const e of present) if (e.kind === "prop") add(e.boundBy === "user" ? bound(e) : bound(e).slice(0, 1));
     // Model-listed extras survive only while still bound to some entity —
     // otherwise a later text-only/unmap decision could never un-cite them.
     const boundNames = new Set(entities.flatMap((e) => bound(e).map((n) => refLookupKey(n))));

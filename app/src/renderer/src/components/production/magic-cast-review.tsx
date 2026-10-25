@@ -50,6 +50,8 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
   const roster = useMemo(() => magicRefRoster(prod), [prod]);
   const thumbs = useMemo(() => new Map(allPromptRefs(prod).map((r) => [r.id, r.artwork])), [prod]);
   const [pickerFor, setPickerFor] = useState<string | null>(null);
+  /** Multi-select draft per entity while its picker is open (ref ids). */
+  const [draftPicks, setDraftPicks] = useState<Record<string, string[]>>({});
   const [showReady, setShowReady] = useState(false);
   const rosterByName = useMemo(() => new Map(roster.map((e) => [e.name, e])), [roster]);
   const reviewCount = needs.filter((n) => n.status === "review" || n.status === "unmapped" || n.status === "pending-create").length;
@@ -64,9 +66,23 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
   };
   const notCastable = roster.filter((e) => !isMagicCitablePurpose(e.purpose));
 
+  const openPicker = (need: MagicCastNeed, mappedIds: string[]): void => {
+    if (pickerFor === need.entityName) { setPickerFor(null); return; }
+    setPickerFor(need.entityName);
+    setDraftPicks((prev) => ({ ...prev, [need.entityName]: mappedIds }));
+  };
+  const togglePick = (entityName: string, id: string): void => {
+    setDraftPicks((prev) => {
+      const cur = prev[entityName] ?? [];
+      return { ...prev, [entityName]: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] };
+    });
+  };
+
   const row = (need: MagicCastNeed) => {
     const mapped = need.refNames.map((n) => rosterByName.get(n)).filter(Boolean) as MagicRefRosterEntry[];
     const isBusy = busy === need.entityName;
+    const draft = draftPicks[need.entityName] ?? mapped.map((e) => e.id);
+    const draftChanged = draft.length !== mapped.length || draft.some((id) => !mapped.some((e) => e.id === id));
     return (
       <div className="prod-cast-row" key={need.entityName}>
         <div className="prod-cast-main">
@@ -77,16 +93,38 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
           </div>
           {need.descriptor && <div className="prod-cast-desc">{need.descriptor}</div>}
           <div className={"prod-cast-status" + (need.status === "ready" || need.status === "text-only" ? " ok" : "")}>{statusLine(need)}</div>
+          {mapped.length > 0 && pickerFor !== need.entityName && (
+            <div className="prod-cast-chips">
+              {mapped.map((e) => (
+                <span key={e.id} className="prod-cast-chip">
+                  @[{e.name}]
+                  <button disabled={isBusy} title={`Remove @[${e.name}] from ${need.entityName}`} onClick={() => onMap(need.entityName, mapped.filter((x) => x.id !== e.id).map((x) => x.id))}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
           {pickerFor === need.entityName && (
             <div className="prod-cast-picker">
-              {candidatesFor(need).map((c) => (
-                <button key={c.id} className="prod-cast-candidate" disabled={isBusy} onClick={() => { setPickerFor(null); onMap(need.entityName, [c.id]); }} title={c.descriptor || c.name}>
-                  {thumbs.get(c.id) ? <img src={thumbs.get(c.id)} alt="" /> : <span className="prod-cast-candidate-blank">＋</span>}
-                  <span>@[{c.name}]</span>
-                  <small>{c.purpose}{c.purposeInferred ? " (auto)" : ""}{c.descriptor ? ` — ${c.descriptor}` : ""}</small>
-                </button>
-              ))}
+              <div className="prod-cast-picker-hint">Select one or more references — a group (heroes, a gang, a team) can use several at once.</div>
+              <div className="prod-cast-picker-grid">
+                {candidatesFor(need).map((c) => {
+                  const selectedPick = draft.includes(c.id);
+                  return (
+                    <button key={c.id} className={"prod-cast-candidate" + (selectedPick ? " selected" : "")} disabled={isBusy} aria-pressed={selectedPick} onClick={() => togglePick(need.entityName, c.id)} title={c.descriptor || c.name}>
+                      {thumbs.get(c.id) ? <img src={thumbs.get(c.id)} alt="" /> : <span className="prod-cast-candidate-blank">＋</span>}
+                      <span>{selectedPick ? "✓ " : ""}@[{c.name}]</span>
+                      <small>{c.purpose}{c.purposeInferred ? " (auto)" : ""}{c.descriptor ? ` — ${c.descriptor}` : ""}</small>
+                    </button>
+                  );
+                })}
+              </div>
               {!candidatesFor(need).length && <span className="hint">No castable references yet — create one.</span>}
+              <div className="prod-cast-picker-actions">
+                <button className="prod-btn" disabled={isBusy || !draftChanged} onClick={() => { setPickerFor(null); onMap(need.entityName, draft); }}>
+                  {draft.length ? `Use selected (${draft.length})` : "Unmap all"}
+                </button>
+                <button className="prod-btn ghost" disabled={isBusy} onClick={() => setPickerFor(null)}>Cancel</button>
+              </div>
               {notCastable.length > 0 && (
                 <div className="prod-cast-notcastable">
                   Not castable (style/layout/inspiration): {notCastable.map((e) => `${e.name} (${e.purpose})`).join(", ")}. Change a reference's purpose in Step 2 to use it here.
@@ -96,7 +134,7 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
           )}
         </div>
         <div className="prod-cast-side">
-          {mapped.slice(0, 2).map((e) => (
+          {mapped.slice(0, 4).map((e) => (
             thumbs.get(e.id)
               ? <img key={e.id} className="prod-cast-thumb" src={thumbs.get(e.id)} alt={e.name} title={`@[${e.name}]`} />
               : <span key={e.id} className="prod-cast-thumb-blank" title={`@[${e.name}] (no image yet)`}>?</span>
@@ -105,8 +143,8 @@ export function MagicCastReview({ prod, busy, onMap, onTextOnly, onCreateInSuite
             {need.status !== "ready" && need.status !== "text-only" && need.refNames.length > 0 && !need.purposeWarning && (
               <button className="prod-btn" disabled={isBusy} onClick={() => onMap(need.entityName, mapped.map((e) => e.id))}>Looks right</button>
             )}
-            <button className="prod-btn" disabled={isBusy} onClick={() => setPickerFor(pickerFor === need.entityName ? null : need.entityName)}>
-              {need.refNames.length ? "Use a different reference" : "Use my reference"}
+            <button className="prod-btn" disabled={isBusy} onClick={() => openPicker(need, mapped.map((e) => e.id))}>
+              {need.refNames.length ? "Add / change references" : "Use my reference"}
             </button>
             <button className="prod-btn" disabled={isBusy} onClick={() => onCreateInSuite(need)}>Create in Image Suite</button>
             {need.status !== "text-only" && (

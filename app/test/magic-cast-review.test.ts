@@ -14,7 +14,10 @@ function prod(): Production {
     meta: { id: "p1", name: "Junk Drawer" },
     magicEnabled: true,
     scenes: [{ number: 1, title: "S", shots: [{ id: "s1", number: "0100", audio: "", visual: "x" }] }],
-    characters: [{ id: "c1", name: "Hero", key: "red cloak", imagePath: "references/hero.png" }],
+    characters: [
+      { id: "c1", name: "Hero", key: "red cloak", imagePath: "references/hero.png" },
+      { id: "c2", name: "Butterfly", key: "butterfly-shaped clip", imagePath: "references/butterfly.png" },
+    ],
     products: [],
     references: [
       { id: "r-env", name: "Drawer Alley", purpose: "environment", imagePath: "references/env.png", shotIds: [] },
@@ -58,15 +61,22 @@ describe("MagicCastReview", () => {
     expect(body).toContain("Ready (1)");
 
     const buttons = [...document.body.querySelectorAll("button")];
-    // Map Ada -> Hero via the picker.
+    // Map Ada -> Hero + Butterfly via the multi-select picker (groups and
+    // multi-ref subjects must be addable, not replace-one-at-a-time).
     await act(async () => { buttons.find((b) => b.textContent === "Use my reference")!.click(); });
-    const candidate = [...document.body.querySelectorAll("button")].find((b) => b.textContent?.includes("@[Hero]"));
-    expect(candidate).toBeTruthy();
+    expect(document.body.textContent).toContain("Select one or more references");
+    const candidateFor = (name: string) => [...document.body.querySelectorAll(".prod-cast-candidate")].find((b) => b.textContent?.includes(`@[${name}]`)) as HTMLButtonElement;
+    expect(candidateFor("Hero")).toBeTruthy();
     // The layout blockout is listed as not castable, never as a candidate.
     expect(document.body.textContent).toContain("Not castable");
     expect([...document.body.querySelectorAll(".prod-cast-candidate")].some((b) => b.textContent?.includes("Ref-001"))).toBe(false);
-    await act(async () => { candidate!.click(); });
-    expect(onMap).toHaveBeenCalledWith("Ada", ["c1"]);
+    await act(async () => { candidateFor("Hero").click(); });
+    await act(async () => { candidateFor("Butterfly").click(); });
+    expect(onMap).not.toHaveBeenCalled();
+    const apply = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Use selected (2)") as HTMLButtonElement;
+    expect(apply).toBeTruthy();
+    await act(async () => { apply.click(); });
+    expect(onMap).toHaveBeenCalledWith("Ada", ["c1", "c2"]);
 
     const buttons2 = [...document.body.querySelectorAll("button")];
     await act(async () => { buttons2.find((b) => b.textContent === "Create in Image Suite")!.click(); });

@@ -64,6 +64,7 @@ vi.mock("@core", () => ({
 import {
   applyMagicRefDecision,
   buildMagicBibleMessages,
+  deriveMagicMustCite,
   generateMagicPrompts,
   isMagicBibleStale,
   magicBibleInputHash,
@@ -252,6 +253,21 @@ describe("Junk Drawer-shaped binding (generic roster names, no descriptors)", ()
     // Characters first (gang capped at 2), exactly ONE environment ref total.
     expect(fight).toEqual(["Main Character", "Villain 1", "Villain 2", "Environment 02"]);
     expect(bible!.shotPlans[1].mustCite).toEqual([]);
+  });
+
+  it("a user's explicit multi-ref map survives derivation in full (heroes case)", () => {
+    const p = junkProd();
+    const entities = [
+      { name: "paperclip heroes", kind: "character" as const, descriptor: "team", refName: "Main Character", refNames: ["Main Character", "Villain 1", "Villain 2"], boundBy: "user" as const, confidence: "high" as const },
+    ];
+    const plans = [{ number: "0100", purpose: "fight", present: ["paperclip heroes"], mustCite: [] as string[] }];
+    deriveMagicMustCite(p, entities, [], plans);
+    expect(plans[0].mustCite).toEqual(["Main Character", "Villain 1", "Villain 2"]);
+    // The same three refs from the MODEL stay capped at the group limit of 2.
+    const modelEntities = [{ ...entities[0], boundBy: "model" as const }];
+    const modelPlans = [{ number: "0100", purpose: "fight", present: ["paperclip heroes"], mustCite: [] as string[] }];
+    deriveMagicMustCite(p, modelEntities, [], modelPlans);
+    expect(modelPlans[0].mustCite).toEqual(["Main Character", "Villain 1"]);
   });
 
   it("protagonist bind: the most-present unbound character takes the 'Main Character' ref", () => {

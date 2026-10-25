@@ -617,6 +617,9 @@ export interface MagicBibleEntity {
   /** Canonical one-line visual descriptor every shot reuses verbatim. */
   descriptor: string;
   refName?: string;
+  /** Every roster reference depicting this entity (groups bind several,
+   *  e.g. a gang → Villain 1/2/3). `refName` mirrors the first entry. */
+  refNames?: string[];
   /** Other names the script uses for this entity. */
   aliases?: string[];
 }
@@ -628,6 +631,10 @@ export interface MagicBibleScene {
   location?: string;
   timeOfDay?: string;
   beat: string;
+  /** Compressed standalone setting sentence for this scene (where we are,
+   *  what the surroundings are made of, at what scale) — restated in every
+   *  shot prompt so the image model needs no other context. */
+  settingAnchor?: string;
 }
 
 /** Per-shot storytelling plan in the Magic Prompt Story Bible. */
@@ -650,6 +657,10 @@ export interface MagicBibleShotPlan {
 export interface MagicBible {
   version: 1;
   synopsis: string;
+  /** One-sentence world/setting premise (scale, place, what the world is
+   *  made of) that EVERY shot prompt restates — the image model sees one
+   *  prompt at a time and has no memory of this bible. */
+  worldPremise?: string;
   /** Fill-ins the model chose where the script was silent — user-visible. */
   assumptions: string[];
   scenes: MagicBibleScene[];

@@ -176,6 +176,88 @@ describe("generateMagicPrompts (bible + per-scene)", () => {
   });
 });
 
+describe("Junk Drawer-shaped binding (generic roster names, no descriptors)", () => {
+  // Mirrors the real failure: 21 entities, only 3 bound; environment cited
+  // in 3/28 shots; the whole climax with zero citations. Custom refs carry
+  // no descriptors — names + categories are all the binding has to go on.
+  function junkProd(): Production {
+    const p = prod();
+    p.characters = [];
+    p.references = [
+      { id: "r-main", name: "Main Character", categoryId: "cat-heroes", imagePath: "references/main.png", shotIds: [] },
+      { id: "r-v1", name: "Villain 1", categoryId: "cat-villains", imagePath: "references/v1.png", shotIds: [] },
+      { id: "r-v2", name: "Villain 2", categoryId: "cat-villains", imagePath: "references/v2.png", shotIds: [] },
+      { id: "r-env2", name: "Environment 02", categoryId: "cat-env", imagePath: "references/env2.png", shotIds: [] },
+      { id: "r-env1", name: "Environment 01", categoryId: "cat-archive", imagePath: "references/env1.png", shotIds: [] },
+    ] as unknown as Production["references"];
+    p.referenceCategories = [
+      { id: "cat-heroes", name: "Hero Characters" },
+      { id: "cat-villains", name: "Villains" },
+      { id: "cat-env", name: "Environment" },
+      { id: "cat-archive", name: "Archive" },
+    ] as unknown as Production["referenceCategories"];
+    return p;
+  }
+
+  it("fallback-binds groups + locations and derives mustCite from present (environment included)", () => {
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "A paperclip crosses a junk-drawer city.",
+      worldPremise: "A miniature city inside a household junk drawer, streets improvised from drawer contents at paperclip scale.",
+      assumptions: [],
+      scenes: [{ number: 1, title: "Street", location: "junk-drawer alley", beat: "x", settingAnchor: "A narrow alley between towering junk-drawer contents at miniature scale." }],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "A small brightly colored paperclip.", refNames: ["Main Character"] },
+        { name: "safety pin gang", kind: "character", descriptor: "A gang of ordinary metal safety pins." },
+        { name: "junk-drawer alley", kind: "location", descriptor: "A narrow passage between crowded drawer contents." },
+      ],
+      shotPlans: [
+        { number: "0100", purpose: "confrontation", present: ["little paperclip", "safety pin gang", "junk-drawer alley"], mustCite: [] },
+      ],
+    }), junkProd());
+    expect(bible).not.toBeNull();
+    expect(bible!.worldPremise).toContain("junk drawer");
+    expect(bible!.entities.find((e) => e.name === "safety pin gang")?.refNames).toEqual(["Villain 1", "Villain 2"]);
+    expect(bible!.entities.find((e) => e.name === "junk-drawer alley")?.refNames).toEqual(["Environment 02"]);
+    expect(bible!.shotPlans[0].mustCite).toEqual(expect.arrayContaining(["Main Character", "Villain 1", "Villain 2", "Environment 02"]));
+  });
+
+  it("protagonist bind: the most-present unbound character takes the 'Main Character' ref", () => {
+    const p = junkProd();
+    p.scenes[0].shots.push(
+      shot("s300", "0300", "More street."), shot("s400", "0400", "More street."), shot("s500", "0500", "More street."),
+    );
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "A small paperclip." },
+        { name: "junk-drawer alley", kind: "location", descriptor: "A narrow passage." },
+      ],
+      shotPlans: ["0100", "0200", "0300", "0400", "0500"].map((number) => ({
+        number, purpose: "beat", present: ["little paperclip", "junk-drawer alley"], mustCite: [],
+      })),
+    }), p);
+    expect(bible!.entities[0].refNames).toEqual(["Main Character"]);
+    expect(bible!.shotPlans[0].mustCite).toContain("Main Character");
+  });
+
+  it("finalize backstop appends omitted must-cite tags and the setting anchor", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    p.products = [{ id: "pr1", name: "Gondola", imagePath: "references/g.png" } as Production["products"][number]];
+    await generateMagicPrompts(p, "key", "model", () => {});
+    // Simulate a v2 bible whose plan demands the Gondola too, then regen one
+    // shot: the writer mock never cites Gondola and never restates setting.
+    p.magicBible!.worldPremise = "A miniature valley world inside a giant wooden drawer.";
+    p.magicBible!.shotPlans = [{ number: "0200", purpose: "reveal", mustCite: ["Hero", "Gondola"] }];
+    p.magicBible!.inputHash = magicBibleInputHash(p);
+    await generateMagicPrompts(p, "key", "model", () => {}, undefined, ["s200"]);
+    const stored = p.magicPrompts!.s200;
+    expect(stored).toContain("@[Hero]");
+    expect(stored).toContain("@[Gondola]");
+    expect(stored).toContain("Setting: A miniature valley world inside a giant wooden drawer.");
+  });
+});
+
 describe("computeUnresolvedMagicRefs", () => {
   it("groups unmatched citations by shot and skips resolved/dismissed names", () => {
     const p = prod();

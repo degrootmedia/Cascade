@@ -18,6 +18,7 @@ void import("electron")
 import { ChatClient } from "@core";
 import { syncOutputEdge, videoNodeCanvasId, videoEdgeId, editVideoEdgeId } from "../shared/graph/connect.js";
 import {
+  addRefTag,
   dataUrlToBytes,
   escapeRegExp,
   parseJsonLooseArray,
@@ -612,6 +613,9 @@ function magicRosterLines(p: Production): { citeLines: string; styleOnlyNames: s
  *  change flips it, marking the stored bible stale. Pure. */
 export function magicBibleInputHash(p: Production): string {
   const payload = {
+    // Schema epoch: bump when the bible contract changes so stored bibles
+    // built under the old contract are rebuilt instead of silently reused.
+    v: 2,
     scenes: (p.scenes ?? []).map((sc) => ({
       n: sc.number,
       t: sc.title,
@@ -646,8 +650,9 @@ export function buildMagicBibleMessages(p: Production, skillText: string | null)
   const userContent =
     "Build the STORY BIBLE for this production. Read the WHOLE breakdown first and understand the story as one flow — who is who, where things happen, what is established early and paid off late — then plan every shot as part of that single story.\n\n" +
     "Rules:\n" +
-    "- Entities: every character, product, location, and recurring prop. Give each ONE canonical visual descriptor the storyboard will reuse verbatim. Bind an entity to a user reference with \"refName\" ONLY when it is clearly that reference (the roster lists each reference's descriptor and aliases — a script name matching a reference's alias binds to that reference). Omit \"refName\" when no reference fits.\n" +
-    "- Shot plans: one per shot number. \"purpose\" = what the shot does in the story (establish, reveal, reaction, payoff…). \"framing\" should progress with rhythm across cuts, not repeat the same size. \"mustCite\" lists canonical reference names (roster `@[Name]`, without brackets) VISIBLE in that frame — only names from the roster, never invented ones.\n" +
+    "- \"worldPremise\": ONE sentence naming the world every frame lives in — scale, place, and what the surroundings are made of (e.g. \"A miniature city inside a household junk drawer, its streets and buildings improvised from drawer contents at paperclip scale\"). Every shot prompt will restate it, because the image model sees one prompt at a time with no memory. Each scene also gets a compressed \"settingAnchor\" in the same spirit.\n" +
+    "- Entities: every character, product, location, and recurring prop. Give each ONE canonical visual descriptor (identifying features only — no comparisons to other characters). BIND every entity to the roster reference(s) that depict it in \"refNames\": the roster is the user's actual cast and sets, often with generic or numbered names (\"Main Character\" = the protagonist, \"Environment 02\" = a set, \"Villain 1/2/3\" = the villain group). Judge by name words, category, descriptor, aliases, and story role. A group entity binds ALL its depicting refs. Leaving a visible character or location unbound when a plausible roster entry exists is an ERROR — its reference image will never upload. Omit \"refNames\" ONLY when nothing in the roster could depict the entity.\n" +
+    "- Shot plans: one per shot number. \"purpose\" = what the shot does in the story (establish, reveal, reaction, payoff…). \"framing\" should progress with rhythm across cuts, not repeat the same size. \"present\" lists the bible entity names visible (ALWAYS including the shot's location entity). \"mustCite\" lists canonical reference names (without brackets) for every bound entity present — including the LOCATION/environment reference in every shot where surroundings are visible (nearly all). Only roster names, never invented ones.\n" +
     "- Where the script is silent (exact location dressing, who else is in frame, time of day), make a sensible choice and record it in \"assumptions\" so every shot can agree with it.\n" +
     "- CONTENT ONLY in descriptors: no medium/palette/rendering style words.\n" +
     (styleOnlyNames.length ? `- Never cite these style-only references (they attach automatically): ${styleOnlyNames.join(", ")}.\n` : "") +
@@ -657,12 +662,71 @@ export function buildMagicBibleMessages(p: Production, skillText: string | null)
     "\n\nReply with JSON only:\n" +
     "{\n" +
     '  "synopsis": "2-4 sentence story summary",\n' +
+    '  "worldPremise": "one-sentence world/setting premise every frame restates",\n' +
     '  "assumptions": ["choice made where the script was silent", ...],\n' +
-    '  "scenes": [ { "number": 1, "title": "...", "location": "...", "timeOfDay": "...", "beat": "what happens/changes" } ],\n' +
-    '  "entities": [ { "name": "script name", "kind": "character|product|location|prop|other", "descriptor": "canonical visual descriptor", "refName": "roster name or omit", "aliases": ["other script names"] } ],\n' +
+    '  "scenes": [ { "number": 1, "title": "...", "location": "...", "timeOfDay": "...", "beat": "what happens/changes", "settingAnchor": "compressed standalone setting sentence" } ],\n' +
+    '  "entities": [ { "name": "script name", "kind": "character|product|location|prop|other", "descriptor": "canonical visual descriptor", "refNames": ["roster names depicting it"], "aliases": ["other script names"] } ],\n' +
     '  "shotPlans": [ { "number": "0100", "purpose": "...", "framing": "wide/medium/closeup + angle", "present": ["entity names"], "mustCite": ["roster names"] } ]\n' +
     "}";
   return { systemContent, userContent };
+}
+
+/** Words in a name/descriptor for binding scoring (camelCase-aware, with
+ *  light plural stemming so heroes/paperclips/villains match hero/paperclip/villain). */
+function bibleTokens(text: string): string[] {
+  return (text ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3)
+    .map((t) => (t.endsWith("oes") ? t.slice(0, -2) : t.endsWith("sses") || t.endsWith("xes") || t.endsWith("ches") ? t.slice(0, -2) : t.endsWith("s") ? t.slice(0, -1) : t));
+}
+
+const ANTAGONIST_TOKENS = new Set(["gang", "villain", "villains", "menacing", "threat", "enemy", "hostile", "evil"]);
+const LOCATION_TOKENS = new Set(["environment", "location", "set", "background", "backdrop", "interior", "exterior"]);
+
+/**
+ * Deterministic fallback binding for an entity the model left unbound.
+ * Roster names in the wild are generic/numbered ("Environment 02",
+ * "Villain 1/2/3") with no descriptors, so token overlap alone is weak —
+ * category and role words carry the signal. Deliberately conservative for
+ * single entities (a wrong character sheet is worse than none); groups may
+ * bind several clearly-matching refs. Returns canonical roster names.
+ */
+function fallbackBindEntity(
+  entity: { name: string; kind: string; descriptor: string; aliases?: string[] },
+  citable: MagicRefRosterEntry[]
+): string[] {
+  const nameTokens = new Set([...bibleTokens(entity.name), ...(entity.aliases ?? []).flatMap(bibleTokens)]);
+  const textTokens = new Set([...nameTokens, ...bibleTokens(entity.descriptor)]);
+  const isGroup = /\b(gang|team|group|squad|heroes|villains)\b/i.test(entity.name) || /^a (team|gang|group) of/i.test(entity.descriptor);
+  const isAntagonist = [...textTokens].some((t) => ANTAGONIST_TOKENS.has(t));
+  const scored = citable.map((e) => {
+    let score = 0;
+    for (const t of bibleTokens(e.name)) {
+      if (nameTokens.has(t)) score += 3;
+      else if (textTokens.has(t)) score += 2;
+    }
+    for (const a of e.aliases) for (const t of bibleTokens(a)) if (textTokens.has(t)) score += 2;
+    const catTokens = bibleTokens(e.category ?? "");
+    for (const t of catTokens) if (textTokens.has(t)) score += 2;
+    const rosterText = new Set([...bibleTokens(e.name), ...catTokens, ...e.aliases.flatMap(bibleTokens)]);
+    if (entity.kind === "location" && [...rosterText].some((t) => LOCATION_TOKENS.has(t))) score += 6;
+    if (entity.kind === "location" && catTokens.includes("archive")) score -= 3;
+    if (isAntagonist && [...rosterText].some((t) => ANTAGONIST_TOKENS.has(t))) score += 5;
+    // Size antonyms are a strong negative signal ("little paperclip" must
+    // never bind "Large Paperclip Hero" on token overlap alone).
+    const refNameTokens = new Set(bibleTokens(e.name));
+    const SMALL = ["little", "small", "tiny", "mini"];
+    const LARGE = ["large", "big", "giant", "huge", "oversized"];
+    if (SMALL.some((t) => textTokens.has(t)) && LARGE.some((t) => refNameTokens.has(t))) score -= 6;
+    if (LARGE.some((t) => textTokens.has(t)) && SMALL.some((t) => refNameTokens.has(t))) score -= 6;
+    return { name: e.name, score };
+  }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
+  if (!scored.length) return [];
+  if (isGroup) return scored.filter((s) => s.score >= Math.max(4, scored[0].score - 2)).slice(0, 4).map((s) => s.name);
+  const [top, second] = scored;
+  return top.score >= 6 && top.score > (second?.score ?? 0) ? [top.name] : [];
 }
 
 /** The normalized bible body (hash/stamps are added by the generator). */
@@ -699,24 +763,43 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
       location: capStr(o.location, 160) || undefined,
       timeOfDay: capStr(o.timeOfDay, 80) || undefined,
       beat: capStr(o.beat, 400),
+      settingAnchor: capStr(o.settingAnchor, 300) || undefined,
     });
   }
   const kinds = new Set(["character", "product", "location", "prop", "other"]);
-  const entities: MagicBible["entities"] = [];
+  const rawEntities: { name: string; kind: MagicBible["entities"][number]["kind"]; descriptor: string; aliases: string[]; refNames: string[] }[] = [];
   for (const raw of Array.isArray(parsed.entities) ? parsed.entities : []) {
     const o = (raw ?? {}) as Record<string, unknown>;
     const name = capStr(o.name, 120);
     if (!name) continue;
-    const refName = canonical(o.refName);
-    entities.push({
+    const refNames: string[] = [];
+    for (const m of [...(Array.isArray(o.refNames) ? o.refNames : []), o.refName]) {
+      const c = canonical(m);
+      if (c && !refNames.includes(c)) refNames.push(c);
+    }
+    rawEntities.push({
       name,
       kind: (kinds.has(String(o.kind)) ? String(o.kind) : "other") as MagicBible["entities"][number]["kind"],
       descriptor: capStr(o.descriptor, 300),
-      ...(refName ? { refName } : {}),
-      ...(strList(o.aliases, 8, 80).length ? { aliases: strList(o.aliases, 8, 80) } : {}),
+      aliases: strList(o.aliases, 8, 80),
+      refNames,
     });
-    if (entities.length >= 60) break;
+    if (rawEntities.length >= 60) break;
   }
+  // Fallback binding never steals a ref the model already bound elsewhere
+  // (Thumb Tacks belong to the thumbtacks, not the villain gang's category).
+  const claimed = new Set(rawEntities.flatMap((e) => e.refNames.map((n) => refLookupKey(n))));
+  const fallbackPool = citable.filter((e) => !claimed.has(refLookupKey(e.name)));
+  const entities: MagicBible["entities"] = rawEntities.map((e) => {
+    const refNames = e.refNames.length ? e.refNames : fallbackBindEntity(e, fallbackPool);
+    return {
+      name: e.name,
+      kind: e.kind,
+      descriptor: e.descriptor,
+      ...(refNames.length ? { refName: refNames[0], refNames } : {}),
+      ...(e.aliases.length ? { aliases: e.aliases } : {}),
+    };
+  });
   const shotPlans: MagicBibleShotPlan[] = [];
   const seenPlans = new Set<string>();
   for (const raw of Array.isArray(parsed.shotPlans) ? parsed.shotPlans : []) {
@@ -737,9 +820,69 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
       mustCite,
     });
   }
+  // Protagonist bind: a roster entry literally named for the lead role
+  // ("Main Character", "Protagonist", "Lead") binds the one unbound
+  // character entity present in the most shot plans — presence frequency is
+  // the deterministic signature of a lead, where name tokens say nothing.
+  {
+    const claimedNow = new Set(entities.flatMap((e) => (e.refNames ?? []).map((n) => refLookupKey(n))));
+    const leadRefs = citable.filter((e) =>
+      !claimedNow.has(refLookupKey(e.name)) &&
+      bibleTokens(e.name).some((t) => t === "main" || t === "protagonist" || t === "lead"));
+    if (leadRefs.length === 1 && shotPlans.length >= 4) {
+      const counts = new Map<string, number>();
+      for (const plan of shotPlans) for (const name of plan.present ?? []) counts.set(refLookupKey(name), (counts.get(refLookupKey(name)) ?? 0) + 1);
+      let lead: MagicBible["entities"][number] | undefined;
+      let leadCount = 0;
+      for (const e of entities) {
+        if (e.kind !== "character" || e.refNames?.length) continue;
+        const c = Math.max(counts.get(refLookupKey(e.name)) ?? 0, ...(e.aliases ?? []).map((a) => counts.get(refLookupKey(a)) ?? 0));
+        if (c > leadCount) { lead = e; leadCount = c; }
+      }
+      if (lead && leadCount >= Math.ceil(shotPlans.length * 0.4)) {
+        lead.refName = leadRefs[0].name;
+        lead.refNames = [leadRefs[0].name];
+      }
+    }
+  }
+  // Derive mustCite deterministically: the model's own list under-cites
+  // badly in practice (Junk Drawer: 9/28 plans non-empty, whole climax with
+  // zero citations). Every bound entity in `present` contributes its refs,
+  // and the shot's bound location entity is cited in every shot.
+  const entityByKey = new Map<string, MagicBible["entities"][number]>();
+  for (const e of entities) {
+    entityByKey.set(refLookupKey(e.name), e);
+    for (const a of e.aliases ?? []) if (!entityByKey.has(refLookupKey(a))) entityByKey.set(refLookupKey(a), e);
+  }
+  const boundLocations = entities.filter((e) => e.kind === "location" && (e.refNames?.length ?? 0) > 0);
+  const shotSceneNumber = new Map<string, number>();
+  for (const sc of p.scenes ?? []) for (const s of sc.shots) shotSceneNumber.set(magicShotNumberKey(s.number), sc.number);
+  for (const plan of shotPlans) {
+    const derived: string[] = [];
+    const add = (names: string[]): void => { for (const n of names) if (!derived.includes(n)) derived.push(n); };
+    let citesLocation = false;
+    for (const presentName of plan.present ?? []) {
+      const e = entityByKey.get(refLookupKey(presentName));
+      if (!e?.refNames?.length) continue;
+      add(e.refNames);
+      if (e.kind === "location") citesLocation = true;
+    }
+    if (!citesLocation && boundLocations.length) {
+      const sceneNum = shotSceneNumber.get(magicShotNumberKey(plan.number));
+      const bs = scenes.find((x) => x.number === sceneNum);
+      const sceneTokens = new Set([...bibleTokens(bs?.location ?? ""), ...bibleTokens(bs?.title ?? "")]);
+      const matched = boundLocations.filter((e) =>
+        [...bibleTokens(e.name), ...(e.aliases ?? []).flatMap(bibleTokens)].some((t) => sceneTokens.has(t)));
+      const chosen = matched.length ? matched : boundLocations.length === 1 ? boundLocations : [];
+      for (const e of chosen) add(e.refNames ?? []);
+    }
+    add(plan.mustCite);
+    plan.mustCite = derived.slice(0, 8);
+  }
   const synopsis = capStr(parsed.synopsis, 1200);
   if (!synopsis && !scenes.length && !entities.length && !shotPlans.length) return null;
-  return { synopsis, assumptions: strList(parsed.assumptions, 20, 300), scenes, entities, shotPlans };
+  const worldPremise = capStr(parsed.worldPremise, 400) || undefined;
+  return { synopsis, worldPremise, assumptions: strList(parsed.assumptions, 20, 300), scenes, entities, shotPlans };
 }
 
 /** Human-readable bible artifact (`out/magic-bible.md`) — assumptions first,
@@ -748,10 +891,11 @@ export function magicBibleMarkdown(p: Production): string {
   const b = p.magicBible;
   if (!b) return "";
   const lines: string[] = [`# ${p.meta.name} — Magic Prompt Story Bible`, "", `Generated ${b.generatedAt}${b.model ? ` (model: ${b.model})` : ""}.`, "", "## Synopsis", "", b.synopsis || "(none)", ""];
+  if (b.worldPremise) lines.push("## World premise (restated in every prompt)", "", b.worldPremise, "");
   if (b.assumptions.length) lines.push("## Assumptions (script was silent — check these)", "", ...b.assumptions.map((a) => `- ${a}`), "");
   if (b.entities.length) {
     lines.push("## Entities", "", "| Name | Kind | Reference | Descriptor |", "|---|---|---|---|");
-    for (const e of b.entities) lines.push(`| ${e.name} | ${e.kind} | ${e.refName ? `@[${e.refName}]` : "—"} | ${e.descriptor} |`);
+    for (const e of b.entities) lines.push(`| ${e.name} | ${e.kind} | ${(e.refNames?.length ? e.refNames : e.refName ? [e.refName] : []).map((n) => `@[${n}]`).join(", ") || "— (unbound: no reference image will upload)"} | ${e.descriptor} |`);
     lines.push("");
   }
   for (const sc of b.scenes) {
@@ -804,6 +948,10 @@ export async function generateMagicBible(
     `Magic Prompt: Story Bible ready — ${bible.entities.length} entit${bible.entities.length === 1 ? "y" : "ies"}, ${bible.shotPlans.length} shot plan(s)` +
     `${bible.assumptions.length ? `, ${bible.assumptions.length} recorded assumption(s) (see ${p.assets.outDir}/magic-bible.md)` : ""}.`
   );
+  const unbound = bible.entities.filter((e) => !(e.refNames?.length || e.refName));
+  if (unbound.length) {
+    emit(`Magic Prompt: ${unbound.length} script entit${unbound.length === 1 ? "y has" : "ies have"} no matching reference (${unbound.slice(0, 6).map((e) => e.name).join(", ")}${unbound.length > 6 ? ", …" : ""}) — those subjects get text only, no reference image. Add a reference or an alias in Step 2 to bind them.`, "info");
+  }
   return bible;
 }
 
@@ -847,15 +995,16 @@ function magicContextLine(s: ProductionShot): string {
  *  canonical entity descriptors + this scene's beat. Bounded. */
 function magicBibleContext(bible: MagicBible, scene?: ProductionScene | null): string {
   const lines: string[] = [`Synopsis: ${bible.synopsis}`];
+  if (bible.worldPremise) lines.push(`World premise (RESTATED in every prompt, compressed): ${bible.worldPremise}`);
   if (bible.assumptions.length) lines.push(`Assumptions (keep every shot consistent with these): ${bible.assumptions.join(" ")}`);
   if (bible.entities.length) {
     lines.push("Canonical entities (reuse these descriptors verbatim):");
     for (const e of bible.entities) {
-      lines.push(`- ${e.name}${e.refName ? ` = @[${e.refName}]` : ""} (${e.kind})${e.descriptor ? `: ${e.descriptor}` : ""}${e.aliases?.length ? ` [also: ${e.aliases.join(", ")}]` : ""}`);
+      lines.push(`- ${e.name}${(e.refNames?.length ? e.refNames : e.refName ? [e.refName] : []).length ? ` = ${(e.refNames?.length ? e.refNames : [e.refName!]).map((n) => `@[${n}]`).join(" + ")}` : ""} (${e.kind})${e.descriptor ? `: ${e.descriptor}` : ""}${e.aliases?.length ? ` [also: ${e.aliases.join(", ")}]` : ""}`);
     }
   }
   const bs = scene ? bible.scenes.find((x) => x.number === scene.number) : undefined;
-  if (bs) lines.push(`This scene: ${bs.title}${bs.location ? ` — ${bs.location}` : ""}${bs.timeOfDay ? `, ${bs.timeOfDay}` : ""}. Beat: ${bs.beat}`);
+  if (bs) lines.push(`This scene: ${bs.title}${bs.location ? ` — ${bs.location}` : ""}${bs.timeOfDay ? `, ${bs.timeOfDay}` : ""}. Beat: ${bs.beat}${bs.settingAnchor ? ` Setting anchor (restate, compressed): ${bs.settingAnchor}` : ""}`);
   return lines.join("\n").slice(0, 6000);
 }
 
@@ -916,7 +1065,8 @@ export function buildMagicPromptMessages(
     "- NEVER include style words: no medium, palette, lighting style, line treatment, rendering, brush, painterly, photorealistic, 3D, anime, etc. The style system will handle that.\n" +
     "- Keep each prompt to 1-3 sentences, concrete and visual, suitable to append after a \"Style:\" paragraph.\n" +
     "- Depict ONLY each target shot's own beat, grounded in its AUTHORITATIVE script audio/visual. Use the STORY BIBLE and CONTEXT shots for continuity — who is present, where we are, canonical descriptions, framing progression across cuts — but never depict a context shot's beat, subject, or action in a target shot.\n" +
-    "- Tell the story across the shots: maintain character presence, location, props, screen direction, and action continuity from shot to shot; reuse the bible's canonical descriptors verbatim; follow each shot's plan (purpose + framing) when given.\n" +
+    "- STANDALONE PROMPTS: each prompt is sent ALONE to an image model that has never seen the script, this bible, or any other shot. Every prompt must therefore restate, in compressed form, (1) the world premise (scale + what the world is made of), (2) where we are and what the immediate surroundings are made of, and (3) who is visible with their identifying descriptor — before/with the action. Never write a bare 'street', 'alley', or 'city' without saying what it is in this world.\n" +
+    "- Tell the story across the shots: maintain character presence, location, props, screen direction, and action continuity from shot to shot; reuse the bible's canonical descriptors (identifying features only — drop comparisons to characters who are not in this frame); follow each shot's plan (purpose + framing) when given.\n" +
     "- Include ALL elements needed in the frame: foreground/background elements, character count and placement, key objects, and any text-implied visuals (e.g. SFX sources).\n" +
     "- References: cite ONLY roster references, in their canonical @[Name] form, exactly when that subject is visible in the frame. Honour every MUST cite / MUST NOT cite on the shot line. Never invent a @[Name] that is not in the roster — describe unreferenced subjects as plain nouns.\n" +
     "- Carry over a previously cited @[Name] tag only when that reference actually appears in THIS shot's frame; otherwise omit it.\n" +
@@ -940,13 +1090,53 @@ export function buildMagicPromptMessages(
 /** Shots per writing call within one scene (output-token bound). */
 const MAGIC_SCENE_CHUNK = 8;
 
+/** The standalone setting sentence for a shot: the scene's anchor, else
+ *  the world premise. (A raw location name is not an anchor — appending
+ *  "Setting: open valley" would be noise, not context.) */
+function magicSettingAnchor(bible: MagicBible | null | undefined, scene?: ProductionScene | null): string {
+  if (!bible) return "";
+  const bs = scene ? bible.scenes.find((x) => x.number === scene.number) : undefined;
+  return (bs?.settingAnchor || bible.worldPremise || "").trim();
+}
+
+/** Guarantee the setting anchor is actually IN the prompt text: the image
+ *  model never sees the bible, so context that stayed in the plan is lost.
+ *  Appends `Setting: …` only when the prompt barely echoes the anchor. */
+function ensureSettingAnchor(prompt: string, anchor: string): string {
+  if (!anchor) return prompt;
+  const terms = [...new Set(bibleTokens(anchor).filter((t) => t.length >= 5))].slice(0, 8);
+  const lower = prompt.toLowerCase();
+  const hits = terms.filter((t) => lower.includes(t)).length;
+  if (hits >= 2) return prompt;
+  const sentence = anchor.endsWith(".") ? anchor : `${anchor}.`;
+  return `${prompt} Setting: ${sentence}`;
+}
+
 /** Post-process one generated prompt before it is stored: rewrite alias
- *  tags to canonical form and strip user-excluded references. Unknown tags
- *  stay visible in the text (the reconciliation queue resolves them). */
-function finalizeMagicPrompt(p: Production, shot: ProductionShot, roster: MagicRefRosterEntry[], prompt: string): string {
+ *  tags to canonical form, strip user-excluded references, then apply the
+ *  deterministic backstops the model keeps missing in practice — append
+ *  any planned must-cite tags it omitted (environment included) and ensure
+ *  the standalone setting anchor is present. Unknown tags stay visible in
+ *  the text (the reconciliation queue resolves them). */
+function finalizeMagicPrompt(
+  p: Production,
+  shot: ProductionShot,
+  roster: MagicRefRosterEntry[],
+  prompt: string,
+  bible?: MagicBible | null,
+  scene?: ProductionScene | null,
+): string {
   let out = canonicalizeMagicPromptTags(roster, prompt).text;
-  for (const name of shotHardRefs(p, shot).mustNotCite) out = removeRefTag(out, name);
-  return out.trim().slice(0, 600);
+  const hard = shotHardRefs(p, shot);
+  for (const name of hard.mustNotCite) out = removeRefTag(out, name);
+  const plan = shotPlanFor(bible, shot.number);
+  const wanted = [...new Set([...(plan?.mustCite ?? []), ...hard.mustCite])].filter((n) => !hard.mustNotCite.includes(n));
+  if (wanted.length) {
+    const cited = new Set(refTagNames(out).map((n) => refLookupKey(n)));
+    for (const name of wanted) if (!cited.has(refLookupKey(name))) out = addRefTag(out, name);
+  }
+  out = ensureSettingAnchor(out, magicSettingAnchor(bible, scene));
+  return out.trim().slice(0, 900);
 }
 
 /**
@@ -1016,7 +1206,7 @@ export async function generateMagicPrompts(
           bible, scene: sceneOf.get(shot.id) ?? null, contextBefore: before, contextAfter: after,
         });
         if (prompt) {
-          next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt);
+          next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt, bible, sceneOf.get(shot.id) ?? null);
           replaced++;
         } else {
           keepOnFailure(shot);
@@ -1059,7 +1249,7 @@ export async function generateMagicPrompts(
               keepOnFailure(shot);
               emit(`Magic Prompt: no prompt returned for shot ${shot.number} — kept the previous text.`, "info");
             } else {
-              next[shot.id] = finalizeMagicPrompt(p, shot, roster, applied.generated[shot.id]);
+              next[shot.id] = finalizeMagicPrompt(p, shot, roster, applied.generated[shot.id], bible, scene);
               replaced++;
             }
           }
@@ -1073,7 +1263,7 @@ export async function generateMagicPrompts(
                 bible, scene, contextBefore: before, contextAfter: after,
               });
               if (prompt) {
-                next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt);
+                next[shot.id] = finalizeMagicPrompt(p, shot, roster, prompt, bible, scene);
                 replaced++;
               } else keepOnFailure(shot);
             } catch {

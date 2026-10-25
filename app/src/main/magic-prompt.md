@@ -36,6 +36,18 @@ file in full (bounded to 12k chars) as instruction context for every pass.
 - One continuous story: track character presence, location progression,
   props, screen direction, and action continuity across cuts. Framing should
   progress with rhythm (establish → medium → close), not repeat one size.
+- STANDALONE prompts: the image model sees ONE prompt at a time — no script,
+  no bible, no neighbouring shots. Every prompt restates, compressed: the
+  world premise (scale + what the world is made of), where we are and what
+  the surroundings are made of, and who is visible. A bare "alley" or "city
+  street" without its in-world material/scale is a failed prompt.
+- Binding: every bible entity binds to the roster reference(s) depicting it
+  (`refNames`), judged by name/category/role — generic names ("Main
+  Character", "Environment 02", "Villain 1/2/3") are specific user assets.
+  Groups bind all their refs. Shot plans cite every bound entity present,
+  including the location/environment reference in (nearly) every shot;
+  code also derives `mustCite` from `present` and appends any planned tags
+  or setting anchor the writer omitted, so plan `present` carefully.
 - Reuse the bible's canonical entity descriptors verbatim so the same
   person/place/prop reads identically in every frame.
 - Cite ONLY roster references, in canonical `@[Name]` form, exactly when the
@@ -55,10 +67,13 @@ file in full (bounded to 12k chars) as instruction context for every pass.
 
 - Model: the production's configured chat model (`settings.getModel()`).
   Bible call ≤8000 output tokens; writing calls scale with chunk size.
-- Bible reply JSON: `{ synopsis, assumptions[], scenes[{number,title,
-  location,timeOfDay,beat}], entities[{name,kind,descriptor,refName?,
-  aliases[]}], shotPlans[{number,purpose,framing,present[],mustCite[]}] }`.
-  `refName`/`mustCite` entries that don't resolve to the roster are dropped.
+- Bible reply JSON: `{ synopsis, worldPremise, assumptions[],
+  scenes[{number,title,location,timeOfDay,beat,settingAnchor}],
+  entities[{name,kind,descriptor,refNames[],aliases[]}],
+  shotPlans[{number,purpose,framing,present[],mustCite[]}] }`.
+  `refNames`/`mustCite` entries that don't resolve to the roster are dropped;
+  unbound entities get a conservative deterministic fallback bind, and
+  `mustCite` is re-derived in code from `present` + the shot's location.
 - Writing reply JSON: `{ "prompts": [ { "number": "0100", "prompt": "…" } ] }`,
   one entry per shot to write, keyed by exact shot number.
 

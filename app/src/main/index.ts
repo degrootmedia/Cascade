@@ -17,7 +17,7 @@ import * as productions from "./productions.js";
 import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, applyMagicRefDecision, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
@@ -5627,6 +5627,41 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     dismissCitedRefName(p, citedName, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Magic Stage 1: build/refresh the Story Bible only, so the user can
+  // review Cast & Sets before any prompt is written. Same queue/rebase
+  // discipline as the full generate below.
+  handle("production:generateMagicBible", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error(apiKeyRequired());
+    productionEmit(id, "Magic Prompt: reading the full script…");
+    try {
+      await enqueueGeneration(id, async () => {
+        const pq = productions.loadProduction(id);
+        if (!pq) throw new Error("Production not found.");
+        const before = structuredClone(pq);
+        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl(), undefined, { bibleOnly: true });
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
+      });
+    } catch (e) {
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    return productions.loadProduction(id) ?? p;
+  });
+
+  handle("production:setMagicRefDecision", (_e, id: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    applyMagicRefDecision(p, entityName, { refIds: Array.isArray(refIds) ? refIds : [], textOnly: textOnly === true, pendingCreate: pendingCreate === true }, (m, l) => productionEmit(id, m, l));
     productions.saveProduction(p);
     return p;
   });

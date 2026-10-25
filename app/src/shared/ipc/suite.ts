@@ -70,6 +70,10 @@ export interface SuiteDraft {
   /** Generate mode: the Design style to apply (its text + look frame). */
   styleId?: string;
   params?: GenParams;
+  /** Cast & Sets: the bible entity this draft is creating a reference for.
+   *  On "Save as reference" the new reference auto-maps to it. Persisted
+   *  with the draft so the round-trip survives leaving the suite. */
+  pendingEntity?: string;
 }
 
 /** A handoff payload from an existing popup into the suite (not persisted). */
@@ -178,6 +182,7 @@ function normalizeDraft(raw: unknown): SuiteDraft {
   if (typeof d.sourceRefId === "string" && d.sourceRefId) draft.sourceRefId = d.sourceRefId;
   if (typeof d.sourcePath === "string" && d.sourcePath && isProductionRelative(d.sourcePath)) draft.sourcePath = d.sourcePath;
   if (typeof d.styleId === "string" && d.styleId) draft.styleId = d.styleId;
+  if (typeof d.pendingEntity === "string" && d.pendingEntity.trim()) draft.pendingEntity = d.pendingEntity.trim().slice(0, 120);
   const params = normalizeParams(d.params);
   if (params) draft.params = params;
   return draft;

@@ -598,6 +598,10 @@ export interface CascadeApi {
   dismissMagicRef(productionId: string, citedName: string): Promise<Production>;
   /** Draft a reference's one-line visual-summary card from its image (vision). */
   describeReference(productionId: string, refId: string): Promise<Production>;
+  /** Magic Stage 1: build/refresh the Story Bible only (Cast & Sets review follows). */
+  generateMagicBible(productionId: string): Promise<Production>;
+  /** Record a Cast & Sets decision for one bible entity (map / text-only / pending create). */
+  setMagicRefDecision(productionId: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean): Promise<Production>;
   /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's

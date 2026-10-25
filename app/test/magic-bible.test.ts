@@ -163,6 +163,17 @@ describe("generateMagicPrompts (bible + per-scene)", () => {
     expect(modelCalls[1]).toContain("Ada crosses the valley");
   });
 
+  it("bibleOnly stage builds the bible and writes NO prompts (Cast & Sets gate)", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    await generateMagicPrompts(p, "key", "model", () => {}, undefined, undefined, { bibleOnly: true });
+    expect(modelCalls).toHaveLength(1);
+    expect(modelCalls[0]).toContain("Build the STORY BIBLE");
+    expect(p.magicBible?.synopsis).toContain("Ada crosses the valley");
+    expect(p.magicPrompts?.s100).toBe("STALE prose about a constellation @[Hero]");
+    expect(p.magicPrompts?.s200).toBeUndefined();
+  });
+
   it("per-shot regen reuses the stored bible and touches only its entry", async () => {
     modelCalls.length = 0;
     const p = prod();

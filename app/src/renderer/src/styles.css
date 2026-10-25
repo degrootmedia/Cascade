@@ -5167,6 +5167,30 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-ref-purpose { flex: 1; min-width: 0; font-size: 11px; padding: 2px 4px; }
 .prod-ref-purpose-inferred { font-size: 10px; color: var(--text-dim); }
 .prod-ref-describe { font-size: 11px; padding: 2px 6px; white-space: nowrap; }
+/* Cast & Sets review modal */
+.prod-cast-modal { width: min(860px, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
+.prod-cast-list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 10px 0; padding-right: 4px; }
+.prod-cast-premise { margin: 4px 0 0; }
+.prod-cast-group { margin: 10px 0 4px; font-size: 0.85rem; }
+.prod-cast-row { display: flex; gap: 12px; justify-content: space-between; padding: 10px 12px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; }
+.prod-cast-main { flex: 1; min-width: 0; }
+.prod-cast-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.prod-cast-kind { font-size: 11px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
+.prod-cast-title small { color: var(--text-dim); }
+.prod-cast-desc { margin-top: 2px; }
+.prod-cast-status { margin-top: 4px; font-size: 0.85rem; color: var(--text-dim); }
+.prod-cast-status.ok { color: inherit; }
+.prod-cast-side { display: flex; align-items: flex-start; gap: 8px; }
+.prod-cast-thumb { width: 52px; height: 52px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.prod-cast-thumb-blank { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 6px; border: 1px dashed var(--border); color: var(--text-dim); }
+.prod-cast-actions { display: flex; flex-direction: column; gap: 6px; }
+.prod-cast-picker { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.prod-cast-candidate { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; max-width: 150px; text-align: left; }
+.prod-cast-candidate img { width: 64px; height: 48px; object-fit: cover; border-radius: 5px; }
+.prod-cast-candidate small { color: var(--text-dim); white-space: normal; }
+.prod-cast-candidate-blank { width: 64px; height: 48px; display: grid; place-items: center; border: 1px dashed var(--border); border-radius: 5px; }
+.prod-cast-notcastable { flex-basis: 100%; font-size: 0.8rem; color: var(--text-dim); }
+.prod-cast-ready-toggle { background: none; border: none; cursor: pointer; padding: 4px 0; font: inherit; color: inherit; }
 .prod-prompt-sidepanel.magic-active .prompt-content-editor {
   position: relative;
   border: 1.5px solid transparent;

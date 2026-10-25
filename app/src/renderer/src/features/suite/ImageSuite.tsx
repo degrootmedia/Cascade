@@ -356,6 +356,11 @@ export function ImageSuite({
     }
   }, [prodId]);
 
+  // Cast & Sets round-trip: a pending entity from the handoff seed, the
+  // persisted draft, or a production decision awaiting creation.
+  const pendingEntity = draft.pendingEntity
+    ?? Object.values(prod.magicRefDecisions ?? {}).find((d) => d?.pendingCreate && !(d.refIds?.length))?.entityName;
+
   const exportEntry = useCallback(async (target: "references" | "boards") => {
     if (!selected) return;
     // Saving into references creates a named, taggable reference: ask for the
@@ -365,9 +370,11 @@ export function ImageSuite({
     let categoryId: string | undefined;
     if (target === "references") {
       const choice = await askReferenceSave({
-        title: "Save as reference",
-        label: "This name is how prompts cite the reference (@[name]).",
-        initialName: nextNumberedRefName((prod.references ?? []).map((r) => r.name), "Image Suite Gen"),
+        title: pendingEntity ? `Save as reference for ${pendingEntity}` : "Save as reference",
+        label: pendingEntity
+          ? `This will depict “${pendingEntity}” in Magic Prompts. The name is how prompts cite it (@[name]).`
+          : "This name is how prompts cite the reference (@[name]).",
+        initialName: pendingEntity ?? nextNumberedRefName((prod.references ?? []).map((r) => r.name), "Image Suite Gen"),
         confirmLabel: "Save reference",
         categories: prod.referenceCategories ?? [],
       });
@@ -376,12 +383,27 @@ export function ImageSuite({
       categoryId = choice.categoryId;
     }
     try {
+      const beforeIds = new Set((prod.references ?? []).map((r) => r.id));
       const res = await window.cascade.exportSuiteEntry(prodId, selected.id, target, name, categoryId);
-      if (res.production) onProdChange(res.production);
+      if (res.production) {
+        let next = res.production;
+        if (target === "references" && pendingEntity) {
+          const created = (next.references ?? []).find((r) => !beforeIds.has(r.id))
+            ?? (next.references ?? []).find((r) => r.name === name);
+          if (created) {
+            try {
+              next = await window.cascade.setMagicRefDecision(prodId, pendingEntity, [created.id], false, false);
+              setSession((s) => ({ ...s, draft: { ...s.draft, pendingEntity: undefined } }));
+              setNotice(`Mapped: ${pendingEntity} → @[${created.name}]. Back in Cast & Sets it's ready.`);
+            } catch { /* mapping can still be done manually in Cast & Sets */ }
+          }
+        }
+        onProdChange(next);
+      }
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
     }
-  }, [prodId, prod, selected, onProdChange]);
+  }, [prodId, prod, selected, onProdChange, pendingEntity]);
 
   return (
     <div className="suite">

@@ -27,6 +27,7 @@ function normalizeSeed(seed?: Partial<SuiteSeed>): SuiteSeed {
   if (seed?.sourceRefId) draft.sourceRefId = seed.sourceRefId;
   if (!seed?.sourceRefId && seed?.sourcePath) draft.sourcePath = seed.sourcePath;
   if (seed?.params) draft.params = seed.params;
+  if (typeof seed?.pendingEntity === "string" && seed.pendingEntity.trim()) draft.pendingEntity = seed.pendingEntity.trim();
   return draft;
 }
 

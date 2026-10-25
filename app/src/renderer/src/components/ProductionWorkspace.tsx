@@ -20,6 +20,8 @@ import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider,
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { MagicReconcileQueue } from "./production/magic-reconcile.js";
+import { MagicCastReview } from "./production/magic-cast-review.js";
+import { magicCastReviewCount, type MagicCastNeed } from "../../../shared/magic-refs.js";
 import { askName } from "./NamePromptDialog.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { OutdatedSection } from "./production/outdated.js";
@@ -274,6 +276,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [magicBusy, setMagicBusy] = useState(false);
   /** Cited name the Magic reconciliation queue is currently resolving. */
   const [magicReconcileBusy, setMagicReconcileBusy] = useState<string | null>(null);
+  /** Cast & Sets review modal visibility + the entity currently saving. */
+  const [castReviewOpen, setCastReviewOpen] = useState(false);
+  const [castBusy, setCastBusy] = useState<string | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   /** Reference ids with a delete in flight — guards double-clicks while the
    *  atomic main-side delete runs. */
@@ -2627,16 +2632,55 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  re-enable); enabling shows the stored magic content. */
   function toggleMagic() {
     if (!prod || magicBusy) return;
+    // First enable with nothing generated yet: bible first, then Cast & Sets.
+    if (!prod.magicEnabled && !(prod.magicPrompts && Object.keys(prod.magicPrompts).length)) {
+      startCastReview();
+      return;
+    }
     setMagicBusy(true); setErr(null);
     const run = prod.magicEnabled
       ? window.cascade.setMagicEnabled(prod.meta.id, false)
-      : (prod.magicPrompts && Object.keys(prod.magicPrompts).length)
-        ? window.cascade.setMagicEnabled(prod.meta.id, true)
-        : window.cascade.generateMagicPrompts(prod.meta.id);
+      : window.cascade.setMagicEnabled(prod.meta.id, true);
     void run.then((next) => {
       applySnapshot(next); void refreshList();
       void refreshPromptAfterMagic(next);
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** Magic stage 1: build/refresh the Story Bible, then open Cast & Sets.
+   *  Writing prompts happens only from the review's Write action. */
+  function startCastReview() {
+    if (!prod || magicBusy) return;
+    setMagicBusy(true); setErr(null);
+    void window.cascade.generateMagicBible(prod.meta.id).then((next) => {
+      applySnapshot(next); void refreshList();
+      setCastReviewOpen(true);
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** One Cast & Sets decision (map / text-only / pending create). */
+  function decideCast(entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean) {
+    if (!prod || castBusy) return;
+    setCastBusy(entityName); setErr(null);
+    void window.cascade.setMagicRefDecision(prod.meta.id, entityName, refIds, textOnly, pendingCreate).then((next) => {
+      applySnapshot(next); void refreshList();
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setCastBusy(null));
+  }
+
+  /** Send a cast need to the Image Suite to create its reference; the need
+   *  is marked pending first so the flow survives leaving and returning. */
+  function createCastInSuite(need: MagicCastNeed) {
+    if (!prod || castBusy) return;
+    setCastBusy(need.entityName); setErr(null);
+    void window.cascade.setMagicRefDecision(prod.meta.id, need.entityName, [], false, true).then((next) => {
+      applySnapshot(next); void refreshList();
+      setCastReviewOpen(false);
+      openImageSuite(prod.meta.id, {
+        mode: "generate",
+        prompt: `${need.descriptor || need.entityName}${next.magicBible?.worldPremise ? ` — ${next.magicBible.worldPremise}` : ""}`,
+        pendingEntity: need.entityName,
+      });
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setCastBusy(null));
   }
 
   /** Regenerate all Magic content prompts (stays enabled). Both views refresh. */
@@ -4541,12 +4585,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 >
                   {magicBusy ? "…" : prod.magicEnabled ? <><MagicIcon size={13} /> Magic On</> : <><MagicIcon size={13} /> Magic Prompt</>}
                 </button>
+                {prod.magicBible && (
+                  <button
+                    className="prod-btn prod-magic-refresh"
+                    disabled={magicBusy}
+                    onClick={() => setCastReviewOpen(true)}
+                    title="Review who/what depicts each character, environment, and prop before prompts are written"
+                  >
+                    Cast &amp; sets{magicCastReviewCount(prod) ? ` · ${magicCastReviewCount(prod)} to review` : ""}
+                  </button>
+                )}
                 {prod.magicEnabled && (
                   <button
                     className="prod-btn prod-magic-refresh"
                     disabled={magicBusy}
-                    onClick={regenMagic}
-                    title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
+                    onClick={startCastReview}
+                    title="Re-read the script, review Cast & sets, then regenerate all Magic Prompts"
                   >
                     <RegenerateIcon size={13} /> Regenerate all magic prompts
                   </button>
@@ -4561,6 +4615,17 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 <> {mediaProviderName}{mediaProviderId.endsWith("-cli") ? " CLI isn't set up" : " MCP isn't connected"}, so use <strong>Export prompts</strong> to generate frames externally.</>
               )}
             </p>
+            {castReviewOpen && prod.magicBible && (
+              <MagicCastReview
+                prod={prod}
+                busy={castBusy}
+                onMap={(entityName, refIds) => decideCast(entityName, refIds, false, false)}
+                onTextOnly={(entityName) => decideCast(entityName, [], true, false)}
+                onCreateInSuite={createCastInSuite}
+                onClose={() => setCastReviewOpen(false)}
+                onWrite={() => { setCastReviewOpen(false); regenMagic(); }}
+              />
+            )}
             {prod.magicEnabled && (
               <MagicReconcileQueue
                 prod={prod}

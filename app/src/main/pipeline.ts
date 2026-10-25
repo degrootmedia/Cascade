@@ -54,7 +54,7 @@ import type { VideoRef720Deps } from "./video-ref.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, MagicBible, MagicBibleShotPlan, ProductRef, SuggestedReference } from "../shared/ipc.js";
-import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, isMagicCitablePurpose, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
+import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, isMagicCitablePurpose, magicCastReviewCount, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -1335,6 +1335,7 @@ export async function generateMagicPrompts(
   emit: EmitFn,
   baseUrl?: string,
   shotIds?: string[],
+  opts?: { bibleOnly?: boolean },
 ): Promise<Production> {
   const allShots = p.scenes.flatMap((s) => s.shots);
   if (!allShots.length) throw new Error("No shots yet — ingest a script in Step 1 first.");
@@ -1402,9 +1403,15 @@ export async function generateMagicPrompts(
       try {
         bible = await generateMagicBible(p, apiKey, model, emit, baseUrl, skillText);
       } catch (e) {
+        if (opts?.bibleOnly) throw e;
         bible = null;
         emit(`Magic Prompt: Story Bible failed (${e instanceof Error ? e.message : String(e)}) — continuing scene-by-scene without it.`, "error");
       }
+    }
+    if (opts?.bibleOnly) {
+      const n = magicCastReviewCount(p);
+      emit(`Magic Prompt: Story Bible ready — ${n} cast/set decision${n === 1 ? "" : "s"} to review before prompts are written.`, "done");
+      return p;
     }
     const targetIds = new Set(targets.map((t) => t.id));
     for (const scene of p.scenes) {

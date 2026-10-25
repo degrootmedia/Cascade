@@ -62,13 +62,14 @@ vi.mock("@core", () => ({
 }));
 
 import {
+  applyMagicRefDecision,
   buildMagicBibleMessages,
   generateMagicPrompts,
   isMagicBibleStale,
   magicBibleInputHash,
   parseMagicBibleReply,
 } from "../src/main/pipeline.js";
-import { computeUnresolvedMagicRefs, inferReferencePurpose, isMagicCitablePurpose, magicRefRoster } from "../src/shared/magic-refs.js";
+import { computeUnresolvedMagicRefs, inferReferencePurpose, isMagicCitablePurpose, magicCastNeeds, magicCastReviewCount, magicRefRoster } from "../src/shared/magic-refs.js";
 
 function shot(id: string, number: string, visual: string, audio = ""): ProductionShot {
   return { id, number, audio, visual } as ProductionShot;
@@ -276,6 +277,53 @@ describe("Junk Drawer-shaped binding (generic roster names, no descriptors)", ()
     expect(stored).toContain("@[Hero]");
     expect(stored).toContain("@[Gondola]");
     expect(stored).toContain("Setting: A miniature valley world inside a giant wooden drawer.");
+  });
+});
+
+describe("Cast & Sets decisions + provenance", () => {
+  const reply = JSON.stringify({
+    synopsis: "s", assumptions: [], scenes: [],
+    entities: [
+      { name: "Ada", kind: "character", descriptor: "red cloak", refNames: ["MainCharacter"], bindReason: "lead name" },
+      { name: "alley", kind: "location", descriptor: "narrow passage" },
+    ],
+    shotPlans: [{ number: "0100", purpose: "x", present: ["Ada", "alley"], mustCite: [] }],
+  });
+
+  it("records who bound each entity and why", () => {
+    const bible = parseMagicBibleReply(reply, prod())!;
+    expect(bible.entities[0]).toMatchObject({ boundBy: "model", confidence: "high", bindReason: "lead name" });
+  });
+
+  it("user decisions reapply before model binding on regeneration", () => {
+    const p = prod();
+    p.magicRefDecisions = {
+      ada: { entityName: "Ada", refIds: [], textOnly: true, updatedAt: "2026-01-01" },
+    };
+    const bible = parseMagicBibleReply(reply, p)!;
+    expect(bible.entities[0].refNames).toBeUndefined();
+    expect(bible.entities[0]).toMatchObject({ boundBy: "user", bindReason: "You marked this text-only" });
+    expect(bible.shotPlans[0].mustCite).not.toContain("Hero");
+  });
+
+  it("applyMagicRefDecision maps, aliases, re-derives citations, and needs reflect it", () => {
+    const p = prod();
+    p.magicBible = {
+      version: 1, synopsis: "s", assumptions: [], scenes: [],
+      entities: [{ name: "Ada", kind: "character", descriptor: "red cloak" }],
+      shotPlans: [{ number: "0100", purpose: "x", present: ["Ada"], mustCite: [] }],
+      inputHash: "h", generatedAt: "2026-01-01",
+    };
+    expect(magicCastNeeds(p)[0].status).toBe("unmapped");
+    expect(magicCastReviewCount(p)).toBe(1);
+    applyMagicRefDecision(p, "Ada", { refIds: ["c1"] }, () => {});
+    expect(p.magicBible.entities[0]).toMatchObject({ refNames: ["Hero"], boundBy: "user" });
+    expect(p.magicBible.shotPlans[0].mustCite).toEqual(["Hero"]);
+    expect(p.characters[0].aliases).toContain("Ada");
+    expect(magicCastNeeds(p)[0]).toMatchObject({ status: "ready", shotNumbers: ["0100"] });
+    applyMagicRefDecision(p, "Ada", { textOnly: true }, () => {});
+    expect(magicCastNeeds(p)[0].status).toBe("text-only");
+    expect(p.magicBible.shotPlans[0].mustCite).toEqual([]);
   });
 });
 

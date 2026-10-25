@@ -87,6 +87,16 @@ function normalize(p: ProductionFile): ProductionFile {
       delete (p as { magicBible?: unknown }).magicBible;
     }
   }
+  if (p.magicRefDecisions !== undefined) {
+    if (!p.magicRefDecisions || typeof p.magicRefDecisions !== "object" || Array.isArray(p.magicRefDecisions)) {
+      delete (p as { magicRefDecisions?: unknown }).magicRefDecisions;
+    } else {
+      for (const [k, d] of Object.entries(p.magicRefDecisions)) {
+        if (!d || typeof d !== "object" || typeof d.entityName !== "string" || !Array.isArray(d.refIds)) delete p.magicRefDecisions[k];
+        else d.refIds = d.refIds.filter((x) => typeof x === "string");
+      }
+    }
+  }
   if (p.magicDismissedRefs !== undefined) {
     p.magicDismissedRefs = Array.isArray(p.magicDismissedRefs)
       ? [...new Set(p.magicDismissedRefs.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()).filter(Boolean))]

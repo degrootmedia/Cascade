@@ -664,7 +664,7 @@ export function magicBibleInputHash(p: Production): string {
   const payload = {
     // Schema epoch: bump when the bible contract changes so stored bibles
     // built under the old contract are rebuilt instead of silently reused.
-    v: 2,
+    v: 3,
     scenes: (p.scenes ?? []).map((sc) => ({
       n: sc.number,
       t: sc.title,
@@ -714,7 +714,7 @@ export function buildMagicBibleMessages(p: Production, skillText: string | null)
     '  "worldPremise": "one-sentence world/setting premise every frame restates",\n' +
     '  "assumptions": ["choice made where the script was silent", ...],\n' +
     '  "scenes": [ { "number": 1, "title": "...", "location": "...", "timeOfDay": "...", "beat": "what happens/changes", "settingAnchor": "compressed standalone setting sentence" } ],\n' +
-    '  "entities": [ { "name": "script name", "kind": "character|product|location|prop|other", "descriptor": "canonical visual descriptor", "refNames": ["roster names depicting it"], "aliases": ["other script names"] } ],\n' +
+    '  "entities": [ { "name": "script name", "kind": "character|product|location|prop|other", "descriptor": "canonical visual descriptor", "refNames": ["roster names depicting it"], "bindReason": "short why (name/category/role)", "aliases": ["other script names"] } ],\n' +
     '  "shotPlans": [ { "number": "0100", "purpose": "...", "framing": "wide/medium/closeup + angle", "present": ["entity names"], "mustCite": ["roster names"] } ]\n' +
     "}";
   return { systemContent, userContent };
@@ -745,7 +745,7 @@ const LOCATION_TOKENS = new Set(["environment", "location", "set", "background",
 function fallbackBindEntity(
   entity: { name: string; kind: string; descriptor: string; aliases?: string[] },
   citable: MagicRefRosterEntry[]
-): string[] {
+): { names: string[]; reason: string } {
   const nameTokens = new Set([...bibleTokens(entity.name), ...(entity.aliases ?? []).flatMap(bibleTokens)]);
   const textTokens = new Set([...nameTokens, ...bibleTokens(entity.descriptor)]);
   const isGroup = /\b(gang|team|group|squad|heroes|villains)\b/i.test(entity.name) || /^a (team|gang|group) of/i.test(entity.descriptor);
@@ -772,10 +772,15 @@ function fallbackBindEntity(
     if (LARGE.some((t) => textTokens.has(t)) && SMALL.some((t) => refNameTokens.has(t))) score -= 6;
     return { name: e.name, score };
   }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
-  if (!scored.length) return [];
-  if (isGroup) return scored.filter((s) => s.score >= Math.max(4, scored[0].score - 2)).slice(0, 4).map((s) => s.name);
+  const reason = entity.kind === "location"
+    ? "Matched an environment reference by name/category"
+    : isAntagonist
+      ? "Matched villain references by role/category"
+      : "Matched by name/category";
+  if (!scored.length) return { names: [], reason };
+  if (isGroup) return { names: scored.filter((s) => s.score >= Math.max(4, scored[0].score - 2)).slice(0, 4).map((s) => s.name), reason };
   const [top, second] = scored;
-  return top.score >= 6 && top.score > (second?.score ?? 0) ? [top.name] : [];
+  return { names: top.score >= 6 && top.score > (second?.score ?? 0) ? [top.name] : [], reason };
 }
 
 /** A group entity (gang/team/heroes) may depict through several refs. */
@@ -830,7 +835,10 @@ export function deriveMagicMustCite(
     }
     if (env) add(bound(env).slice(0, 1));
     for (const e of present) if (e.kind === "prop") add(bound(e).slice(0, 1));
-    for (const n of plan.mustCite) if (!locationRefKeys.has(refLookupKey(n))) add([n]);
+    // Model-listed extras survive only while still bound to some entity —
+    // otherwise a later text-only/unmap decision could never un-cite them.
+    const boundNames = new Set(entities.flatMap((e) => bound(e).map((n) => refLookupKey(n))));
+    for (const n of plan.mustCite) if (!locationRefKeys.has(refLookupKey(n)) && boundNames.has(refLookupKey(n))) add([n]);
     plan.mustCite = derived.slice(0, MAGIC_CITATION_BUDGET);
   }
 }
@@ -873,7 +881,7 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
     });
   }
   const kinds = new Set(["character", "product", "location", "prop", "other"]);
-  const rawEntities: { name: string; kind: MagicBible["entities"][number]["kind"]; descriptor: string; aliases: string[]; refNames: string[] }[] = [];
+  const rawEntities: { name: string; kind: MagicBible["entities"][number]["kind"]; descriptor: string; aliases: string[]; refNames: string[]; bindReason: string }[] = [];
   for (const raw of Array.isArray(parsed.entities) ? parsed.entities : []) {
     const o = (raw ?? {}) as Record<string, unknown>;
     const name = capStr(o.name, 120);
@@ -889,20 +897,45 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
       descriptor: capStr(o.descriptor, 300),
       aliases: strList(o.aliases, 8, 80),
       refNames,
+      bindReason: capStr(o.bindReason, 160),
     });
     if (rawEntities.length >= 60) break;
   }
   // Fallback binding never steals a ref the model already bound elsewhere
   // (Thumb Tacks belong to the thumbtacks, not the villain gang's category).
+  const decisions = new Map<string, NonNullable<Production["magicRefDecisions"]>[string]>();
+  for (const [k, d] of Object.entries(p.magicRefDecisions ?? {})) {
+    if (d) { decisions.set(refLookupKey(k), d); decisions.set(refLookupKey(d.entityName), d); }
+  }
+  const rosterById = new Map(roster.map((e) => [e.id, e.name]));
   const claimed = new Set(rawEntities.flatMap((e) => e.refNames.map((n) => refLookupKey(n))));
+  for (const d of decisions.values()) for (const id of d.refIds) { const n = rosterById.get(id); if (n) claimed.add(refLookupKey(n)); }
   const fallbackPool = citable.filter((e) => !claimed.has(refLookupKey(e.name)));
   const entities: MagicBible["entities"] = rawEntities.map((e) => {
-    const refNames = e.refNames.length ? e.refNames : fallbackBindEntity(e, fallbackPool);
+    const decision = decisions.get(refLookupKey(e.name)) ?? e.aliases.map((a) => decisions.get(refLookupKey(a))).find(Boolean);
+    if (decision) {
+      const refNames = decision.textOnly ? [] : decision.refIds.map((id) => rosterById.get(id)).filter((n): n is string => Boolean(n));
+      return {
+        name: e.name, kind: e.kind, descriptor: e.descriptor,
+        ...(refNames.length ? { refName: refNames[0], refNames } : {}),
+        boundBy: "user" as const, confidence: "high" as const,
+        bindReason: decision.textOnly ? "You marked this text-only" : "You mapped this in Cast & Sets",
+        ...(e.aliases.length ? { aliases: e.aliases } : {}),
+      };
+    }
+    if (e.refNames.length) {
+      return {
+        name: e.name, kind: e.kind, descriptor: e.descriptor,
+        refName: e.refNames[0], refNames: e.refNames,
+        boundBy: "model" as const, confidence: (e.refNames.length > 1 ? "medium" : "high") as "medium" | "high",
+        bindReason: e.bindReason || "Matched by the model from name, category, and story role",
+        ...(e.aliases.length ? { aliases: e.aliases } : {}),
+      };
+    }
+    const fb = fallbackBindEntity(e, fallbackPool);
     return {
-      name: e.name,
-      kind: e.kind,
-      descriptor: e.descriptor,
-      ...(refNames.length ? { refName: refNames[0], refNames } : {}),
+      name: e.name, kind: e.kind, descriptor: e.descriptor,
+      ...(fb.names.length ? { refName: fb.names[0], refNames: fb.names, boundBy: "auto" as const, confidence: "medium" as const, bindReason: fb.reason } : {}),
       ...(e.aliases.length ? { aliases: e.aliases } : {}),
     };
   });
@@ -941,13 +974,16 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
       let lead: MagicBible["entities"][number] | undefined;
       let leadCount = 0;
       for (const e of entities) {
-        if (e.kind !== "character" || e.refNames?.length) continue;
+        if (e.kind !== "character" || e.refNames?.length || e.boundBy === "user") continue;
         const c = Math.max(counts.get(refLookupKey(e.name)) ?? 0, ...(e.aliases ?? []).map((a) => counts.get(refLookupKey(a)) ?? 0));
         if (c > leadCount) { lead = e; leadCount = c; }
       }
       if (lead && leadCount >= Math.ceil(shotPlans.length * 0.4)) {
         lead.refName = leadRefs[0].name;
         lead.refNames = [leadRefs[0].name];
+        lead.boundBy = "auto";
+        lead.confidence = "medium";
+        lead.bindReason = "Most-present character; roster has a lead-named reference";
       }
     }
   }
@@ -956,6 +992,68 @@ export function parseMagicBibleReply(text: string, p: Production): ParsedMagicBi
   if (!synopsis && !scenes.length && !entities.length && !shotPlans.length) return null;
   const worldPremise = capStr(parsed.worldPremise, 400) || undefined;
   return { synopsis, worldPremise, assumptions: strList(parsed.assumptions, 20, 300), scenes, entities, shotPlans };
+}
+
+/**
+ * Record + apply a Cast & Sets decision: persists it (so bible regeneration
+ * reapplies it before any model binding), updates the live bible entity and
+ * re-derives shot citations, and best-effort saves the entity name as an
+ * alias on each mapped reference so future tags resolve either way.
+ */
+export function applyMagicRefDecision(
+  p: Production,
+  entityName: string,
+  decision: { refIds?: string[]; textOnly?: boolean; pendingCreate?: boolean },
+  emit: EmitFn,
+): Production {
+  const cleanName = sanitizeReferenceName(entityName ?? "");
+  if (!cleanName) throw new Error("The cast/set name is empty.");
+  const roster = magicRefRoster(p);
+  const byId = new Map(roster.map((e) => [e.id, e]));
+  const refIds = [...new Set(decision.refIds ?? [])].filter((id) => byId.has(id));
+  if ((decision.refIds?.length ?? 0) > 0 && !refIds.length && !decision.textOnly) throw new Error("Reference not found.");
+  const key = refLookupKey(cleanName);
+  p.magicRefDecisions = {
+    ...(p.magicRefDecisions ?? {}),
+    [key]: {
+      entityName: cleanName,
+      refIds: decision.textOnly ? [] : refIds,
+      ...(decision.textOnly ? { textOnly: true } : {}),
+      ...(decision.pendingCreate && !refIds.length && !decision.textOnly ? { pendingCreate: true } : {}),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  // Best-effort alias: entity name answers to each mapped ref (conflicts skip).
+  if (refIds.length && !decision.textOnly) {
+    const pools = [p.characters ?? [], p.products ?? [], p.references ?? []] as { id: string; name: string; aliases?: string[] }[][];
+    const all = pools.flat();
+    for (const id of refIds) {
+      const target = all.find((e) => e.id === id);
+      if (!target || refLookupKey(target.name) === key) continue;
+      if (refAliasConflict(all, id, cleanName)) continue;
+      target.aliases = sanitizeAliases([...(target.aliases ?? []), cleanName], target.name);
+    }
+  }
+  const bible = p.magicBible;
+  if (bible) {
+    const entity = bible.entities.find((e) => refLookupKey(e.name) === key || (e.aliases ?? []).some((a) => refLookupKey(a) === key));
+    if (entity) {
+      const refNames = decision.textOnly ? [] : refIds.map((id) => byId.get(id)!.name);
+      entity.refName = refNames[0];
+      entity.refNames = refNames.length ? refNames : undefined;
+      entity.boundBy = "user";
+      entity.confidence = "high";
+      entity.bindReason = decision.textOnly ? "You marked this text-only" : refNames.length ? "You mapped this in Cast & Sets" : entity.bindReason;
+      if (!refNames.length && !decision.textOnly) { entity.boundBy = undefined; entity.confidence = undefined; }
+      deriveMagicMustCite(p, bible.entities, bible.scenes, bible.shotPlans);
+    }
+  }
+  emit(decision.textOnly
+    ? `Cast & Sets: ${cleanName} marked text-only (no reference).`
+    : refIds.length
+      ? `Cast & Sets: ${cleanName} → ${refIds.map((id) => `@[${byId.get(id)!.name}]`).join(", ")}.`
+      : `Cast & Sets: ${cleanName} marked to create later.`);
+  return p;
 }
 
 /** Human-readable bible artifact (`out/magic-bible.md`) — assumptions first,

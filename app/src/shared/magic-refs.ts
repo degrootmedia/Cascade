@@ -4,7 +4,7 @@
  * (types + prompt grammar + the alias resolver only) so both sides agree on
  * what "this cited name resolves" means.
  */
-import type { MagicUnresolvedRef, Production, ReferencePurpose } from "./ipc.js";
+import type { MagicBibleEntity, MagicUnresolvedRef, Production, ReferencePurpose } from "./ipc.js";
 import { refTagMatches, renameRefTag } from "./prompt-grammar.js";
 import { canonicalRefName, refLookupKey, resolveRefByTagName, sanitizeAliases } from "./ref-names.js";
 
@@ -181,6 +181,75 @@ export function canonicalizeMagicPromptTags(
     if (canonical !== name) out = renameRefTag(out, name, canonical);
   }
   return { text: out, unresolved };
+}
+
+/** One Cast & Sets review row: a bible entity the script needs, what it is
+ *  for, and what (if anything) depicts it. Pure view over bible + decisions. */
+export interface MagicCastNeed {
+  entityName: string;
+  kind: MagicBibleEntity["kind"];
+  descriptor: string;
+  /** Display shot numbers where this entity appears (storyboard order). */
+  shotNumbers: string[];
+  /** Canonical reference names currently mapped to it. */
+  refNames: string[];
+  boundBy?: "user" | "model" | "auto";
+  confidence?: "high" | "medium" | "low";
+  bindReason?: string;
+  status: "ready" | "review" | "unmapped" | "text-only" | "pending-create";
+  /** Set when a mapped reference's purpose can't play this role. */
+  purposeWarning?: string;
+}
+
+/** The Cast & Sets list for the review UI, in bible order. */
+export function magicCastNeeds(p: Production): MagicCastNeed[] {
+  const bible = p.magicBible;
+  if (!bible) return [];
+  const roster = magicRefRoster(p);
+  const rosterByName = new Map(roster.map((e) => [refLookupKey(e.name), e]));
+  const decisions = new Map<string, NonNullable<Production["magicRefDecisions"]>[string]>();
+  for (const [k, d] of Object.entries(p.magicRefDecisions ?? {})) if (d) { decisions.set(refLookupKey(k), d); decisions.set(refLookupKey(d.entityName), d); }
+  const shotsFor = (e: MagicBibleEntity): string[] => {
+    const keys = new Set([refLookupKey(e.name), ...(e.aliases ?? []).map(refLookupKey)]);
+    const out: string[] = [];
+    for (const plan of bible.shotPlans) {
+      if ((plan.present ?? []).some((n) => keys.has(refLookupKey(n)))) out.push(plan.number);
+    }
+    return out;
+  };
+  const needs: MagicCastNeed[] = [];
+  for (const e of bible.entities) {
+    if (e.kind === "other") continue;
+    const decision = decisions.get(refLookupKey(e.name)) ?? (e.aliases ?? []).map((a) => decisions.get(refLookupKey(a))).find(Boolean);
+    const refNames = e.refNames?.length ? e.refNames : e.refName ? [e.refName] : [];
+    let purposeWarning: string | undefined;
+    for (const n of refNames) {
+      const entry = rosterByName.get(refLookupKey(n));
+      if (entry && !isMagicCitablePurpose(entry.purpose)) {
+        purposeWarning = `@[${n}] is marked ${entry.purpose} — it can't play this subject. Pick another reference.`;
+        break;
+      }
+    }
+    let status: MagicCastNeed["status"];
+    if (decision?.textOnly) status = "text-only";
+    else if (decision?.pendingCreate && !refNames.length) status = "pending-create";
+    else if (!refNames.length) status = "unmapped";
+    else if (purposeWarning) status = "review";
+    else if (e.boundBy === "user" || (e.boundBy === "model" && e.confidence === "high")) status = "ready";
+    else status = "review";
+    needs.push({
+      entityName: e.name, kind: e.kind, descriptor: e.descriptor,
+      shotNumbers: shotsFor(e), refNames,
+      boundBy: e.boundBy, confidence: e.confidence, bindReason: e.bindReason,
+      status, ...(purposeWarning ? { purposeWarning } : {}),
+    });
+  }
+  return needs;
+}
+
+/** How many cast decisions still need the user (badge counts). */
+export function magicCastReviewCount(p: Production): number {
+  return magicCastNeeds(p).filter((n) => n.status === "review" || n.status === "unmapped" || n.status === "pending-create").length;
 }
 
 /**

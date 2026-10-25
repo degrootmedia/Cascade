@@ -634,6 +634,12 @@ export interface MagicBibleEntity {
   /** Every roster reference depicting this entity (groups bind several,
    *  e.g. a gang → Villain 1/2/3). `refName` mirrors the first entry. */
   refNames?: string[];
+  /** Who bound this entity: the user (Cast & Sets review), the bible model,
+   *  or deterministic auto-binding. User bindings are never overridden. */
+  boundBy?: "user" | "model" | "auto";
+  confidence?: "high" | "medium" | "low";
+  /** Plain-language why ("Matched Villains category", "You mapped this"). */
+  bindReason?: string;
   /** Other names the script uses for this entity. */
   aliases?: string[];
 }
@@ -684,6 +690,19 @@ export interface MagicBible {
   inputHash: string;
   generatedAt: string;
   model?: string;
+}
+
+/** A user's Cast & Sets decision for one bible entity, keyed in
+ *  `Production.magicRefDecisions` by normalized entity name. Reapplied
+ *  deterministically on every bible regeneration before any model binding. */
+export interface MagicRefDecision {
+  entityName: string;
+  /** Mapped reference ids (empty when text-only or pending creation). */
+  refIds: string[];
+  textOnly?: boolean;
+  /** User went off to create this reference (suite/RefGen) — resumable. */
+  pendingCreate?: boolean;
+  updatedAt: string;
 }
 
 /** One cited name no reference resolves (Magic Prompt reconciliation). */
@@ -756,6 +775,9 @@ export interface Production {
    *  per-scene/per-shot generation is grounded in. Main-owned like
    *  `magicPrompts`; absent on productions that never ran the new pass. */
   magicBible?: MagicBible;
+  /** Cast & Sets review decisions (user mappings / text-only / pending
+   *  creates), keyed by normalized entity name. Main-owned like the bible. */
+  magicRefDecisions?: Record<string, MagicRefDecision>;
   /** Cited names the user dismissed in Magic reconciliation ("plain noun,
    *  not a reference") — stored lowercased; renderer-owned via saves. */
   magicDismissedRefs?: string[];

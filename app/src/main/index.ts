@@ -2694,7 +2694,7 @@ function registerIpc() {
     // builder) persist their new/updated entries — without them those changes
     // were silently dropped on save. `styles` is included so the style-frame
     // generator's written frame + pending-job record persist the same way.
-    for (const k of ["status", "currentStep", "magicEnabled", "magicBible", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
+    for (const k of ["status", "currentStep", "magicEnabled", "magicBible", "magicRefDecisions", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }

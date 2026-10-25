@@ -16,7 +16,7 @@
  */
 import type { AgentTool } from "@core";
 import { addRefTag } from "../shared/prompt-grammar.js";
-import { computeUnresolvedMagicRefs } from "../shared/magic-refs.js";
+import { computeUnresolvedMagicRefs, magicCastNeeds, magicCastReviewCount } from "../shared/magic-refs.js";
 import type {
   CharacterSheetGenOptions,
   CliModelSchema,
@@ -35,6 +35,7 @@ export type ProductionOp =
   | "ingest"
   | "setStyle"
   | "setShotPrompt"
+  | "generateMagicBible"
   | "generateMagicPrompts"
   | "generateStyleFrame"
   | "generateCharacterSheet"
@@ -137,6 +138,8 @@ export function productionDigest(p: Production): Record<string, unknown> {
       enabled: !!p.magicEnabled,
       bibleSynopsis: p.magicBible?.synopsis ?? null,
       bibleAssumptions: p.magicBible?.assumptions ?? [],
+      castNeeds: magicCastNeeds(p),
+      castReviewCount: magicCastReviewCount(p),
       unresolvedRefs: computeUnresolvedMagicRefs(p),
     },
     scenes: p.scenes.map((sc) => ({ number: sc.number, title: sc.title, shotCount: sc.shots.length })),
@@ -626,8 +629,22 @@ export function makeProductionAgentTools(host: ProductionToolHost): Record<strin
       detail: "Story Bible pass + per-scene prompt writing; enables Magic Prompt mode.",
     }),
     run: async (args) => {
-      const p = (await host.run("generateMagicPrompts", requireId(host, args))) as Production;
-      return digestText("Magic Prompts generated (references cited for the storyboard).", p);
+      const id = requireId(host, args);
+      // Two-stage: bible (Cast & Sets) first. Unreviewed cast decisions are
+      // the user's to make in the app — report them, never silently write.
+      const withBible = (await host.run("generateMagicBible", id)) as Production;
+      const needs = magicCastNeeds(withBible);
+      const pending = needs.filter((n) => n.status !== "ready" && n.status !== "text-only");
+      if (pending.length) {
+        return digestText(
+          `Story Bible ready, but ${pending.length} cast/set decision(s) need the user in the app's Cast & Sets review (Step 3) before prompts are written: ` +
+          pending.map((n) => `${n.entityName} (${n.kind}, ${n.status}${n.refNames.length ? `, currently ${n.refNames.join(", ")}` : ""})`).join("; ") +
+          `. Ask the user to review them, then re-run this tool.`,
+          withBible,
+        );
+      }
+      const p = (await host.run("generateMagicPrompts", id)) as Production;
+      return digestText("Magic Prompts generated (cast confirmed; references cited for the storyboard).", p);
     },
   };
 

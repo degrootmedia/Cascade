@@ -6135,6 +6135,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     import: "production:import",
     ingest: "production:ingest",
     setShotPrompt: "production:updateBoardPrompt",
+    generateMagicBible: "production:generateMagicBible",
     generateStyleFrame: "production:generateStyleFrame",
     generateCharacterSheet: "production:generateCharacterSheet",
     generateBoards: "production:generateBoards",

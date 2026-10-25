@@ -104,11 +104,13 @@ expect to find it.
    first (synopsis, entities, assumptions, per-shot plans in
    `out/magic-bible.md`), then content prompts are written per scene citing
    the references each shot actually contains. This is what makes the
-   character sheets and prop images upload during generation. Check the
-   returned digest's `magic.unresolvedRefs`: those are script/model names with
-   no matching user reference — tell the user to slot their own reference in
-   the storyboard's reconciliation queue (or cite a reference's alias, which
-   also resolves). If you need finer control, use `cascade_set_shot_prompt`
+   character sheets and prop images upload during generation. The tool is
+   two-stage: if the digest's `magic.castNeeds` shows unreviewed cast/set
+   decisions, it stops after the bible — tell the user to review them in
+   Step 3's Cast & Sets (map their own reference, create it, or mark
+   text-only; layout/blockout and style refs are never cast), then re-run.
+   `magic.unresolvedRefs` remains the post-hoc safety net for stray cited
+   names. If you need finer control, use `cascade_set_shot_prompt`
    per shot and include `@[Name]` for every reference that appears.
 5. **Storyboard (Step 3).** Call `cascade_generate_storyboard`. With no
    `shotIds` it fills every missing frame; pass `shotIds` (from

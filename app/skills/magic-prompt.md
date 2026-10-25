@@ -15,6 +15,11 @@ file in full (bounded to 12k chars) as instruction context for every pass.
    canonical entities, recorded assumptions, and a per-shot plan (purpose,
    framing, must-cite references). Stored on the production and written to
    `out/magic-bible.md`. Refreshed only when the script/roster changes.
+1b. **Cast & Sets review** (UI, between the passes): the user confirms what
+   depicts each character/environment/prop — Map, Text-only, or Create in
+   the Image Suite. Decisions persist as `magicRefDecisions` and reapply
+   before any model binding. Only `subject`/`environment`-purpose references
+   can be cast; style/layout/inspiration refs are never subjects.
 2. **Writing pass** (`buildMagicPromptMessages`): one call per scene chunk
    (≤8 shots), grounded in the bible. Each shot's own script audio/visual is
    AUTHORITATIVE for what it depicts; the bible and flanking shots are

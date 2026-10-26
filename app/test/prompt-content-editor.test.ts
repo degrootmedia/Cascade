@@ -76,6 +76,14 @@ function key(box: HTMLElement, k: string, mods: KeyboardEventInit = {}) {
   });
 }
 
+function paste(box: HTMLElement, text: string) {
+  act(() => {
+    const ev = new window.Event("paste", { bubbles: true, cancelable: true }) as Event & { clipboardData?: unknown };
+    ev.clipboardData = { getData: (type: string) => (type === "text/plain" ? text : "") };
+    box.dispatchEvent(ev);
+  });
+}
+
 function dispose(h: Harness) {
   act(() => { h.root.unmount(); });
   document.body.removeChild(h.host);
@@ -207,6 +215,39 @@ describe("PromptContentEditor reference-block editing", () => {
     expect(insideChip).toBe(false);
     const off = caretOffset(h.box);
     expect(off === 7 || off === 16).toBe(true);
+    dispose(h);
+  });
+
+  it("pasting a prompt with @[Name] tags renders them as chips immediately", () => {
+    const h = renderEditor("Intro: ");
+    act(() => { h.box.focus(); });
+    setCaret(h.box.childNodes[0] as Node, "Intro: ".length);
+    paste(h.box, "@[Gandalf] walks with @[Frodo]");
+    expect(h.value()).toBe("Intro: @[Gandalf] walks with @[Frodo]");
+    expect(h.box.textContent).toBe("Intro: @[Gandalf] walks with @[Frodo]");
+    const chips = h.box.querySelectorAll(".prompt-tag-chip");
+    expect(chips.length).toBe(2);
+    expect(chips[0].textContent).toBe("@[Gandalf]");
+    expect(chips[1].textContent).toBe("@[Frodo]");
+    expect(caretOffset(h.box)).toBe("Intro: @[Gandalf] walks with @[Frodo]".length);
+    dispose(h);
+  });
+
+  it("pasting over a selection replaces it and still chip-ifies pasted tags", () => {
+    const h = renderEditor("Replace me entirely");
+    act(() => { h.box.focus(); });
+    const range = document.createRange();
+    range.selectNodeContents(h.box);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    paste(h.box, "A hero @[Gandalf] walks");
+    expect(h.value()).toBe("A hero @[Gandalf] walks");
+    expect(h.box.querySelectorAll(".prompt-tag-chip").length).toBe(1);
+    // The paste is one undo step, like typing/deleting.
+    key(h.box, "z", { ctrlKey: true });
+    expect(h.value()).toBe("Replace me entirely");
+    expect(h.box.querySelectorAll(".prompt-tag-chip").length).toBe(0);
     dispose(h);
   });
 

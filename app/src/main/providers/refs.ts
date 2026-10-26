@@ -10,6 +10,7 @@ import { refArtworkDataUrl, refMediaDataUrl, refToken } from "../pipeline.js";
 import { refTagMatches } from "../../shared/prompt-grammar.js";
 import type { Production } from "../../shared/ipc.js";
 import { buildRefNameIndex, refLookupKey } from "../../shared/ref-names.js";
+import { STYLE_ONLY_FORBIDDEN, STYLE_ONLY_TRAITS } from "../../shared/prompt-templates.js";
 
 /** Lowercased names of style-only refs: per-ref `styleOnly` override wins,
  *  otherwise the ref's category `kind === "style"` flags it. */
@@ -26,14 +27,18 @@ export function styleRefNames(p: Production): Set<string> {
   return out;
 }
 
-/** The style-only clause appended once per style ref (cites its @imageN token
- *  position). Survives `stripReferenceClause` (that only strips the legacy
+/** The style-only clause emitted once per style ref (cites its @imageN token
+ *  position). Built from the same trait/forbidden fragments as the LOOK
+ *  clause so a style frame and a style reference are fenced identically.
+ *  Survives `stripReferenceClause` (that only strips the legacy
  *  "Reference images by id" alias) by design. */
 export function styleOnlyClause(imagePos: number): string {
   return (
-    `Reference image ${imagePos} is provided for style only ` +
-    `(color palette, lighting, texture, rendering technique). ` +
-    `Do not copy its subject, composition, or content.`
+    `Reference image ${imagePos} — STYLE ONLY: use it solely for its ${STYLE_ONLY_TRAITS}. ` +
+    `STRICT: do not copy, include, or reproduce anything depicted in reference image ${imagePos} — ` +
+    `none of its ${STYLE_ONLY_FORBIDDEN} may appear. ` +
+    `Depict only what the rest of this prompt describes; wherever this prompt conflicts ` +
+    `with reference image ${imagePos}, the prompt wins.`
   );
 }
 
@@ -121,19 +126,23 @@ export function citePrompt(prompt: string, refs: { name: string }[], submitted: 
     for (let k = 0; k < i; k++) if (submitted[k] !== null) pos++;
     out = out.split(token).join(`${r.name} (reference image ${pos})`);
   });
-  // Style-only clause: once per submitted style ref, referencing its @imageN
-  // slot. Never double-inserts when the prompt already carries the sentence.
+  // Style-only clauses: once per submitted style ref, referencing its
+  // @imageN slot, placed FIRST in the wire prompt. They used to trail at the
+  // very end, where the shot description in between let the style image's
+  // own content win; a phrase-level dedupe also suppressed every clause
+  // after the first. Per-clause dedupe keeps a re-cite from stacking copies
+  // while still giving every style ref its own clause.
   if (styles) {
+    const clauses: string[] = [];
     refs.forEach((r, i) => {
       if (!styles.has(r.name.toLowerCase())) return;
       if (submitted[i] === null) return;
       let pos = 1;
       for (let k = 0; k < i; k++) if (submitted[k] !== null) pos++;
       const clause = styleOnlyClause(pos);
-      if (!out.includes(clause) && !out.includes("provided for style only")) {
-        out = `${out.trimEnd()} ${clause}`;
-      }
+      if (!out.includes(clause) && !clauses.includes(clause)) clauses.push(clause);
     });
+    if (clauses.length) out = `${clauses.join(" ")}\n\n${out.trimStart()}`;
   }
   return out;
 }

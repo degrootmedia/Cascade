@@ -4605,3 +4605,168 @@ reconciliation queue (component tests mount it, but no real click-through in
 the app). Deferred follow-ups: pre-slotting alias editor on Design tiles
 (queue Assign + rename-retains-alias cover slotting today), vision-capable
 bible pass over reference images, optional critic/repair pass.
+
+---
+
+# Importing a project folder doesn't set up storyboard / references / script
+
+User report: importing an existing project folder doesn't properly set up the
+existing storyboard, references, script, etc.
+
+## Findings (verified)
+
+- `productions.importProduction` (`app/src/main/productions.ts:1128`) registers
+  the folder with a **brand-new empty document** (`scenes: []`, `references:
+  []`, `status: {}`, step 1) and only scaffolds missing dirs. It never reads
+  anything back from the folder — by design ("Pipeline state starts fresh …
+  the user re-ingests the script from Step 1"), but that loses everything that
+  IS recoverable deterministically from disk.
+- Recoverable artifacts already on disk in a real production folder:
+  - `script.md` — written by `pipeline.scriptMarkdown` in a fixed format
+    (`# Name — Shot Breakdown`, `## Scene N — Title`, `| Shot | Audio |
+    Visual |` tables), re-written on every `production:save`. Parseable back
+    into scenes/shots with their original 4-digit numbers (no LLM needed —
+    `ingestScript` is model-based and must NOT be the recovery path).
+  - `boards/<NNNN>/shot-<NNNN>-*.jpg` (+ `originals/`, `video/`) —
+    `refreshBoardLinks` / `refreshShotVideos` already adopt these, but only
+    onto shots that exist; with `scenes: []` they can never run.
+  - `boards/prompts.md` — `exportBoardPrompts` output (`## Shot NNNN` +
+    composed prompt); content-only text (`stripSharedSections`) restores
+    `shot.prompt`.
+  - `boards/import/<NNNN>.*` — `scanBoardImportFolder` + `importBoards`.
+  - `references/*` images — same adoption as `production:scanReferencesFolder`
+    (`unclaimedReferenceFiles`, name from filename).
+  - `styles/<styleId>.*` look plates (`styleFrameRelPath`) — style prompt
+    text is JSON-only (lost), but the frame can come back as a style entry.
+  - `voiceover/*`, `music/*` — newest audio file restores
+    `voiceoverPath` / `musicPath`.
+- Secondary gap: the `production:import` handler returns the raw new document
+  (no stored graphs / media bootstrap — `production:load` runs
+  `ensureShotGraphs` + `mediaFiles.bootstrap`) and never starts the reference
+  watcher (`refWatcher.watch`), unlike `production:load`.
+
+## Plan
+
+- [x] Tests first (`app/test/productions.test.ts`, `importProduction`):
+      script.md breakdown + board frames recover scenes/artwork/status;
+      boards-only folder synthesizes shots; references/styles/audio adopted;
+      prompts.md restores content-only prompts; empty folder stays empty.
+- [x] `pipeline.ts`: `parseScriptMarkdown` (inverse of `scriptMarkdown`;
+      tolerates the duration-column variant) + `parseBoardPromptsMarkdown`
+      next to their writers; export `markBoardsStatus`.
+- [x] `productions.ts`: `importProduction` hydrates from the folder
+      (each artifact isolated so one bad file can't fail the import),
+      derives `status`/`currentStep`, saves, and returns `loadProduction(id)`
+      so graphs/media are materialized like a normal open.
+- [x] `index.ts`: `production:import` starts `refWatcher.watch` like load.
+- [x] Verify: typecheck, app tests, build; CONTEXT.md note.
+
+Out of scope (JSON-only state, unrecoverable from the folder alone): style
+prompt text, character/product split of reference images (adopted as custom
+references, same as the folder rescan), magic prompts, graph edits, takes
+history beyond the newest frame/clip per shot.
+
+## Review
+
+Done. Root cause: `importProduction` registered the folder with an empty
+document and never read the folder back — the recovery helpers
+(`refreshBoardLinks`, the references rescan) existed but had nothing to attach
+to. Now import rebuilds everything the folder still carries deterministically:
+`parseScriptMarkdown` (new, inverse of `scriptMarkdown`) restores scenes/shots
+with original numbers and the production name from the H1; missing shot numbers
+are synthesized from `boards/<NNNN>/` folders so frames/clips re-link via the
+existing refreshers (+ `boards/import/` drop-ins via `importBoards`);
+`parseBoardPromptsMarkdown` restores content-only manual prompts; reference
+images, style frames (newest per collision group), and the newest
+voiceover/music clips are adopted; `status`/`currentStep` derive from what was
+recovered. Each artifact is isolated (one bad file can't fail the import),
+nothing on disk is deleted/overwritten, and the handler now returns the fully
+loaded document (graphs + media materialized) and starts the reference watcher,
+matching `production:load`. The chat agent's `cascade_import_production` rides
+the same handler, so it recovers too.
+
+Verify: 5 new `importProduction` tests failed before / pass after
+(script+boards recovery, step-3-done, boards-only synthesis, refs/styles/audio
+adoption, prompts.md content-only restore); the 3 pre-existing import tests
+pass unchanged (a non-breakdown `script.md` still yields an empty breakdown).
+App typecheck clean; full suite 1875 passed + 2 skipped; `npm run build`
+clean. Not verified in the live Electron UI (no click-through) — the behavior
+is pinned at the `productions` module boundary the IPC handler calls.
+
+# Style images leaking content into generations — stricter style-only language
+
+User report: image generations submitted with a style attached still copy
+content from the style image despite the explicit prohibition.
+
+## Findings
+
+Every style-image path funnels into exactly two sentences, both weak:
+
+1. `LOOK_CLAUSE` (`app/src/shared/prompt-templates.ts`, user-editable via
+   Settings → Prompts `lookClause`) — style FRAME at reference image 1,
+   prepended by `withLookClause`/`assembleImagePrompt`. Old text: "…match its
+   medium, palette, lighting, line/texture and rendering treatment. Do not copy
+   its subject matter." One vague prohibition; "subject matter" doesn't name
+   composition/pose/setting/objects, no precedence rule on conflict.
+2. `styleOnlyClause` (`app/src/main/providers/refs.ts`) — style-only
+   REFERENCES (category kind `style` / per-ref `styleOnly`, auto-attached by
+   `resolvePromptRefs`). Old text: "Reference image N is provided for style
+   only (…). Do not copy its subject, composition, or content." Two extra
+   defects beyond wording: it is APPENDED at the very end of the wire prompt
+   (weakest position), and the dedupe guard
+   (`!out.includes("provided for style only")`) suppresses the clause for
+   every style ref after the first when 2+ are submitted. Its trait list also
+   omitted medium/line that LOOK names.
+
+Coverage confirmed complete otherwise: storyboard (`openArtPrompt`), Image
+Suite generate (`index.ts` suite handler), character sheets / edits / video
+(all ride provider `citePrompt` with `styleRefNames(p)`). No truncation eats
+either clause (LOOK is prepended after the 2000-char slice; the style clause
+is added at submit). `stripReferenceClause` only strips the legacy
+"Reference images by id" line — safe.
+
+## Plan
+
+- [x] Failing tests first: strict wording pins + multi-style-ref clauses +
+  front placement (`look-cohesion.test.ts`, `providers.test.ts`).
+- [x] `prompt-templates.ts`: shared trait/forbidden fragments; strict
+  `LOOK_CLAUSE` built from them (enumerated borrow-only traits, enumerated
+  forbidden content, depict-only-the-description rule, description wins on
+  conflict).
+- [x] `providers/refs.ts`: `styleOnlyClause` from the same fragments;
+  `citePrompt` emits one clause per submitted style ref (per-clause dedupe)
+  and places them FIRST in the wire prompt instead of appending.
+- [x] Focused tests + typecheck + full suite.
+
+## Review
+
+Done. New LOOK clause: "Look reference (reference image 1) — STYLE ONLY:
+match only its medium, color palette, lighting, line quality, texture and
+grain, and rendering technique. STRICT: do not copy, include, or reproduce
+anything depicted in reference image 1 — none of its people, characters,
+faces, figures, clothing, objects, props, setting, location, background,
+composition, framing, camera angle, pose, or text may appear. Depict only
+what the description and content references below describe; wherever they
+conflict with reference image 1, the description wins." Style references get
+the mirror clause citing their own position, built from the same
+`STYLE_ONLY_TRAITS`/`STYLE_ONLY_FORBIDDEN` fragments so the two fences can't
+drift. `citePrompt` now leads the wire prompt with the style clauses (was:
+appended last) and emits one per submitted style ref (was: the phrase dedupe
+silently dropped refs 2+). Failed uploads still get no clause; re-citing is
+idempotent.
+
+Verify: 5 new/updated assertions failed before (3 LOOK pins, strict-clause-
+first, one-clause-per-ref) and pass after; focused files 51/51; full gate
+`npm run test` (typecheck + vitest) 1878 passed + 2 skipped. Not verified
+against a live model — prompt adherence is the vendor's side; the wording,
+placement, and per-ref coverage are pinned at the `citePrompt`/`LOOK_CLAUSE`
+boundary every provider submits through. Caveat: a stored generation prompt
+carrying the OLD LOOK text re-submitted later gains the new clause in
+addition (`hasLookClause` matches the new text only) — harmless duplication,
+both fences point the same way.
+
+Note: users who customized the `lookClause` template in Settings keep their
+override (by design) — the strict builtin applies to everyone else.
+`styleOnlyClause` is not user-editable, so every style-ref submission gets
+the new wording + placement.
+

@@ -64,8 +64,22 @@ function makeProduction(styles: ProductionStyle[] = [makeStyle()], shot: Product
 describe("buildLookClause", () => {
   it("is the verbatim look sentence — a look, not a subject", () => {
     expect(buildLookClause()).toBe(LOOK_CLAUSE);
-    expect(LOOK_CLAUSE).toMatch(/match its medium, palette, lighting/);
-    expect(LOOK_CLAUSE).toMatch(/Do not copy its subject matter/);
+    expect(LOOK_CLAUSE).toMatch(/reference image 1\) — STYLE ONLY: match only its medium, color palette, lighting/);
+  });
+
+  it("forbids the frame's depicted content by name, not just 'subject matter'", () => {
+    // The old single "Do not copy its subject matter" let models keep the
+    // frame's people/setting/composition; every leak channel is named now.
+    expect(LOOK_CLAUSE).toMatch(/STRICT: do not copy, include, or reproduce anything depicted in reference image 1/);
+    for (const forbidden of ["people", "faces", "clothing", "objects", "setting", "background", "composition", "camera angle", "pose", "text"]) {
+      expect(LOOK_CLAUSE).toContain(forbidden);
+    }
+    expect(LOOK_CLAUSE).not.toMatch(/subject matter/);
+  });
+
+  it("states a precedence rule: the description wins over the frame on conflict", () => {
+    expect(LOOK_CLAUSE).toMatch(/Depict only what the description and content references below describe/);
+    expect(LOOK_CLAUSE).toMatch(/the description wins/);
   });
 
   it("withLookClause prepends once and is idempotent", () => {

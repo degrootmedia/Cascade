@@ -210,6 +210,68 @@ export function suggestedReferences(rawCharacters: RawCharacter[] | undefined, r
   return lines.join("\n");
 }
 
+/** Inverse of `scriptMarkdown`: parse a written shot-breakdown artifact back
+ *  into scenes/shots, preserving each shot's original 4-digit number (fresh
+ *  ids — the old document's ids are unrecoverable). The folder-import recovery
+ *  path uses this so an existing production folder rebuilds its breakdown
+ *  deterministically, without a model call. Tolerant by design: unknown lines,
+ *  duplicate/invalid shot numbers, and scenes with no readable rows are
+ *  skipped; the `animaticMarkdown` duration-column table also parses (columns
+ *  are located by header name). `name` is the H1 production title when the
+ *  `# … — Shot Breakdown` heading is present. */
+export function parseScriptMarkdown(md: string): { name?: string; scenes: ProductionScene[] } {
+  const scenes: ProductionScene[] = [];
+  const seenNumbers = new Set<string>();
+  let name: string | undefined;
+  let current: ProductionScene | null = null;
+  let audioCol = 1;
+  let visualCol = 2;
+  const ensureScene = (): ProductionScene => {
+    if (!current) {
+      current = { number: scenes.length + 1, title: `Scene ${scenes.length + 1}`, shots: [] };
+      scenes.push(current);
+    }
+    return current;
+  };
+  for (const rawLine of (md ?? "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const h1 = /^#\s+(.+?)\s+—\s+Shot Breakdown\s*$/.exec(line);
+    if (h1) {
+      if (!name) name = h1[1].trim() || undefined;
+      continue;
+    }
+    const h2 = /^##\s+Scene\s+\d+\s*[—-]\s*(.*)$/.exec(line);
+    if (h2) {
+      current = { number: scenes.length + 1, title: h2[1].trim() || `Scene ${scenes.length + 1}`, shots: [] };
+      scenes.push(current);
+      continue;
+    }
+    if (!line.startsWith("|")) continue;
+    // Split on unescaped pipes (the writers escape literal pipes as `\|`).
+    const cells = line
+      .replace(/\\\|/g, "\u0000")
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.replace(/\u0000/g, "|").trim());
+    if (cells.length < 3) continue;
+    if (cells[0].toLowerCase() === "shot") {
+      const a = cells.findIndex((c) => c.toLowerCase() === "audio");
+      const v = cells.findIndex((c) => c.toLowerCase() === "visual");
+      if (a > 0) audioCol = a;
+      if (v > 0) visualCol = v;
+      continue;
+    }
+    if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue; // separator row
+    const number = cells[0];
+    if (!shotter.isValidNumber(number) || seenNumbers.has(number)) continue;
+    seenNumbers.add(number);
+    ensureScene().shots.push(shotter.newShot(number, cells[audioCol] ?? "", cells[visualCol] ?? ""));
+  }
+  const kept = scenes.filter((s) => s.shots.length);
+  kept.forEach((s, i) => { s.number = i + 1; });
+  return { name, scenes: kept };
+}
+
 /** Absolute path of a production asset that lives inside its folder. Realpath-verified so symlinks cannot escape. */
 /** Absolute path of a production asset inside `folder` (folder-only:
  *  no production document load — the media-serving hot path uses this). */
@@ -4519,7 +4581,7 @@ export async function generateBoards(
 
 /** Step 3 is "done" once every shot has a frame — either the piped output or
  *  generations waiting on its node. */
-function markBoardsStatus(p: Production): void {
+export function markBoardsStatus(p: Production): void {
   const all = p.scenes.flatMap((s) => s.shots);
   if (all.length && all.every((s) => s.artwork || s.graphImageGens?.length)) p.status[3] = "done";
 }
@@ -4574,6 +4636,39 @@ export function exportBoardPrompts(p: Production, emit: EmitFn, lookClause?: str
   fs.writeFileSync(mdPath, lines.join("\n"), "utf8");
   emit(`Wrote ${all.length} prompt(s) to ${p.assets.boardsDir}/prompts.md — generate the frames anywhere, then use "Import frames…".`, "done");
   return p;
+}
+
+/** Inverse of `exportBoardPrompts`: parse `<boards>/prompts.md` back into a
+ *  per-shot prompt map (shot number → prompt text, first section wins). The
+ *  trailing `Reference(s): …` listing is dropped — it describes attachments,
+ *  not prompt content. Callers strip shared Style/Brand sections before
+ *  storing the text as a (content-only) manual prompt. */
+export function parseBoardPromptsMarkdown(md: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let number: string | null = null;
+  let body: string[] = [];
+  const flush = (): void => {
+    if (number && !out.has(number)) {
+      const text = body.join("\n").trim();
+      if (text) out.set(number, text);
+    }
+    number = null;
+    body = [];
+  };
+  for (const line of (md ?? "").split(/\r?\n/)) {
+    const head = /^##\s+Shot\s+(\d{4})\s*$/.exec(line.trim());
+    if (head) {
+      flush();
+      number = head[1];
+      continue;
+    }
+    if (number === null) continue;
+    if (/^#{1,2}\s/.test(line.trim())) { flush(); continue; }
+    if (/^References?:/i.test(line.trim())) { flush(); continue; }
+    body.push(line);
+  }
+  flush();
+  return out;
 }
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp"]);

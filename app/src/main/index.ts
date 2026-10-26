@@ -2155,6 +2155,8 @@ function registerIpc() {
     const p = productions.importProduction(folder);
     settings.addRecentProduction(p.meta.folder);
     setActiveProduction(p.meta.id);
+    // Follow the imported production's references like a normal open does.
+    refWatcher.watch(p.meta.id, p);
     return p;
   });
 

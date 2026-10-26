@@ -1159,6 +1159,129 @@ describe("importProduction", () => {
   it("throws for a folder that doesn't exist", () => {
     expect(() => importProduction(path.join(dataDir, "external", "no-such-folder"))).toThrow(/doesn't exist/);
   });
+
+  it("rebuilds scenes, shots, and board artwork from script.md + boards/", () => {
+    const folder = path.join(dataDir, "external", "recovered-film-folder");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "0200"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "boards", "0200", "shot-0200-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      [
+        "# Recovered Film — Shot Breakdown",
+        "",
+        "## Scene 1 — Opening",
+        "",
+        "| Shot | Audio | Visual |",
+        "|------|-------|--------|",
+        "| 0100 | Narration \\| one | A lighthouse at dawn |",
+        "| 0200 |  | Waves on rocks |",
+        "",
+        "## Scene 2 — The Letter",
+        "",
+        "| Shot | Audio | Visual |",
+        "|------|-------|--------|",
+        "| 0300 | Dear Mara | Hands open an envelope |",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    // The script.md title wins over the folder basename.
+    expect(p.meta.name).toBe("Recovered Film");
+    expect(p.scenes.map((s) => s.title)).toEqual(["Opening", "The Letter"]);
+    const shots = p.scenes.flatMap((s) => s.shots);
+    expect(shots.map((s) => s.number)).toEqual(["0100", "0200", "0300"]);
+    expect(shots[0].audio).toBe("Narration | one");
+    expect(shots[0].visual).toBe("A lighthouse at dawn");
+    // Existing frames are linked; the unframed shot stays blank.
+    expect(shots[0].artwork).toBe("boards/0100/shot-0100-a.jpg");
+    expect(shots[1].artwork).toBe("boards/0200/shot-0200-a.jpg");
+    expect(shots[2].artwork).toBeUndefined();
+    expect(p.status[1]).toBe("done");
+    expect(p.status[3]).toBeUndefined();
+    // The returned document is fully loaded (stored graphs materialized),
+    // exactly as if it had been opened via production:load.
+    expect(shots[0].graph).toBeTruthy();
+    // And it persists: a fresh load sees the same breakdown.
+    expect(loadProduction(p.meta.id)?.scenes.flatMap((s) => s.shots).map((s) => s.number)).toEqual(["0100", "0200", "0300"]);
+  });
+
+  it("marks the storyboard step done when every recovered shot has a frame", () => {
+    const folder = path.join(dataDir, "external", "Fully Framed");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      "# Fully Framed — Shot Breakdown\n\n## Scene 1 — Only\n\n| Shot | Audio | Visual |\n|------|-------|--------|\n| 0100 | Hi | A door |\n",
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    expect(p.status[3]).toBe("done");
+    expect(p.currentStep).toBe(3);
+  });
+
+  it("synthesizes shots from board folders when script.md is missing", () => {
+    const folder = path.join(dataDir, "external", "Boards Only");
+    fs.mkdirSync(path.join(folder, "boards", "0300"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "outdated", "x"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "boards", "0300", "shot-0300-a.jpg"), "fake-jpeg");
+
+    const p = importProduction(folder);
+    const shots = p.scenes.flatMap((s) => s.shots);
+    expect(shots.map((s) => s.number)).toEqual(["0100", "0300"]);
+    expect(shots.every((s) => !!s.artwork)).toBe(true);
+    // No script was recovered, so Step 1 is not claimed done.
+    expect(p.status[1]).toBeUndefined();
+  });
+
+  it("adopts reference images, style frames, voiceover, and music from disk", () => {
+    const folder = path.join(dataDir, "external", "Assets Film");
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "styles"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "voiceover"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "music"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "references", "Mara.png"), "fake-png");
+    fs.writeFileSync(path.join(folder, "references", "Old Map.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "styles", "style-abc.png"), "fake-png");
+    fs.writeFileSync(path.join(folder, "voiceover", "narration.mp3"), "fake-mp3");
+    fs.writeFileSync(path.join(folder, "music", "theme.mp3"), "fake-mp3");
+
+    const p = importProduction(folder);
+    expect((p.references ?? []).map((r) => r.name).sort()).toEqual(["Mara", "Old Map"]);
+    expect((p.references ?? []).map((r) => r.imagePath).sort()).toEqual(["references/Mara.png", "references/Old Map.jpg"]);
+    expect(p.styles).toHaveLength(1);
+    expect(p.styles[0].imagePath).toBe("styles/style-abc.png");
+    expect(p.voiceoverPath).toBe("voiceover/narration.mp3");
+    expect(p.musicPath).toBe("music/theme.mp3");
+  });
+
+  it("restores shot prompts from boards/prompts.md as content only", () => {
+    const folder = path.join(dataDir, "external", "Prompted Film");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      "# Prompted Film — Shot Breakdown\n\n## Scene 1 — Only\n\n| Shot | Audio | Visual |\n|------|-------|--------|\n| 0100 | Hi | A door |\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(folder, "boards", "prompts.md"),
+      "# Prompted Film — Storyboard Prompts\n\n## Shot 0100\n\nStyle: moody watercolor\n\nA red door, close up, brass knob\n\nReferences: @image1 — Mara (artwork attached)\n",
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    const shot = p.scenes[0].shots[0];
+    expect(shot.prompt).toContain("A red door, close up, brass knob");
+    expect(shot.prompt).not.toContain("Style:");
+    expect(shot.prompt).not.toContain("References:");
+    expect(shot.promptManual).toBe(true);
+  });
 });
 
 describe("too-old production guard (step 10 T5)", () => {

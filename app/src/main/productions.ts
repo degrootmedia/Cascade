@@ -15,14 +15,16 @@ import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
 import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
-relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs }
+relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
+parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
 from "./pipeline.js";
+import * as shotter from "./shotter.js";
 import { normalizeMediaRegistry } from "../shared/media-registry.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
 import { normalizeGraph } from "../shared/graph/normalize.js";
 import { setStyleEdge } from "../shared/graph/connect.js";
 import { nodeDecl } from "../shared/graph/ports.js";
-import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
+import { brandEdgePresent, resolveNodeStyleText, stripSharedSections, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
 import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
@@ -1132,15 +1134,151 @@ export function newProduction(name: string, parentFolder: string): ProductionFil
   return p;
 }
 
+const IMPORT_IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+const IMPORT_AUDIO_FILE = /\.(mp3|wav|m4a|aac|ogg|flac)$/i;
+
+/** Workspace-relative paths of the files directly inside an asset dir whose
+ *  names match `rx` (missing dir → none). */
+function listAssetFiles(p: ProductionFile, relDir: string, rx: RegExp): string[] {
+  try {
+    return fs.readdirSync(assetPath(p, relDir), { withFileTypes: true })
+      .filter((e) => e.isFile() && rx.test(e.name))
+      .map((e) => `${relDir}/${e.name}`);
+  } catch {
+    return [];
+  }
+}
+
+/** The newest (by mtime) of the given workspace-relative files, if any. */
+function newestAssetFile(p: ProductionFile, rels: string[]): string | undefined {
+  let best: { rel: string; mtime: number } | undefined;
+  for (const rel of rels) {
+    try {
+      const mtime = fs.statSync(assetPath(p, rel)).mtimeMs;
+      if (!best || mtime > best.mtime) best = { rel, mtime };
+    } catch { /* unreadable — skip */ }
+  }
+  return best?.rel;
+}
+
+/** Rebuild whatever pipeline state an imported folder still carries on disk
+ *  onto the fresh document: the script breakdown (`script.md`), storyboard
+ *  frames/clips (`boards/<NNNN>/`, plus any `boards/import/` drop-ins), shot
+ *  prompts (`boards/prompts.md`), reference images, style frames, and the
+ *  voiceover/music clips. Every artifact is recovered independently — one
+ *  missing or unreadable file never blocks the rest, and nothing on disk is
+ *  deleted or overwritten (`importBoards` copies drop-ins into per-shot
+ *  folders, as it does from Step 3). JSON-only state (style prompt text,
+ *  character/product identities, magic prompts, graph history) cannot be
+ *  recovered from the folder alone. */
+function hydrateImportedProduction(p: ProductionFile): void {
+  // 1. Script breakdown — the deterministic script.md artifact, parsed back
+  //    with the shots' original numbers (no model call).
+  try {
+    const md = fs.readFileSync(assetPath(p, p.assets.scriptMd), "utf8");
+    const parsed = parseScriptMarkdown(md);
+    if (parsed.name) p.meta.name = parsed.name;
+    if (parsed.scenes.length) {
+      p.scenes = parsed.scenes;
+      p.status[1] = "done";
+    }
+  } catch { /* no readable script.md — board folders may still define shots */ }
+
+  // 2. Board folders for shot numbers the script doesn't carry (or the only
+  //    shot source when script.md is gone) become blank shots to hang the
+  //    existing frames on.
+  try {
+    const numbers = fs.readdirSync(assetPath(p, p.assets.boardsDir), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && shotter.isValidNumber(e.name))
+      .map((e) => e.name)
+      .sort();
+    const known = new Set(p.scenes.flatMap((s) => s.shots.map((sh) => sh.number)));
+    const missing = numbers.filter((n) => !known.has(n));
+    if (missing.length) {
+      if (!p.scenes.length) p.scenes = [{ number: 1, title: "Scene 1", shots: [] }];
+      const last = p.scenes[p.scenes.length - 1];
+      for (const n of missing) last.shots.push(shotter.newShot(n));
+      last.shots.sort((a, b) => a.number.localeCompare(b.number));
+    }
+  } catch { /* no boards dir — nothing to synthesize */ }
+
+  const shots = p.scenes.flatMap((s) => s.shots);
+  if (shots.length) {
+    // 3. Shot prompts from the manual-workflow export, stored content-only
+    //    (shared Style/Brand sections re-render from the style system) and
+    //    marked manual so a later re-ingest preserves them.
+    try {
+      const md = fs.readFileSync(assetPath(p, `${p.assets.boardsDir}/prompts.md`), "utf8");
+      const byNumber = parseBoardPromptsMarkdown(md);
+      for (const shot of shots) {
+        if (shot.prompt?.trim()) continue;
+        const content = stripSharedSections(byNumber.get(shot.number) ?? "").trim();
+        if (content) {
+          shot.prompt = content;
+          shot.promptManual = true;
+        }
+      }
+    } catch { /* no prompts.md — prompts re-derive from audio/visual */ }
+
+    // 4. Frames and clips already on disk: adopt boards/import/ drop-ins,
+    //    then re-link each shot to its newest frame / orphan clips.
+    try {
+      const dropped = scanBoardImportFolder(p);
+      if (dropped.length) importBoards(p, dropped, () => {});
+    } catch { /* drop-in adoption is best-effort */ }
+    try { refreshBoardLinks(p); } catch { /* frames can re-link on demand */ }
+    try { refreshShotVideos(p); } catch { /* clips can re-link on demand */ }
+    markBoardsStatus(p);
+  }
+
+  // 5. Reference images — the same adoption as the references-folder rescan
+  //    (name from the filename; character/product identity is JSON-only).
+  try {
+    const rels = listAssetFiles(p, p.assets.referencesDir, IMPORT_IMAGE_FILE);
+    for (const rel of unclaimedReferenceFiles(rels, p)) {
+      const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
+      p.references = [...(p.references ?? []), { id: newRefId(), name, imagePath: rel, shotIds: [] }];
+    }
+  } catch { /* references can be rescanned later from Step 2 */ }
+
+  // 6. Style frames (look plates). Collision copies (`<id> (2).png`) are
+  //    older writes of the same style — the newest file per base wins. The
+  //    style's prompt text is JSON-only, so recovered styles start blank.
+  try {
+    const byBase = new Map<string, string[]>();
+    for (const rel of listAssetFiles(p, STYLES_DIR, IMPORT_IMAGE_FILE)) {
+      const base = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+\(\d+\)$/, "");
+      byBase.set(base, [...(byBase.get(base) ?? []), rel]);
+    }
+    for (const [base, rels] of byBase) {
+      const imagePath = newestAssetFile(p, rels);
+      if (!imagePath) continue;
+      p.styles = [...(p.styles ?? []), { id: randomUUID(), index: (p.styles?.length ?? 0) + 1, name: base, prompt: "", imagePath }];
+    }
+  } catch { /* style frames can be re-attached from Step 2 */ }
+
+  // 7. Voiceover / music — the newest clip in each folder.
+  p.voiceoverPath ??= newestAssetFile(p, listAssetFiles(p, p.assets.voiceoverDir, IMPORT_AUDIO_FILE));
+  p.musicPath ??= newestAssetFile(p, listAssetFiles(p, p.assets.musicDir, IMPORT_AUDIO_FILE));
+
+  // 8. Land where the recovered work is: storyboard when frames exist,
+  //    design when only the breakdown came back.
+  if (shots.length) {
+    p.currentStep = shots.some((s) => s.artwork || s.graphImageGens?.length) ? 3 : 2;
+  }
+}
+
 /**
  * Re-register an existing production folder (e.g. after moving to a new PC
  * or wiping app data, the userData/productions/ JSON is gone but the folder
  * with boards/, script.md, … survives). The folder ITSELF becomes the
  * production folder — unlike newProduction, no subfolder is created. Missing
- * asset dirs are scaffolded non-destructively; existing files are never
- * touched. Pipeline state starts fresh (the old JSON is gone), so the user
- * re-ingests the script from Step 1. Re-importing an already-registered
- * folder returns the existing document instead of a duplicate.
+ * asset dirs are scaffolded non-destructively, and the pipeline state the
+ * folder still carries on disk (script breakdown, storyboard frames/clips,
+ * prompts, references, style frames, voiceover/music) is rebuilt onto the
+ * new document by `hydrateImportedProduction`. Re-importing an
+ * already-registered folder returns the existing document instead of a
+ * duplicate.
  */
 export function importProduction(folder: string): ProductionFile {
   let stat: fs.Stats;
@@ -1192,8 +1330,13 @@ export function importProduction(folder: string): ProductionFile {
       /* non-fatal: user may add it later */
     }
   }
+  // Rebuild the pipeline state the folder still carries (script, storyboard,
+  // references, …) instead of presenting an empty production.
+  hydrateImportedProduction(p);
   saveProduction(p);
-  return p;
+  // Return the fully loaded document (stored graphs + media registry
+  // materialized), exactly as a production:load would hand it over.
+  return loadProduction(p.meta.id) ?? p;
 }
 
 /**

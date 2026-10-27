@@ -33,7 +33,7 @@ import {
   stripReferenceClause,
   stripStyleParagraph,
 } from "../shared/prompt-grammar.js";
-import { isTweenGenKeyframe, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe, sequenceSelectedTake } from "../shared/ipc.js";
+import { isTweenGenKeyframe, isVideoEditFamilyMode, parseEditNodeKeyframe, TWEEN_KEY_EDITGEN, editNodeKeyframe, sequenceSelectedTake } from "../shared/ipc.js";
 import { findGeneration, generationInUse, generationInUseMessage, removeGeneration } from "../shared/generations.js";
 import { styleFrameForShot, withLookClause, ensureLookSeed, brandClauseText } from "../shared/look.js";
 import { CHARACTER_SHEET_TEMPLATE, EDIT_IMAGE_TEMPLATE, renderPromptTemplate } from "../shared/prompt-templates.js";
@@ -48,6 +48,7 @@ GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen,
 import * as shotter from "./shotter.js";
 import { extractVideoStillFrame, videoStillName } from "./video-still.js";
 import { queueVideoFilePostProcess } from "./video-faststart.js";
+import { prewarmMediaThumbnail } from "./thumbnails.js";
 import type { VideoStillDeps } from "./video-still.js";
 import { ref720pName, transcodeVideoFileTo720p } from "./video-ref.js";
 import type { VideoRef720Deps } from "./video-ref.js";
@@ -2143,6 +2144,9 @@ export function writeBoardFrame(
   // Register the served frame with the media registry BEFORE it is exposed to
   // any consumer (the brief's rule: register a result before showing it).
   mediaFiles.register(p, jpegRel, "image", "generated");
+  // Perf: pre-warm the graph LOD tiers in the background so the first
+  // node-view paint of this take never pays the resize encode.
+  prewarmMediaThumbnail(assetPath(p, jpegRel));
   return { jpegRel, originalRel };
 }
 
@@ -2553,7 +2557,10 @@ export function recordGraphVideoGen(shot: ProductionShot, nodeId: string, rel: s
   if (!shot.graphVideoNodes) shot.graphVideoNodes = videoNodesFor(shot);
   let node = shot.graphVideoNodes.find((n) => n.id === id);
   if (!node) {
-    node = { id, prompt: "" };
+    // Recreated after its node was deleted mid-flight: infer the family
+    // from the id prefix so a reclaimed edit/Genjutsu take doesn't come
+    // back as a generate node.
+    node = { id, prompt: "", ...(id.startsWith("ev") ? { mode: "edit" as const } : id.startsWith("gm") ? { mode: "genjutsu-motion" as const } : id.startsWith("gs") ? { mode: "genjutsu-swap" as const } : {}) };
     shot.graphVideoNodes.push(node);
   }
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString(), ...(draftJobId ? { draftJobId } : {}) };
@@ -4234,7 +4241,7 @@ export function syncShotGraphOutput(shot: ProductionShot): void {
     case "videogen": {
       const node = getVideoNode(shot, shot.graphOutputVideoNodeId ?? "vid0");
       source = node ? videoNodeCanvasId(node) : null;
-      edgeId = node ? (node.mode === "edit" ? editVideoEdgeId("e-editvideo-out", node.id) : videoEdgeId("e-vid-out", node.id)) : undefined;
+      edgeId = node ? (isVideoEditFamilyMode(node.mode) ? editVideoEdgeId("e-editvideo-out", node.id) : videoEdgeId("e-vid-out", node.id)) : undefined;
       break;
     }
     case "editvideo": {

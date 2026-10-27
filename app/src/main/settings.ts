@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProvider } from "../shared/providers.js";
 import { normalizeSandboxMode, type SandboxMode } from "@core";
-import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface, type VerifyCommandIpc } from "../shared/ipc.js";
+import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface, type UiTheme, type VerifyCommandIpc } from "../shared/ipc.js";
 import { coerceWhisperModel, isWhisperModel, type WhisperModel } from "../shared/voice.js";
 
 interface SettingsFile {
@@ -67,6 +67,8 @@ interface SettingsFile {
    *  unset — credit rows show their credits and contribute $0 until set).
    *  Edited in the dev Model Customizer; saving re-prices history. */
   higgsfieldCreditUsd: number | null;
+  /** UI color theme, applied as `data-theme` on the renderer root. */
+  theme: UiTheme;
   /** UI accent color (hex), applied to the --accent CSS variable. */
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
@@ -179,6 +181,7 @@ const DEFAULTS: SettingsFile = {
   openartCliBinary: null,
   higgsfieldCreditUsd: null,
   accent: "#4f8ef7",
+  theme: "dark",
   externalEditor: null,
   hiddenMediaModels: [],
   modelKindOverrides: {},
@@ -577,6 +580,17 @@ export function getAccent(): string {
 export function setAccent(color: string): void {
   if (!/^#[0-9a-fA-F]{6}$/.test(color)) return; // hex only — it's injected into CSS
   load().accent = color;
+  save();
+}
+
+/** UI color theme. Unknown/absent values fall back to the dark default. */
+export function getTheme(): UiTheme {
+  return load().theme === "light" ? "light" : "dark";
+}
+
+export function setTheme(theme: string): void {
+  if (theme !== "dark" && theme !== "light") return; // allowlist — it's injected into the DOM
+  load().theme = theme;
   save();
 }
 

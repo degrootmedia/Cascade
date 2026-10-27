@@ -951,6 +951,29 @@ describe("OpenArtClient pending-image contingency", () => {
     expect(s.pendingImageGen).toBeUndefined();
   });
 
+  it("a synchronous success supersedes a stale pending record through the sink (shot 0200)", async () => {
+    // Regression: an earlier job orphaned a persisted pending record (the
+    // sink owns the on-disk copy). A later generation that returns pixels
+    // synchronously (no historyId, so this run never records its own
+    // pending) must still tell the sink to clear — otherwise the shot shows
+    // "pending" forever despite newer takes (0000_Co-Mo Santa Tests 0200).
+    const seen: (PendingImageGen | null)[] = [];
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_image: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("sync-jpeg")] }),
+    });
+    const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+    const s: ProductionShot = {
+      ...shot(),
+      pendingImageGen: { historyId: "h-stale", prompt: "old", model: "m", at: "2026-10-14T19:04:35.443Z" },
+    };
+    const out = await gen("Fresh frame", [], s, undefined, (rec) => { seen.push(rec); });
+    expect(out.toString()).toBe("sync-jpeg");
+    expect(seen).toEqual([null]);
+    expect(s.pendingImageGen).toBeUndefined();
+  });
+
   it("records the result URL as pending when the finished image can't be downloaded, then a recheck retries it", async () => {
     const mcp = fakeMcp({
       openart_model_list: () => JSON.stringify([{ model: "m", media: ["image"], modes: [] }]),
@@ -1353,6 +1376,35 @@ describe("OpenArtClient generation recorder", () => {
     expect(seen).toHaveLength(2);
     expect(seen[0]).toMatchObject({ historyId: "h-vid-fast" });
     expect(seen[1]).toBeNull();
+    expect(shot.pendingVideoGen).toBeUndefined();
+  });
+
+  it("a synchronous video success supersedes a stale pending record through the sink", async () => {
+    const folder = path.join(dataDir, "prod-vid-supersede");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    const seen: (PendingVideoGen | null)[] = [];
+    const shot: ProductionShot = {
+      id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg",
+      pendingVideoGen: { historyId: "h-stale-vid", prompt: "old", model: "veo-3", at: "2026-10-14T19:04:35.443Z" },
+    };
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () => JSON.stringify({ jsonSchema: { properties: {} } }),
+      openart_generate_video: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("sync-mp4")] }),
+    });
+    const client = new OpenArtClient(mcp);
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const { rel } = await client.generateVideoClip(
+      prod,
+      shot,
+      { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate", onPending: (rec) => { seen.push(rec); } },
+      () => {}
+    );
+    expect(rel).toContain("shot-0100-");
+    expect(seen).toEqual([null]);
     expect(shot.pendingVideoGen).toBeUndefined();
   });
 

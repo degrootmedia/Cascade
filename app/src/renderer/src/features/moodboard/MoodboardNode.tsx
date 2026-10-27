@@ -28,6 +28,7 @@ export const MoodboardNode = memo(function MoodboardNode({
   onOpenViewer,
   onContextMenu,
   thumbEdge,
+  inUseTitle,
 }: {
   prodId: string;
   refItem: CustomRef;
@@ -45,6 +46,8 @@ export const MoodboardNode = memo(function MoodboardNode({
   onContextMenu: (e: ReactMouseEvent, id: string) => void;
   /** LOD thumbnail long-edge for the current settled zoom (0 = full-res). */
   thumbEdge: number;
+  /** When set, the in-use node badge shows (see `referenceUsage`). */
+  inUseTitle?: string;
 }) {
   const style: CSSProperties = {
     left: node.x,
@@ -79,6 +82,7 @@ export const MoodboardNode = memo(function MoodboardNode({
         onRemove={onRemoveFromBoard}
         onRename={onRename}
         thumbEdge={thumbEdge}
+        inUseTitle={inUseTitle}
         onReorder={() => {}}
       />
       <span className="moodboard-node-rotate" title="Drag to rotate (Shift snaps to 15°)" onPointerDown={(e) => { stop(e); onRotateStart(e, node.refId); }} />
@@ -91,4 +95,5 @@ export const MoodboardNode = memo(function MoodboardNode({
   prev.node === next.node &&
   prev.selected === next.selected &&
   prev.thumbEdge === next.thumbEdge &&
+  prev.inUseTitle === next.inUseTitle &&
   prev.dimmed === next.dimmed);

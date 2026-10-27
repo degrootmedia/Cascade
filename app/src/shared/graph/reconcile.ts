@@ -82,7 +82,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
   sequenceprompt: (a, b) =>
     promptNodeEqual(a, b) && JSON.stringify(a.segments) === JSON.stringify(b.segments),
   editprompt: promptNodeEqual,
-  editvideoprompt: promptNodeEqual,
+  editvideoprompt: (a, b) =>
+    promptNodeEqual(a, b) && (a.mode as string | undefined) === (b.mode as string | undefined),
   style: (a, b) => (a.value as string) === (b.value as string),
   brand: (a, b) => (a.include as boolean) === (b.include as boolean),
   ref: (a, b) =>
@@ -109,7 +110,9 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) &&
     (a.savedDurationSec as number | undefined) === (b.savedDurationSec as number | undefined) &&
     ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
-    (a.sourceLabel as string | null) === (b.sourceLabel as string | null),
+    (a.sourceLabel as string | null) === (b.sourceLabel as string | null) &&
+    (a.mode as string | undefined) === (b.mode as string | undefined) &&
+    (a.imageRefCount as number | undefined) === (b.imageRefCount as number | undefined),
   cameraGrid: (a, b) =>
     (a.busy as boolean | undefined) === (b.busy as boolean | undefined) &&
     (a.sheetUrl as string | null) === (b.sheetUrl as string | null) &&

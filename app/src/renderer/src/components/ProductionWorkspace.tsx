@@ -4,10 +4,11 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
+import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-usage.js";
 import { ShotTable } from "./ShotTable.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
@@ -444,6 +445,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     recheckVideo: (id: string) => void;
     clearPending: (id: string, kind: "image" | "video") => void;
     importFrame: (id: string) => void;
+    openGraph: (id: string) => void;
     edit: (id: string) => void;
     video: (id: string) => void;
     textChange: (id: string, patch: { audio: string; visual: string }) => void;
@@ -462,6 +464,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     insertAfter: (id: string) => void;
     remove: (id: string) => void;
     toggleDisabled: (id: string) => void;
+    setColorTag: (id: string, tag: ShotColorTag | undefined) => void;
     zoomChange: (id: string | null) => void;
     zoomNavigate: (id: string, dir: -1 | 1) => void;
   }>(null as never);
@@ -471,6 +474,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     recheckVideo: (id) => void recheckVideo(id),
     clearPending: (id, kind) => void clearPending(id, kind),
     importFrame: (id) => void importFrames(id),
+    // Focus first: the graph composer reads the prompt scoped to
+    // promptShotId, so opening for an unfocused shot must move focus to it
+    // (the side-panel Nodes button never needs this — its shot is focused).
+    openGraph: (id) => { focusPrompt(id, ""); setGraphShotId(id); },
     edit: (id) => setEditShotId(id),
     video: (id) => setVideoShotId(id),
     textChange: (id, patch) => void saveShotText(id, patch),
@@ -512,6 +519,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     },
     remove: (id) => deleteBoardShot(id),
     toggleDisabled: (id) => toggleShotDisabled(id),
+    setColorTag: (id, tag) => setShotColorTag(id, tag),
     zoomChange: (id) => setBoardZoomId(id),
     zoomNavigate: (id, dir) => {
       const current = prodRef.current;
@@ -534,6 +542,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onRecheckVideo: (id: string) => boardHandlerRef.current.recheckVideo(id),
     onClearPending: (id: string, kind: "image" | "video") => boardHandlerRef.current.clearPending(id, kind),
     onImport: (id: string) => boardHandlerRef.current.importFrame(id),
+    onOpenGraph: (id: string) => boardHandlerRef.current.openGraph(id),
     onEdit: (id: string) => boardHandlerRef.current.edit(id),
     onVideo: (id: string) => boardHandlerRef.current.video(id),
     onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
@@ -552,6 +561,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onInsertAfter: (id: string) => boardHandlerRef.current.insertAfter(id),
     onDelete: (id: string) => boardHandlerRef.current.remove(id),
     onToggleDisabled: (id: string) => boardHandlerRef.current.toggleDisabled(id),
+    onSetColorTag: (id: string, tag: ShotColorTag | undefined) => boardHandlerRef.current.setColorTag(id, tag),
     onZoomChange: (id: string | null) => boardHandlerRef.current.zoomChange(id),
     onZoomNavigate: (id: string, dir: -1 | 1) => boardHandlerRef.current.zoomNavigate(id, dir),
   }), []);
@@ -560,6 +570,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // While a range is being built the strip owns the slot space (the bars step
   // aside, so the two never overlap); once created/cleared the bars return.
   const showCreateStrip = seqSelection.size >= 2;
+  // Which references are tag-cited or wired into a node anywhere in the
+  // production — drives the in-use badge on Design/moodboard tiles.
+  const refUsage = useMemo(() => (prod ? referenceUsage(prod) : undefined), [prod]);
   const seqMemberIds = useMemo(() => {
     const set = new Set<string>();
     for (const s of prod?.shotSequences ?? []) for (const id of s.shotIds) set.add(id);
@@ -1338,6 +1351,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function removeRef(id: string) {
     const current = prodRef.current;
     if (!current || removingRefIds.has(id)) return;
+    // Guard the accident the in-use badge warns about: deleting a cited or
+    // wired reference takes its prompts/nodes down with it, so name them.
+    const usage = referenceUsage(current).get(id);
+    if (usage) {
+      const ref = (current.references ?? []).find((r) => r.id === id);
+      if (!(await confirmDestructive({ title: `Delete ${ref?.name ?? "this reference"}?`, body: `It's in use — ${formatReferenceUsage(usage)}. Deleting it can't be undone.`, confirmLabel: "Delete anyway" }))) return;
+    }
     setRemovingRefIds((prev) => new Set(prev).add(id));
     setErr(null);
     try {
@@ -3629,6 +3649,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
   }
 
+  /** Storyboard: set or clear the frame's border color tag (right-click
+   *  menu, reversible). A visual marker only — no pipeline effect. The flag
+   *  rides the normal whole-document save, like `toggleShotDisabled`. */
+  function setShotColorTag(shotId: string, tag: ShotColorTag | undefined) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      scenes: current.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, colorTag: tag } : s)),
+      })),
+    });
+  }
+
   /** Step 3: turn the current shift-click range into a shot sequence. The
    *  overlap guard lives in `sequenceOverlapReason` (a shot belongs to at
    *  most one sequence); the strip shows its verdict inline. */
@@ -4001,6 +4035,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** The active provider has no video-edit path (OpenArt MCP/CLI) — the
    *  edit-video node is disabled with an explanatory hint. */
   const videoEditUnavailable = !providerSupportsVideoEdit(mediaProviderId);
+  const genjutsuUnavailable = !providerSupportsGenjutsu(mediaProviderId);
 
   /** The Seedance 2.5 draft → 1080p finalize is Higgsfield-CLI only. */
   const draftUpgradeAvailable = providerSupportsDraftUpgrade(mediaProviderId);
@@ -4468,6 +4503,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               <CharacterBuilderSection
                 prodId={prod.meta.id}
                 characters={prod.characters}
+                usage={refUsage}
                 models={imageCharacterModels}
                 references={allPromptRefs(prod)}
                 refNameById={referenceNamesById(prod)}
@@ -4498,6 +4534,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 prodId={prod.meta.id}
                 categories={prod.referenceCategories ?? []}
                 items={prod.references ?? []}
+                usage={refUsage}
                 onAddCategory={addCategory}
                 onRenameCategory={renameCategory}
                 onAddReference={addRef}
@@ -4733,6 +4770,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onRecheckVideo={boardActions.onRecheckVideo}
                     onClearPending={boardActions.onClearPending}
                     onImport={boardActions.onImport}
+                    onOpenGraph={boardActions.onOpenGraph}
                     onEdit={boardActions.onEdit}
                     onVideo={boardActions.onVideo}
                     onTextChange={boardActions.onTextChange}
@@ -4758,6 +4796,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onInsertAfter={boardActions.onInsertAfter}
                     onDelete={boardActions.onDelete}
                     onToggleDisabled={boardActions.onToggleDisabled}
+                    onSetColorTag={boardActions.onSetColorTag}
                     zoomOpen={boardZoomId === shot.id}
                     onZoomChange={boardActions.onZoomChange}
                     onZoomNavigate={boardActions.onZoomNavigate}
@@ -4864,7 +4903,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   videoModels={videoModels}
                   endFrameModelIds={endFrameModelIds}
                   upscaleUnavailable={upscaleUnavailable}
-                  videoEditUnavailable={videoEditUnavailable}
+                  videoEditUnavailable={videoEditUnavailable} genjutsuUnavailable={genjutsuUnavailable}
                   draftUpgradeAvailable={draftUpgradeAvailable}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
@@ -4886,7 +4925,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   cameraGridBusy={graphShotId ? (remoteBusy?.cameraGrid ?? []).includes(graphShotId) : false}
                   upscaleBusy={graphShotId ? (remoteBusy?.upscale ?? []).includes(graphShotId) : false}
                   videoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => nodeVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
-                  editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => n.mode === "edit" && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
+                  editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => isVideoEditFamilyMode(n.mode) && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   busyTweenBlock={graphShotId ? tweenBusyAll[graphShotId] ?? null : null}
                   tweenStitching={graphShotId ? tweenStitchingAll.has(graphShotId) : false}

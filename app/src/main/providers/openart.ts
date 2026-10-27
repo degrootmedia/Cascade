@@ -1193,7 +1193,14 @@ private videoRefsAssign = videoRefsAssign;
     return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
       // A fresh submission supersedes any earlier pending job — the new
       // historyId is the one a future recheck must poll.
-      if (shot?.pendingImageGen) delete shot.pendingImageGen;
+      // The delete is in-memory only; clearPending must also tell the
+      // persistence sink, or a run that never records its own pending (a
+      // synchronous reply with no historyId) strands the stale record.
+      let supersededPending = false;
+      if (shot?.pendingImageGen) {
+        supersededPending = true;
+        delete shot.pendingImageGen;
+      }
 
       /** Persist an orphaned job both on the shot (the storyboard flow) and,
        *  when the caller supplied a sink, wherever it stores pending jobs (a
@@ -1216,7 +1223,8 @@ private videoRefsAssign = videoRefsAssign;
        *  the persistence sink, so a just-saved record can't strand the shot. */
       const clearPending = (): void => {
         if (shot?.pendingImageGen) delete shot.pendingImageGen;
-        if (pendingRecorded) {
+        if (pendingRecorded || supersededPending) {
+          supersededPending = false;
           pendingRecorded = false;
           sinkKey = "";
           onPending?.(null);
@@ -1598,6 +1606,7 @@ private videoRefsAssign = videoRefsAssign;
     );
     // A fresh submission supersedes any earlier pending job — the new job is
     // the one a future Fetch must poll.
+    const supersededVideoPending = !!shot.pendingVideoGen;
     if (shot.pendingVideoGen) delete shot.pendingVideoGen;
 
     const { text, images } = await this.mcp.callRawFull(SERVER, toolName, args);
@@ -1650,7 +1659,7 @@ private videoRefsAssign = videoRefsAssign;
         if (!(e instanceof OpenArtVideoFailedError) && (historyId || directUrl)) {
           const full = this.recordPendingVideo(shot, videoPendingFields);
           if (full) opts.onPending?.(full);
-        } else if (e instanceof OpenArtVideoFailedError && videoPendingRecorded) {
+        } else if (e instanceof OpenArtVideoFailedError && (videoPendingRecorded || supersededVideoPending)) {
           if (shot.pendingVideoGen) delete shot.pendingVideoGen;
           videoPendingRecorded = false;
           opts.onPending?.(null);
@@ -1663,7 +1672,7 @@ private videoRefsAssign = videoRefsAssign;
     const rel = writeShotVideo(p, shot, done.buf, safeExt);
 
     if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-    if (videoPendingRecorded) opts.onPending?.(null);
+    if (videoPendingRecorded || supersededVideoPending) opts.onPending?.(null);
 
     this.fireGeneration({
       kind: "video",

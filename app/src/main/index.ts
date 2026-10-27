@@ -67,6 +67,7 @@ import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, Verif
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
+import { defaultGenjutsuModelId, genjutsuModeForModelId, isGenjutsuMode } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1537,6 +1538,7 @@ function registerIpc() {
     workspace: settings.getWorkspace(),
     followProduction: settings.getFollowProduction(),
     accent: settings.getAccent(),
+    theme: settings.getTheme(),
     externalEditor: settings.getExternalEditor(),
   }));
 
@@ -1746,6 +1748,10 @@ function registerIpc() {
 
   handle("settings:setAccent", (_e, color: string) => {
     if (typeof color === "string") settings.setAccent(color);
+  });
+
+  handle("settings:setTheme", (_e, theme: string) => {
+    if (typeof theme === "string") settings.setTheme(theme);
   });
 
   handle("settings:pickExternalEditor", async () => {
@@ -1985,6 +1991,7 @@ function registerIpc() {
       projects.add(p.meta.id);
       paths.push(...productions.referenceThumbnailPaths(p));
       paths.push(...productions.generationVideoThumbnailPaths(p));
+      paths.push(...productions.generationImageThumbnailPaths(p));
     }
     const counts = await regenerateRefThumbnails(paths);
     return { ...counts, projects: projects.size };
@@ -4580,7 +4587,19 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
-      if (!clean.prompt) throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
+      // Genjutsu nodes (Motion Transfer / Object Swap) ride this handler:
+      // their description is optional, their model is locked to the
+      // node's feature pair, and they keep the source clip's timing.
+      const genjutsuMode = node && isGenjutsuMode(node.mode) ? node.mode : null;
+      if (genjutsuMode) {
+        if (clean.model === "auto") clean.model = defaultGenjutsuModelId(genjutsuMode);
+        else if (genjutsuModeForModelId(clean.model) !== genjutsuMode) {
+          throw new Error(`"${clean.model}" isn't a ${genjutsuMode === "genjutsu-motion" ? "Motion Transfer" : "Object Swap"} model — pick Genjutsu or Genjutsu Lite on this node. Nothing was submitted.`);
+        }
+        clean.durationSec = 0;
+      } else if (!clean.prompt) {
+        throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
+      }
       // 720p-retry substitution for this submission only (see classic flow):
       // prompt tags, the source reference, and its file path all follow.
       const editSwaps = resolveRefSwaps(p, opts?.refSwaps);
@@ -4629,7 +4648,30 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         videoRefsForIds(p, editEffectiveRefIds),
         videoRefsForPromptTags(p, clean.prompt)
       );
-      emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      if (genjutsuMode) {
+        // Exactly one video may ride a Genjutsu submit — the source clip.
+        // (Saved-ref inventory here; the provider re-checks every ref,
+        // direct generation wires included, before submitting.)
+        const extraVideo = editVideoInputs.find((v) => v.relPath !== sourcePath && v.refId !== sourceRefId);
+        if (extraVideo) {
+          throw new Error(`Genjutsu takes exactly one video (the source clip) — "${extraVideo.name}" is also a video. Remove it from the references and retry. Nothing was submitted.`);
+        }
+        // Genjutsu accepts 4-30s sources (the site's limits). Probe when
+        // ffmpeg is resolvable; an unreadable duration lets the vendor
+        // rule speak rather than blocking a good clip.
+        try {
+          const bin = await resolveFfmpeg();
+          if (bin) {
+            const probed = await probeMedia(bin, assetPath(p, sourcePath));
+            if (probed.durationSec != null && (probed.durationSec < 4 || probed.durationSec > 30)) {
+              throw new Error(`Genjutsu needs a source clip between 4 and 30 seconds — this one is ${Math.round(probed.durationSec)}s. Trim it and retry. Nothing was submitted.`);
+            }
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("between 4 and 30 seconds")) throw e;
+        }
+      }
+      emit(`Shot ${shot.number}: ${genjutsuMode ? (genjutsuMode === "genjutsu-motion" ? "Genjutsu motion transfer" : "Genjutsu object swap") : "editing the video"}${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
       let editSubmitted = false;
       const editSink = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
       clean.onPending = (rec) => { if (rec) editSubmitted = true; editSink(rec); };

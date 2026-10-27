@@ -56,8 +56,8 @@ describe("node graph stays poster-first (source guards)", () => {
     expect(refNode).toContain("<VideoPreview ");
   });
 
-  it("the canvas culls off-viewport nodes", () => {
+  it("the canvas culls off-viewport nodes only above the node limit", () => {
     const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
-    expect(modal).toContain("onlyRenderVisibleElements");
+    expect(modal).toContain("onlyRenderVisibleElements={nodes.length > GRAPH_CULL_NODE_LIMIT}");
   });
 });

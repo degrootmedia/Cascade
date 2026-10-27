@@ -28,6 +28,7 @@
  *  verbatim (the style mirror never stripped unplugged text).
  */
 import type { Graph, GraphVideoNode, Production, ProductionShot } from "../ipc.js";
+import { isVideoEditFamilyMode } from "../ipc.js";
 import { brandClauseText } from "../look.js";
 import { promptNodeId, type PromptNodeTarget } from "./connect.js";
 import {
@@ -45,7 +46,7 @@ export { promptNodeId };
 
 /** The first generate-mode video node (the legacy bare "videoprompt" target). */
 function firstVideoNode(shot: ProductionShot): GraphVideoNode | undefined {
-  return (shot.graphVideoNodes ?? []).find((n) => n.mode !== "edit") ?? (shot.graphVideoNodes ?? [])[0];
+  return (shot.graphVideoNodes ?? []).find((n) => !isVideoEditFamilyMode(n.mode)) ?? (shot.graphVideoNodes ?? [])[0];
 }
 
 /** The first edit-mode video node (the legacy bare "editvideoprompt" target). */

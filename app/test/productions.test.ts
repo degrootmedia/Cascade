@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
+import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, generationImageThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { assemblyPlan } from "../src/main/assembly.js";
@@ -1084,6 +1084,25 @@ describe("video layout migration", () => {
   });
 });
 
+describe("color tag migration", () => {
+  it("turns the legacy complete marker into a green tag and drops invalid tags on load", () => {
+    const folder = path.join(dataDir, "color-tag-migration");
+    fs.mkdirSync(folder, { recursive: true });
+    const legacy = { id: "shot1", number: "0100", audio: "", visual: "Hero", complete: true } as unknown as ProductionShot;
+    const invalid = { id: "shot2", number: "0200", audio: "", visual: "Sidekick", colorTag: "blue" } as unknown as ProductionShot;
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "color-tag-migration", folder },
+      scenes: [{ number: 1, title: "S1", shots: [legacy, invalid] }],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("color-tag-migration")!;
+    const [a, b] = loaded.scenes[0].shots;
+    expect(a.colorTag).toBe("green");
+    expect((a as { complete?: unknown }).complete).toBeUndefined();
+    expect(b.colorTag).toBeUndefined();
+  });
+});
+
 describe("unclaimedReferenceFiles", () => {
   it("skips files claimed by a character, product, or reference image/media path", () => {
     const p = baseProduction({
@@ -1472,6 +1491,19 @@ describe("media registry (architecture hardening)", () => {
     const paths = generationVideoThumbnailPaths(p as never);
     expect(paths.some((abs) => abs.endsWith("shot-0100-x.mp4"))).toBe(true);
     expect(paths.some((abs) => abs.endsWith(".jpg"))).toBe(false);
+  });
+
+  it("generationImageThumbnailPaths lists every referenced still, clips excluded", () => {
+    const p = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{
+        id: "s1", number: "0100", audio: "", visual: "v",
+        artwork: "boards/0100/shot-0100-a.jpg",
+        graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "boards/0100/video/shot-0100-x.mp4", prompt: "", model: "", at: "" }] }],
+      }] }],
+    });
+    const paths = generationImageThumbnailPaths(p as never);
+    expect(paths.some((abs) => abs.endsWith("shot-0100-a.jpg"))).toBe(true);
+    expect(paths.some((abs) => abs.endsWith(".mp4"))).toBe(false);
   });
 });
 

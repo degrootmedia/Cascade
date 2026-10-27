@@ -33,6 +33,10 @@ export interface ProductionMeta {
   shotCount: number;
 }
 
+/** A storyboard frame's border color tag (right-click menu): a user-managed
+ *  status signal painted around the frame. Marker only — no pipeline effect. */
+export type ShotColorTag = "green" | "yellow" | "red";
+
 export interface ProductionShot {
   /** Stable identity — survives renumbering and reordering. */
   id: string;
@@ -273,6 +277,12 @@ graphImageGenIndex?: number;
    *  and the Step 5 export. Generation, numbering, and media are untouched,
    *  so re-enabling restores it exactly. */
   disabled?: boolean;
+  /** The frame's color tag in the storyboard (right-click menu), painted as
+   *  a border in the tag color. A marker only — generation, the animatic,
+   *  and export are all unaffected. Absent = untagged. (The short-lived
+   *  boolean `complete` marker it replaced reads back as `"green"` via the
+   *  read-repair in productions.ts.) */
+  colorTag?: ShotColorTag;
   /** True once a re-ingest moved this shot out of the active storyboard into
    *  `Production.outdatedShots`. Its media was relocated to
    *  `boards/outdated/<id>/` so a fresh shot re-using its number can't

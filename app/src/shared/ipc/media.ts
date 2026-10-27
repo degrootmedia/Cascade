@@ -5,7 +5,7 @@
  * `../shared/ipc.js` import paths are unchanged.
  */
 
-import type { PendingVideoGen } from "./graph.js";
+import type { GenjutsuMode, PendingVideoGen } from "./graph.js";
 
 /** Which vendor serves image/video generation (global setting).
  *  `higgsfield-cli` is the Higgsfield account driven through the local
@@ -45,6 +45,50 @@ export function providerSupportsVideoEdit(id: MediaProviderId): boolean {
 
 /** Tooltip shown wherever the video-edit path is disabled for the active provider. */
 export const VIDEO_EDIT_UNAVAILABLE_HINT = "Video editing isn't available on the active provider (requires the Higgsfield CLI)";
+
+/** Whether the active provider offers Higgsfield Genjutsu editing (Motion
+ *  Transfer / Object Swap). Genjutsu exists only on the Higgsfield CLI,
+ *  so both OpenArt transports get the grayed-out palette treatment — the
+ *  same gate as the edit-video node. */
+export function providerSupportsGenjutsu(id: MediaProviderId): boolean {
+  return id === "higgsfield-cli";
+}
+
+/** Tooltip shown wherever a Genjutsu node is disabled for the active provider. */
+export const GENJUTSU_UNAVAILABLE_HINT = "Genjutsu isn't available on the active provider (requires the Higgsfield CLI)";
+
+/** The Higgsfield CLI job types behind the Genjutsu node pair (standard
+ *  first, then the cheaper "Genjutsu Lite" flash variant). Verified live
+ *  against `higgsfield model get` (2026-10-27): every one requires
+ *  exactly 1 `video_references`, >=1 `image_references`, an optional
+ *  `prompt`, and 480p/720p/1080p (Lite swap: 720p/1080p). */
+export const GENJUTSU_MOTION_JOB_TYPES: readonly string[] = ["hf_mult_motion_control", "hf_mult_motion_control_flash"];
+/** See GENJUTSU_MOTION_JOB_TYPES. */
+export const GENJUTSU_SWAP_JOB_TYPES: readonly string[] = ["hf_mult_replace_object", "hf_mult_replace_object_flash"];
+
+/** The job types a Genjutsu node's model dropdown may offer. */
+export function genjutsuJobTypesForMode(mode: GenjutsuMode): readonly string[] {
+  return mode === "genjutsu-motion" ? GENJUTSU_MOTION_JOB_TYPES : GENJUTSU_SWAP_JOB_TYPES;
+}
+
+/** The Genjutsu feature a model id belongs to, or null for other models.
+ *  Accepts namespaced (`higgsfield-cli:…`) and raw ids alike. */
+export function genjutsuModeForModelId(id: string): GenjutsuMode | null {
+  const raw = rawMediaModelId(id).trim().toLowerCase();
+  if (GENJUTSU_MOTION_JOB_TYPES.includes(raw)) return "genjutsu-motion";
+  if (GENJUTSU_SWAP_JOB_TYPES.includes(raw)) return "genjutsu-swap";
+  return null;
+}
+
+/** Whether a model id is any Genjutsu model (either node, either tier). */
+export function isGenjutsuModelId(id: string): boolean {
+  return genjutsuModeForModelId(id) !== null;
+}
+
+/** The model a fresh Genjutsu node starts on (standard tier, namespaced). */
+export function defaultGenjutsuModelId(mode: GenjutsuMode): string {
+  return `higgsfield-cli:${genjutsuJobTypesForMode(mode)[0]}`;
+}
 
 /** Canonicalize a per-style model/resolution override for generation:
  *  absent, blank, or "auto" inherits the production default (sent as

@@ -26,7 +26,7 @@ import { clipboardText } from "./clipboard.js";
 import { AttachFileIcon, XIcon } from "./components/icons.js";
 import { expandCommand } from "../../shared/commands.js";
 
-import { applyAccent } from "./theme.js";
+import { applyAccent, applyTheme, normalizeTheme } from "./theme.js";
 
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
@@ -246,6 +246,7 @@ export function App() {
     ]);
     setSettings(s);
     applyAccent(s.accent);
+    applyTheme(normalizeTheme(s.theme));
     setSessionList(list);
     setCredits(c);
     void window.cascade.getVoiceEnabled().then(setVoiceEnabled).catch(() => {});

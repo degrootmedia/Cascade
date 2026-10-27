@@ -600,6 +600,7 @@ export class OpenArtCliProvider implements MediaProvider {
     let projectId: string | null | undefined;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
+      const supersededPending = !!shot?.pendingImageGen;
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let models: OpenArtModelChoice[] = [];
@@ -670,7 +671,7 @@ export class OpenArtCliProvider implements MediaProvider {
           throw e;
         }
         if (shot?.pendingImageGen) delete shot.pendingImageGen;
-        if (submitted) onPending?.(null);
+        if (submitted || supersededPending) onPending?.(null);
         this.fireGeneration(genMeta);
         return done.buf;
       } finally {
@@ -824,6 +825,7 @@ export class OpenArtCliProvider implements MediaProvider {
       if (projectId) args.push("--project", projectId);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (OpenArt CLI)…`);
       let done: { buf: Buffer; ext: string; historyId: string };
@@ -863,7 +865,7 @@ export class OpenArtCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (videoSubmitted) opts.onPending?.(null);
+      if (videoSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);

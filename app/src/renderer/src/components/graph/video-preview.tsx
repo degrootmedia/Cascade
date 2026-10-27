@@ -5,14 +5,18 @@
  * resolution even with preload="metadata" — with one live element per
  * video/edit/output/ref node, opening a take-rich shot (or landing a new
  * take) stalled the canvas behind a burst of decoders. This component
- * paints the cached middle-frame poster (`?thumb=512`, generated main-side)
- * and mounts the real <video> only on intent — hover for reference nodes,
- * a play-button click for generation nodes — with a small global LRU cap
- * on simultaneously live videos so a big graph can never accumulate
- * decoders again. Mirrors the references panel's Perf 2.4 hover-mount.
+ * paints the cached middle-frame poster (fixed `?thumb=` tier, generated
+ * main-side) and mounts the real <video> only on intent — hover for
+ * reference nodes, a play-button click for generation nodes — with a small
+ * global LRU cap on simultaneously live videos so a big graph can never
+ * accumulate decoders again. While the viewport moves (graph/lod.tsx),
+ * live videos unmount back to posters and hover-activation is suppressed:
+ * nodes sliding under a stationary cursor mid-pan must not spin up
+ * decoders. Mirrors the references panel's Perf 2.4 hover-mount.
  */
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { refThumbUrl } from "../production/thumb-url.js";
+import { GRAPH_PREVIEW_EDGE, useGraphLod } from "./lod.js";
 
 /** Max <video> elements alive in the graph at once; the oldest activation
  *  unmounts (back to its poster) when a new one mounts. */
@@ -73,30 +77,38 @@ function useIsLiveVideo(id: string): boolean {
  * nodes); otherwise the play button mounts a controls-bearing <video>
  * that stays until evicted by the live cap or unmounted.
  */
-export function VideoPreview({ instanceId, url, className, controls = false, hoverActivate = false }: {
+export function VideoPreview({ instanceId, url, className, controls = false, hoverActivate = false, posterEdge }: {
   instanceId: string;
   url: string;
   className?: string;
   controls?: boolean;
   hoverActivate?: boolean;
+  /** Fixed poster thumbnail tier (long edge). Defaults to the generator
+   *  previews' tier; resizable hosts (ref/output tiles) pass the tile tier. */
+  posterEdge?: number;
 }) {
   const live = useIsLiveVideo(instanceId);
+  const { interacting } = useGraphLod();
   const [posterAttempt, setPosterAttempt] = useState(0);
   const [posterFailed, setPosterFailed] = useState(false);
   useEffect(() => { setPosterAttempt(0); setPosterFailed(false); }, [url]);
   // A preview that leaves the canvas frees its decoder slot immediately.
   useEffect(() => () => { deactivateLiveVideo(instanceId); }, [instanceId]);
+  // Viewport moving: unmount back to the poster so no decoder competes
+  // with the gesture. Playback restarts only on fresh user intent.
+  useEffect(() => { if (interacting) deactivateLiveVideo(instanceId); }, [interacting, instanceId]);
 
   const activate = useCallback(() => activateLiveVideo(instanceId), [instanceId]);
   const deactivate = useCallback(() => deactivateLiveVideo(instanceId), [instanceId]);
-  const poster = refThumbUrl(url, 512) + (posterAttempt ? `&r=${posterAttempt}` : "");
+  const posterBase = refThumbUrl(url, posterEdge ?? GRAPH_PREVIEW_EDGE);
+  const poster = posterBase + (posterAttempt ? `${posterBase.includes("?") ? "&" : "?"}r=${posterAttempt}` : "");
 
   if (live) {
     return (
       <video
         className={className}
         src={url}
-        poster={posterFailed ? undefined : refThumbUrl(url, 512)}
+        poster={posterFailed ? undefined : posterBase}
         controls={controls || undefined}
         muted
         loop
@@ -109,7 +121,7 @@ export function VideoPreview({ instanceId, url, className, controls = false, hov
     );
   }
   return (
-    <span className="prod-graph-video-poster nodrag" onMouseEnter={hoverActivate ? activate : undefined}>
+    <span className="prod-graph-video-poster nodrag" onMouseEnter={hoverActivate && !interacting ? activate : undefined}>
       {posterFailed
         ? <span className={(className ?? "") + " prod-graph-video-poster-blank"}>▶</span>
         : (

@@ -13,7 +13,7 @@ from "../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
-import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
+import { sanitizeGenParams, normalizeShotSequences, isVideoEditFamilyMode } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
 parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
@@ -147,6 +147,17 @@ function normalize(p: ProductionFile): ProductionFile {
   // `deleted` entries. (The present/missing disk sweep runs in
   // `loadProduction`'s bootstrap, after the migrations settle the paths.)
   p.media = normalizeMediaRegistry(p.media);
+  // Color tags replaced the short-lived boolean `complete` marker: a marked
+  // shot reads back green-tagged, the legacy key is dropped, and an
+  // out-of-set tag value can't poison the border CSS class downstream.
+  for (const s of [...p.scenes.flatMap((sc) => sc.shots), ...p.outdatedShots]) {
+    const legacy = s as typeof s & { complete?: unknown };
+    if (legacy.complete !== undefined) {
+      if (legacy.complete === true && s.colorTag === undefined) s.colorTag = "green";
+      delete legacy.complete;
+    }
+    if (s.colorTag !== undefined && !(["green", "yellow", "red"] as string[]).includes(s.colorTag)) delete s.colorTag;
+  }
   return p;
 }
 
@@ -369,6 +380,18 @@ export function writePreMigrationBackup(id: string, fromVersion: number, origina
 export function generationVideoThumbnailPaths(p: ProductionFile): string[] {
   return productionMediaRefs(p)
     .filter((rel) => /\.(mp4|m4v|mov|webm|mkv)$/i.test(rel))
+    .map((rel) => assetPath(p, rel));
+}
+
+/** Absolute paths of every still image a production references (board
+ *  frames, generation/edit/upscale takes, camera-grid sheets, style frames)
+ *  — the image half of the thumbnail-cache regenerator: graph previews
+ *  paint LOD tiers by settled zoom, so pre-encoding every tier removes the
+ *  first-view resize encode for generated stills, not just references.
+ *  Overlaps `referenceThumbnailPaths` harmlessly (the regenerator dedupes). */
+export function generationImageThumbnailPaths(p: ProductionFile): string[] {
+  return productionMediaRefs(p)
+    .filter((rel) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(rel))
     .map((rel) => assetPath(p, rel));
 }
 
@@ -1026,7 +1049,7 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
   shot.prompt = stripField(shot.prompt, "composer");
   shot.graphVideoPrompt = stripField(shot.graphVideoPrompt, "videoprompt");
   for (const n of shot.graphVideoNodes ?? []) {
-    const next = n.mode === "edit"
+    const next = isVideoEditFamilyMode(n.mode)
       ? stripField(n.prompt, { editvideoprompt: n.id })
       : stripField(n.prompt, { videoprompt: n.id });
     if (next !== n.prompt) n.prompt = next ?? "";

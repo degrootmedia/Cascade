@@ -27,6 +27,8 @@ import { MoodboardFrameView } from "./MoodboardFrame.js";
 import { MoodboardToolbar } from "./MoodboardToolbar.js";
 import { MoodboardMinimap } from "./MoodboardMinimap.js";
 import { MoodboardShelf } from "./MoodboardShelf.js";
+import { referenceUsage } from "../../../../shared/reference-usage.js";
+import { inUseTitleFor } from "../../components/production/references.js";
 import { MediaLightbox } from "../../components/common/MediaLightbox.js";
 import {
   MB_DEFAULT_H,
@@ -166,6 +168,8 @@ export function MoodboardCanvas({
   const prodId = prod.meta.id;
   const refs = prod.references ?? [];
   const categories: ReferenceCategory[] = prod.referenceCategories ?? [];
+  // In-use verdicts for the node-icon badge (canvas nodes + shelf tiles).
+  const usage = useMemo(() => referenceUsage(prod), [prod]);
 
   const [layout, setLayoutState] = useState<MoodboardLayout>(() =>
     reconcileMoodboard(normalizeMoodboardLayout(initialLayout), refKeys(refs)),
@@ -844,6 +848,7 @@ export function MoodboardCanvas({
       <MoodboardShelf
         prodId={prodId}
         refs={offBoard}
+        usage={usage}
         categories={categories}
         onAdd={addFromShelf}
         onZoom={setViewer}
@@ -890,6 +895,7 @@ export function MoodboardCanvas({
                 key={n.refId}
                 prodId={prodId}
                 refItem={r}
+                inUseTitle={inUseTitleFor(usage, n.refId)}
                 node={n}
                 thumbEdge={thumbTierFor(n.w, n.h, settledZoom, dpr)}
                 selected={selection.has(n.refId)}

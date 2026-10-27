@@ -170,6 +170,10 @@ export interface ChatEvent {
   event: AgentEventIpc;
 }
 
+/** UI color theme (Settings → Appearance). "light" is the Softimage XSI
+ *  gray palette; both themes are token sets in styles.css. */
+export type UiTheme = "dark" | "light";
+
 export interface SettingsView {
   /** Selected LLM API provider id (see shared/providers.ts). */
   provider: string;
@@ -180,6 +184,8 @@ export interface SettingsView {
   followProduction: boolean;
   /** UI accent color (hex). */
   accent: string;
+  /** UI color theme. */
+  theme: UiTheme;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
 }
@@ -363,6 +369,7 @@ export interface CascadeApi {
   setModel(model: string): Promise<void>;
   setProvider(id: string): Promise<void>;
   setAccent(color: string): Promise<void>;
+  setTheme(theme: UiTheme): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
   /** Media model ids the user hides from the generation model dropdowns. */

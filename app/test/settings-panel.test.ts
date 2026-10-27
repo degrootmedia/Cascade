@@ -27,6 +27,7 @@ const ALL_SETTINGS_KEYS: Record<keyof SettingsView, true> = {
   workspace: true,
   followProduction: true,
   accent: true,
+  theme: true,
   externalEditor: true,
 };
 
@@ -103,6 +104,7 @@ const VIEW: SettingsView = {
   workspace: null,
   followProduction: false,
   accent: "#4f8ef7",
+  theme: "dark",
   externalEditor: null,
 };
 
@@ -139,6 +141,7 @@ function installCascade() {
     setProvider: async (id: string) => { writes.push(["setProvider", id]); },
     setModel: async (id: string) => { writes.push(["setModel", id]); },
     setAccent: async (c: string) => { writes.push(["setAccent", c]); },
+    setTheme: async (t: string) => { writes.push(["setTheme", t]); },
     setExternalEditor: async (p: string | null) => { writes.push(["setExternalEditor", p]); },
     clearDefaultWorkspace: async () => { writes.push(["clearDefaultWorkspace", null]); },
     openSkillsFolder: async () => {},
@@ -193,6 +196,21 @@ describe("settings deep link", () => {
     expect(writes).toContainEqual(["setProvider", "gab"]);
     expect(writes.some(([k]) => k === "setAccent")).toBe(false);
 
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(container);
+  });
+
+  it("Appearance theme picker applies + persists the light theme", async () => {
+    const { container, root } = await mount("#settings/appearance");
+    const lightChip = container.querySelector('.theme-swatch[data-theme="light"]') as HTMLButtonElement;
+    expect(lightChip).not.toBeNull();
+    expect(lightChip.textContent).toContain("Light (XSI gray)");
+    await act(async () => { lightChip.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(writes).toContainEqual(["setTheme", "light"]);
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(lightChip.className).toContain("selected");
+    delete document.documentElement.dataset.theme;
     await act(async () => { root.unmount(); });
     document.body.removeChild(container);
   });

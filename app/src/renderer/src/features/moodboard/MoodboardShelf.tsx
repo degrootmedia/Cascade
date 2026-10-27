@@ -17,6 +17,8 @@ import { cascadeMedia } from "../../components/production/animatic.js";
 import { refThumbUrl } from "../../components/production/thumb-url.js";
 import { usePersistedCollapsed } from "../../components/production/persisted-state.js";
 import { MagnifyIcon } from "../../components/icons.js";
+import { RefInUseBadge, inUseTitleFor } from "../../components/production/references.js";
+import type { ReferenceUsage } from "../../../../shared/reference-usage.js";
 
 /** A shelf tile's artwork: the compressed image thumbnail, or a video's
  *  middle-frame poster (`?thumb=1` serves both). Falls back to a media glyph
@@ -81,9 +83,10 @@ export function groupShelfRefs(refs: CustomRef[], categories: ReferenceCategory[
     .filter((g) => g.refs.length > 0);
 }
 
-function ShelfItem({ prodId, refItem, onAdd, onZoom }: {
+function ShelfItem({ prodId, refItem, usage, onAdd, onZoom }: {
   prodId: string;
   refItem: CustomRef;
+  usage?: Map<string, ReferenceUsage>;
   onAdd: (id: string) => void;
   onZoom: (ref: CustomRef) => void;
 }) {
@@ -104,6 +107,7 @@ function ShelfItem({ prodId, refItem, onAdd, onZoom }: {
     >
       <ShelfThumb prodId={prodId} refItem={r} />
       <span className="moodboard-shelf-name" title={`Reference @[${r.name}]`}>@[{r.name}]</span>
+      <RefInUseBadge title={inUseTitleFor(usage, r.id)} />
       {(hasImage || isVideo) && (
         <button
           type="button"
@@ -121,9 +125,10 @@ function ShelfItem({ prodId, refItem, onAdd, onZoom }: {
 
 /** One collapsible category group. The persisted key matches the Design
  *  panel's `CategoryPanel`, so both surfaces share collapsed state. */
-function ShelfGroup({ prodId, group, onAdd, onZoom }: {
+function ShelfGroup({ prodId, group, usage, onAdd, onZoom }: {
   prodId: string;
   group: ShelfRefGroup;
+  usage?: Map<string, ReferenceUsage>;
   onAdd: (id: string) => void;
   onZoom: (ref: CustomRef) => void;
 }) {
@@ -143,7 +148,7 @@ function ShelfGroup({ prodId, group, onAdd, onZoom }: {
         <span className="moodboard-shelf-count">{group.refs.length}</span>
       </button>
       {open && group.refs.map((r) => (
-        <ShelfItem key={r.id} prodId={prodId} refItem={r} onAdd={onAdd} onZoom={onZoom} />
+        <ShelfItem key={r.id} prodId={prodId} refItem={r} usage={usage} onAdd={onAdd} onZoom={onZoom} />
       ))}
     </div>
   );
@@ -153,6 +158,7 @@ export const MoodboardShelf = memo(function MoodboardShelf({
   prodId,
   refs,
   categories,
+  usage,
   onAdd,
   onZoom,
 }: {
@@ -161,6 +167,8 @@ export const MoodboardShelf = memo(function MoodboardShelf({
   refs: CustomRef[];
   /** The production's reference categories (Design-panel order). */
   categories: ReferenceCategory[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   /** Put a reference back on the canvas (click). */
   onAdd: (id: string) => void;
   /** Open a reference in the full-size lightbox. */
@@ -207,7 +215,7 @@ export const MoodboardShelf = memo(function MoodboardShelf({
           <div className="moodboard-shelf-empty">Every reference is on the board. Remove one from the canvas to park it here.</div>
         )}
         {groups.map((group) => (
-          <ShelfGroup key={group.id || "uncategorized"} prodId={prodId} group={group} onAdd={onAdd} onZoom={onZoom} />
+          <ShelfGroup key={group.id || "uncategorized"} prodId={prodId} group={group} usage={usage} onAdd={onAdd} onZoom={onZoom} />
         ))}
       </div>
     </aside>

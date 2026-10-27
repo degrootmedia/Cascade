@@ -358,11 +358,17 @@ export async function loadRefThumbnail(absPath: string, maxEdge?: number): Promi
 }
 
 /** Fire-and-forget poster/thumb pre-warm for a file that just landed on disk
- *  (a generated/imported clip): the first graph view then reads the disk
- *  cache instead of paying the ffmpeg extract at paint time. Bounded by the
- *  same poster-slot cap as on-demand encodes; failures are silent. */
+ *  (a generated/imported clip or frame): the first graph view then reads the
+ *  disk cache instead of paying the ffmpeg extract / resize encode at paint
+ *  time. Graph LOD paints the 512 or 1024 tier at working zoom, so both are
+ *  warmed (sequentially — video tiers derive from the one master poster the
+ *  first call extracts). Bounded by the same poster-slot cap as on-demand
+ *  encodes; failures are silent. */
 export function prewarmMediaThumbnail(absPath: string): void {
-  void loadRefThumbnail(absPath, 512).catch(() => {});
+  void (async () => {
+    await loadRefThumbnail(absPath, 512);
+    await loadRefThumbnail(absPath, 1024);
+  })().catch(() => {});
 }
 
 /** Pre-encode thumbnails (every LOD tier) for the given reference media —

@@ -114,6 +114,7 @@ export const SHOT_FIELD_OWNERSHIP: Record<keyof ProductionShot, ShotFieldPolicy>
   pendingImageGen: { owner: "main", merge: "deny", note: "Async vendor job contingency — written by providers, reclaimed by recheckBoard." },
   pendingVideoGen: { owner: "main", merge: "deny", note: "Async vendor job contingency — written by providers, reclaimed by recheckVideo." },
   disabled: { owner: "renderer", merge: "copy", note: "Storyboard hide toggle." },
+  colorTag: { owner: "renderer", merge: "copy", note: "Storyboard border color tag (green/yellow/red; no pipeline effect)." },
   outdated: { owner: "main", merge: "deny", note: "Set by ingest's archiveShotsToOutdated; the renderer never writes it." },
   outdatedAt: { owner: "main", merge: "deny", note: "Archive timestamp — main-only." },
 };

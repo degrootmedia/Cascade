@@ -540,6 +540,121 @@ describe("HiggsfieldCliProvider.videoEditModels / generateVideoEdit", () => {
   });
 });
 
+describe("HiggsfieldCliProvider Genjutsu (generateVideoEdit)", () => {
+  /** Live `model get hf_mult_motion_control` shape (probed 2026-10-27). */
+  const genjutsuGet = (jobType: string) =>
+    JSON.stringify({
+      display_name: "Genjutsu",
+      job_type: jobType,
+      type: "video",
+      params: [
+        { name: "image_references", type: "array", default: null, required: false },
+        { name: "prompt", type: "string|null", default: null, required: false },
+        { name: "resolution", type: "string", default: "720p", required: false, enum: ["480p", "720p", "1080p"] },
+        { name: "video_references", type: "array", default: null, required: false },
+      ],
+      rules: [
+        { cel: "size(params.image_references) >= 1", message: "at least one image_references entry is required" },
+        { cel: "size(params.video_references) == 1", message: "exactly one video_references entry is required" },
+      ],
+    });
+  const GENJUTSU_VIDEO_LIST = JSON.stringify([
+    { job_type: "seedance_2_0", name: "Seedance 2.0", description: "Video." },
+    { job_type: "hf_mult_motion_control", name: "Genjutsu", description: "Motion transfer." },
+    { job_type: "hf_mult_replace_object", name: "Genjutsu", description: "Object swap." },
+  ]);
+  const JOB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  function genjutsuSetup(seen: string[][]) {
+    const { run, calls } = fakeRun(
+      baseHandler({
+        "model list --video": () => ok(GENJUTSU_VIDEO_LIST),
+        "model get hf_mult_motion_control": () => ok(genjutsuGet("hf_mult_motion_control")),
+        "model get hf_mult_replace_object": () => ok(genjutsuGet("hf_mult_replace_object")),
+        "generate create hf_mult_motion_control": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: JOB }));
+        },
+        [`generate wait ${JOB}`]: () =>
+          ok(JSON.stringify([{ id: JOB, status: "completed", video_url: "https://example.invalid/genjutsu.mp4" }])),
+      })
+    );
+    const folder = path.join(dataDir, "prod-genjutsu");
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "videos", "source.mp4"), Buffer.from("video-bytes"));
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "T", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    return { run, calls, prod, shot };
+  }
+
+  it("submits one video + image refs, omits an empty --prompt, keeps the resolution pick", async () => {
+    const seen: string[][] = [];
+    const { run, prod, shot } = genjutsuSetup(seen);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([7]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoEdit(
+        prod,
+        shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}hf_mult_motion_control`, resolution: "1080p", durationSec: 0, prompt: "" },
+        () => {},
+        "videos/source.mp4",
+        [{ name: "Hero", dataUrl: "data:image/png;base64,SGVsbG8=" }]
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toHaveLength(1);
+    const args = seen[0];
+    expect(args.filter((a) => a === "--video-references")).toHaveLength(1);
+    expect(args[args.indexOf("--video-references") + 1]).toMatch(/\.mp4$/);
+    expect(args.filter((a) => a === "--image-references")).toHaveLength(1);
+    expect(args).not.toContain("--prompt");
+    expect(args).not.toContain("--duration");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("1080p");
+  });
+
+  it("rejects a Genjutsu submit with no image reference (nothing created)", async () => {
+    const seen: string[][] = [];
+    const { run, calls, prod, shot } = genjutsuSetup(seen);
+    await expect(
+      provider(run).generateVideoEdit(
+        prod,
+        shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}hf_mult_motion_control`, resolution: "", durationSec: 0, prompt: "" },
+        () => {},
+        "videos/source.mp4"
+      )
+    ).rejects.toThrow(/at least one image reference/);
+    expect(seen).toHaveLength(0);
+    expect(calls.some((c) => c.slice(0, 2).join(" ") === "generate create")).toBe(false);
+  });
+
+  it("rejects a second video reference (nothing created)", async () => {
+    const seen: string[][] = [];
+    const { run, prod, shot } = genjutsuSetup(seen);
+    await expect(
+      provider(run).generateVideoEdit(
+        prod,
+        shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}hf_mult_motion_control`, resolution: "", durationSec: 0, prompt: "" },
+        () => {},
+        "videos/source.mp4",
+        [
+          { name: "Hero", dataUrl: "data:image/png;base64,SGVsbG8=" },
+          { name: "Other clip", dataUrl: "data:video/mp4;base64,SGVsbG8=" },
+        ]
+      )
+    ).rejects.toThrow(/exactly one video/);
+    expect(seen).toHaveLength(0);
+  });
+});
+
 describe("HiggsfieldCliProvider.imageGenFn", () => {
   it("submits with refs/aspect/resolution/quality, waits, downloads, and records", async () => {
     const seen: string[][] = [];

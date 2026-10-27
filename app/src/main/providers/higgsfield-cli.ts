@@ -51,6 +51,7 @@ import {
 } from "../../shared/prompt-grammar.js";
 import {
   DRAFT_RESOLUTION,
+  genjutsuModeForModelId,
   resolveAspectRatio,
   type CliModelSchema,
   type CliOptionField,
@@ -1557,6 +1558,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
     if (!this.isAvailable()) return null;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
+      const supersededPending = !!shot?.pendingImageGen;
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let items: CliListItem[] = [];
@@ -1720,7 +1722,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
           throw e;
         }
         if (shot?.pendingImageGen) delete shot.pendingImageGen;
-        if (submitted) onPending?.(null);
+        if (submitted || supersededPending) onPending?.(null);
         this.fireGeneration(genMeta);
         return done.buf;
       } finally {
@@ -2012,6 +2014,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (Higgsfield CLI)…`);
       let done: { buf: Buffer; ext: string; jobId: string };
@@ -2059,7 +2062,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (videoSubmitted) opts.onPending?.(null);
+      if (videoSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);
@@ -2134,11 +2137,28 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const roles = detail ? HiggsfieldCliProvider.roles(detail) : [];
     const accepts = (cands: string[]): boolean => !roles.length || roles.some((r) => cands.includes(r));
 
+    // Genjutsu's vendor rules (verified via `model get`): exactly one
+    // video (the source at refs[0]) and at least one image reference.
+    // Fail before any upload/submit so a mis-wired node costs nothing.
+    const genjutsuMode = genjutsuModeForModelId(modelId);
+    if (genjutsuMode) {
+      const extras = refs.slice(1);
+      const extraVideo = extras.find((r) => /^data:video\//i.test(r.dataUrl));
+      if (extraVideo) {
+        throw new Error(`Genjutsu takes exactly one video (the source clip) — reference "${extraVideo.name}" is a video. Remove it and retry. Nothing was submitted.`);
+      }
+      if (!extras.some((r) => !/^data:video\//i.test(r.dataUrl))) {
+        throw new Error("Genjutsu needs at least one image reference — wire an image into the prompt node's reference sockets or cite one with @[name]. Nothing was submitted.");
+      }
+    }
+
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
     const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
-      const args = [modelId, "--prompt", fullPrompt];
+      // Genjutsu prompts are optional (schema: string|null) — omit an
+      // empty --prompt entirely instead of sending a blank one.
+      const args = genjutsuMode && !fullPrompt.trim() ? [modelId] : [modelId, "--prompt", fullPrompt];
       const srcPath = paths[0];
       if (!srcPath) throw new Error("Couldn't load the source video.");
       if (accepts(["videoreferences", "video"])) args.push("--video-references", srcPath);
@@ -2185,6 +2205,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video-edit job via ${modelId} (Higgsfield CLI)…`);
       let done: { buf: Buffer; ext: string; jobId: string };
@@ -2223,7 +2244,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (editSubmitted) opts.onPending?.(null);
+      if (editSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt, "edit");

@@ -17,6 +17,7 @@ export const settingsChannels = {
   "settings:setModel": { method: "setModel", kind: "invoke" },
   "settings:setProvider": { method: "setProvider", kind: "invoke" },
   "settings:setAccent": { method: "setAccent", kind: "invoke" },
+  "settings:setTheme": { method: "setTheme", kind: "invoke" },
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
   "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },

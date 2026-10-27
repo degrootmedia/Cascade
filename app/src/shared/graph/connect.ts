@@ -15,7 +15,7 @@
  * step 10 deletes the legacy side.
  */
 import type { Graph, GraphEdge, GraphNode, GraphNodeKind, GraphVideoNode } from "../ipc.js";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX, VIDEOGEN_NODE_PREFIX, VIDEOPROMPT_NODE_PREFIX, EDITVIDEO_NODE_PREFIX, EDITVIDEOPROMPT_NODE_PREFIX, videoGenNodeId, videoPromptNodeId, parseVideoGenNode, parseVideoPromptNode, editVideoGenNodeId, editVideoPromptNodeId, parseEditVideoGenNode, parseEditVideoPromptNode } from "../ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN_PREFIX, VIDEOGEN_NODE_PREFIX, VIDEOPROMPT_NODE_PREFIX, EDITVIDEO_NODE_PREFIX, EDITVIDEOPROMPT_NODE_PREFIX, videoGenNodeId, videoPromptNodeId, parseVideoGenNode, parseVideoPromptNode, editVideoGenNodeId, editVideoPromptNodeId, parseEditVideoGenNode, parseEditVideoPromptNode, isVideoEditFamilyMode } from "../ipc.js";
 import { REF_SOCKET_RE, FRAME_SOCKET_RE } from "./ports.js";
 
 /** Structural canvas connection (ReactFlow Connection shape, no UI import). */
@@ -61,12 +61,12 @@ export function editVideoEdgeId(base: string, nodeId: string): string {
 
 /** A video node's canvas generator id (generate vs edit mode). */
 export function videoNodeCanvasId(node: Pick<GraphVideoNode, "id" | "mode">): string {
-  return node.mode === "edit" ? editVideoGenNodeId(node.id) : videoGenNodeId(node.id);
+  return isVideoEditFamilyMode(node.mode) ? editVideoGenNodeId(node.id) : videoGenNodeId(node.id);
 }
 
 /** A video node's canvas prompt-node id (generate vs edit mode). */
 export function videoNodePromptCanvasId(node: Pick<GraphVideoNode, "id" | "mode">): string {
-  return node.mode === "edit" ? editVideoPromptNodeId(node.id) : videoPromptNodeId(node.id);
+  return isVideoEditFamilyMode(node.mode) ? editVideoPromptNodeId(node.id) : videoPromptNodeId(node.id);
 }
 
 /** The style/brand plug edge-id suffix for a video prompt node. */

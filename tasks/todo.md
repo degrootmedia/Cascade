@@ -4770,3 +4770,376 @@ override (by design) — the strict builtin applies to everyone else.
 `styleOnlyClause` is not user-editable, so every style-ref submission gets
 the new wording + placement.
 
+
+# Take-strip history button + "mark frame as complete" (2026-10-26)
+
+- [x] History button to start of strip: `GenHistoryStrip` in
+  `app/src/renderer/src/components/NodeGraphModal.tsx` now renders the
+  "Show every stored take" button first (it holds the older takes; the strip
+  reads oldest to newest). Applies to every generator node sharing the strip.
+- [x] Mark frame as complete: `ProductionShot.complete` (approved for final,
+  visual marker only) + ownership entry (`renderer`/`copy`); right-click menu
+  "Mark frame as complete" / "Remove complete mark" on `BoardCard`;
+  `toggleShotComplete` in `ProductionWorkspace.tsx` via the stable
+  `boardActions` chain; `.prod-board.complete .prod-board-frame` green
+  (`--ok`) ring, declared before the selected ring so selection wins.
+- [x] Reference in-use icon — implemented same day (see next section; the
+  complete marker above was replaced by color tags there).
+
+## Review
+
+Verify: 5 new assertions failed before (strip order, board menu/class,
+ownership classification + merge) and pass after; focused files 13/13
+(`test/gen-history-strip.test.ts`, `test/board-complete.test.ts`,
+`test/shot-ownership.test.ts`); full gate `npm test` (typecheck + vitest):
+1895 passed, 2 skipped, plus 1 flaky `session-goals` fs-rename failure under
+parallel load that passes 12/12 solo (untouched by this diff). Not yet
+verified in the running app — the green ring and strip position are pinned
+at the component/class boundary by the DOM tests.
+
+# Border color tags + reference in-use icon (2026-10-26, follow-up)
+
+- [x] Color tags replace the complete marker: `ProductionShot.colorTag`
+  (`"green" | "yellow" | "red"`), right-click menu with swatch dots, a check
+  on the current tag, and "Remove color tag". Ring uses `--ok` / new `--warn`
+  / `--danger` via `--board-tag`, still declared before the selected ring.
+  Legacy `complete: true` reads back as `"green"` (normalize read-repair +
+  invalid tags dropped). Ownership entry renamed accordingly.
+- [x] Reference in-use detection: `app/src/shared/reference-usage.ts`
+  (`referenceUsage` + `formatReferenceUsage`) — tag citations across every
+  prompt store, attached/wired shots, style auto-attach, Magic casting;
+  outdated shots count; sentinels never do. Node-icon badge
+  (`RefInUseBadge`) on Design tiles, character sheets, moodboard canvas +
+  shelf, and the node-editor shelf, tooltip naming the shots. Design delete
+  now confirms when in use (unused deletes unchanged); the existing
+  `ref-delete-ui` tests drive the dialog and pin ask/cancel/no-ask.
+
+## Review
+
+Verify: new/updated assertions failed before and pass after (color-tag menu
++ class + merge + migration; 8 usage cases; badge show/hide; delete ask /
+cancel / no-ask). Full gate `npm test` (typecheck + vitest): 1908 passed,
+2 skipped, 0 failed. Intermittent EPERM-on-SVG suite-load flakes under
+parallel workers pass solo; untouched by this diff. Not yet verified in the
+running app — badge, tags, and the guard are pinned at the component/DOM
+boundary. Known scope calls: moodboard placement alone is not "in use";
+name-in-script-text alone uploads nothing (pipeline only honors tags), so
+it does not badge; the delete confirm covers the Design custom-reference
+delete (the `deleteReference` path), and character sheets show the badge
+even though characters have no direct delete button there.
+
+# Node-graph LOD parity + interaction video stand-down (2026-10-26)
+
+Questions asked: (1) drop image LOD whenever the view moves/zooms, at any
+zoom? (2) extend the moodboard perf work to all node views (video-heavy
+canvases slow down)?
+
+## Findings
+
+- The node graph never got LOD: every expanded preview (ref/output/
+  image-gen/edit/upscale/camera-grid, sequence thumbs) painted full-res at
+  every zoom. Node previews are ~236-320px boxes, so settled LOD alone cuts
+  decoded bitmaps ~14-55x at zoom 1 vs 4k sources.
+- Q1 answer: no blanket during-gesture downgrade. Pan never changes the
+  needed tier, and a src swap costs a fetch + decode per visible node,
+  twice per gesture, exactly when the frame budget is tightest (an
+  uncached tier is a synchronous `nativeImage` encode in main). The
+  no-decode gesture wins instead: live videos stand down while moving
+  (they previously kept playing, and ref nodes hover-activated as they
+  slid under a stationary cursor mid-pan), and node shadows drop.
+- Q2 answer: yes — main already serves every tier generically; only
+  renderer plumbing was missing. Gap found: generation *images* were in
+  neither pre-warm nor the Regenerate set (clips and ref images were).
+
+## Changes
+
+- [x] Shared tier math in `thumb-url.ts` (`THUMB_TIERS`/`thumbTierFor`/
+  `dropThumbTier`/`lodThumbUrl`/`posterThumbUrl`); `moodboard-layout.ts`
+  re-exports, moodboard behavior unchanged.
+- [x] `components/graph/lod.tsx`: settled-zoom (250ms quiet) + `interacting`
+  via context (never node `data`); `useLodSrc`/`usePosterSrc`;
+  `GRAPH_LOD_UNDERSHOOT = false` experiment flag (one tier below covering
+  while moving — flip only with before/after trace evidence).
+- [x] `NodeGraphModal`: `onMoveStart`/`onMove`/`onMoveEnd` plumbing
+  (layout save preserved), context provider, `.interacting` canvas class;
+  LOD display srcs for ref/output/image-gen/edit/upscale/camera-grid
+  tiles and static 256 sequence-segment thumbs. Lightbox, context menus,
+  and the camera-grid editor keep full-res URLs.
+- [x] `VideoPreview`: poster at the covering LOD tier (never the clip URL;
+  was fixed 512); unmounts to poster while interacting; hover-activation
+  suppressed while interacting.
+- [x] CSS: `.prod-graph-canvas.interacting .prod-graph-node` drops shadows.
+- [x] Pre-encode: `generationImageThumbnailPaths` (productions + regenerate
+  handler), `prewarmMediaThumbnail` warms 512+1024, `writeBoardFrame`
+  pre-warms each landed frame. CONTEXT.md updated.
+- [x] Contract change (intentional): canvas ref tiles now paint the LOD
+  tier, zoom stays full-res — `ref-thumb.test.ts` updated to pin the new
+  contract (titles + src assertions), not weakened.
+
+## Review
+
+Verify: 12 new assertions (`test/graph-lod.test.ts`,
+`productions.test.ts` image-paths) failed before and pass after; focused
+55/55 + broader graph batch 185/185. Full gate `npm test` (typecheck
+clean + vitest): 1920 passed, 2 skipped, 1 failed — `ledger.test.ts`
+EPERM temp-rename under parallel load (rotating victim test, untouched by
+this diff; passes 33/33 on retry). `npm run build` clean. NOT verified in
+the running app and no GUI perf trace taken in this environment (plan
+Steps 0/7): settled/interaction behavior is pinned at the unit/DOM
+boundary. Before flipping `GRAPH_LOD_UNDERSHOOT`, trace a video-heavy
+production (scripted pan/zoom, cold vs warm `userData/thumb-cache`) and
+compare flag on/off; delete the flag if it does not win. Scope call:
+storyboard board-card videos (`boards.tsx` mounts one `<video>` per clip
+card) were left untouched — same poster-first conversion is available as
+a follow-up if wanted.
+
+# Graph reload-on-enter fix: fixed tiers + keep-mounted nodes (2026-10-26, follow-up)
+
+User report: node view still choppy when image/video nodes enter the view
+during pan/zoom — they reload their images. History thumbs should be
+low-res (verified already: strip 256 / number chips, modal 256). User
+ruling: node-contained media never needs high res; lightbox only.
+
+## Findings
+
+- `onlyRenderVisibleElements` culls with ZERO overscan (installed xyflow
+  bundle: `getNodesInside(nodeLookup, exact viewport rect, transform,
+  partially)`), so a node unmounts/remounts the frame its first pixel
+  enters. Each remount re-renders a heavy form subtree and re-creates up
+  to 7 images (preview + 6 strip thumbs), each paying a
+  `max-age=0, must-revalidate` protocol round-trip + decode when the
+  bitmap was evicted. Gen/output/camera preview imgs also lacked
+  lazy/async decode.
+- Our own settle wave contributed: after each zoom, the settled-zoom
+  context re-rendered every mounted media node once, and tier-boundary
+  crossings swapped `src` (decode burst). Fixed tiers make both moot.
+
+## Changes
+
+- [x] Fixed graph tiers replace settled-zoom LOD: 512 generator
+  previews/posters, 1024 resizable ref/output/camera tiles, 256
+  strip/history/segments (unchanged). A node's `src` never changes
+  across zoom. `GRAPH_LOD_UNDERSHOOT` and the settled-zoom plumbing
+  deleted; `lodThumbUrl`/`posterThumbUrl`/`dropThumbTier` pruned from
+  `thumb-url.ts` (`thumbTierFor` stays — moodboard still uses it, moodboard
+  behavior unchanged).
+- [x] Keep-mounted canvas: `onlyRenderVisibleElements={nodes.length >
+  GRAPH_CULL_NODE_LIMIT}` (150). Below the limit pan/zoom is a pure
+  transform of mounted, decoded nodes; above it, previous behavior.
+- [x] `loading="lazy" decoding="async"` on output/image/edit/upscale/
+  camera preview imgs (ref/strip/poster already had them).
+- [x] `VideoPreview` poster is the fixed tier (`posterEdge` prop);
+  interacting stand-down unchanged. CONTEXT.md updated; cache headers
+  deliberately untouched (stat+304 is cheap; the win is no remount).
+
+## Review
+
+Verify: rewritten `graph-lod.test.ts` + ref-thumb/video-preview contract
+updates failed before (10) and pass after; typecheck clean; focused
+78/78; full gate `npm test` (typecheck + vitest): 1920 passed, 2 skipped,
+0 failed; `npm run build` clean. Contract changes (intentional): ref
+canvas tile is now `?thumb=1024` at every zoom (was settled tier;
+lightbox still full-res); culling pinned as gated, not unconditional.
+NOT verified in the running app — smoothness itself needs a manual pan
+across a video-heavy production. If a >150-node graph still chops when
+culled nodes re-enter, raise the limit or revisit; if keep-mounted open
+feels heavy on a huge graph, the same constant is the knob.
+
+---
+
+# Genjutsu Motion Transfer + Object Swap nodes (Higgsfield-only)
+
+User request (plan approved 2026-10-27): two custom Higgsfield nodes —
+Genjutsu Motion Transfer and Genjutsu Object Swap — matching the
+Higgsfield site flow, grayed out like Edit Video when OpenArt MCP is the
+active service. Verified live: the `higgsfield` CLI (1.1.25) exposes
+`hf_mult_motion_control` + `hf_mult_replace_object` (and `_flash` Lite
+variants); all four require exactly 1 `video_references`, >=1
+`image_references`, optional `prompt`, resolution 480p/720p/1080p
+(default 720p), no duration/aspect. Site: 1 video 4-30s, up to 30
+reference images, preset or short optional description. Presets have no
+CLI parameter, so v1 ships without a preset picker.
+
+Plan: Genjutsu nodes are new `GraphVideoNode.mode` values riding the
+Edit Video family (`graphVideoNodes`, canvas kinds `editvideo` /
+`editvideoprompt`, `production:generateEditVideoNode`,
+`generateVideoEdit`) — no new IPC, shot field, or migration.
+
+- [x] Shared model: `mode` union + `gm`/`gs` id allocators + edit-family
+  helpers (`graph.ts`); Genjutsu model pairs + `providerSupportsGenjutsu`
+  + hint (`media.ts`).
+- [x] Shared graph audit: route `mode === "edit"` family dispatch in
+  materialize/connect/render/generations/merge through the family helper.
+- [x] Provider + main: omit `--prompt` when empty, never submit a second
+  video for Genjutsu models; mode-aware validation in the edit-video
+  handler (prompt optional, model pair, >=1 image ref, 4-30s source).
+- [x] Renderer: variant-aware Edit Video views (title/icon/button/model
+  pool/no duration/ref hint), two palette tiles + Higgsfield gray-out,
+  icons; run path reuses `runEditVideoNode`.
+- [x] Sequence canvas excludes the new tools (v1); CONTEXT.md update.
+- [x] Tests: `genjutsu-node.test.ts`, provider argv tests, shared
+  materialize/generations coverage; full `npm test` + `npm run build`;
+  manual Dev check (gray-out both ways, validation errors, no paid
+  generation without separate user approval).
+
+## Review
+
+Done. Shipped as planned: two palette nodes riding the Edit Video family
+(no new IPC/shot field/migration). Files: shared `ipc/graph.ts` (modes,
+`gm`/`gs` ids, `isVideoEditFamilyMode`), `ipc/media.ts` (model pairs,
+`providerSupportsGenjutsu`), graph materialize/connect/render,
+generations, reconcile equality; provider `generateVideoEdit` (omit empty
+`--prompt`, one-video/>=1-image backstops); main handler (model lock,
+duration forced 0, 4-30s source probe); renderer variant views + two
+grayed palette tiles + icons; sequence canvas excludes both tools;
+CONTEXT.md updated. One existing assertion updated with the feature:
+`graph-shelf.test.ts` palette tile count 6 -> 8.
+Verify: `genjutsu-node.test.ts` 12/12 (helpers, materialize, take
+ownership, render/model-pool/ref-gate/submit/cycle/gray-out), provider
+argv tests 3/3 in `higgsfield-cli.test.ts`; full gate `npm test`
+(typecheck + vitest): 1940 passed, 2 skipped, 0 failed; `npm run build`
+clean; built bundle grepped for the new UI strings. Two honest gaps:
+(1) the live credit quote hides on Genjutsu models — `generate cost`
+enforces the media rules and Cascade's quote probe sends no media by
+design, so it resolves null (ledger price rules still price finished
+jobs). (2) Exercised end-to-end in the production Electron build
+(headless, CDP-driven, isolated userData; a fake native `higgsfield` binary
+via the Settings custom-binary path recorded argv and returned canned jobs —
+no credits spent; harness + screenshots + evidence.json in the system temp
+cascade-genjutsu-e2e folder): 15/15 evidence rows — grayed under OpenArt MCP
+vs enabled under Higgsfield CLI, both nodes created by palette drag, locked
+model pairs, source default, ref gate, extra-video validation with zero
+`generate create` calls, successful Motion (standard/1080p) + Swap
+(Lite/720p) argv, takes, piping, history/cycle, 58 fps pan/zoom/drag,
+persistence across reload; screenshots read back and inspected. Still not
+run: a paid generation
+was submitted — first manual pass: switch providers both ways, drag both
+nodes onto a shot with a 4-30s clip + one image reference, generate.
+
+---
+
+# Stale pending badge fix (shot 0200, 0000_Co-Mo Santa Tests)
+
+- [x] Diagnose: badge = `shot.pendingImageGen` stamped 2026-10-14T19:04Z;
+  ledger + two later billed takes (19:05/19:30) proved superseded-success
+  runs never cleared it; probe test reproduced against real provider.
+- [x] Fix: supersede clears now notify the persistence sink even when the
+  run never records its own pending — `openart.ts` image + video,
+  `openart-cli.ts` + `higgsfield-cli.ts` image/video/edit.
+- [x] Regression tests in `openart.test.ts` (sync image + sync video); full
+  gate 1942 passed; `npm run build` clean. Existing stale record on 0200
+  clears via right-click "Clear pending frame", a Recheck, or the next
+  generation on that shot (now fixed path).
+
+---
+
+# Storyboard Nodes shortcut + selection/tag rings + theme system (2026-10-27)
+
+User asks: (1) Nodes icon on storyboard shots, right of Import, opening the
+node editor for that shot; keep the side-panel Nodes button. (2) Selected
+blue border must not hide the green/yellow/red color tag — selection ring
+goes OUTSIDE the tag ring. (3) Theme system: unify all colors so they are
+easy to edit, then a light theme in the lighter gray of Softimage XSI.
+
+## Findings (verified in code)
+
+- Shot card action row is `.prod-board-actions` in `boards.tsx`
+  (Regen / Edit / Video / Import); `NodesIcon` already exists in
+  `icons.tsx` (used by the side panel in `prompt-panel.tsx`). Opening the
+  graph = `setGraphShotId(id)` in `ProductionWorkspace.tsx`, but the graph
+  composer reads the prompt scoped to `promptShotId`, so a card click must
+  `focusPrompt(id)` first, then open. Card callbacks must go through the
+  stable `boardHandlerRef`/`boardActions` delegator or `memo` breaks.
+- Selected vs tag both paint `border-color` + `0 0 0 2px` ring on
+  `.prod-board-frame`; selected is declared later and wins outright,
+  erasing the tag. Fix: layered `box-shadow` — tag keeps border + inner
+  2px ring, selection adds an outer ring at 4px spread.
+- Colors are mostly tokenized already: 11 vars in `:root`. Remaining: 127
+  hex literals (53 unique) in `styles.css` (scrollbars, status/check
+  colors, magic violet, prompt-category colors duplicating graph socket
+  colors, media black, crash screen, `#fff` on accent) and
+  `var(--bg-elev, #1c1e24)` fallbacks for a token never defined.
+  Black/white alpha washes are theme-invariant overlays and stay literal.
+- Accent persistence is the sibling pattern to mirror for theme:
+  `settings.ts` get/set, `settings:setAccent` IPC, `SettingsView.accent`,
+  `applyAccent()` in `theme.ts`, Appearance section. The detached canvas
+  window never applies accent today; a localStorage pre-paint cache in
+  `main.tsx` covers both windows for theme.
+
+## Plan
+
+- [x] `boards.tsx`: optional `onOpenGraph(shotId)` prop; Nodes button
+      right of Import. `ProductionWorkspace.tsx`: `openGraph` handler
+      (`focusPrompt` then `setGraphShotId`) via `boardActions`.
+      Side-panel button untouched.
+- [x] `styles.css`: selected+tag (and in-range+tag) layered rings — tag
+      inner, accent outer. Untagged selected look unchanged.
+- [x] Theme tokens at the top of `styles.css` (`:root` = dark, current
+      values unchanged); every theme hex outside the block becomes a var;
+      define `--bg-elev`/`--bg-hover`; unify prompt-category colors with
+      graph socket colors. Content colors (hue spectrum, magic rainbow,
+      moodboard canvas presets, sticky note) stay literal, whitelisted.
+- [x] Light theme `:root[data-theme="light"]`: XSI gray surfaces (bg
+      #a8a8a8 / panel #bdbdbd / raised #c9c9c9 / elev #d6d6d6, border
+      #8a8a8a, text #202226, dim #4d5054, darker status colors,
+      `color-scheme: light`).
+- [x] Plumbing mirroring accent: `UiTheme` in shared IPC,
+      `SettingsView.theme`, `settings:setTheme`, `settings.ts` get/set
+      (allowlist), `theme.ts` apply/normalize + pre-paint cache, App +
+      DetachedCanvasApp apply on boot, Appearance Theme picker
+      (Dark / Light (XSI gray)), registry owns `theme`, reset = dark.
+- [x] Tests: BoardCard Nodes button (position + click), theme units, CSS
+      guard (hex whitelist, light tokens, layered ring), settings-panel
+      coverage for `theme`.
+- [x] Verify: app typecheck + full vitest + `npm run build`.
+
+## Review
+
+Done. (1) `.prod-board-nodes` sits immediately right of Import in the
+frame action row; it opens the graph via the stable `boardActions.openGraph`
+delegator, which focuses the shot's prompt first (the graph composer is
+`promptShotId`-scoped) and then sets `graphShotId`. Side-panel button kept.
+(2) Selected and in-range rings now stack as a second `box-shadow` layer at
+4px spread OUTSIDE the tag's border + 2px ring; untagged selection is
+pixel-identical to before. (3) All theme colors are tokens in one block at
+the top of `styles.css` — dark values byte-identical to the old literals,
+guarded by `theme-css.test.ts` (only whitelisted content colors may stay
+literal; black/white alpha washes stay literal as theme-invariant scrims).
+Tokens are scoped by `[data-theme]` attribute, so the Appearance chips
+preview each theme from the same token source. Light theme = XSI gray
+(#a8a8a8 bg / #bdbdbd panel / #c9c9c9 raised, #202226 text, darkened status
+colors, `color-scheme: light`); media wells stay near-black for image
+contrast, and image-overlay controls moved to `--on-overlay` so they stay
+legible in both themes. Persistence mirrors accent end to end
+(`settings.ts` allowlist get/set, `settings:setTheme`, `SettingsView.theme`,
+Appearance picker + reset), with a localStorage pre-paint cache in
+`main.tsx` so both the main and detached windows boot in the right theme;
+the detached window now also applies the authoritative accent (it never
+did before). New tests: `board-nodes-button.test.ts` (2), `theme.test.ts`
+(4), `theme-css.test.ts` (4), settings-panel theme coverage + picker test.
+Verify: typecheck clean; full suite 1953 passed / 2 skipped;
+`npm run build` clean and `out/main/index.js` carries `settings:setTheme`
+(contract + handler). Note: the new IPC needs a main-process restart
+(`npm run dev` restart, or `npm run package` for the packaged exe) before
+the picker persists on a running build.
+
+### Follow-up: uniform ring thickness (user report)
+
+The layered ring made the selected band 2px on tagged shots (4px outer
+spread − 2px inner) vs 3px untagged (1px border + 2px spread), and
+in-range shots used a 35%-alpha ring that also outranked `selected` by
+source order — so thickness/strength varied by which shot was selected.
+Fix: one geometry variable `--board-band: 3px` on `.prod-board`; every
+ring rule (tag, selected, in-range, drop-target, dragover) derives its
+spreads from it — inner `calc(band - 1px)`, outer `calc(2*band - 1px)` —
+so every visible band is exactly 3px in every combination. In-range is
+now an opaque muted accent (`--board-range`, 65% accent into border)
+instead of a translucent ring, selected explicitly outranks in-range
+(with and without a tag), and the halo glow is the same 12px/1px layer
+everywhere (was 3px spread on selected+tag). Guard:
+`theme-css.test.ts` now extracts every `.prod-board-frame` ring rule and
+fails on hard-coded spreads, translucent accent rings, or a non-uniform
+glow. Verify: targeted tests 10 passed, build clean (built CSS carries
+`--board-band`); full suite 1954 passed with 1 unrelated failure
+(`ledger.test.ts` credit repricing — passes 33/33 isolated, flaky under
+full-suite load, untouched by this CSS-only change).

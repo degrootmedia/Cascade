@@ -467,7 +467,7 @@ describe("node-graph tool panel", () => {
 
     expect(toolNodeCount(host)).toBe(0);
     const tiles = host.querySelectorAll(".prod-graph-tools-item");
-    expect(tiles.length).toBe(6);
+    expect(tiles.length).toBe(8); // + the two Genjutsu tiles (Higgsfield-only)
     expect(host.querySelectorAll(".prod-graph-tools-item.on-canvas").length).toBe(0);
 
     await act(async () => { root.unmount(); });
@@ -1086,6 +1086,95 @@ describe("node-graph save-as-reference reveal", () => {
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);
     window.localStorage.clear();
+  });
+});
+
+describe("node-graph wired reference placement", () => {
+  it("shows the node + wire for a video ref piped to the output but never placed/tagged", async () => {
+    // The pipe was set outside the canvas (board drop / programmatic), so the
+    // stored graph carries ref node + e-ref-out wire and the shot resolves
+    // the clip — but the ref has no saved layout position and no prompt tag.
+    // Its canvas node must still render or React Flow drops the wire.
+    lastGraph = null;
+    const refs = [
+      ...REFS,
+      { id: "rv", name: "Clip", artwork: "", media: "video", mediaPath: "references/clip.mp4" },
+    ] as unknown as typeof REFS;
+    const graph = {
+      version: 1,
+      migrated: true,
+      nodes: [
+        { id: "ref:rv", kind: "ref", pos: { x: 0, y: 0 }, data: { label: "Clip" } },
+        { id: "composer", kind: "composer", pos: { x: 300, y: 0 } },
+        { id: "style", kind: "style", pos: { x: 300, y: 200 } },
+        { id: "brand", kind: "brand", pos: { x: 300, y: 320 } },
+        { id: "output", kind: "output", pos: { x: 900, y: 0 } },
+        { id: "imagegen", kind: "imagegen", pos: { x: 600, y: 0 } },
+      ],
+      edges: [
+        { id: "e-ref-out", from: { node: "ref:rv", port: "out" }, to: { node: "output", port: "in-out" } },
+      ],
+    };
+    const { root, host } = renderModal({
+      refs,
+      shotPatch: {
+        graphOutputSource: "ref",
+        graphOutputRefId: "rv",
+        videoPath: "references/clip.mp4",
+        graph,
+      },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const refNames = [...host.querySelectorAll<HTMLInputElement>(".prod-graph-node.prod-graph-ref input.prod-ref-edit-name")].map((i) => i.value);
+    expect(refNames).toContain("Clip");
+    // (React Flow renders an edge iff both endpoint nodes exist; jsdom never
+    // measures nodes, so assert the two preconditions instead: the node
+    // above + the e-ref-out wire still in the graph the modal persists.)
+    expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref-out");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("heals a stored graph whose e-ref-out wire was lost while the pipe fields remain", async () => {
+    // Older/raced save: graphOutputSource/RefId still name the clip (the shot
+    // keeps playing it) but the stored graph has neither the ref node nor the
+    // wire. Opening the graph must restore both.
+    lastGraph = null;
+    const refs = [
+      ...REFS,
+      { id: "rv", name: "Clip", artwork: "", media: "video", mediaPath: "references/clip.mp4" },
+    ] as unknown as typeof REFS;
+    const graph = {
+      version: 1,
+      migrated: true,
+      nodes: [
+        { id: "composer", kind: "composer", pos: { x: 300, y: 0 } },
+        { id: "style", kind: "style", pos: { x: 300, y: 200 } },
+        { id: "brand", kind: "brand", pos: { x: 300, y: 320 } },
+        { id: "output", kind: "output", pos: { x: 900, y: 0 } },
+        { id: "imagegen", kind: "imagegen", pos: { x: 600, y: 0 } },
+      ],
+      edges: [],
+    };
+    const { root, host } = renderModal({
+      refs,
+      shotPatch: {
+        graphOutputSource: "ref",
+        graphOutputRefId: "rv",
+        videoPath: "references/clip.mp4",
+        graph,
+      },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect((lastGraph as { edges: Array<{ id: string }> } | null)?.edges.map((e) => e.id)).toContain("e-ref-out");
+    const refNames = [...host.querySelectorAll<HTMLInputElement>(".prod-graph-node.prod-graph-ref input.prod-ref-edit-name")].map((i) => i.value);
+    expect(refNames).toContain("Clip");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
   });
 });
 

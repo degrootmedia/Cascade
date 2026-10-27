@@ -32,7 +32,7 @@ import { getPromptTemplate } from "./prompt-templates.js";
 /** The generators a sequence canvas hides entirely: image generation (with
  *  its composer prompt node) and the shot-only generator nodes. Only video
  *  generation and video editing remain, plus the frames/refs and the output. */
-export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand"] as const;
+export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand", "genjutsu-motion", "genjutsu-swap"] as const;
 
 /** The sequence's member frames as locked reference inputs: image nodes exactly
  *  like reference nodes, live-linked to each shot's current output frame

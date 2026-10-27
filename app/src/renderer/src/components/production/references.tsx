@@ -12,7 +12,8 @@ import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import type { PromptContentHandle } from "../TriplePrompt.js";
-import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
+import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, NodesIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
+import { formatReferenceUsage, type ReferenceUsage } from "../../../../shared/reference-usage.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 import { refThumbUrl } from "./thumb-url.js";
@@ -230,10 +231,12 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
+export function ReferenceCategorySection({ prodId, categories, items, usage, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   onAddCategory: (name: string) => void;
   onRenameCategory: (id: string, name: string) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
@@ -340,7 +343,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -365,10 +368,11 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
+  usage?: Map<string, ReferenceUsage>;
   selectedIds: Set<string>;
   onSelect: (id: string, mode: "single" | "toggle" | "range", order: string[]) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
@@ -414,7 +418,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} inUseTitle={inUseTitleFor(usage, r.id)} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -426,15 +430,20 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
 /** Data-only equality for a category panel: function identities are ignored
  *  (the parent recreates them per render); only visible data matters. */
 function areCategoryPanelsEqual(
-  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
-  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
+  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
+  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
 ): boolean {
   if (prev.prodId !== next.prodId) return false;
   if (prev.category.id !== next.category.id || prev.category.name !== next.category.name) return false;
   // Selection is a fresh Set on every change, so identity covers any tile
   // entering/leaving the selection (the panel must repaint its highlights).
   if (prev.selectedIds !== next.selectedIds) return false;
-  return areRefItemListsEqual(prev.items, next.items);
+  if (!areRefItemListsEqual(prev.items, next.items)) return false;
+  // The in-use badge repaints when any tile's usage verdict changes.
+  for (const item of next.items) {
+    if (inUseTitleFor(prev.usage, item.id) !== inUseTitleFor(next.usage, item.id)) return false;
+  }
+  return true;
 }
 
 function areRefItemListsEqual(a: CustomRef[], b: CustomRef[]): boolean {
@@ -459,6 +468,21 @@ function areRefItemsEqual(a: CustomRef, b: CustomRef): boolean {
   );
 }
 
+/** The in-use marker shared by every reference surface (Design tiles,
+ *  character sheets, moodboard, node-editor shelf): a small node icon shown
+ *  while the reference is tag-cited or wired into a node, so it isn't
+ *  deleted by accident. Renders nothing without a title. */
+export function RefInUseBadge({ title }: { title?: string }) {
+  if (!title) return null;
+  return <span className="prod-ref-inuse" title={title}><NodesIcon size={11} /></span>;
+}
+
+/** Tooltip for a tile's in-use badge, or undefined when the ref is unused. */
+export function inUseTitleFor(usage: Map<string, ReferenceUsage> | undefined, id: string): string | undefined {
+  const u = usage?.get(id);
+  return u ? `In use — ${formatReferenceUsage(u)}` : undefined;
+}
+
 /** Which half of a tile a drag is over: the left half inserts before it, the
  *  right half after. Grid is a horizontal wrap flow, so X is the axis. */
 function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
@@ -472,7 +496,7 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge, inUseTitle }: {
   prodId: string;
   refItem: CustomRef;
   categoryName?: string;
@@ -503,6 +527,9 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
    *  settled zoom so a zoomed-out board decodes screen-sized bitmaps;
    *  zoom/lightbox/context-menu keep the full-res URL regardless. */
   thumbEdge?: number;
+  /** When set, the in-use node badge shows with this tooltip (the reference
+   *  is tag-cited or wired into a node — see `referenceUsage`). */
+  inUseTitle?: string;
 }) {
   const isNode = variant === "node";
   const r = refItem;
@@ -669,6 +696,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
               ? <video className="prod-ref-video" src={videoUrl} poster={videoUrl ? refThumbUrl(videoUrl) : undefined} muted loop playsInline preload="metadata" autoPlay onLoadedMetadata={(e) => { try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {} }} onMouseEnter={(e) => { try { void e.currentTarget.play().catch(() => {}); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} onError={() => setVideoFailed(true)} draggable onDragStart={handleDragStart} />
               : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>))
           : <div className="prod-ref-blank">＋</div>}
+      <RefInUseBadge title={inUseTitle} />
       <div className="prod-ref-actions">
         {(hasImage || isVideo) && <button className="prod-ref-zoom" title={isVideo ? "Play this reference full size" : "Enlarge this reference"} onClick={handleZoom}><MagnifyIcon size={12} /></button>}
         {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
@@ -714,6 +742,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
   areRefItemsEqual(prev.refItem, next.refItem) &&
   prev.variant === next.variant &&
   prev.thumbEdge === next.thumbEdge &&
+  prev.inUseTitle === next.inUseTitle &&
   prev.selected === next.selected &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
@@ -799,9 +828,11 @@ export function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
  *  front + back) view, neutral pose/expression/lighting on a plain gray
  *  background (characterSheetPrompt in pipeline.ts). The finished sheet is
  *  attached to the character (created on first build) and shown below. */
-export function CharacterBuilderSection({ prodId, characters, models, references, refNameById, productionQuality, onGenerate }: {
+export function CharacterBuilderSection({ prodId, characters, usage, models, references, refNameById, productionQuality, onGenerate }: {
   prodId: string;
   characters: CharacterSheet[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   models: OpenArtModelChoice[];
   /** Artwork-bearing references for the description box's @ autocomplete +
    *  tag previews (characters, products, custom references). */
@@ -1019,6 +1050,7 @@ export function CharacterBuilderSection({ prodId, characters, models, references
               title={`Load ${c.name}'s description and generation settings`}
             >
               <img src={c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork} alt={c.name} />
+              <RefInUseBadge title={inUseTitleFor(usage, c.id)} />
               <div className="prod-ref-actions">
                 <button className="prod-ref-zoom" title="Enlarge this character sheet" onClick={(e) => { e.stopPropagation(); setZoom({ name: c.name, url: c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork! }); }}><MagnifyIcon size={12} /></button>
               </div>

@@ -17,6 +17,7 @@ import type { GraphLayout } from "../../../../shared/ipc.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { refThumbUrl } from "../production/thumb-url.js";
 import { VideoPreview } from "./video-preview.js";
+import { GRAPH_TILE_EDGE } from "./lod.js";
 import { EyeIcon, EyeOffIcon, MagnifyIcon } from "../icons.js";
 
 /** Split a `cascade-media://` URL into the production id + workspace-relative
@@ -63,8 +64,9 @@ export interface GraphRef {
 /** The reference tile's node payload. */
 export interface RefData extends Record<string, unknown> {
   name: string;
-  /** Full-resolution artwork (cascade-media URL or inline data URL) - the node
-   *  tile, the zoom lightbox, and the context menu all use it. */
+  /** Full-resolution artwork (cascade-media URL or inline data URL) - the zoom
+   *  lightbox and the context menu use it as-is; the node tile paints a fixed
+   *  thumbnail tier instead (graph/lod.tsx). */
   artwork: string;
   /** Playable cascade-media URL for video references. */
   mediaUrl?: string;
@@ -121,6 +123,9 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
   }, [nameDraft, data.refId, data.onRename, data.name]);
   const renameable = !data.missing && !!data.refId && !!data.onRename;
   const collapsed = data.collapsed === true;
+  // Fixed tile tier (graph/lod.tsx): the src never changes across zoom, so
+  // panning/zooming reloads nothing; zoom/menu keep data.artwork full-res.
+  const lodArtwork = refThumbUrl(data.artwork, GRAPH_TILE_EDGE);
   // The reference node is placed/collapsed dynamically and its output handle
   // rides the right edge (which moves with the tile width). React Flow only
   // registers a node's handles once it has measured the node, and a
@@ -143,7 +148,7 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
   const mediaEl = (src: string) => data.artwork
     ? <img src={src} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} />
     : data.media === "video" && data.mediaUrl
-      ? <VideoPreview instanceId={`ref:${id}`} className="prod-graph-ref-video" url={data.mediaUrl} hoverActivate />
+      ? <VideoPreview instanceId={`ref:${id}`} className="prod-graph-ref-video" url={data.mediaUrl} hoverActivate posterEdge={GRAPH_TILE_EDGE} />
       : data.media
         ? <div className="prod-graph-ref-blank" title={data.media === "audio" ? "Audio reference" : "Video reference"}>{data.media === "audio" ? "\u266A" : "\u25B6"}</div>
         : <div className="prod-graph-ref-blank" title="Reference has no image">?</div>;
@@ -198,7 +203,7 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
           : <>
               <div className="prod-graph-ref-head">{eyeButton}</div>
               <div className="prod-graph-ref-media" onDoubleClick={zoom} title={zoomTitle}>
-                {mediaEl(data.artwork)}
+                {mediaEl(lodArtwork)}
                 {zoomButton}
               </div>
               {nameEl}

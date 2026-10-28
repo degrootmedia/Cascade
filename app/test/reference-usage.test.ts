@@ -2,7 +2,7 @@
  * Reference usage — the "is this reference in use" truth behind the node icon
  * on reference tiles and the delete confirm. A reference counts when a
  * prompt cites it by @[Name] tag (name or alias), when a shot has it
- * attached or wired into its node graph, or when it auto-attaches as style.
+ * attached or wired into its node graph, or when it is style-tagged.
  * Generation-node sentinels stored beside real ids must never count, and an
  * unused reference must be absent from the map.
  */
@@ -102,7 +102,7 @@ describe("referenceUsage", () => {
     expect(usage.has("r-gone")).toBe(false);
   });
 
-  it("counts style auto-attach but not mere category membership", () => {
+  it("counts style-tagged refs as context, but not mere category membership", () => {
     const p = prod({
       referenceCategories: [
         { id: "cat-style", name: "Looks", kind: "style" },
@@ -117,7 +117,7 @@ describe("referenceUsage", () => {
     });
     const usage = referenceUsage(p);
     for (const id of ["r-a", "r-b", "r-c"]) {
-      expect(usage.get(id)?.other, id).toEqual(["auto-attached style reference"]);
+      expect(usage.get(id)?.other, id).toEqual(["style reference (context only)"]);
     }
     expect(usage.has("r-d")).toBe(false);
   });

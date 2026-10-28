@@ -51,10 +51,10 @@ export function ProvidersSection() {
   async function testConnection() {
     setTest(null);
     try {
-      const res = await window.cascade.listModels();
+      const res = await window.cascade.testConnection();
       setTest(
         res.ok
-          ? { ok: true, text: `Connected — ${res.models.length} model${res.models.length === 1 ? "" : "s"} available.` }
+          ? { ok: true, text: `Connected — ${res.models.length} model${res.models.length === 1 ? "" : "s"} available, and ${view.model || "the selected model"} answered a test request.` }
           : { ok: false, text: res.error }
       );
     } catch (e) {
@@ -100,7 +100,7 @@ export function ProvidersSection() {
         )}
       </SettingField>
 
-      <SettingField label="Test connection" help="Fetches the provider's model list with the stored key to verify the endpoint.">
+      <SettingField label="Test connection" help="Fetches the model list and sends a 1-token test request to the selected model, so a key that can list models but not run them fails here instead of mid-pipeline.">
         <div className="row">
           <button onClick={() => void testConnection()} disabled={!view.hasApiKey}>
             Test connection

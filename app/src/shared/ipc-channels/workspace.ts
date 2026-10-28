@@ -50,5 +50,6 @@ export const settingsChannels = {
   "image:editExternally": { method: "editImageExternally", kind: "invoke" },
   "image:showInFolder": { method: "showInFolder", kind: "invoke" },
   "models:list": { method: "listModels", kind: "invoke" },
+  "models:testConnection": { method: "testConnection", kind: "invoke" },
   "credits:get": { method: "getCredits", kind: "invoke" },
 } as const;

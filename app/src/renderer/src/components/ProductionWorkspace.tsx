@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
-import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
+import { applySavedRevision, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-usage.js";
 import { ShotTable } from "./ShotTable.js";
@@ -179,6 +179,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const pending = takePendingSuiteSeed();
       if (pending) setSuiteSeed(pending.seed);
       setShowSuite(true);
+      // The node graph / sequence canvas / frame lightbox render OVER the
+      // step content — without closing them the suite opens invisibly
+      // underneath and "Edit in Suite" from a graph take does nothing.
+      setGraphShotId(null);
+      setSeqCanvasId(null);
+      setBoardZoomId(null);
       setShowExpenses(false);
       setShowMoodboard(false);
     };
@@ -1392,6 +1398,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
   }
+  /** Step 2: a video/audio file dropped on a references category becomes a
+   *  media reference in that category — the panel already chose the name
+   *  (filename) and category, so no save popup like the graph drop shows. */
+  async function addDroppedMediaReference(file: File, categoryId?: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const name = uniqueRefName((current.references ?? []).map((r) => r.name), file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
+    try {
+      const saved = await window.cascade.addReferenceMedia(current.meta.id, file.name, file.type, await file.arrayBuffer());
+      if (!saved) { setErr("Couldn't save the dropped media file."); return; }
+      saveRefOnly(name, { media: saved.kind, mediaPath: saved.path, categoryId });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+  /** Set an audio reference's waveform color (per-file; follows the asset
+   *  into every canvas that shows it). */
+  function setRefWaveformColor(id: string, colorId: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const refs = current.references ?? [];
+    if (!refs.some((r) => r.id === id && r.waveformColor !== colorId)) return;
+    saveField({ references: refs.map((r) => (r.id === id ? { ...r, waveformColor: colorId } : r)) });
+  }
   async function attachRefArtwork(id: string) {
     const dataUrl = await window.cascade.pickReferenceImage();
     if (!dataUrl) return;
@@ -1464,7 +1494,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   function setRefPurpose(id: string, purpose: CustomRef["purpose"]) {
     if (!prod) return;
-    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, purpose, styleOnly: purpose === "style" ? true : r.styleOnly } : r)) });
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, purpose, styleOnly: purpose === "style" ? true : undefined } : r)) });
   }
 
   /** Edit a reference's one-line "what this shows" card (Magic binding aid).
@@ -3386,7 +3416,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setProd(next);
     try {
       const merged = await window.cascade.updateGraphLayout(current.meta.id, shotId, layout);
-      applySnapshot(merged);
+      // A viewport-only save whose round-trip brought no news (nothing else
+      // moved main-side meanwhile) adopts just the stamped rev: wholesale-
+      // applying the snapshot would bust every shot/prod identity and
+      // rebuild the open canvas to show a pan/zoom the user already sees.
+      // Any other difference falls back to the full snapshot apply.
+      const viewportOnly = "viewport" in layout && Object.keys(layout).length === 1;
+      if (viewportOnly && sameSnapshotExceptRev(next, merged)) adoptSavedRev(merged);
+      else applySnapshot(merged);
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -4538,6 +4575,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onAddCategory={addCategory}
                 onRenameCategory={renameCategory}
                 onAddReference={addRef}
+                onAddMediaFile={(file, categoryId) => void addDroppedMediaReference(file, categoryId)}
                 onAttach={(id) => void attachRefArtwork(id)}
                 onRemove={removeRef}
                 onRename={(id, name) => void updateRef(id, name)}
@@ -4937,6 +4975,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}
+                  onWaveformColorRef={(id, colorId) => setRefWaveformColor(id, colorId)}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={(nodeId) => { if (graphShotId) pipeImageToVideo(graphShotId, nodeId); }}
                   onPipeEditToVideo={(nodeId, sourceNodeId) => { if (graphShotId) pipeEditToVideo(graphShotId, nodeId, sourceNodeId); }}
@@ -4981,6 +5020,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onDropFile={(file) => addFileReference(seq.shotIds[0] ?? seq.id, file)}
                   onPasteFiles={(files) => addPastedReferences(seq.shotIds[0] ?? seq.id, files)}
                   onRenameRef={(refId, name) => { void updateRef(refId, name); }}
+                  onWaveformColorRef={(refId, colorId) => setRefWaveformColor(refId, colorId)}
                   onSaveGenerationAsReference={(rel) => saveSequenceGenerationAsReference(seqCanvasId, rel)}
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onDeleteGeneration={(rel) => deleteSequenceTake(seqCanvasId, rel)}

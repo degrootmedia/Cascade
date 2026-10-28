@@ -1582,6 +1582,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const singleFlag = HiggsfieldCliProvider.singleImageFlag(roles);
       const arrayFlag = HiggsfieldCliProvider.arrayImageFlag(roles);
       const { paths, cleanup } = writeCliTempRefs(refs);
+      // Image generation takes images only — a video/audio reference that
+      // somehow reached here is skipped (never sent as an image).
+      const skippedMedia = refs.filter((r) => !/^data:image\//i.test(r.dataUrl));
+      if (skippedMedia.length) {
+        refs.forEach((r, i) => { if (!/^data:image\//i.test(r.dataUrl)) paths[i] = null; });
+        onNotice?.(`Skipping ${skippedMedia.length} non-image reference(s) — image generation only takes image files (${skippedMedia.map((r) => `"${r.name}"`).join(", ")}).`);
+      }
       /** The flag a reference at `i` rides, or null when it has nowhere to go. */
       const refFlag = (i: number): string | null => {
         if (i === 0 && singleFlag) return singleFlag;
@@ -1894,9 +1901,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
-      const args = [modelId, "--prompt", fullPrompt];
+      const args = [modelId];
       // Media routing — two mutually exclusive modes, never mixed (several
       // models, e.g. minimax_h3 and wan3_0, reject
       // "start_image/end_image cannot be mixed with reference media"):
@@ -1943,7 +1949,10 @@ export class HiggsfieldCliProvider implements MediaProvider {
         }
         if (!hasImageArray) {
           // Lone start frame — nothing else rides, so nothing can mix.
-          if (refs[0] && isVideoRef(refs[0]) && paths[0] && accepts(["videoreferences", "video"])) {
+          if (refs[0] && isAudioRef(refs[0])) {
+            if (paths[0] && accepts(["audioreferences", "audio"])) args.push("--audio-references", paths[0]);
+            else throw new Error(`"${modelId}" doesn't accept audio references, so "${refs[0].name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
+          } else if (refs[0] && isVideoRef(refs[0]) && paths[0] && accepts(["videoreferences", "video"])) {
             args.push("--video-references", paths[0]);
           } else {
             pushStartFrame();
@@ -1959,13 +1968,18 @@ export class HiggsfieldCliProvider implements MediaProvider {
             }
             if (isAudioRef(r)) {
               if (accepts(["audioreferences", "audio"])) args.push("--audio-references", f);
-              else dropRef(r, i, "isn't accepted as an audio reference");
+              else throw new Error(`"${modelId}" doesn't accept audio references, so "${r.name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
               return;
             }
             args.push("--image-references", f);
           });
         }
       }
+
+      // Cite only after routing: a reference the model couldn't carry
+      // (dropped above) must never be cited as submitted.
+      const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
+      args.splice(1, 0, "--prompt", fullPrompt);
 
       // Schema-driven extras (genre, speedramp, batch_size, an explicit
       // mode, …) from the caller's params map. Runs before the seedance
@@ -2147,18 +2161,21 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (extraVideo) {
         throw new Error(`Genjutsu takes exactly one video (the source clip) — reference "${extraVideo.name}" is a video. Remove it and retry. Nothing was submitted.`);
       }
-      if (!extras.some((r) => !/^data:video\//i.test(r.dataUrl))) {
+      const extraAudio = extras.find((r) => /^data:audio\//i.test(r.dataUrl));
+      if (extraAudio) {
+        throw new Error(`Genjutsu doesn't take audio references — "${extraAudio.name}" is audio. Remove it and retry. Nothing was submitted.`);
+      }
+      if (!extras.some((r) => /^data:image\//i.test(r.dataUrl))) {
         throw new Error("Genjutsu needs at least one image reference — wire an image into the prompt node's reference sockets or cite one with @[name]. Nothing was submitted.");
       }
     }
 
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
       // Genjutsu prompts are optional (schema: string|null) — omit an
       // empty --prompt entirely instead of sending a blank one.
-      const args = genjutsuMode && !fullPrompt.trim() ? [modelId] : [modelId, "--prompt", fullPrompt];
+      const args = [modelId];
       const srcPath = paths[0];
       if (!srcPath) throw new Error("Couldn't load the source video.");
       if (accepts(["videoreferences", "video"])) args.push("--video-references", srcPath);
@@ -2169,13 +2186,22 @@ export class HiggsfieldCliProvider implements MediaProvider {
         const f = paths[i];
         if (!f) return;
         const isVideo = /^data:video\//i.test(r.dataUrl);
-        if (isVideo && accepts(["videoreferences", "video"])) args.push("--video-references", f);
+        const isAudio = /^data:audio\//i.test(r.dataUrl);
+        if (isAudio) {
+          if (accepts(["audioreferences", "audio"])) args.push("--audio-references", f);
+          else throw new Error(`"${modelId}" doesn't accept audio references, so "${r.name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
+        }
+        else if (isVideo && accepts(["videoreferences", "video"])) args.push("--video-references", f);
         else if (!isVideo && accepts(["imagereferences", "image"])) args.push("--image-references", f);
         else {
           uploaded[i] = null;
           emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
         }
       });
+
+      // Cite only after routing (same rule as generateVideoClip).
+      const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
+      if (!(genjutsuMode && !fullPrompt.trim())) args.splice(1, 0, "--prompt", fullPrompt);
 
       if (detail && opts.params) {
         emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);

@@ -36,3 +36,31 @@ export function thumbTierFor(boxW: number, boxH: number, zoom: number, dpr: numb
   for (const tier of THUMB_TIERS) if (needed <= tier) return tier;
   return 0;
 }
+
+/** Downgrade only once the painted size drops to this fraction of the lower
+ *  tier, so zoom hovering near a boundary never flaps between tiers. */
+export const TIER_DOWNGRADE_FRACTION = 0.75;
+
+/** Hysteresis wrapper over `thumbTierFor` for surfaces that keep a node's
+ *  previous tier (the moodboard): upgrading to a covering tier is immediate
+ *  (zooming in must not stay blurry), but downgrading waits until the
+ *  painted size is well inside the lower tier. A downgrade is visually a
+ *  no-op — the already-decoded larger bitmap paints identically — so the
+ *  old behavior paid a fetch + decode per node on every boundary crossing
+ *  (the settled-zoom swap wave) for nothing. `prev` 0 means full-res.
+ *  Stable: feeding the result back as `prev` returns it unchanged. */
+export function settledThumbTierFor(
+  prev: number | undefined,
+  boxW: number,
+  boxH: number,
+  zoom: number,
+  dpr: number,
+): number {
+  const covering = thumbTierFor(boxW, boxH, zoom, dpr);
+  if (prev === undefined) return covering;
+  const prevEdge = prev === 0 ? Infinity : prev;
+  const coveringEdge = covering === 0 ? Infinity : covering;
+  if (coveringEdge >= prevEdge) return covering;
+  const needed = Math.max(boxW, boxH) * Math.max(zoom, 0) * Math.max(dpr, 1);
+  return needed <= coveringEdge * TIER_DOWNGRADE_FRACTION ? covering : prev;
+}

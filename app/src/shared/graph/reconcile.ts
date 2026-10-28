@@ -93,7 +93,10 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.sourced as boolean) === (b.sourced as boolean) &&
     (a.missing as boolean) === (b.missing as boolean) &&
     (a.collapsed as boolean) === (b.collapsed as boolean) &&
-    (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined),
+    (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined) &&
+    (a.media as string | undefined) === (b.media as string | undefined) &&
+    (a.mediaUrl as string | undefined) === (b.mediaUrl as string | undefined) &&
+    (a.waveformColor as string | undefined) === (b.waveformColor as string | undefined),
   frame: (a, b) =>
     (a.previewUrl as string) === (b.previewUrl as string) &&
     (a.previewKind as string) === (b.previewKind as string) &&

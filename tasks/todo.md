@@ -5143,3 +5143,217 @@ glow. Verify: targeted tests 10 passed, build clean (built CSS carries
 `--board-band`); full suite 1954 passed with 1 unrelated failure
 (`ledger.test.ts` credit repricing — passes 33/33 isolated, flaky under
 full-suite load, untouched by this CSS-only change).
+
+---
+
+# Canvas navigation perf: gesture-boundary costs (2026-10-27)
+
+User report: moodboard navigation stalls ~1s at gesture start when zoomed
+out (fine zoomed in, smooth once moving); Shot node canvases feel good
+except wheel zoom, which is choppy and seems to skip the first increments.
+
+## Findings (investigation, previous turn)
+
+- Both canvases put expensive work at gesture *boundaries*; wheel zoom
+  makes far more boundaries than drag-pan (d3-zoom: `start` on first tick,
+  `end` 150ms after last; a pan drag is one cycle).
+- Graph: `onMoveStart` flips modal-level React state (`useGraphLodState`)
+  before the first transform paints — modal re-render, new LOD context
+  (every `VideoPreview`), `.interacting` shadow-strip repaint. `onMoveEnd`
+  saves the viewport per burst: optimistic `setProd` + IPC +
+  `applySnapshot`, busting `buildDerived` deps twice per burst.
+- Moodboard: cull margin is one screen / zoom, so zoomed out ~everything
+  is mounted. The 250ms settled-zoom LOD wave swaps `img src` per tier
+  crossing (cold tiers encode synchronously in main); bursting wheel
+  input retriggers it constantly. The 500ms layout-save echo also
+  recomputes `referenceUsage(prod)` (memo keyed on whole-prod identity).
+
+## Plan
+
+- [x] Graph LOD: leaf-owned `GraphLodProvider` (handle ref) so move
+  start/end never re-renders `NodeGraphModal`; canvas `.interacting`
+  class toggled imperatively via the existing canvas ref.
+- [x] Graph: trailing-debounce (400ms) viewport-only layout saves in the
+  modal, flushed on unmount; workspace skips the `applySnapshot` echo
+  when the returned document equals the optimistic one except `rev`
+  (`sameSnapshotExceptRev` in `shared/snapshot-freshness.ts`, fallback =
+  apply snapshot on any difference).
+- [x] Moodboard: tier hysteresis (`settledThumbTierFor` — upgrades
+  immediate, downgrades only well inside the lower tier) + settle delay
+  250ms -> 600ms; `referenceUsage` memo keyed on the prod slices it
+  reads + a moodboard-placement signature; `will-change: transform` on
+  `.moodboard-content`.
+- [x] Tests: pure hysteresis + rev-equality cases in `graph-lod.test.ts`
+  / freshness tests; source guards updated for the new wiring
+  (intentional: `GraphLodProvider` replaces inline context provider).
+- [x] Verify: focused tests, full `npm test`, `npm run build`.
+  Smoothness itself needs a manual pass in the running app.
+
+## Review
+
+Done as planned. New pure helpers: `settledThumbTierFor` +
+`TIER_DOWNGRADE_FRACTION` (`thumb-url.ts`), `sameSnapshotExceptRev`
+(`snapshot-freshness.ts`). Graph: `useGraphLodState` deleted in favor of
+`GraphLodProvider`/`GraphLodHandle` (`graph/lod.tsx`); the modal's move
+handlers are stable callbacks that flip the leaf flag + the canvas class
+imperatively, and `onMoveEnd` now feeds a 400ms trailing debounce
+(unmount-flushed) instead of `onSaveLayout` directly; workspace
+`saveGraphLayout` rev-adopts a no-news viewport save. Moodboard:
+per-node tier memory in a ref map, 600ms settle, slice-keyed usage memo,
+`will-change`. CONTEXT.md thumbnails row updated.
+Verify: new pure tests observed failing first (9 failed / 22 passed),
+then focused 43/43 (`graph-lod`, `production-snapshot-freshness`,
+`video-preview`, `ref-thumb`); full gate `npm test` (typecheck clean +
+vitest): 1966 passed, 2 skipped, 0 failed; `npm run build` clean and the
+built CSS carries `will-change: transform`. NOT verified in the running
+app — pan/zoom feel needs a manual pass over a zoomed-out moodboard and a
+take-rich shot canvas; if zoom still chops, the next suspects are tile
+re-raster at new scales (compositor, no React involved) and the
+first-gesture decode burst on the moodboard (pre-warm on open was the
+deferred scope call).
+
+### Follow-up: node drop shadows removed (user report)
+
+The per-node `box-shadow: 0 4px 14px` on `.prod-graph-node` was still
+hitching navigation, so it is gone outright (nodes were only
+shadowless *during* gestures before). The dead
+`.prod-graph-canvas.interacting` shadow-drop rule and the modal's
+imperative class toggles were removed with it; `interacting` now only
+stands live videos down. Kept deliberately: the zero-offset selected
+ring (`0 0 0 2px`, selection affordance, no blur) and one-off surface
+shadows (graph panel, popovers, history modal — not per-node, not
+rastered per frame). Verify: updated `graph-lod.test.ts` guards pin
+"base node rule has no box-shadow / no .interacting rule"; focused
+30/30 (graph-lod, video-preview, theme-css), typecheck clean, build
+clean with the built CSS confirmed shadowless. Full suite not re-run
+for this CSS+comment change; feel still needs the manual pass above.
+
+Scope calls: no pre-warm of all moodboard tiers on open (hysteresis +
+longer settle first); `buildDerived` deps untouched (the debounce +
+rev-only adoption remove the per-burst rebuilds without the refactor
+risk); sequence canvas gets the debounce free (same modal), its
+whole-layout save path unchanged.
+
+## 2026-10-28 — Script ingest "API key rejected" (Cheaper Inference + Gab)
+
+- [x] Reproduced from user report + `main.log`: 9 ingest failures logged as "Your API key was rejected" (4 without an HTTP suffix under the old build; 5 later as bare `(HTTP 401)` with no provider message/code preserved).
+- [x] Ruled out by later evidence: invalid key (same credentials later completed work), empty/wrong stored model (settings held `claude-sonnet-5.5` at first read), stale bundle/key path (built ingest call matched source), request shape (same `completeOnce` ingest shape later succeeded from local .docx), balance (no 402 in the observed tail), and a 403 key-restriction diagnosis for ingest (post-restart logs show 401, not 403). Withdrawn: the earlier draft's suggestion to check Cheaper Inference key scope/model/IP allowlists first.
+- [x] Confirmed user-side trigger: sharing was off on the Google Doc. Code evidence: `fromGoogleDoc` returned any non-403/404 HTTP-ok body as script text; the same script ingested from local `.docx` to a completed production (2 scenes / 9 shots from `C:\Users\degro\Downloads\4369_Co-Mo Connect Christmas_v1.docx`). Inferred, not directly observed: Google returned an HTML sign-in/interstitial page and providers rejected that payload; the original provider bodies were not preserved pre-fix. A fabricated-document probe only proved Google error bodies can be HTML (404, `text/html`, starts `<!DOCTYPE html>`), not this doc's response.
+- [x] Fixes: `app/src/main/scripting.ts` refuses Google export HTML (`text/html` or doctype/html sniff) with the "Anyone with the link" hint; `core/src/chat.ts` keeps provider status/message/code and raw-body fallback in friendly errors so future failures are diagnosable; `models:testConnection` adds a 1-token completion probe for Settings; provider IPC pinned by tests.
+- [x] Separate live findings, not conflated with ingest root cause: one Cheaper Inference chat failure for `claude-sonnet-5.5` (`HTTP 503`, "No compatible route completed this request") and one `gpt-6.1-terra` empty-stream failure in the observed log tail; user also reported Qwen working via Cheaper Inference while GPT models did not, but that broader GPT pattern is not tallied in local logs. PDF ingest was separately broken by pdf-parse v2 exports/API; `fromPdf` migrated to `new PDFParse({ data })` + `getText()` and obsolete v1 type shim deleted.
+- [x] Verification after final edits: app targeted Vitest (`scripting`, `ipc-validation`, `settings-panel`, `providers`) 55/55; core full Vitest 199/199; app+core `tsc --noEmit` clean; `npm run build` clean and built bundle greps: `models:testConnection` x2, `pdf-parse/lib` x0, Google HTML guard string x1, 403 copy x1. Not re-run after final edits: full app Vitest suite. Not observed yet: successful Google-link ingest after sharing was turned on (production record still shows local .docx source).
+
+Review: turn on link sharing (or keep using local .docx) and retry after a full app restart so main-process changes load. If a model now fails, the production log should include the provider's own message/body rather than a generic key error.
+
+---
+
+# Imported audio: waveform/playback node + generation upload + waveform color
+
+User request: imported audio assets get their own node showing waveform +
+playback; piped into a reference slot they upload with Higgsfield/OpenArt
+generation requests; right-click recolors the waveform from accent colors.
+
+## Decisions (user-confirmed 2026-10-28)
+
+- Node model: **shared reference node** (existing `ref:<id>` + audio view),
+  not a new `GraphNodeKind`. Audio already fits `CustomRef.media/mediaPath`;
+  ports already accept audio into prompt `in-ref-open`.
+- Color: **per-file** `CustomRef.waveformColor` (palette id from
+  `SEQUENCE_ACCENT_COLORS`, unset = `blue`).
+- No audio slot on chosen model/transport: **fail with a clear error**
+  (today audio is silently dropped in `resolvePromptRefs`/`resolveGenRefIds`).
+- Scope: generation only (no animatic Step 4 / export A-track binding).
+
+## Plan
+
+- [x] `CustomRef.waveformColor` + `productions.ts` normalize read-repair.
+- [x] Import parity: Design-grid drop (`onAddMediaFile` → `addReferenceMedia`
+      + `saveRefOnly`), folder scan + hydrate adopt video/audio, image-picker
+      audio guard, `addReferenceMedia` extension/empty validation (handler-side;
+      no ipc-schemas entry, matching the `addReferenceImage` sibling).
+- [x] Graph `mediaUrl` for audio (3 sites) + `CANVAS_TYPE_EQUAL.ref`.
+- [x] `components/graph/audio-peaks.ts`: pure `computePeaks` + cached hook
+      (512 buckets, ≤2 concurrent decodes, rev-busted URL cache key).
+- [x] `audio-ref-tile.tsx` in `ref-node.tsx`: canvas waveform in palette hex,
+      play/pause + click/drag seek, pause-others; `RefFigure` Design/moodboard
+      tiles play too; audio never zooms (lightbox stays image/video).
+- [x] Right-click "Waveform color" swatch menu (portaled z-300, sequence-bar
+      palette/classes) persisting the palette id via `saveField`.
+- [x] Graph `onDrop` consumes `application/x-cascade-reference(s)`.
+- [x] Forwarding: widened media ternaries (`resolveGenRefIds`, sequence path,
+      `resolvePromptRefs`); image paths skip non-images loudly-by-notice.
+      `shotReferences` deliberately NOT widened — its consumers are all image
+      surfaces (boards/prompts.md/recheck), so audio would leak to image models.
+- [x] Citations: per-kind numbering in `citePrompt` ("reference audio N");
+      Higgsfield cites after routing in both generate + edit.
+- [x] Higgsfield: `mimeToExt` audio extensions; `generateVideoEdit` audio
+      branch; genjutsu requires a real image and rejects audio.
+- [x] OpenArt MCP: `videoRefsAssign` kind-split via `audioArrayKey` (dedicated
+      field when declared, else typed `visualReferences` elements; never a
+      frame slot); start-only forms fail loudly pre-submit.
+- [x] OpenArt CLI: `audioRefs` capability (false) + named pre-submit error.
+- [x] Tests: `audio-refs` (10), `audio-peaks` (4), `audio-tile` (3) + cases in
+      `higgsfield-cli`/`openart-cli`/`productions`/`providers`; full `npm test`
+      green (1992 passed, 2 skipped, tsc clean).
+
+## Review
+
+Done. Audio was half-wired: files imported and piped, but rendered as a ♪
+glyph and silently dropped before either vendor saw them. Now an imported
+audio file is a reference node with a real waveform (renderer-decoded peaks,
+cached per rev-busted URL), in-tile playback (click/drag to seek, one tile
+sounds at a time), and a right-click accent menu whose choice persists
+per-file as `CustomRef.waveformColor`. Wired into a video reference slot (or
+cited `@[name]`), it resolves to an `audio/*` data URL and uploads: Higgsfield
+via `--audio-references` (correct `.mp3`/`.m4a` temp files, Seedance omni
+mode), OpenArt via sign+PUT as `mediaType:"audio"` bound to the form's audio
+field when declared. A model/transport with no audio slot fails the
+generation with a named error (user choice) instead of dropping silently;
+image surfaces never receive audio. Import parity closed: Design-grid drop,
+folder rescan, folder import, and the image picker all handle audio.
+
+Not verified live (needs vendor accounts): an actual Higgsfield/OpenArt
+submission carrying audio, and whether OpenArt's live forms prefer the
+dedicated audio field or typed `visualReferences` elements — the binder
+handles both from the live form shape. Manual check: drop an mp3 on the
+canvas → waveform → play/seek → right-click recolor (survives restart) →
+wire into a videoprompt → generate on Seedance 2.5 / an OpenArt audio model.
+
+---
+
+# Image Suite bug batch (wrong prompt / edit style / style desync / Edit in Suite / tag scroll)
+
+- [x] 1. Wrong prompt displayed: a finished generation became the selection
+      without re-syncing the draft, and `selectEntry` leaked the previous
+      draft's absent optionals. New pure `draftFromSuiteEntry` exact replay,
+      used on select, generation completion, and finished recheck.
+      `suite-prompt-display.test.ts` (select another entry mid-generation,
+      then the result shows its request prompt) + pure replay cases in
+      `suite.test.ts`.
+- [x] 2. Edit prompts inherited Generate's Style paragraph (shared draft)
+      with no dropdown to remove it. `suiteDraftForMode` strips paragraph +
+      pick on every path into Edit (tab, seed, replay, restore); submit
+      strips again as the last gate. Pinned in `suite-ui` / `suite-style` /
+      `suite-prompt-display` tests.
+- [x] 3. Style dropdown read only `styleId` while the paragraph carried the
+      applied text (handoff seeds also dropped `styleId`). Dropdown now
+      derives from the applied text (`suiteStyleSelectValue`); unowned text
+      shows removable Custom, never a false None; `reconcileSuiteDraftStyle`
+      repairs the stored pick toward the text.
+- [x] 4. "Edit in Suite" could land on the wrong image: a stale persisted
+      `sourceRefId` shadowed the seed's `sourcePath` in picker/canvas/
+      submit. `applySuiteSeed` makes the seed's source (and style)
+      authoritative and mutually exclusive. Opening the suite also really
+      closes the graph/sequence canvas (`suite-open-workspace.test.ts` —
+      leaving the suite no longer resurrects the graph).
+- [x] 5. The @ tag autocomplete (the one list behind the side panel, node
+      graph, and Image Suite) moved its highlight without scrolling.
+      `ReferencePromptEditor` now scrolls the highlighted tag into view on
+      selection change (`prompt-autocomplete-caret.test.ts`).
+
+## Review
+
+Verify: app `npm test` (typecheck + 2011 passed, 2 skipped), core
+typecheck + 199 tests, `npm run build` clean. Not run live in Electron:
+a real vendor generation round-trip and pixel-level tag-list scrolling
+(jsdom pins the `scrollIntoView` call, not real scrolling).

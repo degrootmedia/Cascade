@@ -6,7 +6,8 @@
  * limit (culling unmounts/remounts them at the viewport edge with zero
  * overscan, which read as "reload every image on pan"); above the limit
  * the canvas falls back to React Flow culling. While the viewport moves,
- * live videos stand down to posters and node shadows drop.
+ * live videos stand down to posters. Nodes carry no drop shadow (a
+ * per-node shadow re-rasters on every pan/zoom frame).
  *
  * The moodboard keeps its own regime (settled-zoom tiers via
  * `thumbTierFor`, one-screen cull margin) — these tests pin only the graph.
@@ -14,7 +15,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { THUMB_TIERS, thumbTierFor } from "../src/renderer/src/components/production/thumb-url.js";
+import { THUMB_TIERS, thumbTierFor, settledThumbTierFor } from "../src/renderer/src/components/production/thumb-url.js";
 import { GRAPH_PREVIEW_EDGE, GRAPH_TILE_EDGE, GRAPH_CULL_NODE_LIMIT } from "../src/renderer/src/components/graph/lod.js";
 
 describe("shared tier math (moodboard settled LOD)", () => {
@@ -24,6 +25,55 @@ describe("shared tier math (moodboard settled LOD)", () => {
     expect(thumbTierFor(320, 120, 1, 2)).toBe(1024);
     expect(thumbTierFor(320, 120, 0.2, 1)).toBe(256);
     expect(thumbTierFor(320, 120, 4, 1)).toBe(0);
+  });
+});
+
+describe("settled tier hysteresis (moodboard swap-wave guard)", () => {
+  // Box long edge 1000 at dpr 1: zoom == needed/1000, so cases read as px.
+  const settled = (prev: number | undefined, needed: number) =>
+    settledThumbTierFor(prev, 1000, 10, needed / 1000, 1);
+
+  it("with no previous tier it is the covering tier (thumbTierFor)", () => {
+    expect(settled(undefined, 200)).toBe(256);
+    expect(settled(undefined, 500)).toBe(512);
+    expect(settled(undefined, 1500)).toBe(0);
+  });
+
+  it("upgrades immediately when the painted size outgrows the current tier", () => {
+    expect(settled(256, 300)).toBe(512);
+    expect(settled(512, 900)).toBe(1024);
+    expect(settled(1024, 1500)).toBe(0);
+  });
+
+  it("holds the higher tier near a boundary instead of swapping src", () => {
+    // 500px paints fine from the already-decoded 1024 bitmap; swapping to
+    // 512 costs a fetch+decode for zero visual change.
+    expect(settled(1024, 500)).toBe(1024);
+    expect(settled(512, 250)).toBe(512);
+  });
+
+  it("downgrades once the painted size is well inside the lower tier", () => {
+    expect(settled(1024, 380)).toBe(512);
+    expect(settled(512, 180)).toBe(256);
+    // From full-res (0) it can settle back to a tier.
+    expect(settled(0, 700)).toBe(1024);
+  });
+
+  it("does not flap when zoom oscillates across a tier boundary", () => {
+    let tier: number | undefined;
+    for (const needed of [500, 540, 500, 540, 500]) tier = settled(tier, needed);
+    // First paint picks 512; 540 upgrades to 1024 once; after that the
+    // boundary oscillation must not swap again.
+    expect(tier).toBe(1024);
+    expect(settled(tier, 500)).toBe(1024);
+    expect(settled(tier, 540)).toBe(1024);
+  });
+
+  it("is stable: feeding its own answer back returns the same tier", () => {
+    for (const needed of [120, 250, 380, 500, 700, 900, 1500]) {
+      const once = settled(1024, needed);
+      expect(settled(once, needed)).toBe(once);
+    }
   });
 });
 
@@ -72,11 +122,35 @@ describe("graph fixed-tier wiring (source guards)", () => {
     expect(modal).toContain('<img className="prod-graph-camera-sheet" src={sheetUrl}');
   });
 
-  it("nodes stay mounted below the limit; interacting still rides context", () => {
+  it("nodes stay mounted below the limit; interacting rides a leaf-owned context", () => {
     const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
     expect(modal).toContain("onlyRenderVisibleElements={nodes.length > GRAPH_CULL_NODE_LIMIT}");
     expect(modal).toContain("onMoveStart");
-    expect(modal).toContain("GraphLodContext.Provider");
+    // The interacting flag's state lives in the leaf GraphLodProvider:
+    // modal-level state re-rendered the whole modal per wheel burst,
+    // eating the first zoom increments.
+    expect(modal).toContain("<GraphLodProvider handleRef={lodHandleRef}>");
+    expect(modal).not.toContain("useGraphLodState");
+    expect(modal).not.toContain("GraphLodContext.Provider");
+    // No canvas class juggling either: nodes are shadowless outright, so
+    // move start/end only flips the leaf context, nothing DOM-styled.
+    expect(modal).not.toContain('classList.add("interacting")');
+    expect(modal).toContain('className="prod-graph-canvas"');
+  });
+
+  it("viewport-only saves are debounced in the modal and echo-skipped in the workspace", () => {
+    const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
+    expect(modal).toContain("VIEWPORT_SAVE_DEBOUNCE_MS");
+    expect(modal).toContain("flushPendingViewport");
+    const workspace = read("../src/renderer/src/components/ProductionWorkspace.tsx");
+    expect(workspace).toContain("sameSnapshotExceptRev(next, merged)");
+  });
+
+  it("moodboard tiers settle through hysteresis, not raw boundary crossings", () => {
+    const mood = read("../src/renderer/src/features/moodboard/MoodboardCanvas.tsx");
+    expect(mood).toContain("settledThumbTierFor");
+    expect(mood).toContain("SETTLED_ZOOM_MS");
+    expect(mood).not.toContain("thumbTierFor(n.w");
   });
 
   it("preview images lazy-load and async-decode so a keep-mounted open prioritizes the viewport", () => {
@@ -94,9 +168,14 @@ describe("graph fixed-tier wiring (source guards)", () => {
     expect(vp).toContain("deactivateLiveVideo(instanceId)");
   });
 
-  it("node shadows drop while interacting", () => {
+  it("nodes carry no drop shadow (re-rastered per pan/zoom frame otherwise)", () => {
     const css = read("../src/renderer/src/styles.css");
-    expect(css).toContain(".prod-graph-canvas.interacting");
+    // The first `.prod-graph-node {…}` rule in file order is the base node
+    // rule (the selected-state ring is a separate, longer selector).
+    const base = css.match(/\.prod-graph-node \{([^}]*)\}/);
+    expect(base).not.toBeNull();
+    expect(base![1]).not.toContain("box-shadow");
+    expect(css).not.toContain(".prod-graph-canvas.interacting");
   });
 
   it("history surfaces stay at the 256 tier (strip images, modal tiles)", () => {

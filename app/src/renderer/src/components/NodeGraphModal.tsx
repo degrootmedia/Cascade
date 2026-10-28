@@ -48,8 +48,9 @@ import { usePersistedCollapsed, usePersistedNumber } from "./production/persiste
 import { refThumbUrl } from "./production/thumb-url.js";
 import { mediaRev, bumpMediaRev } from "./production/media-rev.js";
 import { RefNodeView, refSizeStyle, REF_COLLAPSED_WIDTH, REF_DEFAULT_WIDTH, type GraphRef, type RefData, type RefFlowNode } from "./graph/ref-node.js";
+import { refDragIds } from "./production/references.js";
 import { VideoPreview } from "./graph/video-preview.js";
-import { GraphLodContext, GRAPH_CULL_NODE_LIMIT, GRAPH_PREVIEW_EDGE, GRAPH_TILE_EDGE, useGraphLodState } from "./graph/lod.js";
+import { GraphLodProvider, GRAPH_CULL_NODE_LIMIT, GRAPH_PREVIEW_EDGE, GRAPH_TILE_EDGE, type GraphLodHandle } from "./graph/lod.js";
 import { RefShelf } from "./graph/ref-shelf.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
 import { DurationField, clampDurationSec, snapDurationSec } from "./production/duration-field.js";
@@ -2497,6 +2498,8 @@ function CameraGridEditor({ sheetUrl, sheetPath, cols, rows, panels, panelLabels
  *  button takes over; the full list (bounded by `GRAPH_HISTORY_CAP`) lives in
  *  the history modal. */
 const HISTORY_STRIP_LIMIT = 6;
+/** Trailing debounce for viewport-only layout saves (see onCanvasMoveEnd). */
+const VIEWPORT_SAVE_DEBOUNCE_MS = 400;
 
 /** Opens a node's full take history (provided once around the canvas). */
 const NodeHistoryContext = createContext<((target: GraphHistoryTarget) => void) | null>(null);
@@ -2779,7 +2782,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* ------------------------------------------------------------------ */
 
 export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagicShot, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, videoEditUnavailable = false, genjutsuUnavailable = false, draftUpgradeAvailable = false, hiddenTools, hidePalette = false, subjectLabel, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onUpgradeDraft = async () => {}, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, cameraGridBusy = false, upscaleBusy = false, videoBusyNodeIds = [], editVideoBusyNodeIds = [], editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {},
-  onSaveGenerationAsReference = async () => undefined, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
+  onSaveGenerationAsReference = async () => undefined, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onWaveformColorRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -2925,6 +2928,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Rename a reference from its canvas node (main rewrites its `@[name]` tags
    *  across every prompt store atomically, like the Design page). */
   onRenameRef?: (refId: string, name: string) => void;
+  /** Persist an audio reference's waveform color (right-click swatch menu). */
+  onWaveformColorRef?: (refId: string, colorId: string) => void;
   /** Merge shot-level graph fields (video prompt text, cycle index, pipes). */
   onGraphField: (patch: Partial<ProductionShot>) => void;
   /** Pipe the image node's output into a video node's image input. */
@@ -3179,8 +3184,38 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const stitching = tweenStitching === true;
   const hintTimer = useRef<number | null>(null);
   /** Viewport-moving flag for node media (graph/lod.tsx): live videos stand
-   *  down to posters and node shadows drop while the view moves. */
-  const lod = useGraphLodState();
+   *  down to posters while the view moves. The flag's React state lives in
+   *  the leaf GraphLodProvider — flipping modal-level state here re-rendered
+   *  this whole component on every d3-zoom start/end cycle (one per wheel
+   *  burst), eating the first zoom increments. */
+  const lodHandleRef = useRef<GraphLodHandle | null>(null);
+  // Viewport-only layout saves are trailing-debounced: d3-zoom ends a
+  // wheel burst after 150ms idle, so saving on every onMoveEnd fired a
+  // workspace setProd + IPC + snapshot round-trip between bursts, right
+  // where the next notch lands. The viewport is read only at mount
+  // (defaultViewport), so persisting it a beat late is invisible; the
+  // unmount flush keeps a fast close (or shot switch) from losing it.
+  const pendingViewportRef = useRef<{ x: number; y: number; zoom: number } | null>(null);
+  const viewportSaveTimerRef = useRef<number | null>(null);
+  const flushPendingViewport = useCallback(() => {
+    if (viewportSaveTimerRef.current !== null) {
+      window.clearTimeout(viewportSaveTimerRef.current);
+      viewportSaveTimerRef.current = null;
+    }
+    const viewport = pendingViewportRef.current;
+    pendingViewportRef.current = null;
+    if (viewport) saveLayoutRef.current({ viewport });
+  }, []);
+  useEffect(() => () => flushPendingViewport(), [flushPendingViewport]);
+  const onCanvasMoveStart = useCallback(() => {
+    lodHandleRef.current?.setInteracting(true);
+  }, []);
+  const onCanvasMoveEnd = useCallback((_event: unknown, viewport: { x: number; y: number; zoom: number }) => {
+    lodHandleRef.current?.setInteracting(false);
+    pendingViewportRef.current = viewport;
+    if (viewportSaveTimerRef.current !== null) window.clearTimeout(viewportSaveTimerRef.current);
+    viewportSaveTimerRef.current = window.setTimeout(flushPendingViewport, VIEWPORT_SAVE_DEBOUNCE_MS);
+  }, [flushPendingViewport]);
   /** React Flow instance (captured on init) — used to map drop coordinates. */
   const flowRef = useRef<{
   screenToFlowPosition: (p: { x: number; y: number }) => { x: number; y: number };
@@ -3556,6 +3591,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // read the live Magic flag through a ref, not the first render's prop.
   const magicActiveRef = useRef(magicActive);
   magicActiveRef.current = magicActive;
+  // Same live-ref pattern for the waveform-color callback (stable wrappers
+  // below are created once and must see the current prop).
+  const waveformColorFnRef = useRef(onWaveformColorRef);
+  waveformColorFnRef.current = onWaveformColorRef;
   // Live-draft handles registered by the three prompt nodes (see
   // PromptDraftApplier). Prompt mutations below prefer them over cb.current's
   // prop values, which lag the node's local draft while it is focused.
@@ -3593,6 +3632,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     },
     /** Rename a reference from its canvas node (Design-page semantics). */
     onRenameRef: (refId: string, name: string) => cb.current.onRenameRef?.(refId, name),
+    /** Persist an audio reference's waveform color from its canvas node. */
+    onWaveformColorRef: (refId: string, colorId: string) => waveformColorFnRef.current?.(refId, colorId),
     /** Collapse/expand a reference node. Collapsing narrows the tile to a fixed
      *  compact width (its expanded width/height are stashed and kept in
      *  `GraphLayout.sizes`), then persists the collapsed set. */
@@ -3826,12 +3867,15 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         name: ref.name,
         artwork: ref.artwork,
         media: ref.media,
-        mediaUrl: ref.media === "video" && ref.mediaPath ? graphMediaUrl(prod.meta.id, ref.mediaPath) : undefined,
+        mediaUrl: ref.media && ref.mediaPath ? graphMediaUrl(prod.meta.id, ref.mediaPath) : undefined,
+        mediaPath: ref.mediaPath,
+        waveformColor: ref.waveformColor,
         tagged: false,
         refId: ref.id,
         collapsed,
         onToggleCollapse: stable.onToggleRefCollapsed,
         onRename: stable.onRenameRef,
+        onWaveformColor: stable.onWaveformColorRef,
         onZoom: stable.onZoom,
       },
       deletable: true,
@@ -4476,8 +4520,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             name: t.name,
             artwork: t.ref?.artwork ?? "",
             media: t.ref?.media,
-            mediaUrl: t.ref?.media === "video" && t.ref?.mediaPath ? graphMediaUrl(prod.meta.id, t.ref.mediaPath) : undefined,
+            mediaUrl: t.ref?.media && t.ref?.mediaPath ? graphMediaUrl(prod.meta.id, t.ref.mediaPath) : undefined,
             mediaPath: t.ref?.mediaPath,
+            waveformColor: t.ref?.waveformColor,
             missing: !t.ref,
             tagged: true,
             refId: t.ref?.id,
@@ -4485,6 +4530,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             collapsed,
             onToggleCollapse: stable.onToggleRefCollapsed,
             onRename: t.ref?.id && !locked ? stable.onRenameRef : undefined,
+            onWaveformColor: t.ref?.id && !locked ? stable.onWaveformColorRef : undefined,
             onZoom: stable.onZoom,
           },
           deletable: !locked,
@@ -4501,7 +4547,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           type: "ref" as const,
           position: ORIGIN,
           style: refSizeStyle(initialLayout, nodeId, collapsed),
-          data: { name: r.name, artwork: r.artwork, media: r.media, mediaUrl: r.media === "video" && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, mediaPath: r.mediaPath, tagged: false, sourced: sourcedRefIds.has(r.id), refId: r.id, plainName: locked, collapsed, onToggleCollapse: stable.onToggleRefCollapsed, onRename: locked ? undefined : stable.onRenameRef, onZoom: stable.onZoom },
+          data: { name: r.name, artwork: r.artwork, media: r.media, mediaUrl: r.media && r.mediaPath ? graphMediaUrl(prod.meta.id, r.mediaPath) : undefined, mediaPath: r.mediaPath, waveformColor: r.waveformColor, tagged: false, sourced: sourcedRefIds.has(r.id), refId: r.id, plainName: locked, collapsed, onToggleCollapse: stable.onToggleRefCollapsed, onRename: locked ? undefined : stable.onRenameRef, onWaveformColor: locked ? undefined : stable.onWaveformColorRef, onZoom: stable.onZoom },
           deletable: !locked,
         });
       }),
@@ -5902,6 +5948,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (ref) addPlacedRef(ref, pos);
       return;
     }
+    // Design-grid / moodboard-shelf drag: place the dragged reference(s) —
+    // the same tiles the shelf drag carries, under the Step 2 mime types.
+    const dragIds = refDragIds(e.dataTransfer);
+    if (dragIds.length) {
+      let n = 0;
+      for (const id of dragIds) {
+        const ref = references.find((r) => r.id === id);
+        if (ref) addPlacedRef(ref, { x: pos.x + (n % 5) * 32, y: pos.y + (n % 5) * 32 });
+        n += 1;
+      }
+      return;
+    }
     const files = Array.from(e.dataTransfer.files);
     if (!files.length) return;
     void (async () => {
@@ -6075,11 +6133,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             onDismissHighlight={dismissHighlight}
             onZoom={stable.onShelfRefZoom}
           />
-          <div className={"prod-graph-canvas" + (lod.interacting ? " interacting" : "")} ref={(el) => { traceRootRef.current = el; }} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>
+          <div className="prod-graph-canvas" ref={(el) => { traceRootRef.current = el; }} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={onDrop}>
             <NodeDeleteContext.Provider value={requestDeleteNode}>
             <NodeHistoryContext.Provider value={setHistoryTarget}>
             <WaypointContext.Provider value={waypointHandlers}>
-            <GraphLodContext.Provider value={lod.value}>
+            <GraphLodProvider handleRef={lodHandleRef}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -6095,8 +6153,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               onConnect={onConnect}
               onConnectEnd={onConnectEnd}
               isValidConnection={isValidConnection}
-              onMoveStart={lod.onMoveStart}
-              onMoveEnd={(_event, viewport) => { lod.onMoveEnd(); onSaveLayout({ viewport }); }}
+              onMoveStart={onCanvasMoveStart}
+              onMoveEnd={onCanvasMoveEnd}
               fitView={!initialLayout?.viewport}
               defaultViewport={initialLayout?.viewport ?? { x: 0, y: 0, zoom: 1 }}
               fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
@@ -6115,7 +6173,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             >
               <Background gap={22} />
             </ReactFlow>
-            </GraphLodContext.Provider>
+            </GraphLodProvider>
             </WaypointContext.Provider>
             </NodeHistoryContext.Provider>
             </NodeDeleteContext.Provider>

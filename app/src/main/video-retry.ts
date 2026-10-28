@@ -10,9 +10,8 @@
  * the transport can carry video references at all), and the user decides.
  *
  * Only handler-visible inputs are inventoried: node refIds, prompt
- * @[name] tags, and an edit node's source reference. Provider-internal
- * attachments (style auto-attach refs) are deliberately excluded — a
- * per-submission swap can't fix a ref that rides every submission.
+ * @[name] tags, and an edit node's source reference. Style-tagged refs
+ * are deliberately excluded — they never upload, so no swap applies.
  * Pure node apart from the injected probe seam.
  */
 import type { CustomRef, Production, RefSwap, Retry720pAction } from "../shared/ipc.js";
@@ -39,7 +38,7 @@ function isVideoRef(r: CustomRef): r is CustomRef & { mediaPath: string } {
 }
 
 /** Video references eligible for a 720p duplicate: saved video refs that are
- *  not style auto-attach refs (styleOnly flag or style-kind category). */
+ *  not style-tagged refs (effective purpose `style`). */
 function eligibleVideoRefs(p: Production): (CustomRef & { mediaPath: string })[] {
   const styles = styleRefNames(p);
   return (p.references ?? []).filter(

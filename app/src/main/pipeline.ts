@@ -55,7 +55,7 @@ import type { VideoRef720Deps } from "./video-ref.js";
 import { createGenerationQueue } from "./providers/generation-queue.js";
 import { extractScriptText, isGoogleDocUrl } from "./scripting.js";
 import type { CharacterSheet, CharacterSheetView, MagicBible, MagicBibleShotPlan, ProductRef, SuggestedReference } from "../shared/ipc.js";
-import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, isMagicCitablePurpose, magicCastReviewCount, magicRefRoster, type MagicRefRosterEntry } from "../shared/magic-refs.js";
+import { canonicalizeMagicPromptTags, computeUnresolvedMagicRefs, isMagicCitablePurpose, magicCastReviewCount, magicRefRoster, styleTaggedRefIds, type MagicRefRosterEntry } from "../shared/magic-refs.js";
 
 /** Cap on script text sent to the model (chars). ~20k tokens — safe for all chat models. */
 const MAX_SCRIPT_CHARS = 80_000;
@@ -767,7 +767,7 @@ export function buildMagicBibleMessages(p: Production, skillText: string | null)
     "- Shot plans: one per shot number. \"purpose\" = what the shot does in the story (establish, reveal, reaction, payoff…). \"framing\" should progress with rhythm across cuts, not repeat the same size. \"present\" lists the bible entity names visible (ALWAYS including the shot's location entity). \"mustCite\" lists canonical reference names (without brackets) for every bound entity present — including the LOCATION/environment reference in every shot where surroundings are visible (nearly all). Only roster names, never invented ones.\n" +
     "- Where the script is silent (exact location dressing, who else is in frame, time of day), make a sensible choice and record it in \"assumptions\" so every shot can agree with it.\n" +
     "- CONTENT ONLY in descriptors: no medium/palette/rendering style words.\n" +
-    (styleOnlyNames.length ? `- Never cite these style-only references (they attach automatically): ${styleOnlyNames.join(", ")}.\n` : "") +
+    (styleOnlyNames.length ? `- Never cite these style-only references (style context only — they are never uploaded): ${styleOnlyNames.join(", ")}.\n` : "") +
     "\nFULL SCRIPT BREAKDOWN:\n" + scriptMarkdown(p.meta.name, p.scenes).slice(0, 60000) +
     "\nREFERENCES AVAILABLE (cite exactly as @[Name]):\n" + citeLines +
     (styleNames.length ? `\n\nPRODUCTION STYLES (tone context only — do not describe them): ${styleNames.join(", ")}` : "") +
@@ -2074,21 +2074,13 @@ export function shotReferences(p: Production, shot: ProductionShot): ShotRef[] {
   const promptForTags = p.magicEnabled && p.magicPrompts?.[shot.id]?.trim()
     ? p.magicPrompts[shot.id]
     : shot.prompt ?? "";
+  // Style-tagged references never upload: a citation stays as prompt text
+  // context only, and nothing auto-attaches.
+  const styleTagged = styleTaggedRefIds(p);
   const byTagName = buildRefNameIndex(candidates);
   for (const { name } of refTagMatches(promptForTags)) {
     const ref = byTagName.get(refLookupKey(name));
-    if (ref) push(materialize(ref));
-  }
-  // Style-only refs auto-attach after content refs (no tag required).
-  // Per-ref `styleOnly` wins; otherwise the category `kind === "style"` flags it.
-  const styleCats = new Set(
-    (p.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id)
-  );
-  for (const r of p.references ?? []) {
-    if (r.styleOnly === true || (r.categoryId && styleCats.has(r.categoryId))) {
-      const ref = candidates.find((c) => c.name.toLowerCase() === r.name.toLowerCase());
-      if (ref) push(materialize(ref));
-    }
+    if (ref && !(ref.id && styleTagged.has(ref.id))) push(materialize(ref));
   }
   return out;
 }
@@ -2815,8 +2807,8 @@ export async function saveVideoStillAsReference(
  * anywhere (and deleting the original can't orphan it). Idempotent — a
  * duplicate with its file present is returned as-is, so repeated retry
  * clicks transcode once. The source's category carries over unless it is a
- * style category, and `styleOnly` never carries: a duplicate that silently
- * auto-attached to every submission would surprise. Returns the duplicate;
+ * style category, and `styleOnly` never carries: a duplicate that was
+ * silently style-tagged (and so never uploaded) would surprise. Returns the duplicate;
  * callers save the production. Throws (writing nothing) when the source is
  * missing/not a video or the transcode fails.
  */

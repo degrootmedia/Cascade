@@ -4,7 +4,7 @@
  * (types + prompt grammar + the alias resolver only) so both sides agree on
  * what "this cited name resolves" means.
  */
-import type { MagicBibleEntity, MagicUnresolvedRef, Production, ReferencePurpose } from "./ipc.js";
+import type { CustomRef, MagicBibleEntity, MagicUnresolvedRef, Production, ReferencePurpose } from "./ipc.js";
 import { refTagMatches, renameRefTag } from "./prompt-grammar.js";
 import { canonicalRefName, refLookupKey, resolveRefByTagName, sanitizeAliases } from "./ref-names.js";
 
@@ -20,7 +20,8 @@ export interface MagicRefRosterEntry {
   aliases: string[];
   /** True when citing it will actually upload an image. */
   hasArtwork: boolean;
-  /** Style-only refs auto-attach downstream; content prompts never cite them. */
+  /** Style-tagged refs are LLM context only and never upload; content
+   *  prompts never cite them. */
   styleOnly: boolean;
   category?: string;
   /** Effective purpose (explicit, else inferred from strong name/category
@@ -52,14 +53,62 @@ export function isMagicCitablePurpose(purpose: ReferencePurpose): boolean {
   return purpose === "subject" || purpose === "environment";
 }
 
+/** A reference's effective purpose: the explicit user choice when set,
+ *  else strong-signal inference. An explicit purpose always wins — over
+ *  inference and over a stale `styleOnly` flag left behind when the user
+ *  changed the purpose away from style. */
+export function effectiveReferencePurpose(
+  r: Pick<CustomRef, "name" | "purpose" | "styleOnly">,
+  categoryName = "",
+  categoryKind?: string
+): ReferencePurpose {
+  return r.purpose ?? inferReferencePurpose(r.name, categoryName, categoryKind, r.styleOnly);
+}
+
+/** True when a custom reference is style-tagged (effective purpose
+ *  `style`). Style-tagged references are prompt/LLM context only: their
+ *  files must never be uploaded with a generation payload. Characters and
+ *  products carry no purpose and are never style-tagged. */
+export function isStyleTaggedReference(
+  r: Pick<CustomRef, "name" | "purpose" | "styleOnly">,
+  categoryName = "",
+  categoryKind?: string
+): boolean {
+  return effectiveReferencePurpose(r, categoryName, categoryKind) === "style";
+}
+
+function categoryLookups(p: Production): { catName: Map<string, string>; catKind: Map<string, string | undefined> } {
+  return {
+    catName: new Map((p.referenceCategories ?? []).map((c) => [c.id, c.name])),
+    catKind: new Map((p.referenceCategories ?? []).map((c) => [c.id, c.kind])),
+  };
+}
+
+/** Ids of the production's style-tagged custom references. */
+export function styleTaggedRefIds(p: Production): Set<string> {
+  const { catName, catKind } = categoryLookups(p);
+  const out = new Set<string>();
+  for (const r of p.references ?? []) {
+    if (isStyleTaggedReference(r, r.categoryId ? catName.get(r.categoryId) ?? "" : "", r.categoryId ? catKind.get(r.categoryId) : undefined)) out.add(r.id);
+  }
+  return out;
+}
+
+/** Lowercased names of the production's style-tagged custom references. */
+export function styleTaggedRefNames(p: Production): Set<string> {
+  const { catName, catKind } = categoryLookups(p);
+  const out = new Set<string>();
+  for (const r of p.references ?? []) {
+    if (isStyleTaggedReference(r, r.categoryId ? catName.get(r.categoryId) ?? "" : "", r.categoryId ? catKind.get(r.categoryId) : undefined)) out.add(r.name.toLowerCase());
+  }
+  return out;
+}
+
 /** The production's full citable roster (deduplicated by canonical name,
  *  first occurrence wins — the same precedence as tag resolution). */
 export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
   const out: MagicRefRosterEntry[] = [];
   const seen = new Set<string>();
-  const styleCats = new Set(
-    (p.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id)
-  );
   const catName = new Map((p.referenceCategories ?? []).map((c) => [c.id, c.name]));
   const catKind = new Map((p.referenceCategories ?? []).map((c) => [c.id, c.kind]));
   const push = (e: MagicRefRosterEntry): void => {
@@ -96,8 +145,7 @@ export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
   }
   for (const r of p.references ?? []) {
     const category = r.categoryId ? catName.get(r.categoryId) : undefined;
-    const styleOnly = r.styleOnly === true || Boolean(r.categoryId && styleCats.has(r.categoryId));
-    const purpose: ReferencePurpose = r.purpose ?? inferReferencePurpose(r.name, category ?? "", r.categoryId ? catKind.get(r.categoryId) : undefined, r.styleOnly);
+    const purpose: ReferencePurpose = effectiveReferencePurpose(r, category ?? "", r.categoryId ? catKind.get(r.categoryId) : undefined);
     push({
       id: r.id,
       name: r.name,
@@ -105,7 +153,7 @@ export function magicRefRoster(p: Production): MagicRefRosterEntry[] {
       descriptor: (r.visualSummary ?? "").trim(),
       aliases: sanitizeAliases(r.aliases, r.name),
       hasArtwork: Boolean(r.artwork || r.imagePath || r.mediaPath),
-      styleOnly: styleOnly || purpose === "style",
+      styleOnly: purpose === "style",
       category,
       purpose,
       purposeInferred: !r.purpose,

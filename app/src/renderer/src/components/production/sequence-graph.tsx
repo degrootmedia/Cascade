@@ -106,7 +106,7 @@ export interface SequenceEditVideoGenOpts {
 }
 
 /** Statement of what the sequence's graph can host. */
-export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
+export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onWaveformColorRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
   prod: Production;
   seq: ShotSequence;
   imageModels: OpenArtModelChoice[];
@@ -132,6 +132,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
   onDropFile: (file: File) => Promise<GraphRef | null> | void;
   onPasteFiles?: (files: File[]) => Promise<GraphRef[]>;
   onRenameRef?: (refId: string, name: string) => void;
+  onWaveformColorRef?: (refId: string, colorId: string) => void;
   onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null>;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
@@ -359,6 +360,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onDropFile={onDropFile}
       onPasteFiles={onPasteFiles}
       onRenameRef={onRenameRef}
+      onWaveformColorRef={onWaveformColorRef}
       onGraphField={onGraphField}
       sequenceFramePrompts={framePrompts}
       onSequenceSegments={setSegments}

@@ -9,6 +9,7 @@
  * production-relative output paths served over `cascade-media://`. No vendor
  * id ever appears in this file, so a new backend needs zero suite changes.
  */
+import { stripStyleParagraph } from "../prompt-grammar.js";
 import type { GenParams, PendingImageGen } from "./graph.js";
 import type { CustomRef, ImageGenAspectRatio, Production } from "./production.js";
 
@@ -135,6 +136,29 @@ export const SUITE_ENTRY_CAP = 500;
 /** The empty draft the suite starts from (also the seed fallback). */
 export function emptySuiteDraft(): SuiteDraft {
   return { mode: "generate", prompt: "", model: "", resolution: "1k", refIds: [] };
+}
+
+/** The draft that exactly replays one timeline entry: every field comes from
+ *  the entry (absent optionals stay absent — never leaked from whatever draft
+ *  was showing before), so selecting an image always displays the prompt,
+ *  model, and settings that were actually used for it. Edit entries never
+ *  carry a style (see the suite's edit flow), so their style id is dropped. */
+export function draftFromSuiteEntry(entry: SuiteEntry): SuiteDraft {
+  const draft: SuiteDraft = {
+    mode: entry.kind,
+    // Edit prompts never carry a style — a legacy entry stored before that
+    // rule replays without its Style paragraph.
+    prompt: entry.kind === "edit" ? stripStyleParagraph(entry.prompt) : entry.prompt,
+    model: entry.model,
+    resolution: entry.resolution,
+    refIds: [...entry.refIds],
+  };
+  if (entry.aspectRatio) draft.aspectRatio = entry.aspectRatio;
+  if (entry.sourceRefId) draft.sourceRefId = entry.sourceRefId;
+  else if (entry.sourcePath) draft.sourcePath = entry.sourcePath;
+  if (entry.kind === "generate" && entry.styleId) draft.styleId = entry.styleId;
+  if (entry.params) draft.params = { ...entry.params };
+  return draft;
 }
 
 /** A fresh, empty session document. */

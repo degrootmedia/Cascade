@@ -17,6 +17,7 @@ import { formatReferenceUsage, type ReferenceUsage } from "../../../../shared/re
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 import { refThumbUrl } from "./thumb-url.js";
+import { AudioRefTile } from "../graph/audio-ref-tile.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
@@ -231,7 +232,7 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, usage, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
+export function ReferenceCategorySection({ prodId, categories, items, usage, onAddCategory, onRenameCategory, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
@@ -240,6 +241,8 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
   onAddCategory: (name: string) => void;
   onRenameCategory: (id: string, name: string) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
+  /** A video/audio file dropped on a category (media reference import). */
+  onAddMediaFile?: (file: File, categoryId?: string) => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -343,7 +346,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAddMediaFile={onAddMediaFile} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -368,7 +371,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, selectedIds, onSelect, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
@@ -376,6 +379,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
   selectedIds: Set<string>;
   onSelect: (id: string, mode: "single" | "toggle" | "range", order: string[]) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
+  onAddMediaFile?: (file: File, categoryId?: string) => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -401,6 +405,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
       const ids = refDragIds(e.dataTransfer);
       if (ids.length) { onMove(ids, category.id || undefined); return; }
       for (const file of Array.from(e.dataTransfer.files)) {
+        if (file.type.startsWith("video/") || file.type.startsWith("audio/")) { onAddMediaFile?.(file, category.id || undefined); continue; }
         if (!file.type.startsWith("image/")) continue;
         const reader = new FileReader();
         reader.onload = () => { if (typeof reader.result === "string") onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, reader.result); };
@@ -549,6 +554,8 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
   // the context menu also use the full-res `imgUrl` below.
   const displayUrl = isNode ? (thumbEdge ? refThumbUrl(imgUrl ?? "", thumbEdge) : imgUrl) : refThumbUrl(imgUrl ?? "");
   const videoUrl = isVideo ? cascadeMedia(prodId, videoPath!) : undefined;
+  const isAudio = r.media === "audio" && !!r.mediaPath;
+  const audioUrl = isAudio ? cascadeMedia(prodId, r.mediaPath!) : undefined;
   const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean; rel?: string } | null>(null);
   // Which edge a dragged tile currently hovers — drives the insert marker.
   const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
@@ -695,17 +702,19 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
               : videoActive
               ? <video className="prod-ref-video" src={videoUrl} poster={videoUrl ? refThumbUrl(videoUrl) : undefined} muted loop playsInline preload="metadata" autoPlay onLoadedMetadata={(e) => { try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {} }} onMouseEnter={(e) => { try { void e.currentTarget.play().catch(() => {}); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} onError={() => setVideoFailed(true)} draggable onDragStart={handleDragStart} />
               : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>))
-          : <div className="prod-ref-blank">＋</div>}
+          : isAudio && audioUrl
+            ? <div className="prod-ref-audio" draggable={!isNode} onDragStart={isNode ? undefined : handleDragStart}><AudioRefTile url={audioUrl} name={r.name} colorId={r.waveformColor} /></div>
+            : <div className="prod-ref-blank">＋</div>}
       <RefInUseBadge title={inUseTitle} />
       <div className="prod-ref-actions">
         {(hasImage || isVideo) && <button className="prod-ref-zoom" title={isVideo ? "Play this reference full size" : "Enlarge this reference"} onClick={handleZoom}><MagnifyIcon size={12} /></button>}
-        {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
+        {!imgUrl && !isVideo && !isAudio && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
         {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
         {hasImage && <OpenInSuiteButton productionId={prodId} seed={{ mode: "edit", sourceRefId: r.id }} className="prod-ref-suite" label="◨" title="Open this reference in the Image Suite" />}
         <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}>{isNode ? <XIcon size={12} /> : <TrashIcon size={12} />}</button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
-      {!isNode && onSetPurpose && (
+      {!isNode && !isAudio && onSetPurpose && (
         <div className="prod-ref-purpose-row" title={r.visualSummary ? `Shows: ${r.visualSummary}` : "What Magic may use this reference for"}>
           <select
             className="prod-ref-purpose"
@@ -760,6 +769,8 @@ export interface PromptReference {
   artwork: string;
   media?: "video" | "audio";
   mediaPath?: string;
+  /** Waveform palette id for an audio reference (CustomRef.waveformColor). */
+  waveformColor?: string;
 }
 
 /** Three-box prompt editor (Style / Content / Brand) with human-readable
@@ -784,7 +795,7 @@ export function allPromptRefs(prod: Production): PromptReference[] {
   };
   for (const r of prod.characters) if (r.name && (r.artwork || r.imagePath)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r) });
   for (const pr of prod.products) if (pr.name && (pr.artwork || pr.imagePath)) push({ id: pr.id, name: pr.name, aliases: pr.aliases, artwork: img(pr) });
-  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r), media: r.media, mediaPath: r.mediaPath });
+  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r), media: r.media, mediaPath: r.mediaPath, waveformColor: r.waveformColor });
   return out;
 }
 

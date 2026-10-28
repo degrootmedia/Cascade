@@ -16,7 +16,7 @@ import type {
   MoodboardNodeLayout,
   MoodboardNote,
 } from "../../../../shared/ipc.js";
-import { THUMB_TIERS, thumbTierFor } from "../../components/production/thumb-url.js";
+import { THUMB_TIERS, thumbTierFor, settledThumbTierFor } from "../../components/production/thumb-url.js";
 
 export const MOODBOARD_VERSION = 1 as const;
 
@@ -35,7 +35,7 @@ export const MB_ROTATE_SNAP = 15;
 /** Canvas LOD tier math lives in thumb-url.ts (shared with the node graph);
  *  re-exported here so moodboard imports and tests keep their home. */
 export const MB_THUMB_TIERS = THUMB_TIERS;
-export { thumbTierFor };
+export { thumbTierFor, settledThumbTierFor };
 
 /** Padding between a grouped frame's edge and its outer member nodes. */
 export const MB_FRAME_PAD = 18;

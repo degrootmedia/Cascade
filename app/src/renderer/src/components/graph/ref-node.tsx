@@ -17,6 +17,7 @@ import type { GraphLayout } from "../../../../shared/ipc.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { refThumbUrl } from "../production/thumb-url.js";
 import { VideoPreview } from "./video-preview.js";
+import { AudioRefTile } from "./audio-ref-tile.js";
 import { GRAPH_TILE_EDGE } from "./lod.js";
 import { EyeIcon, EyeOffIcon, MagnifyIcon } from "../icons.js";
 
@@ -55,6 +56,8 @@ export interface GraphRef {
   media?: "video" | "audio";
   /** Workspace-relative media path (video/audio refs), for cascade-media URLs. */
   mediaPath?: string;
+  /** Waveform palette id for an audio reference (CustomRef.waveformColor). */
+  waveformColor?: string;
   /** A host-supplied input that is not a user-managed reference (e.g. a shot
    *  sequence's member frame): rendered with a plain name and not deletable or
    *  renameable on the canvas. */
@@ -68,8 +71,14 @@ export interface RefData extends Record<string, unknown> {
    *  lightbox and the context menu use it as-is; the node tile paints a fixed
    *  thumbnail tier instead (graph/lod.tsx). */
   artwork: string;
-  /** Playable cascade-media URL for video references. */
+  /** Non-image media kind when this reference is a video/audio file. */
+  media?: "video" | "audio";
+  /** Playable cascade-media URL for video/audio references. */
   mediaUrl?: string;
+  /** Waveform palette id for an audio reference (absent = blue default). */
+  waveformColor?: string;
+  /** Persist a new waveform color for the underlying audio reference. */
+  onWaveformColor?: (refId: string, colorId: string) => void;
   /** Workspace-relative media path (video refs) — the lightbox hands it to
    *  main for a paused-frame still (a URL can't be resolved back reliably). */
   mediaPath?: string;
@@ -136,7 +145,8 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
   useEffect(() => {
     updateNodeInternals(id);
   }, [id, collapsed, updateNodeInternals]);
-  const zoomable = !!(data.artwork || data.mediaUrl);
+  // Audio has no lightbox (image/video only) — its tile plays in place.
+  const zoomable = !!(data.artwork || (data.media === "video" && data.mediaUrl));
   const openZoom = useCallback(() => {
     if (data.media === "video" && data.mediaUrl) data.onZoom(data.name, data.mediaUrl, "video", data.mediaPath);
     else if (data.artwork) data.onZoom(data.name, data.artwork);
@@ -149,7 +159,9 @@ export const RefNodeView = memo(function RefNodeView({ id, data, selected }: Nod
     ? <img src={src} alt={data.name} draggable={false} loading="lazy" decoding="async" onContextMenu={extMenu.onContextMenu} />
     : data.media === "video" && data.mediaUrl
       ? <VideoPreview instanceId={`ref:${id}`} className="prod-graph-ref-video" url={data.mediaUrl} hoverActivate posterEdge={GRAPH_TILE_EDGE} />
-      : data.media
+      : data.media === "audio" && data.mediaUrl
+        ? <AudioRefTile url={data.mediaUrl} name={data.name} colorId={data.waveformColor} onPickColor={data.refId && data.onWaveformColor ? (colorId) => data.onWaveformColor!(data.refId!, colorId) : undefined} />
+        : data.media
         ? <div className="prod-graph-ref-blank" title={data.media === "audio" ? "Audio reference" : "Video reference"}>{data.media === "audio" ? "\u266A" : "\u25B6"}</div>
         : <div className="prod-graph-ref-blank" title="Reference has no image">?</div>;
   const nameEl = renameable

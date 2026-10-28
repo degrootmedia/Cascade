@@ -8,7 +8,7 @@ import { useMemo, useState } from "react";
 
 import type { CliModelSchema, CustomRef, OpenArtModelChoice, Production } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, UPSCALE_UNAVAILABLE_HINT, resolveAspectRatio } from "../../../../shared/ipc.js";
-import { withSuiteStyle } from "./suite-style.js";
+import { SUITE_CUSTOM_STYLE_VALUE, stripSuiteStyle, suiteStyleSelectValue, withSuiteStyle } from "./suite-style.js";
 import { ImageGenForm } from "../../components/production/ImageGenForm.js";
 import type { PromptReference } from "../../components/production/references.js";
 import { rememberMediaDefault } from "../../components/production/media-defaults.js";
@@ -79,6 +79,7 @@ export function SuitePromptPanel({
   // the read-only Style preview matches; None clears it.
   const styles = prod.styles ?? [];
   const onStyleChange = (styleId: string) => {
+    if (styleId === SUITE_CUSTOM_STYLE_VALUE) return; // already the applied text; picking it changes nothing
     const style = styles.find((s) => s.id === styleId);
     onDraftChange({ styleId: styleId || undefined, prompt: withSuiteStyle(draft.prompt, style) });
   };
@@ -129,7 +130,8 @@ export function SuitePromptPanel({
               disabled={disabled}
               title={disabled ? UPSCALE_UNAVAILABLE_HINT : undefined}
               onClick={() => {
-                onDraftChange({ mode: m });
+                // Edit prompts never carry a style: entering Edit removes any Style paragraph carried over from Generate and clears the pick.
+                onDraftChange({ mode: m, ...(m === "edit" ? { prompt: stripSuiteStyle(draft.prompt), styleId: undefined } : {}) });
                 if (m !== "generate" && !draft.sourceRefId && !draft.sourcePath && editable[0]) {
                   onDraftChange({ mode: m, sourceRefId: editable[0].id });
                 }
@@ -208,11 +210,14 @@ export function SuitePromptPanel({
           draft.mode === "generate" ? (
             <select
               className="prod-openart-select prod-prompt-style"
-              value={draft.styleId ?? ""}
+              value={suiteStyleSelectValue(draft.prompt, draft.styleId, styles)}
               onChange={(e) => onStyleChange(e.target.value)}
               title="Apply a style from Design (Step 2) — its text plus its look frame"
             >
               <option value="">None</option>
+              {suiteStyleSelectValue(draft.prompt, draft.styleId, styles) === SUITE_CUSTOM_STYLE_VALUE && (
+                <option value={SUITE_CUSTOM_STYLE_VALUE}>Custom (in prompt)</option>
+              )}
               {styles.map((s) => (
                 <option key={s.id} value={s.id}>{s.index}. {s.name || `Style ${s.index}`}</option>
               ))}

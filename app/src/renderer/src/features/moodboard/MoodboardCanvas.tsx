@@ -54,7 +54,7 @@ import {
   setFrameColor,
   setFrameLabel,
   settleFrameMembership,
-  thumbTierFor,
+  settledThumbTierFor,
   snapMove,
   snapRotation,
   snapToGrid,
@@ -68,6 +68,10 @@ import {
 
 /** Debounce before the layout is persisted through `production:save`. */
 const SAVE_DEBOUNCE_MS = 500;
+/** Quiet time before zoom counts as settled for LOD tier swaps. Long
+ *  enough that bursts of wheel zooming (pauses in between) do not each
+ *  trigger a swap wave; the current bitmap stretches meanwhile. */
+const SETTLED_ZOOM_MS = 600;
 /** Boards larger than this get a minimap (orientation stops being optional). */
 const MINIMAP_THRESHOLD = 40;
 
@@ -169,7 +173,21 @@ export function MoodboardCanvas({
   const refs = prod.references ?? [];
   const categories: ReferenceCategory[] = prod.referenceCategories ?? [];
   // In-use verdicts for the node-icon badge (canvas nodes + shelf tiles).
-  const usage = useMemo(() => referenceUsage(prod), [prod]);
+  // Keyed on the slices referenceUsage actually reads (plus a placement
+  // signature — it reads only refIds from the board), so this canvas's own
+  // layout-save echoes (a fresh prod identity after every gesture) do not
+  // recompute the full usage scan mid-navigation.
+  const placementSig = useMemo(() => {
+    const ids = new Set<string>();
+    for (const n of prod.moodboard?.nodes ?? []) ids.add(n.refId);
+    for (const f of prod.moodboard?.frames ?? []) for (const id of f.refIds ?? []) ids.add(id);
+    return [...ids].sort().join("|");
+  }, [prod.moodboard]);
+  const usage = useMemo(
+    () => referenceUsage(prod),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [prod.characters, prod.products, prod.references, prod.scenes, prod.outdatedShots, prod.magicPrompts, prod.styles, prod.magicRefDecisions, prod.referenceCategories, placementSig],
+  );
 
   const [layout, setLayoutState] = useState<MoodboardLayout>(() =>
     reconcileMoodboard(normalizeMoodboardLayout(initialLayout), refKeys(refs)),
@@ -207,16 +225,27 @@ export function MoodboardCanvas({
   }, []);
 
   // LOD: canvas nodes paint the thumbnail tier matching their on-screen
-  // size, swapped only once zoom settles (250ms quiet) so a zoom gesture
+  // size with hysteresis:
+  // swapped only once zoom settles (SETTLED_ZOOM_MS quiet) and only
+  // across the hysteresis band in settledThumbTierFor, so a zoom gesture
   // never churns image srcs mid-flight — the current bitmap stretches
   // briefly instead. Mounts/cull-ins use the settled tier immediately, so
   // opening zoomed-out never decodes full-res files.
   const [settledZoom, setSettledZoom] = useState(layout.viewport.zoom);
   useEffect(() => {
-    const t = setTimeout(() => setSettledZoom(layout.viewport.zoom), 250);
+    const t = setTimeout(() => setSettledZoom(layout.viewport.zoom), SETTLED_ZOOM_MS);
     return () => clearTimeout(t);
   }, [layout.viewport.zoom]);
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  // Per-node tier memory feeding the hysteresis: a node's previous tier is
+  // its `prev` for the next settled-zoom decision. Mutated during render
+  // (idempotent for unchanged inputs — settledThumbTierFor is stable).
+  const thumbTierByRefRef = useRef<Map<string, number>>(new Map());
+  const thumbEdgeForNode = (n: { refId: string; w: number; h: number }): number => {
+    const tier = settledThumbTierFor(thumbTierByRefRef.current.get(n.refId), n.w, n.h, settledZoom, dpr);
+    thumbTierByRefRef.current.set(n.refId, tier);
+    return tier;
+  };
 
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const selectionRef = useRef(selection);
@@ -897,7 +926,7 @@ export function MoodboardCanvas({
                 refItem={r}
                 inUseTitle={inUseTitleFor(usage, n.refId)}
                 node={n}
-                thumbEdge={thumbTierFor(n.w, n.h, settledZoom, dpr)}
+                thumbEdge={thumbEdgeForNode(n)}
                 selected={selection.has(n.refId)}
                 dimmed={activeCategory !== null && (r.categoryId ?? null) !== activeCategory}
                 onGestureStart={beginMove}

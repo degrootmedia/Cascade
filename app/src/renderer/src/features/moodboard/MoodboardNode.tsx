@@ -10,7 +10,7 @@ import { RefFigure } from "../../components/production/references.js";
 
 /** The wrapper never starts a drag from an interactive control. */
 function isInteractive(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && !!target.closest("input, button, textarea, a, select");
+  return target instanceof HTMLElement && !!target.closest("input, button, textarea, a, select, .prod-graph-audio");
 }
 
 export const MoodboardNode = memo(function MoodboardNode({
@@ -63,6 +63,7 @@ export const MoodboardNode = memo(function MoodboardNode({
   };
   const handleDoubleClick = (e: ReactMouseEvent) => {
     if (isInteractive(e.target)) return;
+    if (refItem.media === "audio") return;
     onOpenViewer(refItem);
   };
   const stop = (e: ReactPointerEvent) => e.stopPropagation();

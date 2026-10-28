@@ -8,13 +8,14 @@
  * fixed preview boxes.)
  *
  * This module also carries the interaction flag: while the viewport moves,
- * live videos stand down to posters and node shadows drop (the
- * `.interacting` canvas class), so no decoder or shadow raster competes
- * with the gesture. It reaches node views through context — never through
- * node `data`, which would churn the reconciliation equality rules in
- * shared/graph/reconcile.ts.
+ * live videos stand down to posters, so no decoder competes with the
+ * gesture. It reaches node views through context — never through node
+ * `data`, which would churn the reconciliation equality rules in
+ * shared/graph/reconcile.ts. (Nodes carry no drop shadow at all — a
+ * per-node shadow re-rasters every pan/zoom frame; see `.prod-graph-node`
+ * in styles.css.)
  */
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState, type MutableRefObject, type ReactNode } from "react";
 
 /** Fixed tier for generator previews and video posters (300/320px-wide
  *  nodes, 120px-tall preview). Covers zoom 1 at most DPRs; zoomed right in
@@ -43,11 +44,29 @@ export function useGraphLod(): GraphLod {
   return useContext(GraphLodContext);
 }
 
-/** Canvas-side interaction state for React Flow's move callbacks. */
-export function useGraphLodState() {
+/** Imperative door into the provider's interaction flag. The canvas host
+ *  calls this from React Flow's move callbacks; the state lives in the
+ *  leaf provider below, NOT in the host component — d3-zoom fires a full
+ *  start/end cycle per wheel burst, and flipping host-level React state on
+ *  `start` re-rendered the entire modal between the first wheel notch and
+ *  the first painted scale change (the "zoom skips its first increments"
+ *  feel). Only context consumers (live video previews) re-render now. */
+export interface GraphLodHandle {
+  setInteracting: (interacting: boolean) => void;
+}
+
+/** Leaf owner of the viewport-moving flag. `handleRef` is assigned during
+ *  render (the codebase's callback-ref pattern) so the host's stable move
+ *  callbacks can flip the flag without prop drilling state upward. */
+export function GraphLodProvider({
+  handleRef,
+  children,
+}: {
+  handleRef: MutableRefObject<GraphLodHandle | null>;
+  children: ReactNode;
+}) {
   const [interacting, setInteracting] = useState(false);
-  const onMoveStart = useCallback(() => setInteracting(true), []);
-  const onMoveEnd = useCallback(() => setInteracting(false), []);
+  handleRef.current = { setInteracting };
   const value = useMemo<GraphLod>(() => ({ interacting }), [interacting]);
-  return { value, interacting, onMoveStart, onMoveEnd };
+  return <GraphLodContext.Provider value={value}>{children}</GraphLodContext.Provider>;
 }

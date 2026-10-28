@@ -174,4 +174,48 @@ describe("friendlyApiError", () => {
   it("maps max-token truncation to an actionable message", () => {
     expect(friendlyApiError(new Error("response truncated: the model hit the token limit mid-generation"))).toContain("token limit");
   });
+
+  // Real envelopes from api.cheaperinference.com (probed live): /models
+  // accepts a key that chat completions then refuse with 403 when the key
+  // is restricted by model/IP or lacks the inference scope — that must not
+  // be reported as a rejected (invalid) key.
+  const CI_401 = `HTTP 401: {"error":{"message":"Invalid API key.","type":"authentication_error","param":null,"code":"invalid_api_key"}}`;
+  const CI_403 = `HTTP 403: {"error":{"message":"API key is not allowed to use model claude-sonnet-5.5.","type":"permission_error","param":null,"code":"model_not_allowed"}}`;
+  const CI_402 = `HTTP 402: {"error":{"message":"Insufficient balance.","type":"billing_error","param":null,"code":"insufficient_balance"}}`;
+
+  it("keeps a 401 as a rejected key and preserves the provider detail", () => {
+    const out = friendlyApiError(new Error(CI_401));
+    expect(out).toContain("API key was rejected");
+    expect(out).toContain("Invalid API key.");
+    expect(out).toContain("invalid_api_key");
+  });
+
+  it("maps a 403 key restriction to model/IP/scope guidance, not a bad key", () => {
+    const out = friendlyApiError(new Error(CI_403));
+    expect(out).not.toContain("was rejected");
+    expect(out).toContain("isn't allowed");
+    expect(out).toContain("model claude-sonnet-5.5");
+    expect(out).toContain("HTTP 403");
+  });
+
+  it("maps the wallet-style 402 insufficient_balance to the balance message", () => {
+    const out = friendlyApiError(new Error(CI_402));
+    expect(out).toContain("credits");
+    expect(out).toContain("Insufficient balance.");
+  });
+
+  it("falls back to the raw body when a failure carries no error envelope", () => {
+    // Observed live from a Cheaper Inference seller route: a bare 401 whose
+    // body is not the gateway's {error:{message,code}} envelope. "(HTTP 401)"
+    // alone tells the user nothing — keep the body's own words.
+    const out = friendlyApiError(new Error("HTTP 401: upstream credential rejected by seller route"));
+    expect(out).toContain("API key was rejected");
+    expect(out).toContain("upstream credential rejected by seller route");
+  });
+
+  it("reads insufficient_balance as balance even when a provider sends it as 403", () => {
+    const out = friendlyApiError(new Error(CI_402.replace("HTTP 402", "HTTP 403")));
+    expect(out).toContain("credits");
+    expect(out).not.toContain("isn't allowed");
+  });
 });

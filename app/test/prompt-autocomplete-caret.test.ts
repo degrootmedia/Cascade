@@ -19,7 +19,7 @@ interface H {
   value: () => string;
 }
 
-function renderEditor(initial: string): H {
+function renderEditor(initial: string, refs: PromptReference[] = REFS): H {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -33,7 +33,7 @@ function renderEditor(initial: string): H {
       value: v,
       includeBrand: false,
       onChange: (next: string) => setV(next),
-      references: REFS,
+      references: refs,
       className: "prod-prompt-drawer-text",
       rows: 12,
       placeholder: "type @",
@@ -107,5 +107,49 @@ describe("side-panel @ autocomplete keeps the caret after the block", () => {
     expect(caretOffset(h.host)).toBe("A hero @[Gandalf]".length);
     act(() => { h.root.unmount(); });
     document.body.removeChild(h.host);
+  });
+});
+
+describe("@ tag list keyboard navigation keeps the highlight visible (Item 5)", () => {
+  it("scrolls the newly highlighted tag into view on ArrowDown/ArrowUp", () => {
+    const many: PromptReference[] = Array.from({ length: 12 }, (_, i) => ({
+      id: `r${i + 1}`,
+      name: `Hero${String(i + 1).padStart(2, "0")}`,
+      artwork: "",
+    }));
+    const scrolled: Element[] = [];
+    const origScroll = (window.HTMLElement.prototype as any).scrollIntoView;
+    (window.HTMLElement.prototype as any).scrollIntoView = function (this: Element) { scrolled.push(this); };
+    try {
+      const h = renderEditor("", many);
+      act(() => {
+        h.box.textContent = "@";
+        setCaret(h.box.firstChild as Node, 1);
+        h.box.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const buttons = Array.from(document.querySelectorAll(".prod-ref-autocomplete button"));
+      expect(buttons).toHaveLength(12);
+      expect(buttons[0].className).toContain("selected");
+
+      const arrow = (key: string) => act(() => {
+        h.box.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      });
+      // Move well past the menu's visible window.
+      for (let i = 0; i < 8; i++) arrow("ArrowDown");
+      const nowSelected = document.querySelector(".prod-ref-autocomplete button.selected");
+      expect(nowSelected?.textContent).toContain("Hero09");
+      expect(scrolled[scrolled.length - 1]).toBe(nowSelected);
+
+      arrow("ArrowUp");
+      const upSelected = document.querySelector(".prod-ref-autocomplete button.selected");
+      expect(upSelected?.textContent).toContain("Hero08");
+      expect(scrolled[scrolled.length - 1]).toBe(upSelected);
+
+      act(() => { h.root.unmount(); });
+      document.body.removeChild(h.host);
+    } finally {
+      if (origScroll) (window.HTMLElement.prototype as any).scrollIntoView = origScroll;
+      else delete (window.HTMLElement.prototype as any).scrollIntoView;
+    }
   });
 });

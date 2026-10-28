@@ -1402,6 +1402,68 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
     expect(args.filter((a) => a === "--video-references")).toHaveLength(1);
   });
 
+  it("routes audio refs into --audio-references as .mp3 (seedance_2_5 + omni mode)", async () => {
+    const seen: string[][] = [];
+    let audioBytes: Buffer | null = null;
+    const jobId = "34343434-5656-7878-9090-121212121212";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_5": (args) => {
+          seen.push(args);
+          const at = args.indexOf("--audio-references");
+          if (at >= 0) audioBytes = fs.readFileSync(args[at + 1]);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/s25.mp4" }])),
+      })
+    );
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([5]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoClip(prodDir("prod-audio"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_5`, resolution: "720p", durationSec: 5, prompt: "lip-sync",
+        refsOnly: true,
+      }, () => {}, undefined, [
+        { name: "Voiceover", dataUrl: `data:audio/mpeg;base64,${Buffer.from("mp3-bytes").toString("base64")}` },
+      ]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args.filter((a) => a === "--audio-references")).toHaveLength(1);
+    expect(args[args.indexOf("--audio-references") + 1]).toMatch(/\.mp3$/);
+    expect(audioBytes!.toString()).toBe("mp3-bytes");
+    // The frame still rides the image array; audio never joins it.
+    expect(args.filter((a) => a === "--image-references")).toHaveLength(1);
+    expect(args[args.indexOf("--mode") + 1]).toBe("omni_reference");
+  });
+
+  it("fails loudly (nothing submitted) when the model declares no audio slot", async () => {
+    let submitted = false;
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": () => {
+          submitted = true;
+          return ok(JSON.stringify({ job_id: "x" }));
+        },
+      })
+    );
+    // seedance_2_0 declares image/video references but no audio_references.
+    await expect(
+      provider(run).generateVideoClip(prodDir("prod-audio-no"), shot(), {
+        model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 5, prompt: "lip-sync",
+        refsOnly: true,
+      }, () => {}, undefined, [
+        { name: "Voiceover", dataUrl: "data:audio/mpeg;base64,Vm9pY2U=" },
+      ])
+    ).rejects.toThrow(/doesn't accept audio references.*"Voiceover".*Nothing was submitted/);
+    expect(submitted).toBe(false);
+  });
+
   it("falls back to a lone start frame on start-only models and fails loudly with extra refs", async () => {
     const seen: string[][] = [];
     const jobId = "23232323-4545-6767-8989-010101010101";

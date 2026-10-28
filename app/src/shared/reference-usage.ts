@@ -13,8 +13,8 @@
  *    reference sockets, tween keyframes, stored `ref:` edges);
  *  - it is placed on the reference moodboard (a board node dangles if its
  *    reference is deleted — delete does not prune the board);
- *  - it auto-attaches (style-only / style-category / style-purpose) or Magic
- *    has cast it.
+ *  - it is style-tagged (style-only / style-category / style-purpose —
+ *    prompt context for Magic, never uploaded) or Magic has cast it.
  *
  * Same-name twins share one verdict: pool entries carrying the same
  * canonical name (a character sheet also saved as a custom reference, say)
@@ -34,6 +34,7 @@ import type { GraphSource, Production } from "./ipc.js";
 import { isTweenGenKeyframe, isVideoGenRef } from "./ipc.js";
 import { refTagNames } from "./prompt-grammar.js";
 import { buildRefNameIndex, refLookupKey } from "./ref-names.js";
+import { styleTaggedRefIds } from "./magic-refs.js";
 
 /** Where one reference is used. Shot lists carry display numbers, sorted. */
 export interface ReferenceUsage {
@@ -41,7 +42,7 @@ export interface ReferenceUsage {
   tagShots: string[];
   /** Shots with the reference attached or wired into a node. */
   wiredShots: string[];
-  /** Non-shot uses (style auto-attach, character/style text, Magic cast). */
+  /** Non-shot uses (style context, character/style text, Magic cast). */
   other: string[];
 }
 
@@ -143,15 +144,10 @@ export function referenceUsage(prod: Production): Map<string, ReferenceUsage> {
     for (const id of decision.refIds ?? []) note(other, id, "cast by Magic");
   }
 
-  // Auto-attach (the pipeline's `shotReferences` rule, plus an explicit
-  // style purpose): uploaded with every submission, tag or not.
-  const styleCats = new Set(
-    (prod.referenceCategories ?? []).filter((c) => c.kind === "style").map((c) => c.id),
-  );
-  for (const r of references) {
-    if (r.styleOnly === true || r.purpose === "style" || (r.categoryId && styleCats.has(r.categoryId))) {
-      note(other, r.id, "auto-attached style reference");
-    }
+  // Style-tagged references ride every Magic prompt as text context
+  // (never uploaded), so they are in use even with no citation or wire.
+  for (const id of styleTaggedRefIds(prod)) {
+    note(other, id, "style reference (context only)");
   }
 
   // Moodboard placements (nodes, plus frame membership for drifted boards

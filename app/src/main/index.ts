@@ -33,6 +33,7 @@ import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
+import { styleTaggedRefIds } from "../shared/magic-refs.js";
 import { applyRefSwapsToIds, applyRefSwapsToPrompt, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags } from "./video-retry.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
@@ -1864,6 +1865,34 @@ function registerIpc() {
     }
   });
 
+  // Settings "Test connection": listing models proves only that the key can
+  // read the catalog — a key restricted by model/IP or missing the
+  // inference scope (e.g. Cheaper Inference) passes that yet fails at the
+  // first pipeline step. Probe the real submit shape too: one 1-token
+  // completion on the selected model via the same ChatClient path ingest
+  // uses, so a restriction surfaces here with the provider's own reason.
+  handle("models:testConnection", async (): Promise<import("../shared/ipc.js").ModelListResult> => {
+    const list = ipcListeners.get("models:list");
+    if (!list) return { ok: false, error: "Model list is unavailable (no handler registered)." };
+    const listed = (await list(undefined)) as import("../shared/ipc.js").ModelListResult;
+    if (!listed.ok) return listed;
+    const apiKey = settings.getApiKey();
+    if (!apiKey) return listed;
+    const model = settings.getModel() || listed.models[0]?.id;
+    if (!model) return listed;
+    try {
+      await new ChatClient(apiKey, settings.getBaseUrl()).completeOnce(
+        model,
+        [{ role: "user", content: "Reply with the word ok." }],
+        1
+      );
+      return listed;
+    } catch (e) {
+      console.warn(`[settings] connection test: models listed but ${model} probe failed: ${String(e)}`);
+      return { ok: false, error: `Models listed, but a test request to ${model} failed — ${friendlyApiError(e)}` };
+    }
+  });
+
   handle("credits:get", async () => {
     const apiKey = settings.getApiKey();
     // Only providers that declare a balance endpoint get a request — the
@@ -2242,6 +2271,7 @@ function registerIpc() {
       // (it would be saved as a .png holding video bytes). Videos enter as
       // media references via drag/paste instead.
       if (/^(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/.test(ext)) throw new Error("That's a video file — drag it onto the references panel (or a storyboard frame) to add it as a video reference.");
+      if (/^(mp3|wav|m4a|aac|ogg|flac)$/.test(ext)) throw new Error("That's an audio file — drag it onto the references panel (or the node graph) to add it as an audio reference.");
       return `data:image/${ext};base64,${buf.toString("base64")}`;
     } catch (e) {
       throw new Error(`Couldn't read that image: ${e instanceof Error ? e.message : String(e)}`);
@@ -3849,8 +3879,11 @@ function registerIpc() {
     // Upscale submits exactly one image (the source) — extra references would
     // fail the model's single-image rule, so its refIds are ignored.
     if (kind !== "upscale") {
+      const styleTagged = styleTaggedRefIds(p);
       for (const id of Array.isArray(req?.refIds) ? req.refIds : []) {
         if (typeof id !== "string" || !id) continue;
+        // Style-tagged references never upload, even when attached by id.
+        if (styleTagged.has(id)) continue;
         const r = refPool.find((x) => x.id === id);
         if (!r) continue;
         const dataUrl = refArtworkDataUrl(p, r);
@@ -4494,8 +4527,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
         const ref = (p.references ?? []).find((r) => r.id === iid);
         if (ref) {
-          const data = ref.media === "video" ? refMediaDataUrl(p, ref) : refArtworkDataUrl(p, ref);
-          if (data) inputs.push({ name: ref.name, dataUrl: data, ...(ref.media !== "video" && ref.imagePath ? { imageRel: ref.imagePath } : {}) });
+          const data = ref.media ? (refMediaDataUrl(p, ref) ?? refArtworkDataUrl(p, ref)) : refArtworkDataUrl(p, ref);
+          if (data) inputs.push({ name: ref.name, dataUrl: data, ...(!ref.media && ref.imagePath ? { imageRel: ref.imagePath } : {}) });
         }
       }
       if (!inputs.length) throw new Error("Nothing to animate yet — generate the member frames first (or wire references in).");
@@ -4721,13 +4754,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   function resolveGenRefIds(p: Production, shot: ProductionShot, refIds: unknown): { name: string; dataUrl: string }[] {
     const extraRefs: { name: string; dataUrl: string }[] = [];
     if (!Array.isArray(refIds)) return extraRefs;
+    // Style-tagged references never upload, even when wired by id.
+    const styleTagged = styleTaggedRefIds(p);
     const pool = [
       ...p.characters.map((c) => ({ id: c.id, name: c.name, data: refArtworkDataUrl(p, c) })),
       ...p.products.map((pr) => ({ id: pr.id, name: pr.name, data: refArtworkDataUrl(p, pr) })),
       ...(p.references ?? []).map((r) => ({
         id: r.id,
         name: r.name,
-        data: r.media === "video" ? refMediaDataUrl(p, r) : refArtworkDataUrl(p, r),
+        data: r.media ? (refMediaDataUrl(p, r) ?? refArtworkDataUrl(p, r)) : refArtworkDataUrl(p, r),
       })),
     ];
     for (const rid of refIds) {
@@ -4746,6 +4781,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
         continue;
       }
+      if (typeof rid === "string" && styleTagged.has(rid)) continue;
       const ref = pool.find((r) => r.id === rid && r.data);
       if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
     }
@@ -5562,6 +5598,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) return null;
     const kind = mime.startsWith("video/") ? "video" as const : mime.startsWith("audio/") ? "audio" as const : null;
     if (!kind) throw new Error(`Unsupported reference media type: ${mime || "unknown"}`);
+    // The renderer-supplied MIME only picks the kind — the extension must
+    // agree, so an arbitrary file can't be written into referencesDir
+    // under a media mime, and an empty payload never lands as a 0-byte ref.
+    const ext = path.extname(String(fileName ?? "")).slice(1).toLowerCase();
+    const okExt = kind === "video" ? /^(mp4|m4v|mov|webm|mkv|avi)$/ : /^(mp3|wav|m4a|aac|ogg|flac)$/;
+    if (!okExt.test(ext)) throw new Error(`Unsupported ${kind} file ".${ext || "?"}" — expected ${kind === "video" ? "mp4/mov/webm/mkv/avi" : "mp3/wav/m4a/aac/ogg/flac"}.`);
+    if (!bytes || !(bytes instanceof ArrayBuffer) || bytes.byteLength === 0) throw new Error("The media file is empty.");
     const base = path.basename(String(fileName || "clip")).trim() || "clip";
     const parsed = path.parse(base);
     const dir = p.assets.referencesDir;
@@ -6046,7 +6089,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already gone */ }
   });
 
-  // Step 2: rescan referencesDir — adopt images the user dropped into the
+  // Step 2: rescan referencesDir — adopt media the user dropped into the
   // folder externally. Every image file no reference/character/product claims
   // becomes a reference (name from the filename); a same-name reference with
   // no image is filled in instead of duplicated.
@@ -6055,33 +6098,36 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) return null;
     const dir = p.assets.referencesDir;
     const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+    const VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
+    const AUDIO_FILE = /\.(mp3|wav|m4a|aac|ogg|flac)$/i;
     let rels: string[] = [];
     try {
       rels = fs.readdirSync(assetPath(p, dir))
-        .filter((f) => IMAGE_FILE.test(f))
+        .filter((f) => IMAGE_FILE.test(f) || VIDEO_FILE.test(f) || AUDIO_FILE.test(f))
         .map((f) => `${dir}/${f}`);
     } catch { /* missing folder — nothing to adopt */ }
     const orphans = productions.unclaimedReferenceFiles(rels, p);
     for (const rel of orphans) {
       const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
-      const empty = (p.references ?? []).find((r) => !r.imagePath && r.name.trim().toLowerCase() === name.toLowerCase());
+      const kind = VIDEO_FILE.test(rel) ? "video" as const : AUDIO_FILE.test(rel) ? "audio" as const : null;
+      const empty = (p.references ?? []).find((r) => !r.imagePath && !r.mediaPath && r.name.trim().toLowerCase() === name.toLowerCase());
       if (empty) {
-        empty.imagePath = rel;
+        if (kind) { empty.media = kind; empty.mediaPath = rel; } else empty.imagePath = rel;
         empty.artwork = undefined;
       } else {
         p.references = [...(p.references ?? []), {
           id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
           name,
-          imagePath: rel,
+          ...(kind ? { media: kind, mediaPath: rel } : { imagePath: rel }),
           shotIds: [],
         }];
       }
     }
     if (orphans.length > 0) {
       productions.saveProduction(p);
-      productionEmit(id, `Rescanned ${dir}/ — adopted ${orphans.length} reference image${orphans.length === 1 ? "" : "s"}.`, "done");
+      productionEmit(id, `Rescanned ${dir}/ — adopted ${orphans.length} reference file${orphans.length === 1 ? "" : "s"}.`, "done");
     } else {
-      productionEmit(id, `Rescanned ${dir}/ — no new reference images.`);
+      productionEmit(id, `Rescanned ${dir}/ — no new reference files.`);
     }
     return p;
   });

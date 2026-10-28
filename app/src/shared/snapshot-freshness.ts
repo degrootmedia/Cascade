@@ -44,3 +44,23 @@ export function isStaleRevisionError(e: unknown): boolean {
 export function applySavedRevision<T extends { rev?: number }>(current: T, savedRev: number): T {
   return savedRev > revOf(current) ? { ...current, rev: savedRev } : current;
 }
+
+/**
+ * True when two snapshots carry identical content apart from `rev` — the
+ * save-trip that produced the second one brought no news (no concurrent
+ * main-side change rode along), so the caller can adopt just the rev via
+ * `applySavedRevision` instead of wholesale-applying the snapshot and
+ * busting every downstream object identity. JSON comparison: any key-order
+ * surprise degrades to `false` (apply the snapshot), never to a wrong skip.
+ */
+export function sameSnapshotExceptRev<T extends { rev?: number }>(a: T, b: T): boolean {
+  if (a === b) return true;
+  try {
+    // rev first in both: a snapshot missing the key would otherwise append
+    // it at the end and never stringify-equal one that carries it up front.
+    const normalize = (o: T) => JSON.stringify(Object.assign({ rev: 0 }, o, { rev: 0 }));
+    return normalize(a) === normalize(b);
+  } catch {
+    return false;
+  }
+}

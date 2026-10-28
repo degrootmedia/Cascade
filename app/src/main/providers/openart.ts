@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { McpManager } from "../mcp.js";
 import { assetPath, writeShotVideo, type ImageGenFn, type GenerationRef } from "../pipeline.js";
-import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { citePrompt, isAudioRef, resolvePromptRefs, styleRefNames } from "./refs.js";
 import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
 import type { MediaProvider, ProviderEmit } from "./types.js";
 import { uploadDataUrlReference } from "../openart-upload.js";
@@ -166,6 +166,9 @@ export const REFERENCE_ARRAY_KEY_RX = /reference|refs?|medias?|inputs?|image_?re
 export function referenceArrayKey(props: Record<string, unknown>): string | null {
   for (const key of Object.keys(props)) {
     if (!REFERENCE_ARRAY_KEY_RX.test(key)) continue;
+    // A dedicated audio array carries sound, not visuals — binding images
+    // there would misroute every reference. `audioArrayKey` owns it.
+    if (/audio|sound/i.test(key)) continue;
     // `elementTypes`/`mediaTypes` list the accepted kinds, not the media.
     if (/type/i.test(key)) continue;
     if (START_FRAME_KEY_RX.test(key) || END_FRAME_KEY_RX.test(key)) continue;
@@ -187,6 +190,21 @@ export function endFrameSlotKey(props: Record<string, unknown>): string | null {
     if (!p) continue;
     if (p.type === "array" || p.items) continue;
     return key;
+  }
+  return null;
+}
+
+/** The model form's dedicated array-shaped AUDIO reference field key
+ *  (`audioReferences`, `audioRefs`, `sounds`, …), or null when it declares
+ *  none. Boolean audio toggles (`generateAudio`) never match — the field
+ *  must be array-shaped to carry uploaded references. */
+export function audioArrayKey(props: Record<string, unknown>): string | null {
+  for (const key of Object.keys(props)) {
+    if (!/audio|sound/i.test(key)) continue;
+    if (/type/i.test(key)) continue;
+    const p = props[key] as { type?: string; items?: unknown } | undefined;
+    if (!p) continue;
+    if (p.type === "array" || p.items) return key;
   }
   return null;
 }
@@ -222,13 +240,23 @@ export function videoRefsAssign(
   opts?: { frames?: boolean; refsOnly?: boolean }
 ): Record<string, unknown> | null {
   if (!refs.length) return null;
+  // Audio references bind separately from visuals: a dedicated audio
+  // field when the form declares one, never a frame slot. Without a
+  // dedicated field they ride the visual array as typed elements
+  // (the vendor's own visualReference shape carries `type: "audio"`).
+  const audioRefs = refs.filter((r) => String(r.type ?? "").toLowerCase() === "audio");
+  const visualRefs = audioRefs.length ? refs.filter((r) => String(r.type ?? "").toLowerCase() !== "audio") : refs;
+  const audioKey = audioRefs.length ? audioArrayKey(props) : null;
+  const arrayRefs = audioKey ? visualRefs : refs;
+  const withAudio = (bound: Record<string, unknown>): Record<string, unknown> =>
+    audioKey ? { ...bound, [audioKey]: audioRefs } : bound;
   // Reference mode (every generation surface): the array field only. A
   // form with NO reference array falls through to a lone start-frame
   // binding below — never start slot + array together.
   let startOnlyFallback = false;
   if (opts?.refsOnly === true) {
     const refKey = referenceArrayKey(props);
-    if (refKey) return { [refKey]: refs };
+    if (refKey) return withAudio(arrayRefs.length ? { [refKey]: arrayRefs } : {});
     startOnlyFallback = true;
   }
   const keys = Object.keys(props);
@@ -245,6 +273,7 @@ export function videoRefsAssign(
     return out;
   };
   const out: Record<string, unknown> = {};
+  const frameRef = visualRefs[0] ?? refs[0];
   // Pass 1a: the single start-frame object field (the common image2video shape)
   // — the source frame, required by image2video forms in every mode.
   for (const key of keys) {
@@ -253,10 +282,10 @@ export function videoRefsAssign(
     if (!p) continue;
     if (p.type === "array" || p.items) { /* array-shaped — handle in pass 2 */ continue; }
     if (p.properties && typeof p.properties === "object") {
-      const filled = fillObject(refs[0] as Record<string, unknown>, p.properties);
-      out[key] = Object.keys(filled).length ? filled : refs[0];
+      const filled = fillObject(frameRef as Record<string, unknown>, p.properties);
+      out[key] = Object.keys(filled).length ? filled : frameRef;
     } else {
-      out[key] = refs[0];
+      out[key] = frameRef;
     }
     break;
   }
@@ -277,15 +306,15 @@ export function videoRefsAssign(
       endFilled = true;
     }
   }
-  if (startOnlyFallback) return Object.keys(out).length ? out : null;
-  if (opts?.frames === true && Object.keys(out).length && (refs.length < 2 || endFilled)) return out;
+  if (startOnlyFallback) return Object.keys(out).length || audioKey ? withAudio(out) : null;
+  if (opts?.frames === true && Object.keys(out).length && (refs.length < 2 || endFilled)) return withAudio(out);
   // Pass 2: array-style reference fields — every ref (the source frame plus
   // extras) so positional citation stays aligned and video clips upload. The
   // field name varies by vendor (`visualReferences`, `referenceImages`, …),
   // so scan for any array-shaped reference field.
   const refKey = referenceArrayKey(props);
-  if (refKey) return { ...out, [refKey]: refs };
-  return Object.keys(out).length ? out : null;
+  if (refKey) return withAudio(arrayRefs.length ? { ...out, [refKey]: arrayRefs } : out);
+  return Object.keys(out).length || audioKey ? withAudio(out) : null;
 }
 
 export class OpenArtClient implements MediaProvider {
@@ -1251,6 +1280,8 @@ private videoRefsAssign = videoRefsAssign;
       const uploaded: Record<string, unknown>[] = [];
       const submitted: (string | null)[] = [];
       for (const [i, r] of refs.entries()) {
+        // Image models take images only — never upload a video/audio ref as one.
+        if (!/^data:image\//i.test(r.dataUrl)) { submitted[i] = null; continue; }
         try {
           const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name);
           uploaded.push(vr);
@@ -1514,6 +1545,9 @@ private videoRefsAssign = videoRefsAssign;
     for (const [i, r] of refs.entries()) {
       try {
         const vr = await uploadDataUrlReference(this.mcp, r.dataUrl, r.name, "create-video");
+        // Keep the kind on the uploaded reference so the binder can split
+        // audio from visuals even when the server's shape omits `type`.
+        if (isAudioRef(r) && String((vr as { type?: unknown }).type ?? "").toLowerCase() !== "audio") (vr as Record<string, unknown>).type = "audio";
         uploaded.push(vr);
         submitted[i] = String((vr as { id?: unknown }).id ?? (vr as { url?: unknown }).url ?? "").trim() || "";
       } catch (e) {
@@ -1540,6 +1574,17 @@ private videoRefsAssign = videoRefsAssign;
       }
     }
 
+    // Fail loudly when audio was wired in but the model's live form
+    // proves it has nowhere to bind (no audio field and no reference
+    // array — a start-frame-only form). An unreadable form still
+    // passes through on the visualReferences fallback in videoGenArgs.
+    const audioInputs = refs.filter((r) => isAudioRef(r));
+    if (audioInputs.length && formProps && !audioArrayKey(formProps) && !referenceArrayKey(formProps)) {
+      throw new Error(
+        `"${modelId || "the video model"}" doesn't accept audio references (its form has no audio or reference-array field), so ${audioInputs.map((r) => `"${r.name}"`).join(", ")} can't be uploaded — pick an audio-capable model or remove the audio reference. Nothing was submitted.`
+      );
+    }
+
     const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps, !!frameRefs);
     // Diagnostics: surface exactly what reaches OpenArt so a silently-ignored
     // length (the recurring "asked 2s, got the 5s default" bug) is visible in
@@ -1551,7 +1596,7 @@ private videoRefsAssign = videoRefsAssign;
     // failure mode). `paramsObj[k] === uploaded` identifies the field the
     // binder assigned, since `videoGenArgs` passes that exact array.
     const refArrayKey = uploaded.length
-      ? Object.keys(paramsObj).find((k) => Array.isArray(paramsObj[k]) && paramsObj[k] === uploaded)
+      ? Object.keys(paramsObj).find((k) => Array.isArray(paramsObj[k]) && (paramsObj[k] as unknown[]).some((el) => uploaded.includes(el as Record<string, unknown>)))
       : undefined;
     // When the refs couldn't be bound, dump the chosen mode's form fields
     // (array-shaped ones marked `[]`) so the real reference field name is

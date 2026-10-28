@@ -347,7 +347,7 @@ export interface ProductRef {
 /** What a reference is FOR — governs whether Magic may cast/cite it:
  *  - `subject`: a character, product, or prop that appears in frame.
  *  - `environment`: a set/location/backdrop.
- *  - `style`: look only; auto-attaches as style, never a subject.
+ *  - `style`: look only; prompt/LLM context, never uploaded, never a subject.
  *  - `layout`: blockouts/composition plates; generation inputs, never cast.
  *  - `inspiration`: mood only; never uploaded as a subject.
  *  Absent = infer from name/category (strong signals only), else `subject`. */
@@ -376,19 +376,24 @@ export interface CustomRef {
   categoryId?: string;
   /** Script/model names this reference also answers to (`@[Alias]` → this). */
   aliases?: string[];
-  /** Style-only override: auto-attaches with a style-only clause. */
+  /** Style-only override: style-tagged (context only, never uploaded).
+   *  Kept in sync with an explicit `purpose` on read. */
   styleOnly?: boolean;
   /** What this reference is for (Magic casting/citation). See ReferencePurpose. */
   purpose?: ReferencePurpose;
   /** One-line "what this image shows" card for Magic binding and tooltips.
    *  User-editable; may be auto-drafted by vision. NOT prompt direction. */
   visualSummary?: string;
+  /** Waveform color for an audio reference: a `SEQUENCE_ACCENT_COLORS`
+   *  palette id (hex is presentation only). Absent = the `blue` default.
+   *  Set from the audio node's right-click menu; follows the file. */
+  waveformColor?: string;
 }
 
 export interface ReferenceCategory {
   id: string;
   name: string;
-  /** "style" refs auto-attach to every submission with a style-only clause. */
+  /** "style" refs are style-tagged: prompt context only, never uploaded. */
   kind?: "content" | "style";
 }
 

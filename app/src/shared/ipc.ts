@@ -450,6 +450,10 @@ export interface CascadeApi {
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
   onZoomChanged(cb: () => void): () => void;
   listModels(): Promise<ModelListResult>;
+  /** Settings "Test connection": list models AND send a 1-token completion
+   *  to the selected model, so a key that can list but not run inference
+   *  (model/IP restriction, missing inference scope) fails here. */
+  testConnection(): Promise<ModelListResult>;
   getCredits(): Promise<ChatBalance | null>;
   /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
   getOpenArtCredits(): Promise<number | null>;

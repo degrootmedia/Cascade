@@ -13,7 +13,7 @@ from "../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
-import { sanitizeGenParams, normalizeShotSequences, isVideoEditFamilyMode } from "../shared/ipc.js";
+import { sanitizeGenParams, normalizeShotSequences, isVideoEditFamilyMode, SEQUENCE_ACCENT_COLORS } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
 parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
@@ -48,10 +48,18 @@ function normalize(p: ProductionFile): ProductionFile {
   });
   for (const r of p.references) {
     if (r.purpose !== undefined && !["subject", "environment", "style", "layout", "inspiration"].includes(r.purpose)) delete r.purpose;
+    // An explicit purpose is authoritative for the legacy style flag:
+    // changing the purpose away from style must stop the reference from
+    // being treated as style-tagged (a stale `styleOnly` once kept it so).
+    if (r.purpose !== undefined) {
+      if (r.purpose === "style") r.styleOnly = true;
+      else delete r.styleOnly;
+    }
     if (r.visualSummary !== undefined) {
       const clean = typeof r.visualSummary === "string" ? r.visualSummary.trim().slice(0, 300) : "";
       if (clean) r.visualSummary = clean; else delete r.visualSummary;
     }
+    if (r.waveformColor !== undefined && !SEQUENCE_ACCENT_COLORS.some((c) => c.id === r.waveformColor)) delete r.waveformColor;
   }
   // Reference aliases are read-repaired: sanitized/deduped, canonical dropped.
   for (const pool of [p.characters, p.products, p.references]) {
@@ -1158,6 +1166,7 @@ export function newProduction(name: string, parentFolder: string): ProductionFil
 }
 
 const IMPORT_IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+const IMPORT_VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
 const IMPORT_AUDIO_FILE = /\.(mp3|wav|m4a|aac|ogg|flac)$/i;
 
 /** Workspace-relative paths of the files directly inside an asset dir whose
@@ -1261,6 +1270,13 @@ function hydrateImportedProduction(p: ProductionFile): void {
     for (const rel of unclaimedReferenceFiles(rels, p)) {
       const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
       p.references = [...(p.references ?? []), { id: newRefId(), name, imagePath: rel, shotIds: [] }];
+    }
+    // Dropped video/audio files recover as media references, like the rescan.
+    for (const [rx, kind] of [[IMPORT_VIDEO_FILE, "video"], [IMPORT_AUDIO_FILE, "audio"]] as const) {
+      for (const rel of unclaimedReferenceFiles(listAssetFiles(p, p.assets.referencesDir, rx), p)) {
+        const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
+        p.references = [...(p.references ?? []), { id: newRefId(), name, media: kind, mediaPath: rel, shotIds: [] }];
+      }
     }
   } catch { /* references can be rescanned later from Step 2 */ }
 

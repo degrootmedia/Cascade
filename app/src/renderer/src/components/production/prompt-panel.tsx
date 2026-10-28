@@ -38,6 +38,15 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
   const [query, setQuery] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0 });
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // Keep the keyboard-highlighted tag visible: the menu is height-capped
+  // (max-height + overflow auto), so arrowing past its window must scroll
+  // the highlight into view. This editor backs every @ tag list (side
+  // panel, node graph, Image Suite), so the fix lands everywhere at once.
+  useEffect(() => {
+    const el = menuRef.current?.querySelector("button.selected") as HTMLElement | null;
+    if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
+  }, [selected, query]);
   // Live mirrors for the deferred blur cleanup — a stale closure there once
   // re-composed from an old value and stripped a just-inserted reference block.
   const valueRef = useRef(value);
@@ -122,7 +131,7 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
         }}
       />
       {query !== null && matches.length > 0 && (
-        <div className="prod-ref-autocomplete" style={{ left: menuPos.left, top: menuPos.top }}>
+        <div ref={menuRef} className="prod-ref-autocomplete" style={{ left: menuPos.left, top: menuPos.top }}>
           {matches.map((r, i) => (
             <button key={r.id} className={i === selected ? "selected" : ""} onMouseDown={(e) => { e.preventDefault(); choose(r); }}>
               {r.artwork ? <img src={r.artwork} alt="" /> : <RefMediaGlyph media={r.media} />}<span>@[{r.name}]</span>

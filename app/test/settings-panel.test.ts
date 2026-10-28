@@ -138,6 +138,7 @@ function installCascade() {
     onVoiceProgress: () => () => {},
     getHiddenMediaModels: async () => [],
     listModels: async () => ({ ok: true, models: [] }),
+    testConnection: async () => ({ ok: true, models: [] }),
     setProvider: async (id: string) => { writes.push(["setProvider", id]); },
     setModel: async (id: string) => { writes.push(["setModel", id]); },
     setAccent: async (c: string) => { writes.push(["setAccent", c]); },

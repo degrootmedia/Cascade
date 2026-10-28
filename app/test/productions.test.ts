@@ -991,6 +991,40 @@ describe("board frame selection persistence", () => {
   });
 });
 
+describe("waveformColor read repair", () => {
+  it("keeps a palette id and drops an unknown waveform color on load", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "wave-color", folder: path.join(dataDir, "assets") },
+      references: [
+        { id: "r1", name: "Voiceover", media: "audio", mediaPath: "references/vo.mp3", waveformColor: "teal" },
+        { id: "r2", name: "Theme", media: "audio", mediaPath: "references/theme.mp3", waveformColor: "chartreuse" },
+      ],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("wave-color")!;
+    expect(loaded.references?.find((r) => r.id === "r1")?.waveformColor).toBe("teal");
+    expect(loaded.references?.find((r) => r.id === "r2")?.waveformColor).toBeUndefined();
+  });
+});
+
+describe("purpose/styleOnly read repair", () => {
+  it("an explicit purpose wins over a stale styleOnly flag on load", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "purpose-sync", folder: path.join(dataDir, "assets") },
+      references: [
+        { id: "r1", name: "Untagged", purpose: "subject", styleOnly: true },
+        { id: "r2", name: "Tagged", purpose: "style" },
+        { id: "r3", name: "Legacy", styleOnly: true },
+      ],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("purpose-sync")!;
+    expect(loaded.references?.find((r) => r.id === "r1")?.styleOnly).toBeUndefined();
+    expect(loaded.references?.find((r) => r.id === "r2")?.styleOnly).toBe(true);
+    expect(loaded.references?.find((r) => r.id === "r3")?.styleOnly).toBe(true);
+  });
+});
+
 describe("loadProduction isolation", () => {
   function jobDoc(id: string): Production {
     return baseProduction({
@@ -1173,6 +1207,20 @@ describe("importProduction", () => {
     const first = importProduction(folder);
     const second = importProduction(folder);
     expect(second.meta.id).toBe(first.meta.id);
+  });
+
+  it("recovers dropped video/audio files in references/ as media references", () => {
+    const folder = path.join(dataDir, "external", "Media Film");
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "references", "plate.png"), Buffer.from("png"));
+    fs.writeFileSync(path.join(folder, "references", "voiceover.mp3"), Buffer.from("mp3"));
+    fs.writeFileSync(path.join(folder, "references", "motion.mp4"), Buffer.from("mp4"));
+
+    const p = importProduction(folder);
+    const byName = new Map((p.references ?? []).map((r) => [r.name, r]));
+    expect(byName.get("plate")?.imagePath).toBe("references/plate.png");
+    expect(byName.get("voiceover")).toMatchObject({ media: "audio", mediaPath: "references/voiceover.mp3" });
+    expect(byName.get("motion")).toMatchObject({ media: "video", mediaPath: "references/motion.mp4" });
   });
 
   it("throws for a folder that doesn't exist", () => {

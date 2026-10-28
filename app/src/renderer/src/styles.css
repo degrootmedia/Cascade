@@ -2423,6 +2423,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 /* Row tiles reuse the canvas poster block when a clip can't play; the row
    figure isn't flex, so the poster needs the tile media height explicitly. */
 .prod-ref:not(.prod-ref-node) > .prod-ref-video-thumb { height: 110px; }
+/* Audio references: the shared waveform tile at the row media height. */
+.prod-ref:not(.prod-ref-node) > .prod-ref-audio { height: 110px; }
+.prod-ref-audio > .prod-graph-audio { width: 100%; height: 100%; border: none; border-radius: 0; }
 .prod-ref figcaption {
   padding: 6px 8px;
   font-size: 0.8rem;
@@ -4802,6 +4805,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   pointer-events: none;
 }
 
+/* No drop shadow: a per-node shadow is re-rastered for every visible node
+   on every pan/zoom frame and reads as navigation hitching; the border
+   alone separates a node from the canvas. */
 .prod-graph-node {
   width: 236px;
   background: var(--bg);
@@ -4810,7 +4816,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   padding: 10px;
   color: var(--text);
   font-size: 0.78rem;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 .prod-graph-node-title { font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 7px; }
 /* Delete affordance: a small × at the node's top-right, a sibling of the node
@@ -4845,10 +4850,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
 }
-/* While the viewport pans/zooms (graph/lod.tsx `interacting`), per-node
-   drop shadows are the most expensive thing rastered every frame for zero
-   information — drop them for the gesture; the border still reads. */
-.prod-graph-canvas.interacting .prod-graph-node { box-shadow: none; }
 .prod-graph-canvas .react-flow__selection {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border: 1px solid var(--accent);
@@ -4918,6 +4919,15 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-ref-collapsed .prod-ref-edit-name { margin: 0; }
 .prod-graph-ref-video { background: var(--media-bg); }
 .prod-graph-ref-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-weight: 700; }
+/* Audio reference tile: waveform canvas over a compact transport row. */
+.prod-graph-ref-media > .prod-graph-audio, .prod-graph-ref-thumb > .prod-graph-audio { width: 100%; height: 100%; }
+.prod-graph-audio { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-raised); overflow: hidden; }
+.prod-graph-audio-wave { position: relative; flex: 1 1 auto; min-height: 34px; cursor: pointer; touch-action: none; }
+.prod-graph-audio-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.prod-graph-audio-transport { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-top: 1px solid var(--border); }
+.prod-graph-audio-play { width: 22px; height: 22px; flex: 0 0 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--accent); border: 1px solid var(--accent); color: var(--on-accent); font-size: 0.5rem; line-height: 1; padding: 0; cursor: pointer; }
+.prod-graph-audio-play:hover { filter: brightness(1.12); }
+.prod-graph-audio-time { font-size: 0.68rem; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .prod-graph-ref-name { font-size: 0.72rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prod-graph-ref-btn {
   align-self: flex-start;
@@ -5631,7 +5641,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   background-size: 32px 32px;
 }
 .moodboard-canvas.panning { cursor: grabbing; }
-.moodboard-content { position: absolute; top: 0; left: 0; transform-origin: 0 0; pointer-events: none; }
+.moodboard-content { position: absolute; top: 0; left: 0; transform-origin: 0 0; pointer-events: none; will-change: transform; }
 
 .moodboard-node { position: absolute; pointer-events: auto; }
 /* Zoomed far out, per-node chrome (name field, action buttons, handles) is
@@ -5790,7 +5800,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-ref-node { display: flex; flex-direction: column; }
 .prod-ref-node > img,
 .prod-ref-node > .prod-ref-video,
-.prod-ref-node > .prod-ref-blank {
+.prod-ref-node > .prod-ref-blank,
+.prod-ref-node > .prod-ref-audio {
   flex: 1 1 auto;
   height: auto;
   min-height: 0;

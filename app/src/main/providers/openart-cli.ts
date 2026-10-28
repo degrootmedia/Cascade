@@ -57,7 +57,7 @@ import type {
   VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
-import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { citePrompt, isAudioRef, resolvePromptRefs, styleRefNames } from "./refs.js";
 import {
   defaultCliRun,
   resolveCliOnPath,
@@ -617,9 +617,9 @@ export class OpenArtCliProvider implements MediaProvider {
 
       // Reference art (images only — the CLI has no video/image-edit input
       // on image generation beyond --image files).
-      const imageRefs = refs.filter((r) => !/^data:video\//i.test(r.dataUrl));
+      const imageRefs = refs.filter((r) => /^data:image\//i.test(r.dataUrl));
       if (imageRefs.length < refs.length) {
-        onNotice?.(`Skipping ${refs.length - imageRefs.length} video reference(s) — the OpenArt CLI only takes image files.`);
+        onNotice?.(`Skipping ${refs.length - imageRefs.length} video/audio reference(s) — the OpenArt CLI only takes image files.`);
       }
       const { paths, cleanup } = writeCliTempRefs(imageRefs);
       const uploaded: (string | null)[] = [...paths];
@@ -788,6 +788,12 @@ export class OpenArtCliProvider implements MediaProvider {
     if (videoRefs.length) {
       throw new Error(
         `The OpenArt CLI can't send video references (${videoRefs.map((r) => `"${r.name}"`).join(", ")}) — switch to the OpenArt MCP transport for reference-carrying video.`
+      );
+    }
+    const audioRefs = refs.filter((r) => isAudioRef(r));
+    if (audioRefs.length) {
+      throw new Error(
+        `The OpenArt CLI can't send audio references (${audioRefs.map((r) => `"${r.name}"`).join(", ")}) — switch to the OpenArt MCP transport or Higgsfield for audio-carrying video. Nothing was submitted.`
       );
     }
     if (refs.length > 1) {

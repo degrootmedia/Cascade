@@ -34,7 +34,7 @@ import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSur
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
 import { styleTaggedRefIds } from "../shared/magic-refs.js";
-import { applyRefSwapsToIds, applyRefSwapsToPrompt, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags } from "./video-retry.js";
+import { applyRefSwapsToIds, applyRefSwapsToPrompt, mergeRefSwaps, proactive720pSwaps, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags, type ResolvedRefSwap, type VideoInputRef } from "./video-retry.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
@@ -63,6 +63,8 @@ import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
+import { shrinkImageToJpeg, imageDataUrlToBuffer } from "./image-downsample.js";
+import { IMAGE_IMPORT_LIMIT_BYTES, OVERSIZE_IMAGE_MESSAGE, OVERSIZE_IMAGE_CONVERT_LABEL } from "../shared/image-import.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, ReferenceSaveOptions, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
@@ -2264,14 +2266,28 @@ function registerIpc() {
     const file = res.canceled ? null : res.filePaths[0];
     if (!file) return null;
     try {
-      const buf = fs.readFileSync(file);
-      if (buf.length > 15 * 1024 * 1024) throw new Error("Image is larger than 15 MB.");
-      const ext = path.extname(file).slice(1).toLowerCase().replace("jpg", "jpeg") || "png";
+      let buf: Buffer = fs.readFileSync(file);
+      let ext = path.extname(file).slice(1).toLowerCase().replace("jpg", "jpeg") || "png";
       // "All files" can pick a clip: never mint a fake `data:image/<video ext>`
       // (it would be saved as a .png holding video bytes). Videos enter as
       // media references via drag/paste instead.
       if (/^(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/.test(ext)) throw new Error("That's a video file — drag it onto the references panel (or a storyboard frame) to add it as a video reference.");
       if (/^(mp3|wav|m4a|aac|ogg|flac)$/.test(ext)) throw new Error("That's an audio file — drag it onto the references panel (or the node graph) to add it as an audio reference.");
+      if (buf.length > IMAGE_IMPORT_LIMIT_BYTES) {
+        // Oversize: offer a JPEG downsample instead of refusing the import.
+        // The picked file is only read — the original is never modified;
+        // the converted bytes are what the caller imports.
+        const choice = await dialog.showMessageBox(win!, {
+          type: "question",
+          message: OVERSIZE_IMAGE_MESSAGE,
+          buttons: [OVERSIZE_IMAGE_CONVERT_LABEL, "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        if (choice.response !== 0) return null;
+        buf = shrinkImageToJpeg(buf, { decode: (b) => nativeImage.createFromBuffer(b) });
+        ext = "jpeg";
+      }
       return `data:image/${ext};base64,${buf.toString("base64")}`;
     } catch (e) {
       throw new Error(`Couldn't read that image: ${e instanceof Error ? e.message : String(e)}`);
@@ -2904,6 +2920,26 @@ function registerIpc() {
         offer
       );
     } catch { /* the offer is best-effort; the real error is rethrown by the caller */ }
+  }
+
+  /** Proactive counterpart of the retry offer, for a video node's ticked
+   *  "Downsample reference video to 720p": build this submission's swaps by
+   *  creating/reusing each oversize input's 720p duplicate up front. Unlike
+   *  the best-effort offer this THROWS (no encoder / failed transcode) so
+   *  the caller submits nothing instead of uploading at native resolution
+   *  against the user's tick. New duplicates ride the job's save. */
+  async function buildProactive720pSwaps(p: Production, inputs: VideoInputRef[]): Promise<ResolvedRefSwap[]> {
+    if (!inputs.length) return [];
+    const bin = await resolveFfmpeg();
+    if (!bin) throw new Error("Downsample reference video to 720p is on, but no video encoder is available — nothing was submitted.");
+    return proactive720pSwaps(p, inputs, {
+      probe: (abs) => probeVideoSize(bin, abs),
+      createDup: (refId) => create720pReference(p, refId, {
+        resolveBin: resolveFfmpeg,
+        run: (b, argv) => runFfmpeg(b, argv),
+        probe: (b, abs) => probeVideoSize(b, abs),
+      }),
+    });
   }
 
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
@@ -4414,8 +4450,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // image artwork and dropped video clips upload as visual references.
       // Direct generation wires (no saved reference) resolve to the wired
       // node's selected take.
-      // 720p-retry substitution for this submission only (see classic flow).
-      const nodeSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      // 720p substitution for this submission only (see classic flow): the
+      // explicit retry swaps, plus — when the node's "Downsample reference
+      // video to 720p" is ticked — proactive swaps for its oversize inputs.
+      const genNode = (shot.graphVideoNodes ?? []).find((n) => n.id === nodeId);
+      const proactiveSwaps = genNode?.downsampleVideoRefs
+        ? await buildProactive720pSwaps(p, unionVideoInputs(videoRefsForIds(p, opts?.refIds), videoRefsForPromptTags(p, clean.prompt)))
+        : [];
+      if (proactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${proactiveSwaps.length} reference video${proactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
+      const nodeSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), proactiveSwaps);
       if (nodeSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, nodeSwaps);
       const effectiveRefIds = applyRefSwapsToIds(opts?.refIds, nodeSwaps);
       const extraRefs = resolveGenRefIds(p, shot, effectiveRefIds);
@@ -4633,9 +4676,21 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       } else if (!clean.prompt) {
         throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
       }
-      // 720p-retry substitution for this submission only (see classic flow):
+      // 720p substitution for this submission only (see classic flow):
       // prompt tags, the source reference, and its file path all follow.
-      const editSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      // A ticked "Downsample reference video to 720p" adds proactive swaps
+      // for oversize inputs — never on Genjutsu (its one source clip
+      // uploads as-is; the node doesn't offer the option).
+      const editProactiveSwaps = !genjutsuMode && node?.downsampleVideoRefs
+        ? await buildProactive720pSwaps(p, unionVideoInputs(
+            videoRefForEditSource(p, { sourceRefId: opts?.sourceRefId, sourcePath: opts?.sourcePath }),
+            node?.source?.kind === "ref" ? videoRefForEditSource(p, { sourceRefId: node.source.refId }) : [],
+            videoRefsForIds(p, opts?.refIds),
+            videoRefsForPromptTags(p, clean.prompt)
+          ))
+        : [];
+      if (editProactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${editProactiveSwaps.length} reference video${editProactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
+      const editSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), editProactiveSwaps);
       if (editSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, editSwaps);
       let sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       if (sourcePath) {
@@ -5618,6 +5673,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     fs.writeFileSync(assetPath(p, rel), Buffer.from(bytes));
     productionEmit(id, `Added ${kind} reference → ${rel}.`);
     return { path: rel, kind };
+  });
+
+  // Oversize drop/paste imports: shrink a renderer-supplied image data URL
+  // to a JPEG at or under the import limit. The renderer shows the convert
+  // popup first; the source file on disk is never touched.
+  handle("production:downsampleImage", (_e, dataUrl: string): string => {
+    const buf = imageDataUrlToBuffer(dataUrl);
+    const jpeg = shrinkImageToJpeg(buf, { decode: (b) => nativeImage.createFromBuffer(b) });
+    return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
   });
 
   // Step 2/3: save a reference image (inline data URL) into the production's

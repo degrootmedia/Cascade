@@ -52,6 +52,56 @@ describe("applyGraphShotPatch", () => {
     expect(merged.graphImageGens?.map((g) => g.path)).toEqual(["fresh.jpg"]);
   });
 
+  it("persists first tween block prompt/timing when fresh has no blocks yet", () => {
+    // Regression: a newly wired in-betweener has keyframes on disk but no
+    // persisted blocks (main only derives them on generate/stitch). The
+    // timeline's first prompt/drag edit rides this narrow patch — it must
+    // be adopted, not dropped back to the derived 2s/empty defaults.
+    const fresh = {
+      ...freshShot(),
+      graphTweenRefIds: ["a", "b"],
+      graphTweenBlocks: undefined,
+    } as ProductionShot;
+    const merged = applyGraphShotPatch(fresh, {
+      graphTweenBlocks: [
+        { id: "tw0", startRefId: "a", endRefId: "b", prompt: "she turns", startSec: 0, durationSec: 5 },
+      ],
+    } as Partial<ProductionShot>);
+    expect(merged.graphTweenBlocks).toHaveLength(1);
+    expect(merged.graphTweenBlocks?.[0].prompt).toBe("she turns");
+    expect(merged.graphTweenBlocks?.[0].durationSec).toBe(5);
+    // A following model-only patch must not erase the block either.
+    const afterModel = applyGraphShotPatch(merged, { graphTweenModel: "m2" } as Partial<ProductionShot>);
+    expect(afterModel.graphTweenModel).toBe("m2");
+    expect(afterModel.graphTweenBlocks?.[0].prompt).toBe("she turns");
+    expect(afterModel.graphTweenBlocks?.[0].durationSec).toBe(5);
+  });
+
+  it("adopts a new tween pair while keeping fresh history on the surviving pair", () => {
+    const fresh = {
+      ...freshShot(),
+      graphTweenRefIds: ["a", "b", "c"],
+      graphTweenBlocks: [
+        {
+          id: "tw0", startRefId: "a", endRefId: "b", prompt: "old", startSec: 0, durationSec: 2,
+          gens: [{ path: "clip.mp4", prompt: "old", model: "m", at: "" }], genIndex: 0,
+        },
+      ],
+    } as ProductionShot;
+    const merged = applyGraphShotPatch(fresh, {
+      graphTweenBlocks: [
+        { id: "tw0", startRefId: "a", endRefId: "b", prompt: "new", startSec: 0, durationSec: 4, gens: [], genIndex: 0 },
+        { id: "tw1", startRefId: "b", endRefId: "c", prompt: "he waves", startSec: 4, durationSec: 3 },
+      ],
+    } as Partial<ProductionShot>);
+    expect(merged.graphTweenBlocks).toHaveLength(2);
+    expect(merged.graphTweenBlocks?.[0].prompt).toBe("new");
+    expect(merged.graphTweenBlocks?.[0].durationSec).toBe(4);
+    expect(merged.graphTweenBlocks?.[0].gens?.map((g) => g.path)).toEqual(["clip.mp4"]);
+    expect(merged.graphTweenBlocks?.[1].prompt).toBe("he waves");
+    expect(merged.graphTweenBlocks?.[1].durationSec).toBe(3);
+  });
+
   it("repeating the same patch is a fixed point (retry-safe)", () => {
     const patch = { graphOutputSource: "videogen", graphTweenRefIds: ["r1"] } as Partial<ProductionShot>;
     const once = applyGraphShotPatch(freshShot(), patch);

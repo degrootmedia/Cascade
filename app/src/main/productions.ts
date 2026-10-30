@@ -610,29 +610,41 @@ function mergeShotSequences(
 }
 
 /** Merge in-betweener action blocks by keyframe pair (start/end source ids —
- *  block ids are positional and reshuffle when keyframes reorder). The fresh
- *  block owns its generation history; the incoming snapshot owns the block's
- *  prompt and timing. Pairs only the incoming snapshot has are re-derived
- *  from the (incoming) keyframe list by syncTweenBlocks below. */
+ *  block ids are positional and reshuffle when keyframes reorder). The
+ *  incoming snapshot owns block membership, prompts, and timing (like
+ *  mergeGraphNodes); the fresh block owns its generation history. Pairs only
+ *  the incoming snapshot has are adopted (a newly wired in-betweener has no
+ *  persisted blocks until its first timeline edit, so iterating the fresh
+ *  list would drop that edit wholesale); pairs only the fresh list has were
+ *  rewired away renderer-side and drop. syncTweenBlocks later re-derives ids
+ *  and prunes dead keyframes where it runs. */
 function mergeTweenBlocks(
   freshBlocks: TweenBlock[] | undefined,
   incomingBlocks: TweenBlock[] | undefined
 ): TweenBlock[] | undefined {
   if (!incomingBlocks) return freshBlocks;
-  const incomingByPair = new Map<string, TweenBlock>();
-  for (const b of incomingBlocks) {
+  const freshByPair = new Map<string, TweenBlock>();
+  for (const b of freshBlocks ?? []) {
     if (!b) continue;
     const key = `${b.startRefId}→${b.endRefId}`;
-    if (!incomingByPair.has(key)) incomingByPair.set(key, b);
+    if (!freshByPair.has(key)) freshByPair.set(key, b);
   }
-  return (freshBlocks ?? []).map((fb) => {
-    const ib = incomingByPair.get(`${fb.startRefId}→${fb.endRefId}`);
-    if (!ib) return fb;
-    const { gens: _gens, genIndex: _idx, id: _id, startRefId: _s, endRefId: _e, ...rest } = ib;
-    const block: TweenBlock = { ...fb, ...rest };
+  const out: TweenBlock[] = [];
+  const seen = new Set<string>();
+  for (const ib of incomingBlocks) {
+    if (!ib || typeof ib.startRefId !== "string" || typeof ib.endRefId !== "string") continue;
+    const key = `${ib.startRefId}→${ib.endRefId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fb = freshByPair.get(key);
+    // A pair main has never seen has no main-owned history yet — drop any
+    // echoed gens rather than resurrecting takes from a stale snapshot.
+    if (!fb) { out.push({ ...ib, gens: undefined, genIndex: undefined }); continue; }
+    const block: TweenBlock = { ...ib, gens: fb.gens };
     block.genIndex = takeGenIndex(ib.genIndex, ib.gens, fb.genIndex, fb.gens);
-    return block;
-  });
+    out.push(block);
+  }
+  return out;
 }
 
 /**

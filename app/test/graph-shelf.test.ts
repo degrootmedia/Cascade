@@ -657,6 +657,34 @@ describe("node-graph delete key", () => {
     document.body.removeChild(host);
   });
 
+  it("deleting a laid-out video node removes the pair permanently (no layout resurrection)", async () => {
+    savedLayouts = [];
+    // A shot reopened with saved canvas positions for both pair members —
+    // the state every real graph is in after its first session.
+    const { root, host } = renderModal({
+      shotPatch: { graphVideoNodes: [{ id: "vid0", prompt: "" }] },
+      layout: { positions: { videogen: { x: 900, y: 300 }, videoprompt: { x: 500, y: 300 } } },
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeTruthy();
+
+    selectNode(host, ".prod-graph-node.prod-graph-videogen");
+    await pressDeleteKey(host);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // The pair must NOT come back (recentred) off the surviving layout entry.
+    expect(toolNodeCount(host)).toBe(0);
+    expect(host.querySelector(".prod-graph-node.prod-graph-videogen")).toBeNull();
+    expect(host.querySelector(".prod-graph-node.prod-graph-videoprompt")).toBeNull();
+    // The persisted layout patch must name BOTH pair members for removal.
+    const removals = savedLayouts.flatMap((l) => ((l as unknown as { remove?: string[] }).remove ?? []));
+    expect(removals).toContain("videogen");
+    expect(removals).toContain("videoprompt");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
   it("asks before deleting a data-holding tool, then deletes on confirm", async () => {
     const { root, host } = renderModal({
       shotPatch: {
@@ -1215,6 +1243,63 @@ describe("camera-grid node (Spec 04)", () => {
 
     expect(host.querySelector(".prod-graph-node.prod-graph-camera")).toBeTruthy();
     expect(host.querySelector(".prod-graph-camera-empty")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("node-graph model selections survive a late model list (canvas pop-out)", () => {
+  it("shows the saved video model once the catalog lands after mount", async () => {
+    // A popped-out (detached) canvas boots fresh: nodes mount with an empty
+    // model list, then listOpenArtModels resolves. The saved pick must show.
+    const shotPatch = { graphVideoNodes: [{ id: "vid0", prompt: "move", model: "vm2" }] };
+    const { root, host } = renderModal({ shotPatch, videoModels: [] });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const node = host.querySelector(".prod-graph-node.prod-graph-videogen") as HTMLElement;
+    expect(node).toBeTruthy();
+    expect((node.querySelector("select") as HTMLSelectElement).options.length).toBe(0);
+
+    const models = [
+      { id: "vm1", displayName: "VM 1", description: "", imageInput: true, videoInput: true, cost: null },
+      { id: "vm2", displayName: "VM 2", description: "", imageInput: true, videoInput: true, cost: null },
+    ];
+    await act(async () => {
+      root.render(createElement(Fragment, null, createElement(Harness, { shotPatch, videoModels: models }), createElement(ConfirmHost)));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const select = host.querySelector(".prod-graph-node.prod-graph-videogen select") as HTMLSelectElement;
+    expect(select.options.length).toBe(2);
+    expect(select.value).toBe("vm2");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+});
+
+describe("prompt nodes plug into any prompt input", () => {
+  it("wires the composer into the video node's prompt input, replacing the paired wire", async () => {
+    lastGraph = null;
+    const hadEfp = "elementFromPoint" in document;
+    const origEfp = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: () => null }).elementFromPoint = () => null;
+    const { root, host } = renderModal({ shotPatch: { graphVideoNodes: [{ id: "vid0", prompt: "Drift" }] } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const source = host.querySelector('[data-id="composer"] .react-flow__handle.react-flow__handle-right') as HTMLElement | null;
+    const target = host.querySelector('[data-id="videogen"] .react-flow__handle[data-handleid="in-prompt"]') as HTMLElement | null;
+    expect(source).toBeTruthy();
+    expect(target).toBeTruthy();
+    await act(async () => {
+      source!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, clientX: 1, clientY: 1 }));
+      target!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, clientX: 1, clientY: 1 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const edges = (lastGraph as unknown as { edges: Array<{ id: string; from: { node: string }; to: { node: string; port: string } }> } | null)?.edges ?? [];
+    const into = edges.filter((e) => e.to.node === "videogen" && e.to.port === "in-prompt");
+    expect(into.map((e) => e.from.node)).toEqual(["composer"]);
+    if (hadEfp) (document as unknown as { elementFromPoint?: unknown }).elementFromPoint = origEfp;
+    else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    expect(edges.map((e) => e.id)).toContain("e-composer-videogen-prompt");
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

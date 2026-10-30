@@ -36,6 +36,10 @@ export const TWEEN_SOCKET_RE = /^in-tween-(\d+)$/;
 export const FRAME_SOCKET_RE = /^in-frame-(\d+)$/;
 export const MAX_TWEEN_SOCKETS = 5;
 
+/** Every prompt-node kind — any of them may feed any generator's prompt
+ *  input (the paired prompt is merely the default wire). */
+const PROMPT_KINDS: GraphNodeKind[] = ["composer", "videoprompt", "editprompt", "editvideoprompt"];
+
 const promptInputs: PortDecl[] = [
   { id: "in-style", label: "Style", media: "text", from: ["style"] },
   { id: "in-ref-open", label: "Reference (open)", media: "image", accepts: ["image", "video", "audio"] },
@@ -79,13 +83,13 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
   },
   imagegen: {
     kind: "imagegen",
-    inputs: [{ id: "in-prompt", label: "Prompt", media: "text", from: ["composer"] }],
+    inputs: [{ id: "in-prompt", label: "Prompt", media: "text", from: PROMPT_KINDS }],
     outputs: [{ id: "out", label: "Image", media: "image" }],
   },
   videogen: {
     kind: "videogen",
     inputs: [
-      { id: "in-prompt", label: "Prompt", media: "text", from: ["videoprompt"] },
+      { id: "in-prompt", label: "Prompt", media: "text", from: PROMPT_KINDS },
       { id: "in-image", label: "Source frame", media: "image", accepts: ["image", "video"], from: ["imagegen", "editgen", "ref"] },
     ],
     outputs: [{ id: "out", label: "Clip", media: "video" }],
@@ -93,7 +97,7 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
   editgen: {
     kind: "editgen",
     inputs: [
-      { id: "in-prompt", label: "Prompt", media: "text", from: ["editprompt"] },
+      { id: "in-prompt", label: "Prompt", media: "text", from: PROMPT_KINDS },
       { id: "in-image", label: "Source image", media: "image", accepts: ["image", "video"], from: ["imagegen", "editgen", "ref"] },
     ],
     outputs: [{ id: "out", label: "Edit", media: "image" }],
@@ -101,7 +105,7 @@ const TABLE: Record<GraphNodeKind, NodeDecl> = {
   editvideo: {
     kind: "editvideo",
     inputs: [
-      { id: "in-prompt", label: "Prompt", media: "text", from: ["editvideoprompt"] },
+      { id: "in-prompt", label: "Prompt", media: "text", from: PROMPT_KINDS },
       { id: "in-video", label: "Source video", media: "video", from: ["videogen", "editvideo", "ref"] },
     ],
     outputs: [{ id: "out", label: "Edit", media: "video" }],

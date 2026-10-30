@@ -21,6 +21,8 @@ import { transcodeVideoFileTo720p, type VideoRef720Deps } from "../src/main/vide
 import {
   applyRefSwapsToIds,
   applyRefSwapsToPrompt,
+  mergeRefSwaps,
+  proactive720pSwaps,
   probeVideoInputs,
   resolveRefSwaps,
   retry720pOffer,
@@ -297,5 +299,58 @@ describe("normalizeRefs (submit-wrapper)", () => {
       [video, true, false],
       [image, false, false],
     ]);
+  });
+});
+
+describe("proactive 720p downsample (video-node checkbox)", () => {
+  const p = () => makeProduction("C:/prod", [CLIP, STILL, STYLE_ONLY, STYLE_CAT, { id: "r-small", name: "Small", media: "video", mediaPath: "references/small.mp4", shotIds: [] }]);
+
+  it("swaps only oversize (>720p) inputs to their created duplicates", async () => {
+    const created: string[] = [];
+    const heights: Record<string, number> = { "references/clip.mp4": 1080, "references/small.mp4": 480 };
+    const swaps = await proactive720pSwaps(p(), videoRefsForIds(p(), ["r-clip", "r-small"]), {
+      probe: async (abs) => {
+        const rel = Object.keys(heights).find((k) => abs.replace(/\\/g, "/").endsWith(k));
+        return rel ? { width: 1920, height: heights[rel] } : null;
+      },
+      createDup: async (refId) => {
+        created.push(refId);
+        return { id: `${refId}-720`, name: "Clip_720p", media: "video", mediaPath: "references/clip_720p.mp4", shotIds: [] } as CustomRef;
+      },
+    });
+    expect(created).toEqual(["r-clip"]);
+    expect(swaps).toEqual([{ fromId: "r-clip", fromName: "Clip", fromPath: "references/clip.mp4", toId: "r-clip-720", toName: "Clip_720p", toPath: "references/clip_720p.mp4" }]);
+    // The built swaps drop straight into the existing apply helpers.
+    expect(applyRefSwapsToPrompt("animate @[Clip]", swaps)).toBe("animate @[Clip_720p]");
+    expect(applyRefSwapsToIds(["r-clip", "r-small"], swaps)).toEqual(["r-clip-720", "r-small"]);
+  });
+
+  it("returns no swaps (and creates nothing) when nothing is oversize or unreadable", async () => {
+    const createDup = vi.fn(async (refId: string) => ({ id: `${refId}-720`, name: "X_720p", shotIds: [] } as CustomRef));
+    const atCap = await proactive720pSwaps(p(), videoRefsForIds(p(), ["r-clip"]), {
+      probe: async () => ({ width: 1280, height: 720 }),
+      createDup,
+    });
+    expect(atCap).toEqual([]);
+    const unreadable = await proactive720pSwaps(p(), videoRefsForIds(p(), ["r-clip"]), {
+      probe: async () => null,
+      createDup,
+    });
+    expect(unreadable).toEqual([]);
+    expect(createDup).not.toHaveBeenCalled();
+  });
+
+  it("propagates a duplicate-creation failure so the submission stops pre-upload", async () => {
+    await expect(proactive720pSwaps(p(), videoRefsForIds(p(), ["r-clip"]), {
+      probe: async () => ({ width: 3840, height: 2160 }),
+      createDup: async () => { throw new Error("no encoder"); },
+    })).rejects.toThrow("no encoder");
+  });
+
+  it("mergeRefSwaps keeps the primary entry per source id", () => {
+    const a = [{ fromId: "x", fromName: "X", toId: "x1", toName: "X1" }];
+    const b = [{ fromId: "x", fromName: "X", toId: "x2", toName: "X2" }, { fromId: "y", fromName: "Y", toId: "y1", toName: "Y1" }];
+    expect(mergeRefSwaps(a, b).map((s) => s.toId)).toEqual(["x1", "y1"]);
+    expect(mergeRefSwaps([], b).map((s) => s.toId)).toEqual(["x2", "y1"]);
   });
 });

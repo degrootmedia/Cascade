@@ -58,6 +58,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) &&
     (a.openHandleId as string) === (b.openHandleId as string),
   videogen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.hasImageSource as boolean) === (b.hasImageSource as boolean) &&
     (a.selected as number) === (b.selected as number) &&
     sameGenItems(a.items, b.items) &&
@@ -71,6 +73,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.stitched as boolean) === (b.stitched as boolean) &&
     (a.reencoded as boolean) === (b.reencoded as boolean),
   editgen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.sourceHint as string) === (b.sourceHint as string) &&
     (a.prompt as string) === (b.prompt as string) &&
     (a.sourceRefId as string | undefined) === (b.sourceRefId as string | undefined) &&
@@ -102,8 +106,11 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.previewKind as string) === (b.previewKind as string) &&
     (a.bound as boolean) === (b.bound as boolean),
   imagegen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean),
   editvideo: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
     (a.selected as number) === (b.selected as number) &&
     sameGenItems(a.items, b.items) &&
     (a.busy as boolean) === (b.busy as boolean) &&

@@ -12,6 +12,7 @@ import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-
 import { ShotTable } from "./ShotTable.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
+import { importableImageDataUrl } from "./production/image-downsample.js";
 import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
 import { nextNumberedRefName } from "../../../shared/ref-names.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
@@ -44,7 +45,8 @@ import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
-import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
+import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wiredPromptTarget } from "../../../shared/graph/render.js";
+import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
@@ -1738,11 +1740,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod || styleFrameBusy) return;
     const file = Array.from(files).find((f) => f.type.startsWith("image/"));
     if (!file) return;
-    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
     setStyleFrameBusy(styleId);
     setErr(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const dataUrl = await importableImageDataUrl(file);
+      if (!dataUrl) { setStyleFrameBusy(null); return; }
       if (!prodRef.current) { setStyleFrameBusy(null); return; }
       apply(window.cascade.setStyleFrame(prodRef.current.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
     } catch (e) {
@@ -1848,10 +1850,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  reference (for the node graph to place it on the canvas). */
   async function createReferenceFromFile(file: File): Promise<{ id: string; name: string; artwork: string } | null> {
     if (!prodRef.current) return null;
-    if (file.size > 15 * 1024 * 1024) {
-      setErr("That image is larger than 15 MB — use a smaller one.");
-      return null;
-    }
     if (!file.type.startsWith("image/")) {
       setErr(`${file.name}: not an image file.`);
       return null;
@@ -1860,13 +1858,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const choice = await promptReferenceSave(nextRefName(), { title: "Save pasted image as reference" });
     if (!choice || prodRef.current?.meta.id !== prodId) return null;
     const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
-    let dataUrl: string;
+    let dataUrl: string | null;
     try {
-      dataUrl = await fileToDataUrl(file);
+      dataUrl = await importableImageDataUrl(file);
     } catch {
       setErr("Couldn't read the pasted image.");
       return null;
     }
+    if (!dataUrl || prodRef.current?.meta.id !== prodId) return null;
     const imagePath = await persistRefImage(dataUrl, name);
     if (!imagePath) { setErr("Couldn't save the pasted image."); return null; }
     const id = uid("ref");
@@ -2201,10 +2200,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       return;
     }
     const file = media;
-    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
     setImportBusy(true); setErr(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const dataUrl = await importableImageDataUrl(file);
+      if (!dataUrl) return;
       const next = await window.cascade.importBoardImage(prod.meta.id, shotId, file.name, dataUrl);
       setProd(next);
       bustOne(shotId);
@@ -2542,12 +2541,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
     try {
       if (kind === "image") {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => { if (typeof reader.result === "string") resolve(reader.result); else reject(reader.error ?? new Error("Couldn't read the file.")); };
-          reader.onerror = () => reject(reader.error ?? new Error("Couldn't read the file."));
-          reader.readAsDataURL(file);
-        });
+        const dataUrl = await importableImageDataUrl(file);
+        if (!dataUrl) return null;
         const imagePath = await persistRefImage(dataUrl, name);
         if (!imagePath) { setErr("Couldn't save the dropped image."); return null; }
         const id = saveRefOnly(name, { imagePath, categoryId: choice.categoryId });
@@ -3089,7 +3084,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const frameParams = params ?? cur?.graphImageParams;
-      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: liveFocusedPrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
+      // The prompt wired into the image node's prompt input wins; the
+      // composer (the paired/live board prompt) is the default wire.
+      const imageTarget = cur ? wiredPromptTarget(cur, "imagegen", "composer") : "composer";
+      const framePrompt = cur && imageTarget !== "composer" ? renderShotPrompt(prod, cur, imageTarget) : liveFocusedPrompt;
+      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: framePrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -3129,9 +3128,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
           ? cur?.graphImageGens?.[cur?.graphImageGenIndex ?? 0]?.path
           : refSource?.imagePath;
       const videoParams = params ?? node?.params;
-      // Render the video prompt from the plugged references at submit time.
+      // Render the wired prompt at submit time: whichever prompt node is
+      // plugged into this generator's prompt input (paired by default).
+      const videoTarget = cur ? wiredPromptTarget(cur, videoGenNodeId(node?.id ?? nodeId), { videoprompt: node?.id ?? nodeId }) : { videoprompt: nodeId };
+      const videoContent = cur ? promptContent(cur, videoTarget) : "";
       const videoPrompt = cur
-        ? renderPromptText((node?.prompt ?? "").trim() ? node!.prompt : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, { videoprompt: nodeId }))
+        ? renderPromptText(videoContent.trim() ? videoContent : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, videoTarget))
         : getPromptTemplate("videoMotion");
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { nodeId, prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: node?.refIds ?? [], ...(refSwaps?.length ? { refSwaps } : {}), ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
@@ -3169,9 +3171,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
-      // Render the edit prompt from the node's plugged references at submit time.
+      // Render the wired prompt at submit time (paired prompt by default);
+      // the paired path keeps the live view text as its fallback.
+      const evTarget = cur ? wiredPromptTarget(cur, editVideoGenNodeId(nodeId), { editvideoprompt: nodeId }) : { editvideoprompt: nodeId };
+      const evOwn = typeof evTarget === "object" && "editvideoprompt" in evTarget && evTarget.editvideoprompt === nodeId;
       const editVideoPrompt = cur
-        ? renderPromptText(node?.prompt ?? prompt, promptRefsFor(prod, cur, { editvideoprompt: nodeId }))
+        ? renderPromptText(evOwn ? (node?.prompt ?? prompt) : promptContent(cur, evTarget), promptRefsFor(prod, cur, evTarget))
         : prompt;
       // Source: a wired video node's selected clip, a wired video reference, or
       // the shot's own video (the default when the source socket is empty).
@@ -3225,7 +3230,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       // Render the edit prompt from the plugged references at submit time —
       // the stored node prompt is content-only, so the live style/brand text
       // is always current (no baked copy from connect time).
-      const editPrompt = cur ? renderShotPrompt(prod, cur, { editprompt: nodeId }) : (node?.prompt ?? "");
+      const editPrompt = cur ? renderShotPrompt(prod, cur, wiredPromptTarget(cur, `editgen:${nodeId}`, { editprompt: nodeId })) : (node?.prompt ?? "");
       const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: editPrompt, model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
       setProd(next);
       bustOne(shotId);
@@ -4472,10 +4477,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
                     if (files.length) {
                       const file = files[0];
-                      if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
                       try {
-                        const dataUrl = await fileToDataUrl(file);
-                        await styleFromImageDataUrl(dataUrl);
+                        const dataUrl = await importableImageDataUrl(file);
+                        if (dataUrl) await styleFromImageDataUrl(dataUrl);
                       } catch { setErr("Couldn't read the dropped image."); }
                     }
                   }}

@@ -9,6 +9,7 @@ export const productionChannels = {
   "production:remove": { method: "removeProduction", kind: "invoke" },
   "production:pickScriptFile": { method: "pickScriptFile", kind: "invoke" },
   "production:pickReferenceImage": { method: "pickReferenceImage", kind: "invoke" },
+  "production:downsampleImage": { method: "downsampleImage", kind: "invoke" },
   "production:addReferenceMedia": { method: "addReferenceMedia", kind: "invoke" },
   "production:addReferenceImage": { method: "addReferenceImage", kind: "invoke" },
   "production:addBoardFrameReference": { method: "addBoardFrameReference", kind: "invoke" },

@@ -277,6 +277,12 @@ export interface GraphVideoNode {
   refIds?: string[];
   /** Whether the style node is plugged into this node's prompt node. */
   styleConnected?: boolean;
+  /** Proactive 720p downsample: at submit, oversize (>720p) video
+   *  references taking part are swapped to their `<name>_720p` duplicates
+   *  (created on first use) for that submission only — the same substitution
+   *  the manual 720p retry applies, without waiting for a failure. Ignored
+   *  for Genjutsu modes, whose single source clip always uploads as-is. */
+  downsampleVideoRefs?: boolean;
 }
 
 /** One timed shot segment of a sequence node's timeline. A shot sequence is

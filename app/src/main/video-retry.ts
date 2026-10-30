@@ -96,6 +96,52 @@ export function resolveRefSwaps(p: Production, swaps: unknown): ResolvedRefSwap[
   return out;
 }
 
+/** Merge two swap lists, keeping the FIRST entry per source id (callers
+ *  pass the explicit retry swaps first, so they win over proactive ones). */
+export function mergeRefSwaps(primary: ResolvedRefSwap[], secondary: ResolvedRefSwap[]): ResolvedRefSwap[] {
+  const seen = new Set<string>();
+  return [...primary, ...secondary].filter((s) => (seen.has(s.fromId) ? false : (seen.add(s.fromId), true)));
+}
+
+/** Injected seams for the proactive downsample (ffmpeg probe + duplicate
+ *  creation in production; fakes in tests). */
+export interface Proactive720pDeps {
+  probe: (absPath: string) => Promise<{ width: number; height: number } | null>;
+  createDup: (refId: string) => Promise<CustomRef>;
+}
+
+/**
+ * Build the ref swaps for a video node's "Downsample reference video to
+ * 720p" submission: probe every inventoried video input and swap each
+ * oversize (>720p) one to its 720p duplicate (created via `createDup`,
+ * idempotent in production). At-cap and unreadable inputs upload as-is —
+ * the same proven-oversize rule as the retry offer. A duplicate-creation
+ * failure propagates: the caller submits nothing rather than silently
+ * uploading at native resolution against the user's tick.
+ */
+export async function proactive720pSwaps(
+  p: Production,
+  inputs: VideoInputRef[],
+  deps: Proactive720pDeps
+): Promise<ResolvedRefSwap[]> {
+  if (!inputs.length) return [];
+  const probed = await probeVideoInputs(p, inputs, deps.probe);
+  const swaps: ResolvedRefSwap[] = [];
+  for (const input of probed) {
+    if (input.height === null || input.height <= VIDEO_REF_MAX_HEIGHT) continue;
+    const dup = await deps.createDup(input.refId);
+    swaps.push({
+      fromId: input.refId,
+      fromName: input.name,
+      fromPath: input.relPath,
+      toId: dup.id,
+      toName: dup.name,
+      ...(dup.mediaPath ? { toPath: dup.mediaPath } : {}),
+    });
+  }
+  return swaps;
+}
+
 /** Rewrite @[from] prompt tags to the swap targets for one submission. */
 export function applyRefSwapsToPrompt(prompt: string, swaps: ResolvedRefSwap[]): string {
   let out = prompt;

@@ -10,6 +10,7 @@ import { isQuotableCostModel } from "./generation-cost.js";
 import { GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
+import { importableImageDataUrl } from "./image-downsample.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import type { PromptContentHandle } from "../TriplePrompt.js";
 import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, NodesIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
@@ -407,9 +408,10 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
       for (const file of Array.from(e.dataTransfer.files)) {
         if (file.type.startsWith("video/") || file.type.startsWith("audio/")) { onAddMediaFile?.(file, category.id || undefined); continue; }
         if (!file.type.startsWith("image/")) continue;
-        const reader = new FileReader();
-        reader.onload = () => { if (typeof reader.result === "string") onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, reader.result); };
-        reader.readAsDataURL(file);
+        // Oversize images get the convert-to-JPEG offer (null = cancelled).
+        void importableImageDataUrl(file).then((dataUrl) => {
+          if (dataUrl) onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, dataUrl);
+        }).catch(() => { /* unreadable or unshrinkable drop: nothing to add */ });
       }
     }}>
       <div className="prod-category-head">

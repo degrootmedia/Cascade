@@ -5357,3 +5357,18 @@ Verify: app `npm test` (typecheck + 2011 passed, 2 skipped), core
 typecheck + 199 tests, `npm run build` clean. Not run live in Electron:
 a real vendor generation round-trip and pixel-level tag-list scrolling
 (jsdom pins the `scrollIntoView` call, not real scrolling).
+
+## 2026-10-29 - Bug batch (import button / oversize downsample / 720p video checkbox)
+
+- [x] Item 1: design-page reference import button - NOT REPRODUCED (jsdom probe: click calls picker and saves; design and moodboard share RefFigure + attachRefArtwork). Reported, moved on.
+- [ ] Item 2: oversize (>15MB) image import popup + convert-to-JPEG (main image-downsample module + picker dialog + renderer drop guards + tests).
+- [ ] Item 3: Downsample reference video to 720p checkbox on video nodes (not Genjutsu).
+
+
+### Review (2026-10-29 bug batch)
+
+- Item 1: NOT REPRODUCED. Design and moodboard tiles are the same RefFigure + attachRefArtwork + pickReferenceImage; a jsdom probe clicking the design import button called the picker and saved imagePath. No code change; probe removed. Needs repro steps (which card/state?) to proceed.
+- Item 2: DONE. Shared limit+copy in src/shared/image-import.ts; main shrink ladder in src/main/image-downsample.ts (nativeImage seam); native popup in production:pickReferenceImage; production:downsampleImage IPC for drops/pastes via renderer helper components/production/image-downsample.ts + confirm popup at all five guards + category/graph drops. Tests: image-downsample.test.ts (7), oversize-image-import.test.ts (3).
+- Item 3: DONE. GraphVideoNode.downsampleVideoRefs; checkbox on videogen + edit-video nodes only (never Genjutsu; hidden on sequence canvas); main proactive720pSwaps reuses create720pReference + existing swap application; only proven >720p inputs swap; failures stop the submission. Tests: video-retry.test.ts additions (4), video-node-downsample.test.ts (2).
+- Gate: tsc clean; full vitest 1995 passed / 2 skipped; 2 files failed to COLLECT with sandbox EPERM realpath (prompt-focus-switch, tween) and both pass alone (6/6, 48/48) - environmental, no assertion failures.
+

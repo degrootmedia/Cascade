@@ -5128,6 +5128,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-gen-zoom { position: absolute; top: 6px; left: 6px; background: color-mix(in srgb, var(--bg-raised) 85%, transparent); }
 .prod-graph-gen-cycle { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-dim); font-size: 0.72rem; }
 .prod-graph-gen-hint { font-size: 0.68rem; color: var(--text-dim); }
+.prod-graph-downsample { display: flex; align-items: center; gap: 6px; font-size: 0.68rem; color: var(--text-dim); cursor: pointer; }
 .prod-graph-gen-go { padding: 7px 10px; font-size: 0.78rem; }
 /* Fetch button for a video node whose vendor job outlived its wait. */
 .prod-graph-gen-fetch { padding: 5px 10px; font-size: 0.72rem; margin-bottom: 6px; }

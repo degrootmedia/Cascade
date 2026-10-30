@@ -449,7 +449,11 @@ OpenArt) → **4 Animatic** (timing, voiceover, music, video) → **5 Export**.
   mirrors into every plugged prompt (composer, video, and each edit node) — not
   only the text baked in at connect time. Each generator's prompt→generation
   wire is **structural** (emitted by the materializer, and by `ensurePromptPipe`
-  when a tool is dragged onto the canvas mid-session — it is not hand-connectable).
+  when a tool is dragged onto the canvas mid-session), but any prompt node may
+  be hand-plugged into any generator's prompt input — the cross-wire replaces
+  the paired pipe and generation follows the wire (`wiredPromptTarget` in
+  `shared/graph/render.ts`); `ensurePromptPipe` never adds a second prompt
+  wire over a cross-wire.
   Dragging a generation node's output onto any prompt reference socket copies the
   selected take into the production as a new reference
   (`production:saveGenerationAsReference`) and wires the new ref node into that

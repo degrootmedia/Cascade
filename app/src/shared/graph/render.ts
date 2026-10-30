@@ -28,7 +28,7 @@
  *  verbatim (the style mirror never stripped unplugged text).
  */
 import type { Graph, GraphVideoNode, Production, ProductionShot } from "../ipc.js";
-import { isVideoEditFamilyMode } from "../ipc.js";
+import { isVideoEditFamilyMode, parseEditVideoPromptNode, parseVideoPromptNode } from "../ipc.js";
 import { brandClauseText } from "../look.js";
 import { promptNodeId, type PromptNodeTarget } from "./connect.js";
 import {
@@ -68,6 +68,35 @@ export function promptContent(shot: ProductionShot, target: StylePromptTarget): 
     return node?.prompt ?? (target.editvideoprompt === "ev0" ? shot.graphEditVideoPrompt ?? "" : "");
   }
   return (shot.graphEditNodes ?? []).find((n) => n.id === target.editprompt)?.prompt ?? "";
+}
+
+/** The prompt target a canvas prompt-node id names, or null for non-prompt ids. */
+function promptTargetForNodeId(nodeId: string): StylePromptTarget | null {
+  if (nodeId === "composer") return "composer";
+  const vid = parseVideoPromptNode(nodeId);
+  if (vid) return { videoprompt: vid };
+  const ev = parseEditVideoPromptNode(nodeId);
+  if (ev) return { editvideoprompt: ev };
+  if (nodeId === "editprompt") return { editprompt: "edit0" };
+  if (nodeId.startsWith("editprompt:")) return { editprompt: nodeId.slice("editprompt:".length) };
+  return null;
+}
+
+/**
+ * The prompt a generator actually reads: the prompt node wired into its
+ * `in-prompt` socket. Any prompt node may feed any generator's prompt
+ * input, so generation follows the wire; with no (recognizable) wire the
+ * paired prompt (`fallback`) reads as before. Shots without a stored
+ * graph always take the fallback.
+ */
+export function wiredPromptTarget(shot: ProductionShot, genNodeId: string, fallback: StylePromptTarget): StylePromptTarget {
+  const edges = shot.graph?.edges ?? [];
+  for (let i = edges.length - 1; i >= 0; i--) {
+    const e = edges[i];
+    if (e.to.node !== genNodeId || e.to.port !== "in-prompt") continue;
+    return promptTargetForNodeId(e.from.node) ?? fallback;
+  }
+  return fallback;
 }
 
 /** True when the style node plugs into the target (edge present). */

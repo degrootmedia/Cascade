@@ -134,6 +134,33 @@ describe("node-registration completeness", () => {
     expect(nodeDataEqual("editvideo", base, { ...base, pending: true })).toBe(false);
   });
 
+  it("generator reconciliation notices a late-arriving model list and saved model (detached-window pop-out)", () => {
+    // A freshly booted detached canvas window mounts its nodes before the
+    // model catalog resolves (models: []). When the list lands, every
+    // generator node must rebuild or its model dropdown stays empty and the
+    // saved pick looks lost until some unrelated change rebuilds the node.
+    const models = [{ id: "m1" }, { id: "m2" }];
+    const videogen = { hasImageSource: false, selected: 0, items: [], busy: false, models: [] as Array<{ id: string }>, savedModel: "m2" };
+    expect(nodeDataEqual("videogen", videogen, { ...videogen })).toBe(true);
+    expect(nodeDataEqual("videogen", videogen, { ...videogen, models })).toBe(false);
+    expect(nodeDataEqual("videogen", videogen, { ...videogen, savedModel: "m1" })).toBe(false);
+    const imagegen = { selected: 0, items: [], busy: false, models: [] as Array<{ id: string }>, savedModel: "m2" };
+    expect(nodeDataEqual("imagegen", imagegen, { ...imagegen })).toBe(true);
+    expect(nodeDataEqual("imagegen", imagegen, { ...imagegen, models })).toBe(false);
+    expect(nodeDataEqual("imagegen", imagegen, { ...imagegen, savedModel: "m1" })).toBe(false);
+    const editgen = { sourceHint: "", prompt: "", selected: 0, items: [], busy: false, models: [] as Array<{ id: string }>, savedModel: "m2" };
+    expect(nodeDataEqual("editgen", editgen, { ...editgen })).toBe(true);
+    expect(nodeDataEqual("editgen", editgen, { ...editgen, models })).toBe(false);
+    expect(nodeDataEqual("editgen", editgen, { ...editgen, savedModel: "m1" })).toBe(false);
+    // Edit-video already noticed the model list; the saved pick must count too.
+    const editvideo = {
+      selected: 0, items: [], busy: false, piped: false, pending: false,
+      sourceLabel: null, savedPrompt: "", models, savedModel: "m2",
+    };
+    expect(nodeDataEqual("editvideo", editvideo, { ...editvideo })).toBe(true);
+    expect(nodeDataEqual("editvideo", editvideo, { ...editvideo, savedModel: "m1" })).toBe(false);
+  });
+
   it("every declared submit channel exists in the IPC contract", () => {
     const channels = Object.values(NODE_KIND_REGISTRY).flatMap((r) => r.submitChannels);
     expect(channels.length).toBeGreaterThan(0);

@@ -405,6 +405,11 @@ interface VideoGenData extends Record<string, unknown> {
   savedDurationSec?: number;
   /** This node's saved advanced/variant params (schema-driven). */
   savedParams?: GenParams;
+  /** This node's saved "Downsample reference video to 720p" tick. */
+  savedDownsampleVideoRefs?: boolean;
+  /** Offer the 720p-downsample checkbox (false on the sequence canvas,
+   *  whose submits ride separate handlers). */
+  showDownsampleVideoRefs?: boolean;
   /** Stored clips (newest first). `draftJobId` marks a Seedance 2.5 480p draft
    *  that can be finalized at 1080p. */
   items: { url: string; prompt: string; path: string; draftJobId?: string }[];
@@ -475,6 +480,12 @@ interface EditVideoData extends Record<string, unknown> {
   savedResolution?: string;
   /** This node's saved clip-length pick in seconds (0 / absent = Auto: keep the source timing). */
   savedDurationSec?: number;
+  /** This node's saved "Downsample reference video to 720p" tick (never
+   *  offered on Genjutsu variants). */
+  savedDownsampleVideoRefs?: boolean;
+  /** Offer the 720p-downsample checkbox (false on the sequence canvas,
+   *  whose submits ride separate handlers). */
+  showDownsampleVideoRefs?: boolean;
   /** Label of the clip wired into the source socket (null = not wired;
    *  generation then falls back to the shot's own video). */
   sourceLabel: string | null;
@@ -1033,8 +1044,8 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
     // This shot's own pick wins; else the production master (when it names a
     // real model); else the remembered last choice. "auto"/a stale id falls
     // through — effModel below always lands on a listed model.
-    const own = data.savedModel && data.models.some((m) => m.id === data.savedModel) ? data.savedModel : null;
-    const master = data.defaultModel && data.defaultModel !== "auto" && data.models.some((m) => m.id === data.defaultModel)
+    const own = data.savedModel && (data.models.length === 0 || data.models.some((m) => m.id === data.savedModel)) ? data.savedModel : null;
+    const master = data.defaultModel && data.defaultModel !== "auto" && (data.models.length === 0 || data.models.some((m) => m.id === data.defaultModel))
       ? data.defaultModel
       : null;
     return own ?? master ?? getMediaDefault("image")?.model ?? data.defaultModel;
@@ -1165,6 +1176,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   const [resolution, setResolution] = useState(data.savedResolution ?? remembered?.resolution ?? "1080p");
   const [durationSec, setDurationSec] = useState(data.sequenceTotal ?? data.savedDurationSec ?? remembered?.durationSec ?? 5);
   const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
+  const [downsampleVideoRefs, setDownsampleVideoRefs] = useState(data.savedDownsampleVideoRefs ?? false);
   const busy = data.busy === true;
   const [fetching, setFetching] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
@@ -1278,6 +1290,11 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
         </select>
         <DurationField className="prod-openart-select nodrag" opts={opts} value={durationSec} title="Clip length" onChange={(n) => { setDurationSec(n); data.onSaveFields(data.nodeId, { durationSec: n }); }} />
       </div>
+      {data.showDownsampleVideoRefs && (
+        <label className="prod-graph-downsample nodrag" title="Shrink oversize (over 720p) reference videos to their 720p copies before uploading (created on first use)">
+          <input type="checkbox" checked={downsampleVideoRefs} onChange={(e) => { setDownsampleVideoRefs(e.target.checked); data.onSaveFields(data.nodeId, { downsampleVideoRefs: e.target.checked }); }} /> Downsample reference video to 720p
+        </label>
+      )}
       <div className="nodrag">
         <ModelOptionsForm
           schema={schema}
@@ -1396,6 +1413,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
   const [resolution, setResolution] = useState(data.savedResolution ?? "");
   const [durationSec, setDurationSec] = useState(data.savedDurationSec ?? 0);
   const [params, setParams] = useState<GenParams>(data.savedParams ?? {});
+  const [downsampleVideoRefs, setDownsampleVideoRefs] = useState(data.savedDownsampleVideoRefs ?? false);
   const [schema, setSchema] = useState<CliModelSchema | null>(null);
   const [opts, setOpts] = useState<VideoModelOptions | null>(null);
   const busy = data.busy === true;
@@ -1475,6 +1493,11 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
         </select>
         {!genjutsu && <DurationField className="prod-openart-select nodrag" opts={opts} value={durationSec} auto title="Clip length (Auto = keep the source clip's timing)" onChange={(n) => { setDurationSec(n); save({ durationSec: n }); }} />}
       </div>
+      {!genjutsu && data.showDownsampleVideoRefs && (
+        <label className="prod-graph-downsample nodrag" title="Shrink oversize (over 720p) reference videos to their 720p copies before uploading (created on first use)">
+          <input type="checkbox" checked={downsampleVideoRefs} onChange={(e) => { setDownsampleVideoRefs(e.target.checked); save({ downsampleVideoRefs: e.target.checked }); }} /> Downsample reference video to 720p
+        </label>
+      )}
       <span className="prod-graph-gen-hint">
         {data.sourceLabel ? `Source: ${data.sourceLabel}` : "Source: shot video (wire a clip to override)"}
       </span>
@@ -1540,7 +1563,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
         <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy || !canRun} title={genjutsu && imageRefCount < 1 ? "Wire or @-cite at least one image reference first" : undefined} onClick={() => { void run(); }}>
           {busy ? variant.busyLabel : <>{variant.goLabel}<GenerationCostSuffix req={editVideoCostReq} /></>}
         </button>
-        {data.items[data.selected] && (
+        {!genjutsu && data.items[data.selected] && (
           <button className="prod-btn nodrag" disabled={data.piped} onClick={() => data.onPipeToOutput(data.nodeId)} title="Feed the edited clip into the frame output">
             {data.piped ? "Piped" : "Pipe to output"}
           </button>
@@ -3335,6 +3358,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const videoNodes = useMemo<GraphVideoNode[]>(() => {
     const list = videoNodesFor(shot).filter((n) => !isVideoEditFamilyMode(n.mode));
     if (list.length) return list;
+    // An explicit (possibly empty) node list is authoritative membership:
+    // a deleted video node stays deleted instead of resurrecting off a
+    // surviving layout position. Only pre-migration shots (no list yet)
+    // fall back to layout-derived presence, mirroring the materializer.
+    if (Array.isArray(shot.graphVideoNodes)) return list;
     // A saved layout position alone implies a placed (empty) node, mirroring
     // the materializer's layout-derived presence.
     const p = initialLayout?.positions ?? {};
@@ -4091,6 +4119,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         savedPrompt: node.prompt,
         savedResolution: node.resolution,
         savedDurationSec: node.durationSec,
+        savedDownsampleVideoRefs: node.downsampleVideoRefs,
+        showDownsampleVideoRefs: !shot.graphSequence,
         sourceLabel,
         items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path })),
         selected: node.genIndex ?? 0,
@@ -4113,7 +4143,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       },
       deletable: true,
     };
-  }, [videoModels, videoEditModelIds, taggedVideoByNode, shot.graphOutputSource, shot.graphOutputVideoNodeId, shot.pendingVideoGen, references, prod.meta.id, editVideoBusyNodeIds, stable]);
+  }, [videoModels, videoEditModelIds, taggedVideoByNode, shot.graphOutputSource, shot.graphOutputVideoNodeId, shot.pendingVideoGen, shot.graphSequence, references, prod.meta.id, editVideoBusyNodeIds, stable]);
 
   /** One edit-video node's prompt node. */
   const editVideoPromptNodeFor = useCallback((node: GraphVideoNode, promptPos: { x: number; y: number }): GraphNode => {
@@ -4152,6 +4182,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         savedResolution: node.resolution,
         savedDurationSec: node.durationSec,
         savedParams: node.params,
+        savedDownsampleVideoRefs: node.downsampleVideoRefs,
+        showDownsampleVideoRefs: !shot.graphSequence,
         items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path, ...(g.draftJobId ? { draftJobId: g.draftJobId } : {}) })),
         selected: node.genIndex ?? 0,
         hasImageSource: !!node.source,
@@ -5069,7 +5101,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       saveLayout({
         positions: Object.fromEntries(final.map((n) => [n.id, n.position])),
         ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
-        ...(removed.length > 0 ? { remove: removed.map((c) => c.id) } : {}),
+        ...(removed.length > 0 ? { remove: [...new Set([...removed.map((c) => c.id), ...toolNodeIds])] } : {}),
       });
     }
   }, [shot, videoGenActive, tweenActive, cameraGridActive, showHint, flushPosChanges]);
@@ -5564,7 +5596,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  (all at once allowed), videogen/tween→output, ref→output
    *  (image/video refs only), ref→edit-node source (image refs only),
    *  ref→tween keyframe sockets (image refs only, 5 max), plus fixed
-   *  prompt pipes — everything else is rejected. Prompt nodes (composer,
+   *  prompt plugs (any prompt node into any generator's prompt input) —
+   *  everything else is rejected. Prompt nodes (composer,
    *  videoprompt, editprompt) each accept Style / Reference / Brand exactly alike. */
   const isValidConnection = useCallback((c: Connection | Edge) => {
     const source = c.source ?? "";
@@ -5589,9 +5622,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     const targetVideoPrompt = parseVideoPromptNode(c.target ?? "");
     const sourceEvPrompt = parseEditVideoPromptNode(source);
     const targetEvPrompt = parseEditVideoPromptNode(c.target ?? "");
-    if (sourceVideoPrompt) return targetVid === sourceVideoPrompt && c.targetHandle === "in-prompt";
-    if (sourceEvPrompt) return targetEv === sourceEvPrompt && c.targetHandle === "in-prompt";
-    if (source === "composer") return c.target === "imagegen" && c.targetHandle === "in-prompt";
+    // Any prompt node may plug into any generator's prompt input (the
+    // paired prompt is just the default wire generation follows).
+    const srcEditPromptId = source === "editprompt" ? "edit0" : source.startsWith(EDITPROMPT_NODE_PREFIX) ? source.slice(EDITPROMPT_NODE_PREFIX.length) : null;
+    if (source === "composer" || sourceVideoPrompt || sourceEvPrompt || srcEditPromptId) {
+      return c.targetHandle === "in-prompt" && (c.target === "imagegen" || targetVid !== null || targetEv !== null || parseEditGenNode(c.target ?? "") !== null);
+    }
     const srcEditId = parseEditGenNode(source);
     const tgtEditId = parseEditGenNode(c.target ?? "");
     // Edit-video node: the source socket takes a video node clip (generate or
@@ -5636,7 +5672,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     }
     const editPromptId = source === "editprompt" ? "edit0" : source.startsWith(EDITPROMPT_NODE_PREFIX) ? source.slice(EDITPROMPT_NODE_PREFIX.length) : null;
     const targetEditPrompt = c.target === "editprompt" || (c.target ?? "").startsWith(EDITPROMPT_NODE_PREFIX);
-    if (editPromptId) return parseEditGenNode(c.target ?? "") === editPromptId && c.targetHandle === "in-prompt";
+    void editPromptId; // prompt sources return above (any prompt feeds any prompt input)
     if (source === "imagegen") {
       if (targetVid) return c.targetHandle === "in-image";
       if (tgtEditId) return c.targetHandle === "in-image";

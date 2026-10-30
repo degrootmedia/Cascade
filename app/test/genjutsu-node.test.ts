@@ -299,6 +299,26 @@ describe("Genjutsu nodes in the node graph", () => {
     act(() => { root.unmount(); });
   });
 
+  it("shows no pipe-to-output button on Genjutsu nodes (Edit video keeps it)", async () => {
+    const genjutsu = renderModal({
+      graphVideoNodes: [{ id: "gm0", mode: "genjutsu-motion", prompt: "", model: MOTION, gens: [gen("a.mp4")], genIndex: 0 }],
+    });
+    await settle();
+    const gmNode = genjutsu.host.querySelector(".prod-graph-node.prod-graph-editvideo")!;
+    const gmButtons = Array.from(gmNode.querySelectorAll("button")).map((b) => b.textContent);
+    expect(gmButtons.some((t) => t?.includes("Pipe to output") || t === "Piped")).toBe(false);
+    act(() => { genjutsu.root.unmount(); });
+
+    const edit = renderModal({
+      graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "make it night", model: DECOY, gens: [gen("a.mp4")], genIndex: 0 }],
+    });
+    await settle();
+    const evNode = edit.host.querySelector(".prod-graph-node.prod-graph-editvideo")!;
+    const evButtons = Array.from(evNode.querySelectorAll("button")).map((b) => b.textContent);
+    expect(evButtons.some((t) => t?.includes("Pipe to output"))).toBe(true);
+    act(() => { edit.root.unmount(); });
+  });
+
   it("grays out both palette tiles when Genjutsu is unavailable (OpenArt active)", async () => {
     const off = renderModal({}, { genjutsuUnavailable: true });
     await settle();

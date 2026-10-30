@@ -204,7 +204,7 @@ function refEdgeCount(graph: Graph, targetNode: string): number {
 
 /**
  * Map a canvas connection to its stored edge. Returns null when the
- * connection carries no wire (fixed prompt pipes, tween keyframes — routed
+ * connection carries no wire (tween keyframes — routed
  * through connectTweenKey — unknown nodes/handles).
  */
 export function connectionToEdge(conn: FlowConnection, graph: Graph): ConnectionEdge | null {
@@ -385,7 +385,17 @@ export function connectionToEdge(conn: FlowConnection, graph: Graph): Connection
     return { edge: mkEdge(`e-brand${suffix}`, "brand", "out", target, "in-brand"), dropIds: edgesInto(graph, target, "in-brand").map((e) => e.id) };
   }
 
-  // Fixed prompt pipes carry no stored wire (structural, always present).
+  // Prompt pipes: any prompt node may feed any generator's prompt input.
+  // The paired pipe keeps its canonical edge id; a cross-wire replaces
+  // whatever prompt wire the generator had (one prompt input, one wire).
+  if (handle === "in-prompt" && (srcKind === "composer" || srcKind === "videoprompt" || srcKind === "editprompt" || srcKind === "editvideoprompt")) {
+    const toKind = nodeKindForId(target);
+    if (toKind === "imagegen" || toKind === "videogen" || toKind === "editgen" || toKind === "editvideo") {
+      const pipe = promptPipeFor(target);
+      const id = pipe && pipe.from === source ? pipe.id : `e-${source}-${target}-prompt`;
+      return { edge: mkEdge(id, source, "out", target, "in-prompt"), dropIds: edgesInto(graph, target, "in-prompt").map((e) => e.id) };
+    }
+  }
   return null;
 }
 
@@ -533,6 +543,9 @@ export function ensurePromptPipe(graph: Graph, genNode: string): Graph {
   if (!pipe) return graph;
   if (!graph.nodes.some((n) => n.id === pipe.from) || !graph.nodes.some((n) => n.id === pipe.to)) return graph;
   if (graph.edges.some((e) => e.id === pipe.id)) return graph;
+  // A cross-wired prompt already feeds this generator — never add a second
+  // prompt wire over the user's plug.
+  if (graph.edges.some((e) => e.to.node === pipe.to && e.to.port === "in-prompt")) return graph;
   return { ...graph, edges: [...graph.edges, mkEdge(pipe.id, pipe.from, "out", pipe.to, "in-prompt")] };
 }
 

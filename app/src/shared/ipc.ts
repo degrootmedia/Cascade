@@ -562,6 +562,12 @@ export interface CascadeApi {
   /** Step 2: open a native file dialog for a reference image. Returns a data URL or null. */
   pickReferenceImage(): Promise<string | null>;
   /**
+   * Shrink an oversize image data URL to a JPEG data URL at or under the
+   * 15MB import limit (quality first, then dimensions). Throws when the
+   * image can't be decoded or shrunk far enough.
+   */
+  downsampleImage(dataUrl: string): Promise<string>;
+  /**
    * Step 3 node graph: save a dropped video/audio file into the production's
    * referencesDir (on disk, keeping media out of the JSON). Returns the
    * workspace-relative path and the media kind, or null when the production

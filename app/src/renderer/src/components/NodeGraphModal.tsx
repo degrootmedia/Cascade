@@ -45,7 +45,7 @@ function imageResOptions(schema: CliModelSchema | null): string[] {
   const v = schema?.fields.find((f) => f.name === "resolution")?.values;
   return v && v.length ? v : ["1k", "2k", "4k"];
 }
-import { enforceSourceTag, composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
+import { SOURCE_TAG_NAME, enforceSourceTag, hasRefTag, composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
 import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { referenceUsage } from "../../../shared/reference-usage.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
@@ -72,7 +72,11 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { seedModelOptionValues } from "./production/model-param-defaults.js";
 import { useImageContextMenu } from "./image-context-menu.js";
 import { graphEdgesToFlow, promptSockets, type PromptSocket } from "./graphFlow.js";
-import { WaypointContext, WaypointEdge, type WaypointHandlers } from "./graph/WaypointEdge.js";
+import { WaypointContext, WaypointEdge, waypointInsertIndex, type WaypointHandlers } from "./graph/WaypointEdge.js";
+import type { GraphFrame } from "../../../shared/ipc.js";
+import { FrameContext, FrameLayer, GroupNodeView, groupNodeSize, type FrameHandlers } from "./graph/frames-ui.js";
+import { groupIntoFrame, frameSockets, deactivatedNodes, deactivatedEdgeIds, translateFrame, settleMembership } from "../../../shared/graph/frames.js";
+import { planReroutes, moveReroute, removeReroute, polylineCrossing, type WireCrossing } from "../../../shared/graph/reroute.js";
 import { storedOrMaterializedGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, promptRefWires, promptWiresAfterConnect, reconcilePromptRefEdges, removeGraphEdge, removeGraphNode, setStyleEdge, syncOutputEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs, withPromptRefWires } from "../../../shared/graph/connect.js";
@@ -2734,6 +2738,7 @@ function withNodeDelete<P extends { id: string }>(Base: ComponentType<P>): Compo
 const edgeTypes = { waypoint: WaypointEdge };
 
 const nodeTypes = {
+  group: GroupNodeView,
   ref: RefNodeView,
   composer: ComposerNodeView,
   style: StyleNodeView,
@@ -3099,6 +3104,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         sizes: snap?.sizes ?? {},
         collapsed: snap?.collapsed ?? {},
         waypoints: snap?.waypoints ?? {},
+        frames: {
+          ...Object.fromEntries(Object.keys(cur?.frames ?? {}).map((k) => [k, null])),
+          ...(snap?.frames ?? {}),
+        },
+        wireStyle: snap?.wireStyle ?? "curved",
         remove,
       });
       // The saved layout alone doesn't move mounted nodes (the reconcile
@@ -3118,6 +3128,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    *  narrow updateGraphLayout command, so bends persist and classic view
    *  never sees them. */
   const [selectedWaypoint, setSelectedWaypoint] = useState<{ edgeId: string; index: number } | null>(null);
+  const [liveWaypoint, setLiveWaypoint] = useState<WaypointHandlers["live"]>(null);
   const waypointHandlers = useMemo<WaypointHandlers>(() => ({
     add: (edgeId, pos, index) => {
       if (readOnly) return;
@@ -3129,14 +3140,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     move: (edgeId, index, pos) => {
       if (readOnly) return;
       captureHistory(true);
-      const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
-      saveLayout({ waypoints: { [edgeId]: cur.map((p, i) => (i === index ? pos : p)) } });
+      saveLayout({ waypoints: moveReroute(cb.current.initialLayout?.waypoints ?? {}, edgeId, index, pos) });
     },
     remove: (edgeId, index) => {
       if (readOnly) return;
       captureHistory(true);
-      const cur = cb.current.initialLayout?.waypoints?.[edgeId] ?? [];
-      saveLayout({ waypoints: { [edgeId]: cur.filter((_, i) => i !== index) } });
+      saveLayout({ waypoints: removeReroute(cb.current.initialLayout?.waypoints ?? {}, edgeId, index) });
       setSelectedWaypoint((sel) => {
         if (!sel || sel.edgeId !== edgeId) return sel;
         if (sel.index === index) return null;
@@ -3156,7 +3165,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       }
     },
     selected: selectedWaypoint,
-  }), [captureHistory, readOnly, saveLayout, selectedWaypoint]);
+    live: liveWaypoint,
+    setLive: setLiveWaypoint,
+    wireStyle: initialLayout?.wireStyle ?? "curved",
+  }), [captureHistory, readOnly, saveLayout, selectedWaypoint, liveWaypoint, initialLayout?.wireStyle]);
 
   /** Tidy: arrange every node into a deterministic left-to-right flow and
    *  clear all edge waypoints (stale bends are meaningless once nodes move).
@@ -3187,6 +3199,108 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     applyLivePositions(positions);
   }, [captureHistory, readOnly, applyLivePositions]);
 
+  // Shift + right-drag: draw a line, highlight crossed wires, and on release
+  // add reroute points where it crossed (wires sharing a source output are
+  // bundled through one shared point). Esc cancels; a real drag suppresses
+  // the context menu. Layout-only: one history step, no graph change.
+  useEffect(() => {
+    const root = traceRootRef.current;
+    if (!root || readOnly) return;
+    const wireSamples = (edgeId: string): { x: number; y: number }[] | null => {
+      const g = root.querySelector(`[data-testid="rf__edge-${CSS.escape(edgeId)}"]`);
+      const path = g?.querySelector("path.react-flow__edge-path") as SVGPathElement | null;
+      const m = path?.getScreenCTM();
+      if (!path || !m) return null;
+      const len = path.getTotalLength();
+      const n = Math.max(2, Math.min(200, Math.ceil(len / 6)));
+      const pts: { x: number; y: number }[] = [];
+      for (let i = 0; i <= n; i++) {
+        const p = path.getPointAtLength((len * i) / n);
+        pts.push({ x: m.a * p.x + m.c * p.y + m.e, y: m.b * p.x + m.d * p.y + m.f });
+      }
+      return pts;
+    };
+    const crossed = (line: { x: number; y: number }[]) => {
+      const out: { edgeId: string; hit: { x: number; y: number }; wire: { x: number; y: number }[] }[] = [];
+      for (const e of flowRef.current?.getEdges() ?? []) {
+        const wire = wireSamples(e.id);
+        const hit = wire ? polylineCrossing(line, wire) : null;
+        if (wire && hit) out.push({ edgeId: e.id, hit, wire });
+      }
+      return out;
+    };
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 2 || !e.shiftKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = root.getBoundingClientRect();
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "prod-reroute-line");
+      svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:50";
+      const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      poly.setAttribute("fill", "none");
+      poly.setAttribute("stroke", "var(--warn)");
+      poly.setAttribute("stroke-width", "2");
+      poly.setAttribute("stroke-dasharray", "5 4");
+      svg.appendChild(poly);
+      root.appendChild(svg);
+      const line = [{ x: e.clientX, y: e.clientY }];
+      let moved = 0;
+      let lit: Element[] = [];
+      const highlight = () => {
+        lit.forEach((el) => el.classList.remove("prod-wire-crossed"));
+        lit = crossed(line).map((c) => root.querySelector(`[data-testid="rf__edge-${CSS.escape(c.edgeId)}"]`)).filter((x): x is Element => !!x);
+        lit.forEach((el) => el.classList.add("prod-wire-crossed"));
+      };
+      const finish = () => {
+        window.removeEventListener("pointermove", move, true);
+        window.removeEventListener("pointerup", up, true);
+        window.removeEventListener("keydown", key, true);
+        lit.forEach((el) => el.classList.remove("prod-wire-crossed"));
+        svg.remove();
+      };
+      const move = (ev: PointerEvent) => {
+        line.push({ x: ev.clientX, y: ev.clientY });
+        moved = Math.max(moved, Math.hypot(ev.clientX - line[0].x, ev.clientY - line[0].y));
+        poly.setAttribute("points", line.map((p) => `${p.x - rect.left},${p.y - rect.top}`).join(" "));
+        highlight();
+      };
+      const up = (ev: PointerEvent) => {
+        if (ev.button !== 2) return;
+        if (moved > 4) {
+          const stop = (c: Event) => { c.preventDefault(); c.stopPropagation(); };
+          window.addEventListener("contextmenu", stop, { capture: true, once: true });
+          window.setTimeout(() => window.removeEventListener("contextmenu", stop, true), 50);
+        }
+        const hits = moved > 4 ? crossed(line) : [];
+        finish();
+        const inst = flowRef.current;
+        if (!inst || !hits.length) return;
+        const edgesById = new Map(inst.getEdges().map((x) => [x.id, x as { id: string; source: string; sourceHandle?: string | null }]));
+        const current = cb.current.initialLayout?.waypoints ?? {};
+        const crossings: WireCrossing[] = hits.map((h) => {
+          const first = inst.screenToFlowPosition(h.wire[0]);
+          const last = inst.screenToFlowPosition(h.wire[h.wire.length - 1]);
+          const ed = edgesById.get(h.edgeId);
+          return {
+            edgeId: h.edgeId,
+            sourceKey: `${ed?.source ?? ""}|${ed?.sourceHandle ?? ""}`,
+            pos: inst.screenToFlowPosition(h.hit),
+            index: waypointInsertIndex([first, ...(current[h.edgeId] ?? []), last], inst.screenToFlowPosition(h.hit)),
+          };
+        });
+        const plan = planReroutes(crossings, current, () => `rr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
+        captureHistory(true);
+        saveLayoutRef.current({ waypoints: plan });
+      };
+      const key = (ev: KeyboardEvent) => { if (ev.key === "Escape") { ev.stopPropagation(); moved = 0; finish(); } };
+      window.addEventListener("pointermove", move, true);
+      window.addEventListener("pointerup", up, true);
+      window.addEventListener("keydown", key, true);
+    };
+    root.addEventListener("pointerdown", onDown, true);
+    return () => root.removeEventListener("pointerdown", onDown, true);
+  }, [readOnly, captureHistory]);
   const doRedo = useCallback(() => {
     const target = historyRef.current.redo(snapshotNow());
     if (target) restoreHistory(target);
@@ -4566,9 +4680,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const buildDerived = useCallback((): GraphNode[] => {
     const ORIGIN = { x: 0, y: 0 };
     const build = <T extends GraphNode>(node: T): T => ({ ...node, position: defaultPosition(node.id, availIds, taggedIds) });
-    const visibleTagged = unionTagged.filter((t) => !(t.ref?.id && removedRefIdsRef.current.has(t.ref.id)));
+    // The pinned `@[source]` tag stands for a wired source socket, not a reference:
+    // it must never become a (missing) reference node. Indexes stay those of
+    // unionTagged so `ref:missing-N` ids match the stored graph.
+    const origIndex = new Map(unionTagged.map((t, idx) => [t, idx] as const));
+    const visibleTagged = unionTagged.filter((t) =>
+      !(t.ref?.id && removedRefIdsRef.current.has(t.ref.id)) &&
+      !(!t.ref && t.name.trim().toLowerCase() === SOURCE_TAG_NAME));
     return [
-      ...visibleTagged.map((t, i) => {
+      ...visibleTagged.map((t) => {
+        const i = origIndex.get(t) ?? 0;
         const nodeId = `ref:${t.ref?.id ?? "missing-" + i}`;
         const collapsed = collapsedRef.current[nodeId] === true;
         // A locked ref is a host-supplied input (e.g. a sequence's member
@@ -5040,7 +5161,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const refId = m[1];
       removedRefIdsRef.current.add(refId);
       setPlacedRefIds((prev) => { const n = new Set(prev); n.delete(refId); return n; });
-      const entry = cb.current.references.find((r) => r.id === refId);
+      // A tag naming no reference renders as `ref:missing-N`; deleting that node
+      // must strip the tag by NAME or the node is rebuilt from the prompt text.
+      const missingIdx = /^missing-(\d+)$/.exec(refId);
+      const missingName = missingIdx ? unionTagged[Number(missingIdx[1])]?.name : undefined;
+      const entry = cb.current.references.find((r) => r.id === refId) ?? (missingName ? { id: refId, name: missingName } : undefined);
       if (entry) {
         const strip = (cur: string) => removeRefTag(cur, entry.name);
         const freshComposer = appliers.current["composer"]?.get() ?? cb.current.prompt;
@@ -5784,24 +5909,45 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // node's prompt; it can't be removed by hand and goes when the source is
   // disconnected. Reconciled on every change so connect, disconnect, source
   // deletion and hand edits all converge.
+  /** The @[source] tag is ALWAYS kept (a submission fails without it): only ever ADDED (when a source is wired and it is missing), never removed or moved. An unplugged source turns its chip red instead (see the effect below). Works on the content box only. */
+  const enforceSourceInContent = (text: string, connected: boolean): string => {
+    if (!connected) return text; // never removed: it turns red instead
+    const b = parsePromptBoxes(text);
+    if (hasRefTag(b.content, SOURCE_TAG_NAME)) return text;
+    return composePromptBoxes({ ...b, content: enforceSourceTag(b.content, true) });
+  };
   useEffect(() => {
     if (readOnly) return;
     for (const n of editNodes) {
       const cur = appliers.current[`edit:${n.id}`]?.get() ?? editPromptValues.get(n.id) ?? n.prompt ?? "";
-      const fixed = enforceSourceTag(cur, !!n.source);
-      if (fixed === cur) continue;
-      if (!applyDraftEdit(`edit:${n.id}`, (t) => enforceSourceTag(t, !!n.source))) cb.current.onEditNodePrompt(n.id, fixed);
+      const fixed = enforceSourceInContent(cur, !!n.source);
+      const stored = n.prompt ?? "";
+      const storedStale = enforceSourceInContent(stored, !!n.source) !== stored;
+      if (fixed === cur && !storedStale) continue;
+      // Persist even when the live editor took the edit: a stale stored prompt
+      // would otherwise flow back into the editor and re-add/remove the tag forever.
+      const applied = fixed !== cur && applyDraftEdit(`edit:${n.id}`, (t) => enforceSourceInContent(t, !!n.source));
+      if (!applied || storedStale) cb.current.onEditNodePrompt(n.id, fixed);
     }
     // Video, Edit video and Genjutsu nodes: same rule on their source socket.
     for (const n of allVideoNodes) {
       const key = isVideoEditFamilyMode(n.mode) ? editVideoApplierKey(n.id) : videoApplierKey(n.id);
       const cur = appliers.current[key]?.get() ?? videoPromptValues.get(n.id) ?? n.prompt ?? "";
       const want = !!n.source;
-      const fixed = enforceSourceTag(cur, want);
-      if (fixed === cur) continue;
-      if (!applyDraftEdit(key, (t) => enforceSourceTag(t, want))) patchVideoNode(n.id, { prompt: stripSharedSections(fixed) });
+      const fixed = enforceSourceInContent(cur, want);
+      const stored = n.prompt ?? "";
+      const storedStale = enforceSourceInContent(stored, want) !== stored;
+      if (fixed === cur && !storedStale) continue;
+      const applied = fixed !== cur && applyDraftEdit(key, (t) => enforceSourceInContent(t, want));
+      if (!applied || storedStale) patchVideoNode(n.id, { prompt: stripSharedSections(enforceSourceInContent(stored, want)) });
     }
   }, [editNodes, editPromptValues, allVideoNodes, videoPromptValues, readOnly]);
+  // Unplugged source: flag the prompt node so its @[source] chip renders red.
+  useEffect(() => {
+    const flag = (id: string, missing: boolean) => document.querySelector(`.react-flow__node[data-id="${id}"]`)?.classList.toggle("source-missing", missing);
+    for (const n of editNodes) flag(editPromptNodeId(n.id), !n.source);
+    for (const n of allVideoNodes) flag(isVideoEditFamilyMode(n.mode) ? editVideoPromptNodeId(n.id) : videoPromptNodeId(n.id), !n.source);
+  });
   const onConnectEnd = useCallback<OnConnectEnd>((event, state) => {
     // Input-socket-only disconnect: grab a link at its input (target) end and
     // release it into empty space. Dragging out from an output (source) socket
@@ -6110,6 +6256,200 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     captureHistory(true);
     onConnect({ source: nodeId, sourceHandle, target: "output", targetHandle: "in-out" });
   }, [captureHistory, onConnect]);
+  // ---- Frames / groups (Item 2) and wire style (Item 3): layout only ----
+  const frameMap = initialLayout?.frames;
+  const frameList = useMemo(() => Object.values(frameMap ?? {}), [frameMap]);
+  const [frameLive, setFrameLive] = useState<Record<string, Partial<GraphFrame>>>({});
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; frameId?: string } | null>(null);
+  const ctxTimer = useRef<number | null>(null);
+  const armCtxDismiss = useCallback((ms: number) => {
+    if (ctxTimer.current !== null) window.clearTimeout(ctxTimer.current);
+    ctxTimer.current = window.setTimeout(() => setCtxMenu(null), ms);
+  }, []);
+  const cancelCtxDismiss = useCallback(() => {
+    if (ctxTimer.current !== null) window.clearTimeout(ctxTimer.current);
+    ctxTimer.current = null;
+  }, []);
+  const openCtx = useCallback((x: number, y: number, nodeId?: string) => {
+    const fr = Object.values(cb.current.initialLayout?.frames ?? {});
+    const frameId = nodeId?.startsWith("frame:") ? nodeId.slice(6) : fr.find((f) => nodeId && f.members.includes(nodeId))?.id;
+    setCtxMenu({ x, y, frameId });
+    armCtxDismiss(2500);
+  }, [armCtxDismiss]);
+  const edgesLite = useMemo(
+    () => edges.map((e) => ({ id: e.id, source: e.source, sourceHandle: e.sourceHandle, target: e.target, targetHandle: e.targetHandle })),
+    [edges]
+  );
+  const groupNodeCache = useRef(new Map<string, { sig: string; node: (typeof nodes)[number] }>());
+  const displayNodes = useMemo(() => {
+    if (!frameList.length) return nodes;
+    const hidden = new Set<string>();
+    for (const f of frameList) if (f.collapsed) for (const m of f.members) hidden.add(m);
+    const off = deactivatedNodes(initialLayout);
+    const out = nodes.map((n) => {
+      const isHidden = hidden.has(n.id);
+      const isOff = off.has(n.id);
+      if (!isHidden && !isOff) return n;
+      return { ...n, ...(isHidden ? { hidden: true } : {}), ...(isOff ? { className: `${n.className ?? ""} prod-node-deactivated`.trim() } : {}) };
+    });
+    for (const f0 of frameList) {
+      if (!f0.collapsed) continue;
+      const f = { ...f0, ...(frameLive[f0.id] ?? {}) };
+      const { inputs, outputs } = frameSockets(f0, edgesLite);
+      const rows = Math.max(inputs.length, outputs.length, 1);
+      const size = groupNodeSize(inputs, outputs);
+      // Reuse the same node object while nothing changed, and always carry a
+      // measured size: a fresh object without one drops its handle bounds in
+      // React Flow, which is what made every wire into the group vanish.
+      const sig = JSON.stringify([f0, f.x, f.y, inputs.map((s) => s.edgeId + s.label), outputs.map((s) => s.edgeId + s.label)]);
+      const hit = groupNodeCache.current.get(f0.id);
+      if (hit && hit.sig === sig) { out.push(hit.node); continue; }
+      const node = {
+        id: `frame:${f0.id}`, type: "group", position: { x: f.x, y: f.y }, selectable: false, deletable: false,
+        ...size, measured: { ...size },
+        data: { frame: f0, inputs, outputs },
+      } as unknown as (typeof nodes)[number];
+      groupNodeCache.current.set(f0.id, { sig, node });
+      out.push(node);
+    }
+    return out;
+  }, [nodes, frameList, frameLive, edgesLite, initialLayout]);
+  const displayEdges = useMemo(() => {
+    if (!frameList.length) return edges;
+    const owner = new Map<string, string>();
+    for (const f of frameList) for (const m of f.members) owner.set(m, f.id);
+    const collapsedIds = new Set(frameList.filter((f) => f.collapsed).map((f) => f.id));
+    const offEdges = deactivatedEdgeIds(initialLayout, edgesLite);
+    return edges.map((e) => {
+      const so = owner.get(e.source), to = owner.get(e.target);
+      const sc = so && collapsedIds.has(so), tc = to && collapsedIds.has(to);
+      let next = e;
+      if (sc && tc && so === to) return { ...e, hidden: true };
+      if (sc) next = { ...next, source: `frame:${so}`, sourceHandle: `gout-${e.id}` };
+      if (tc) next = { ...next, target: `frame:${to}`, targetHandle: `gin-${e.id}` };
+      if (offEdges.has(e.id)) next = { ...next, className: "prod-edge-deactivated" };
+      return next;
+    });
+  }, [edges, frameList, edgesLite, initialLayout]);
+
+  const commitFrames = useCallback((frames: Record<string, GraphFrame | null>, positions?: Record<string, { x: number; y: number }>) => {
+    if (readOnly) return;
+    captureHistory(true);
+    saveLayoutRef.current({ frames, ...(positions ? { positions } : {}) });
+    if (positions) applyLivePositions(positions);
+  }, [captureHistory, readOnly, applyLivePositions]);
+  const patchFrame = useCallback((id: string, patch: Partial<GraphFrame>) => {
+    const f = cb.current.initialLayout?.frames?.[id];
+    if (f) commitFrames({ [id]: { ...f, ...patch } });
+  }, [commitFrames]);
+  const groupSelection = useCallback(() => {
+    const sel = nodesRef.current.filter((n) => n.selected);
+    if (sel.length < 2 || readOnly) return;
+    const cur = cb.current.initialLayout?.frames;
+    const boxes = sel.map((n) => ({ x: n.position.x, y: n.position.y, width: n.measured?.width ?? n.width ?? 300, height: n.measured?.height ?? n.height ?? 200 }));
+    const id = `fr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const out = groupIntoFrame(cur, sel.map((n) => n.id), boxes, id);
+    const patch: Record<string, GraphFrame | null> = { ...Object.fromEntries(Object.keys(cur ?? {}).map((k) => [k, null])), ...out };
+    commitFrames(patch);
+    // The selection box around the grouped nodes goes away once they are framed.
+    const cleared = nodesRef.current.map((n) => (n.selected ? { ...n, selected: false } : n));
+    nodesRef.current = cleared;
+    setNodes(cleared);
+  }, [commitFrames, readOnly]);
+  const ungroupSelection = useCallback(() => {
+    const sel = new Set(nodesRef.current.filter((n) => n.selected).map((n) => n.id));
+    const hit = Object.values(cb.current.initialLayout?.frames ?? {}).filter((f) => f.members.some((m) => sel.has(m)));
+    if (hit.length && !readOnly) commitFrames(Object.fromEntries(hit.map((f) => [f.id, null])));
+  }, [commitFrames, readOnly]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== "g" || e.isComposing || isEditingTarget(e.target)) return;
+      e.preventDefault();
+      if (e.altKey) ungroupSelection(); else groupSelection();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [groupSelection, ungroupSelection]);
+  const frameHandlers = useMemo<FrameHandlers>(() => ({
+    readOnly: !!readOnly,
+    rename: (id, name) => patchFrame(id, { name }),
+    recolor: (id, color) => patchFrame(id, { color }),
+    toggleCollapse: (id) => { const f = cb.current.initialLayout?.frames?.[id]; if (f) patchFrame(id, { collapsed: !f.collapsed }); },
+    toggleDeactivate: (id) => { const f = cb.current.initialLayout?.frames?.[id]; if (f) patchFrame(id, { deactivated: !f.deactivated }); },
+    ungroup: (id) => commitFrames({ [id]: null }),
+    menu: (id, e) => openCtx(e.clientX, e.clientY, `frame:${id}`),
+    startMove: (id, e) => {
+      const inst = flowRef.current; const f = cb.current.initialLayout?.frames?.[id];
+      if (!inst || !f || readOnly) return;
+      e.preventDefault(); e.stopPropagation();
+      const start = inst.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const starts: Record<string, { x: number; y: number }> = {};
+      for (const n of nodesRef.current) if (f.members.includes(n.id)) starts[n.id] = { ...n.position };
+      let last = { dx: 0, dy: 0 };
+      const move = (ev: PointerEvent) => {
+        const p = inst.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+        last = { dx: p.x - start.x, dy: p.y - start.y };
+        setFrameLive({ [id]: { x: f.x + last.dx, y: f.y + last.dy } });
+        applyLivePositions(Object.fromEntries(Object.entries(starts).map(([k, v]) => [k, { x: v.x + last.dx, y: v.y + last.dy }])));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+        setFrameLive({});
+        if (!last.dx && !last.dy) return;
+        const t = translateFrame(f, starts, last.dx, last.dy);
+        commitFrames({ [id]: t.frame }, t.positions);
+      };
+      window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+    },
+    startResize: (id, e) => {
+      const inst = flowRef.current; const f = cb.current.initialLayout?.frames?.[id];
+      if (!inst || !f || readOnly) return;
+      e.preventDefault(); e.stopPropagation();
+      const start = inst.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      let size = { width: f.width, height: f.height };
+      const move = (ev: PointerEvent) => {
+        const p = inst.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+        size = { width: Math.max(160, f.width + p.x - start.x), height: Math.max(100, f.height + p.y - start.y) };
+        setFrameLive({ [id]: size });
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+        setFrameLive({});
+        commitFrames({ [id]: { ...f, ...size } });
+      };
+      window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+    },
+  }), [patchFrame, commitFrames, applyLivePositions, readOnly, openCtx]);
+  const onNodesChangeFramed = useCallback<OnNodesChange<GraphNode>>((changes) => {
+    const mine = changes.filter((c) => "id" in c && typeof c.id === "string" && c.id.startsWith("frame:"));
+    if (mine.length) {
+      for (const c of mine) {
+        if (c.type !== "position" || !c.position) continue;
+        const fid = (c.id as string).slice(6);
+        const f = cb.current.initialLayout?.frames?.[fid];
+        if (!f) continue;
+        if (c.dragging) setFrameLive({ [fid]: { x: c.position.x, y: c.position.y } });
+        else {
+          setFrameLive({});
+          const starts: Record<string, { x: number; y: number }> = {};
+          for (const n of nodesRef.current) if (f.members.includes(n.id)) starts[n.id] = { ...n.position };
+          const t = translateFrame(f, starts, c.position.x - f.x, c.position.y - f.y);
+          commitFrames({ [fid]: t.frame }, t.positions);
+        }
+      }
+      changes = changes.filter((c) => !mine.includes(c));
+      if (!changes.length) return;
+    }
+    return onNodesChange(changes);
+  }, [onNodesChange, commitFrames]);
+  const onNodeDragStopFramed = useCallback((_e: unknown, node: { id: string; position: { x: number; y: number }; measured?: { width?: number; height?: number } }) => {
+    const frames = cb.current.initialLayout?.frames;
+    if (!frames || node.id.startsWith("frame:") || readOnly) return;
+    const center = { x: node.position.x + (node.measured?.width ?? 300) / 2, y: node.position.y + (node.measured?.height ?? 200) / 2 };
+    const next = settleMembership(frames, node.id, center);
+    const changed = Object.fromEntries(Object.entries(next).filter(([k, v]) => v !== frames[k]));
+    if (Object.keys(changed).length) commitFrames(changed);
+  }, [commitFrames, readOnly]);
   const onNodeClick = useCallback((e: React.MouseEvent, node: { id: string }) => {
     if (!(e.ctrlKey || e.metaKey) || readOnly) return;
     const nodeId = canonicalNodeId(node.id);
@@ -6241,6 +6581,11 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             <>
               <button className="prod-btn" onClick={doUndo} disabled={!historyRef.current.canUndo()} title="Undo (Ctrl+Z)">Undo</button>
               <button className="prod-btn" onClick={doRedo} disabled={!historyRef.current.canRedo()} title="Redo (Ctrl+Shift+Z)">Redo</button>
+              <button className="prod-btn" onClick={groupSelection} title="Group the selected nodes into a named frame">Group into Frame</button>
+              <select className="prod-btn" value={initialLayout?.wireStyle ?? "curved"} title="Wire style" onChange={(e) => { captureHistory(true); saveLayoutRef.current({ wireStyle: e.target.value as "curved" | "straight" }); }}>
+                <option value="curved">Curved wires</option>
+                <option value="straight">Straight wires</option>
+              </select>
               <button className="prod-btn" onClick={tidyLayout} title="Arrange all nodes into a clean left-to-right flow (clears edge waypoints)">Tidy</button>
             </>
           )}
@@ -6263,12 +6608,16 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             <WaypointContext.Provider value={waypointHandlers}>
             <GraphLodProvider handleRef={lodHandleRef}>
             <ReactFlow
-              nodes={nodes}
-              edges={edges}
+              nodes={displayNodes}
+              edges={displayEdges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onInit={(inst) => { flowRef.current = inst; }}
-              onNodesChange={onNodesChange}
+              onNodesChange={onNodesChangeFramed}
+              onNodeDragStop={onNodeDragStopFramed}
+              onSelectionContextMenu={(e) => { if (!readOnly) { e.preventDefault(); openCtx(e.clientX, e.clientY); } }}
+              onNodeContextMenu={(e, node) => { if (!readOnly) { e.preventDefault(); openCtx(e.clientX, e.clientY, node.id); } }}
+              onPaneContextMenu={(e) => { if (!readOnly) { e.preventDefault(); openCtx((e as React.MouseEvent).clientX, (e as React.MouseEvent).clientY); } }}
               onNodeClick={onNodeClick}
               onNodeMouseEnter={onNodeMouseEnter}
               onNodeMouseLeave={onNodeMouseLeave}
@@ -6296,11 +6645,27 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} />
+              <FrameContext.Provider value={frameHandlers}><FrameLayer frames={frameList} live={frameLive} /></FrameContext.Provider>
             </ReactFlow>
             </GraphLodProvider>
             </WaypointContext.Provider>
             </NodeHistoryContext.Provider>
             </NodeDeleteContext.Provider>
+          {ctxMenu && (() => {
+            const f = ctxMenu.frameId ? cb.current.initialLayout?.frames?.[ctxMenu.frameId] : undefined;
+            const multi = nodesRef.current.filter((n) => n.selected).length >= 2;
+            const item = (label: string, on: () => void, disabled = false) => (
+              <button type="button" className="prod-graph-output-chooser-item prod-ctx-item" disabled={disabled} onClick={() => { setCtxMenu(null); on(); }}>{label}</button>
+            );
+            return (
+              <div className="prod-graph-output-chooser" style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y }} onMouseEnter={cancelCtxDismiss} onMouseLeave={() => armCtxDismiss(500)}>
+                {item("Group into Frame (Ctrl+G)", groupSelection, !multi)}
+                {f && item(f.collapsed ? "Expand group" : "Collapse group", () => patchFrame(f.id, { collapsed: !f.collapsed }))}
+                {f && item(f.deactivated ? "Reactivate group" : "Deactivate group", () => patchFrame(f.id, { deactivated: !f.deactivated }))}
+                {f && item("Ungroup (Ctrl+Alt+G)", () => commitFrames({ [f.id]: null }))}
+              </div>
+            );
+          })()}
           {dropHint && <div className="prod-graph-drop-hint">{dropHint}</div>}
           {dropMenu && (
             <div className="prod-graph-output-chooser" style={{ left: dropMenu.x, top: dropMenu.y }}>

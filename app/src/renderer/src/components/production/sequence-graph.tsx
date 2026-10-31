@@ -13,7 +13,8 @@
  * disabled with a hint.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GenParams, GraphLayout, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
+import { mergeGraphLayoutPatch } from "../../../../shared/graph/layout.js";
+import type { GenParams, GraphLayout, GraphLayoutPatch, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceSelectedTake, sequenceSegmentLine, sequenceTotalDuration } from "../../../../shared/ipc.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import {
@@ -365,7 +366,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       sequenceFramePrompts={framePrompts}
       onSequenceSegments={setSegments}
       onRevertFramePrompt={revertFramePrompt}
-      onSaveLayout={(layout: GraphLayout) => onGraphField((g) => ({ graphLayout: { ...(g.graphLayout ?? {}), ...layout } }))}
+      onSaveLayout={(layout: GraphLayoutPatch) => onGraphField((g) => ({ graphLayout: mergeGraphLayoutPatch(g.graphLayout, layout) }))}
       onRunImageGen={async () => {}}
       onRunVideoGen={runVideoGen}
       onRunEditVideo={runEditVideo}

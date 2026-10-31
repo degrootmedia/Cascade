@@ -25,9 +25,27 @@ export interface GraphLayout {
   /** Edge waypoints (bend points) keyed by edge id, in canvas coordinates.
    *  Layout-only: they route connection lines visually and are never graph
    *  nodes; classic view ignores them. */
-  waypoints?: Record<string, { x: number; y: number }[]>;
+  waypoints?: Record<string, { x: number; y: number; id?: string }[]>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
+  /** Layout-only frames/groups keyed by frame id. */
+  frames?: Record<string, GraphFrame>;
+  /** Wire rendering style; absent = curved. */
+  wireStyle?: "curved" | "straight";
+}
+
+/** A named, colored frame around canvas nodes (layout only). */
+export interface GraphFrame {
+  id: string;
+  name: string;
+  color: string;
+  members: string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  collapsed?: boolean;
+  deactivated?: boolean;
 }
 
 /** A partial canvas-state update for the `production:updateGraphLayout`
@@ -40,8 +58,11 @@ export interface GraphLayoutPatch {
   collapsed?: Record<string, boolean>;
   /** Edge waypoints by edge id. An explicit empty list deletes the entry
    *  (edge deleted, or Tidy clearing all bends). */
-  waypoints?: Record<string, { x: number; y: number }[]>;
+  waypoints?: Record<string, { x: number; y: number; id?: string }[]>;
   viewport?: { x: number; y: number; zoom: number };
+  /** Frames by id; null deletes the frame. */
+  frames?: Record<string, GraphFrame | null>;
+  wireStyle?: "curved" | "straight";
   /** Node ids whose positions/sizes/collapsed entries should be dropped
    *  (the node was deleted — absence alone can't express a delete in a
    *  per-key merge). */

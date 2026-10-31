@@ -14,7 +14,7 @@
  * updateGraphLayout`) and the renderer's optimistic apply both read it, so
  * the two can't disagree on what a patch means.
  */
-import type { GraphLayout, GraphLayoutPatch } from "../ipc.js";
+import type { GraphFrame, GraphLayout, GraphLayoutPatch } from "../ipc.js";
 
 /** Structural minimum the tidy layout needs (a full Graph satisfies it). */
 export interface TidyGraphShape {
@@ -121,13 +121,22 @@ export function mergeGraphLayoutPatch(fresh: GraphLayout | undefined, patch: Gra
     // Per-edge fold like the other maps, except an explicit empty list
     // DELETES the entry (that is how an edge's waypoints are cleared —
     // edge deletion, Tidy — in a merge where absence means "untouched").
-    const out: Record<string, { x: number; y: number }[]> = { ...(fresh?.waypoints ?? {}) };
+    const out: Record<string, { x: number; y: number; id?: string }[]> = { ...(fresh?.waypoints ?? {}) };
     for (const [edgeId, pts] of Object.entries(patch.waypoints)) {
-      if (Array.isArray(pts) && pts.length) out[edgeId] = pts.map((p) => ({ x: p.x, y: p.y }));
+      if (Array.isArray(pts) && pts.length) out[edgeId] = pts.map((p) => (p.id ? { id: p.id, x: p.x, y: p.y } : { x: p.x, y: p.y }));
       else delete out[edgeId];
     }
     next.waypoints = Object.keys(out).length ? out : undefined;
   }
+  if (patch.frames !== undefined) {
+    const out: Record<string, GraphFrame> = { ...(fresh?.frames ?? {}) };
+    for (const [fid, f] of Object.entries(patch.frames)) {
+      if (f) out[fid] = { ...f, members: [...f.members] };
+      else delete out[fid];
+    }
+    next.frames = Object.keys(out).length ? out : undefined;
+  }
+  if (patch.wireStyle !== undefined) next.wireStyle = patch.wireStyle === "straight" ? "straight" : undefined;
   if (patch.viewport !== undefined) next.viewport = { ...patch.viewport };
   return next;
 }

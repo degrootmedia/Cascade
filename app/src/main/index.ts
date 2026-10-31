@@ -2,6 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
+import { GENERATION_CHANNELS, generationBlocked } from "../shared/graph/frames.js";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell, Menu, nativeImage, protocol, screen } from "electron";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -1224,6 +1225,13 @@ function registerIpc() {
     ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
       if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
       validateIpcArgs(channel, args);
+      // Deactivated frames: member nodes are skipped at generation time.
+      if (GENERATION_CHANNELS.has(channel) && typeof args[0] === "string" && typeof args[1] === "string") {
+        const gp = productions.loadProduction(args[0]);
+        const gs = gp?.scenes.flatMap((s) => s.shots).find((s) => s.id === args[1]);
+        const nid = channel === "production:generateTweenBlock" ? undefined : (args[2] as { nodeId?: string } | undefined)?.nodeId;
+        if (gs && generationBlocked(gs.graphLayout, channel, nid)) throw new Error("This node is in a deactivated group - reactivate the group to generate.");
+      }
       // Record generation jobs on the ledger — the wrapper, not the call
       // site, so a generation can't ship without a job record.
       return await runWithJobLedger(jobLedger, channel, args, () => listener(event, ...args));

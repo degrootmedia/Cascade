@@ -18,7 +18,7 @@ describe("pinned @[source] tag", () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const src = fs.readFileSync(path.resolve(__dirname, "../src/renderer/src/components/NodeGraphModal.tsx"), "utf8");
-    expect(src).toContain("enforceSourceTag(cur, !!n.source)");
+    expect(src).toContain("enforceSourceInContent(cur, !!n.source)");
     expect(src).toContain("for (const n of allVideoNodes)");
     expect(src).toContain("isVideoEditFamilyMode(n.mode) ? editVideoApplierKey(n.id) : videoApplierKey(n.id)");
   });

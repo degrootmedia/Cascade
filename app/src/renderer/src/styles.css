@@ -6304,3 +6304,37 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--danger-soft);
 }
 .crash-actions { display: flex; gap: 8px; }
+
+.prod-wire-crossed .react-flow__edge-path { stroke: var(--warn) !important; stroke-width: 3px !important; }
+.prod-graph-canvas { position: relative; }
+
+
+/* Frames / groups (Item 2) */
+.prod-frame { border: 2px solid; border-radius: 8px; box-sizing: border-box; }
+.prod-frame-title { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; color: white; font-size: 12px; font-weight: 600; cursor: grab; border-radius: 6px 6px 0 0; user-select: none; }
+.prod-frame-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prod-frame-name-input { flex: 1; min-width: 0; font-size: 12px; }
+.prod-frame-actions { display: flex; gap: 3px; position: relative; }
+.prod-frame-actions button { border: 1px solid rgba(255,255,255,.5); background: rgba(0,0,0,.25); color: white; border-radius: 4px; width: 22px; height: 20px; padding: 0; cursor: pointer; font-size: 11px; }
+.prod-frame-actions button.on { background: black; }
+.prod-frame-palette-wrap { position: relative; }
+.prod-frame-palette { position: absolute; top: 24px; right: 0; display: flex; gap: 3px; padding: 4px; background: var(--bg-raised); border-radius: 6px; z-index: 20; }
+.prod-frame-resize { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, currentColor 50%); opacity: .6; }
+.prod-frame.deactivated, .prod-group-node.deactivated { filter: grayscale(1); }
+.prod-group-node { position: relative; border: 2px solid; border-radius: 8px; background: var(--bg-raised); color: var(--text); font-size: 11px; }
+.prod-group-sock { position: absolute; display: flex; align-items: center; height: 22px; max-width: 110px; overflow: hidden; }
+.prod-group-sock.in { left: 10px; } .prod-group-sock.out { right: 10px; }
+.prod-group-sock span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prod-node-deactivated { filter: grayscale(1) saturate(0) opacity(.65); }
+.prod-edge-deactivated .react-flow__edge-path { stroke: var(--text-dim) !important; opacity: .5; }
+.prod-group-label { position: absolute; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; }
+.prod-group-label.in { left: 12px; } .prod-group-label.out { right: 12px; text-align: right; }
+.prod-group-node { box-sizing: border-box; }
+.prod-ctx-item:disabled { opacity: .4; cursor: default; }
+.prod-frame-name { min-width: 80px; flex: 1 1 auto; }
+.prod-frame-actions { flex: none; }
+.prod-frame-name-input { user-select: text; cursor: text; background: var(--bg-inset); color: var(--text); caret-color: var(--text); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
+.prod-frame-name-input::selection { background: var(--accent); color: white; }
+
+/* Unplugged source input: the pinned @[source] chip goes red until rewired. */
+.react-flow__node.source-missing .prompt-tag-chip[data-tag="@[source]"] { background: color-mix(in srgb, var(--danger) 25%, transparent); border-color: var(--danger); color: var(--danger); }

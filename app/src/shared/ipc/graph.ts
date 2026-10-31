@@ -453,6 +453,9 @@ export interface GraphGenItem {
    *  id needed to finalize it at 1080p within the vendor's window. Absent for
    *  ordinary takes and for an already-finalized draft. */
   draftJobId?: string;
+  /** Tagged as a "select": exported with the assembly even when it is not the
+   *  shot's active clip. */
+  select?: boolean;
 }
 
 /** One action block on the in-betweener timeline: a start keyframe, an end

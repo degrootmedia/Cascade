@@ -3872,11 +3872,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Same copy as `saveAsReference`, but resolves the created reference so the
    *  node graph can place its node and wire it to the socket it was dropped on. */
-  async function saveGenerationAsReferenceRef(shotId: string, rel: string): Promise<GraphRef | null> {
+  async function saveGenerationAsReferenceRef(shotId: string, rel: string, name?: string): Promise<GraphRef | null> {
     const current = prodRef.current;
     if (!current || !rel) return null;
     const prodId = current.meta.id;
-    const choice = await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
+    // A wired node output is named after its node (no popup); a manual save asks.
+    const choice = name ? { name } : await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
     if (!choice || prodRef.current?.meta.id !== prodId) return null;
     try {
       const next = await window.cascade.saveGenerationAsReference(prodId, shotId, rel, undefined, choice);
@@ -4975,7 +4976,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
           onDeleteGeneration={(rel) => (graphShotId ? deleteGeneration(graphShotId, rel) : undefined)}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
-                  onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
+                  onSaveGenerationAsReference={(rel, name) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel, name) : Promise.resolve(null)}
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}

@@ -445,16 +445,9 @@ export function nextFreeSpot(nodes: MoodboardNodeLayout[]): { x: number; y: numb
 export function reconcileMoodboard(layout: MoodboardLayout, refs: MoodboardRefKey[]): MoodboardLayout {
   const ids = new Set(refs.map((r) => r.id));
   const nodes = layout.nodes.filter((n) => ids.has(n.refId));
-  const have = new Set(nodes.map((n) => n.refId));
-  const missing = refs.filter((r) => !have.has(r.id));
-  const nodesChanged = missing.length > 0 || nodes.length !== layout.nodes.length;
-  if (missing.length) {
-    const spot = nextFreeSpot(nodes);
-    let z = nextZ(nodes);
-    for (const n of autoLayoutNodes(missing, spot.y)) {
-      nodes.push({ ...n, x: n.x + spot.x, z: z++ });
-    }
-  }
+  // New refs are NOT auto-placed: unplaced refs live on the shelf
+  // (`offBoardRefs`) until the user adds them to the board.
+  const nodesChanged = nodes.length !== layout.nodes.length;
   // Frames: drop members whose ref is gone, and drop frames left empty. A ref
   // belongs to at most one frame (first frame wins on a hand-edited collision).
   const nodeIds = new Set(nodes.map((n) => n.refId));

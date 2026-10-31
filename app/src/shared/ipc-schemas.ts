@@ -82,6 +82,16 @@ const validators: Record<string, (args: unknown[]) => void> = {
     }
     checkPathString(args[1], "folder");
   },
+  "production:assemblySend": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "rel");
+  },
+  "production:setGenerationSelect": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "shotId");
+    checkPathString(args[2], "rel");
+    if (typeof args[3] !== "boolean") throw new Error("IPC validation: setGenerationSelect selected must be a boolean");
+  },
   "production:selectGraphTake": (args) => {
     checkPathString(args[0], "productionId");
     checkPathString(args[1], "shotId");

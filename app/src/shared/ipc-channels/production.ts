@@ -120,6 +120,8 @@ export const productionChannels = {
   "production:jobsChanged": { method: "onJobsChanged", kind: "send" },
   "production:assemblyRender": { method: "assemblyRender", kind: "invoke" },
   "production:assemblyOpenFolder": { method: "assemblyOpenFolder", kind: "invoke" },
+  "production:assemblySend": { method: "assemblySend", kind: "invoke" },
+  "production:setGenerationSelect": { method: "setGenerationSelect", kind: "invoke" },
   "production:exportStoryboardPdf": { method: "exportStoryboardPdf", kind: "invoke" },
   "production:pickStoryboardLogo": { method: "pickStoryboardLogo", kind: "invoke" },
   "production:clearStoryboardLogo": { method: "clearStoryboardLogo", kind: "invoke" },

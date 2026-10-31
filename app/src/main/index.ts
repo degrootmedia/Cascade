@@ -37,7 +37,7 @@ import { styleTaggedRefIds } from "../shared/magic-refs.js";
 import { applyRefSwapsToIds, applyRefSwapsToPrompt, mergeRefSwaps, proactive720pSwaps, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags, type ResolvedRefSwap, type VideoInputRef } from "./video-retry.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
-import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
+import { assemble, renderAnimatic, assemblyPlan, sendAssetToAssembly } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
@@ -6268,6 +6268,28 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         throw e;
       }
     });
+  });
+
+  handle("production:assemblySend", (_e, id: string, rel: string): string => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const dest = sendAssetToAssembly(p, rel);
+    productionEmit(id, `Sent to assembly folder: ${dest}`);
+    return dest;
+  });
+
+  handle("production:setGenerationSelect", (_e, id: string, shotId: string, rel: string, selected: boolean): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    let hit = false;
+    for (const n of shot.graphVideoNodes ?? []) for (const g of n.gens ?? []) {
+      if (g.path === rel) { if (selected) g.select = true; else delete g.select; hit = true; }
+    }
+    if (!hit) throw new Error("Video generation not found.");
+    productions.saveProduction(p);
+    return p;
   });
 
   // Step 5: open the export folder in the OS file manager.

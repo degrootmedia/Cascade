@@ -4277,7 +4277,11 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* A video job outlived its wait — its badge/fetch row sits below the frame one,
    both still anchored upper-right. */
-.prod-board-pending-video { top: 38px; left: auto; right: 38px; }
+.prod-board-pending-video { top: 8px; left: auto; right: 6px; }
+.prod-board-recheck-video { top: 34px; right: 6px; }
+/* A frame job is also pending: its badge/button take the top rows, so the video pair drops below them. */
+.prod-board-pending:not(.prod-board-pending-video) ~ .prod-board-pending-video { top: 66px; }
+.prod-board-recheck:not(.prod-board-recheck-video) ~ .prod-board-recheck-video { top: 92px; }
 
 /* Explicit missing-media state (media registry) — the brief's rule: never a
    silently blank frame. */

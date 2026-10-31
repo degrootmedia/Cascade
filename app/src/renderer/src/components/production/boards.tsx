@@ -335,6 +335,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     setMenu(null);
     if (relForFolder) void window.cascade.showInFolder({ productionId: prod.meta.id, relPath: relForFolder });
   }
+  function sendMenuToAssembly() {
+    setMenu(null);
+    if (relForFolder) void window.cascade.assemblySend(prod.meta.id, relForFolder);
+  }
   function saveMenuReference() {
     setMenu(null);
     if (saveableRel && onSaveAsReference) onSaveAsReference(shot.id, saveableRel);
@@ -702,6 +706,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
                 >
                   {MEDIA_MENU_LABELS.openFolder}
                 </button>
+              )}
+              {relForFolder && (
+                <button className="ctx-item" onClick={sendMenuToAssembly}>Send to assembly folder</button>
               )}
               <div className="ctx-sep" />
             </>

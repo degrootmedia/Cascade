@@ -1090,6 +1090,10 @@ export interface CascadeApi {
   assemblyRender(productionId: string): Promise<Production>;
   /** Step 5: open the export folder in the OS file manager. */
   assemblyOpenFolder(productionId: string): Promise<void>;
+  /** Immediately copy any production file into the assembly export folder. */
+  assemblySend(productionId: string, rel: string): Promise<string>;
+  /** Tag/untag a video generation as an assembly "select". */
+  setGenerationSelect(productionId: string, shotId: string, rel: string, selected: boolean): Promise<Production>;
   /**
    * Step 3: render the storyboard (panel stills + Audio/Visual boxes) to a
    * landscape PDF via a Save dialog. Remembers the version label + layout on

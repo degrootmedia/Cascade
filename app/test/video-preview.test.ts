@@ -56,6 +56,14 @@ describe("node graph stays poster-first (source guards)", () => {
     expect(refNode).toContain("<VideoPreview ");
   });
 
+  it("native full screen on generation videos is redirected to the shared lightbox", () => {
+    const preview = read("../src/renderer/src/components/graph/video-preview.tsx");
+    expect(preview).toContain("fullscreenchange");
+    expect(preview).toContain("exitFullscreen");
+    const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
+    expect(modal.match(/controls onExpand=\{\(\) => data\.onZoom\(/g)?.length).toBe(2);
+  });
+
   it("the canvas culls off-viewport nodes only above the node limit", () => {
     const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
     expect(modal).toContain("onlyRenderVisibleElements={nodes.length > GRAPH_CULL_NODE_LIMIT}");

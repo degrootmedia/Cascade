@@ -39,7 +39,7 @@ type VideoModelOptions } from "../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceTotalDuration, DRAFT_RESOLUTION, isDraftOnlyModel, type SequenceSegment } from "../../../shared/ipc.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
 import { closestResolution } from "./resolution.js";
-import { composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
+import { enforceSourceTag, composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
 import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { referenceUsage } from "../../../shared/reference-usage.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
@@ -58,6 +58,7 @@ import { getPromptTemplate } from "./production/prompt-templates.js";
 import { openSettings } from "./settings/open-settings.js";
 import { OpenInSuiteButton } from "./common/OpenInSuiteButton.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
+import { stepLightbox, type ZoomNav } from "./graph/lightbox-nav.js";
 import { openImageSuite } from "../features/suite/suite-handoff.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./production/gen-queue.js";
 import { costAspect, isQuotableCostModel } from "./production/generation-cost.js";
@@ -217,6 +218,17 @@ function selectedGenerationRel(shot: ProductionShot, nodeId: string): string | n
     return node?.gens?.[node.genIndex ?? 0]?.path ?? null;
   }
   return null;
+}
+
+/** Reference name for a generation node wired into a reference socket
+ *  ("Edit Image #2", "Image"). */
+export function generationNodeRefName(nodeId: string): string {
+  const editId = parseEditGenNode(nodeId);
+  if (editId) {
+    const m = /^edit(\d+)$/.exec(editId);
+    return m ? `Edit Image #${Number(m[1]) + 1}` : "Edit Image";
+  }
+  return "Image";
 }
 
 /** True for a prompt node id (composer / video / edit-video / an edit node). */
@@ -380,7 +392,7 @@ interface ImageGenData extends Record<string, unknown> {
   /** Persists a per-shot advanced-params change onto the shot. */
   onSaveFields: (patch: Partial<ProductionShot>) => void;
   /** Open a generation in the lightbox (same zoom as reference nodes). */
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type ImageGenFlowNode = Node<ImageGenData, "imagegen">;
 
@@ -412,7 +424,9 @@ interface VideoGenData extends Record<string, unknown> {
   showDownsampleVideoRefs?: boolean;
   /** Stored clips (newest first). `draftJobId` marks a Seedance 2.5 480p draft
    *  that can be finalized at 1080p. */
-  items: { url: string; prompt: string; path: string; draftJobId?: string }[];
+  items: { url: string; prompt: string; path: string; draftJobId?: string; select?: boolean }[];
+  /** Tag/untag a take as an assembly select. */
+  onToggleSelect?: (rel: string, selected: boolean) => void;
   selected: number;
   hasImageSource: boolean;
   /** Lifted in-flight flag (see ImageGenData.busy). */
@@ -440,7 +454,7 @@ interface VideoGenData extends Record<string, unknown> {
   /** Persists a per-node model/resolution/length change onto the node. */
   onSaveFields: (nodeId: string, patch: Partial<GraphVideoNode>) => void;
   /** Open a generation in the lightbox (same zoom as reference nodes). */
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type VideoGenFlowNode = Node<VideoGenData, "videogen">;
 
@@ -489,7 +503,8 @@ interface EditVideoData extends Record<string, unknown> {
   /** Label of the clip wired into the source socket (null = not wired;
    *  generation then falls back to the shot's own video). */
   sourceLabel: string | null;
-  items: { url: string; prompt: string; path: string }[];
+  items: { url: string; prompt: string; path: string; select?: boolean }[];
+  onToggleSelect?: (rel: string, selected: boolean) => void;
   selected: number;
   busy: boolean;
   piped: boolean;
@@ -513,7 +528,7 @@ interface EditVideoData extends Record<string, unknown> {
   /** Per-model resolution / clip-length ladders (same probe the video node uses). */
   onModelOptions: (model: string, withImage: boolean) => Promise<VideoModelOptions | null>;
   /** Open a generation in the lightbox (same zoom as reference nodes). */
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type EditVideoFlowNode = Node<EditVideoData, "editvideo">;
 
@@ -585,7 +600,7 @@ interface EditGenData extends Record<string, unknown> {
   /** The model's full option schema (Advanced panel). */
   onModelSchema: (model: string) => Promise<CliModelSchema | null>;
   /** Open a generation in the lightbox (same zoom as reference nodes). */
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type EditGenFlowNode = Node<EditGenData, "editgen">;
 
@@ -712,7 +727,7 @@ interface CameraGridNodeData extends Record<string, unknown> {
   /** A generation is running for this node in another window (ledger busy). */
   busy?: boolean;
   onModelSchema: (model: string) => Promise<CliModelSchema | null>;
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type CameraGridFlowNode = Node<CameraGridNodeData, "cameraGrid">;
 
@@ -753,7 +768,7 @@ interface UpscaleNodeData extends Record<string, unknown> {
   onEditInSuite: (rel: string) => void;
   onSave: (patch: Partial<UpscaleData>) => void;
   onModelSchema: (model: string) => Promise<CliModelSchema | null>;
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
 }
 type UpscaleFlowNode = Node<UpscaleNodeData, "upscale">;
 
@@ -1128,7 +1143,7 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
-              onClick={() => data.onZoom("Image generation", data.items[data.selected].url, "image", data.items[data.selected].path)}
+              onClick={() => data.onZoom("Image generation", data.items[data.selected].url, "image", data.items[data.selected].path, { items: data.items, index: data.selected })}
             >
               <MagnifyIcon size={9} />
             </button>
@@ -1312,7 +1327,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
             title="Right-click for save, copy, edit, reference, or delete options"
             onContextMenu={(e) => genMenu.open(e, data.items[data.selected].path, { src: data.items[data.selected].url, media: "video" })}
           >
-            <VideoPreview instanceId={`vid:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls />
+            <VideoPreview instanceId={`vid:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls onExpand={() => data.onZoom("Video generation", data.items[data.selected].url, "video", data.items[data.selected].path)} />
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
@@ -1360,7 +1375,7 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
       <button className="prod-btn primary prod-graph-gen-go nodrag" disabled={busy} onClick={() => { void run(); }}>
         {busy ? "Generating…" : <>Generate<GenerationCostSuffix req={videoCostReq} /></>}
       </button>
-      <GenerationMenu menu={genMenu.menu} onClose={genMenu.close} onSaveAsReference={data.onSaveAsRef} onDelete={data.onDeleteGen} onRefresh={data.onRefreshGen} onEditInSuite={data.onEditInSuite} />
+      <GenerationMenu menu={genMenu.menu} onClose={genMenu.close} onSaveAsReference={data.onSaveAsRef} selectTag={data.onToggleSelect ? { selected: !!data.items.find((x) => x.path === genMenu.menu?.rel)?.select, onToggle: data.onToggleSelect } : undefined} onDelete={data.onDeleteGen} onRefresh={data.onRefreshGen} onEditInSuite={data.onEditInSuite} />
       </div>
   );
 });
@@ -1524,7 +1539,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
             title="Right-click for save, copy, edit, reference, or delete options"
             onContextMenu={(e) => genMenu.open(e, data.items[data.selected].path, { src: data.items[data.selected].url, media: "video" })}
           >
-            <VideoPreview instanceId={`ev:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls />
+            <VideoPreview instanceId={`ev:${id}`} className="prod-graph-gen-preview nodrag" url={data.items[data.selected].url} controls onExpand={() => data.onZoom(variant.title, data.items[data.selected].url, "video", data.items[data.selected].path)} />
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
@@ -1569,7 +1584,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
           </button>
         )}
       </div>
-      <GenerationMenu menu={genMenu.menu} onClose={genMenu.close} onSaveAsReference={data.onSaveAsRef} onDelete={data.onDeleteGen} onRefresh={data.onRefreshGen} onEditInSuite={data.onEditInSuite} />
+      <GenerationMenu menu={genMenu.menu} onClose={genMenu.close} onSaveAsReference={data.onSaveAsRef} selectTag={data.onToggleSelect ? { selected: !!data.items.find((x) => x.path === genMenu.menu?.rel)?.select, onToggle: data.onToggleSelect } : undefined} onDelete={data.onDeleteGen} onRefresh={data.onRefreshGen} onEditInSuite={data.onEditInSuite} />
       </div>
   );
 });
@@ -1677,7 +1692,7 @@ const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<Ed
             <button
               className="prod-graph-ref-zoom prod-graph-gen-zoom nodrag"
               title="View larger"
-              onClick={() => data.onZoom(`Edit image ${editNodeLabel(data.nodeId)}`, data.items[data.selected].url, "image", data.items[data.selected].path)}
+              onClick={() => data.onZoom(`Edit image ${editNodeLabel(data.nodeId)}`, data.items[data.selected].url, "image", data.items[data.selected].path, { items: data.items, index: data.selected })}
             >
               <MagnifyIcon size={9} />
             </button>
@@ -2307,7 +2322,7 @@ function CameraGridEditor({ sheetUrl, sheetPath, cols, rows, panels, panelLabels
   onInsetChange: (v: number) => void;
   onSizeChange: (cols: number, rows: number) => void;
   onExport: (rects: CameraGridPanel[], labels: string[], single: boolean) => Promise<number>;
-  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => void;
+  onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => void;
   onClose: () => void;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -2936,7 +2951,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Resolves the created ref; `null` = handled but nothing saved (popup
    *  cancelled or an error the caller already surfaced); `undefined` = not
    *  wired, fall back to `onSaveAsReference`. */
-  onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null | undefined>;
+  onSaveGenerationAsReference?: (rel: string, name?: string) => Promise<GraphRef | null | undefined>;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
   /** Update one edit node's prompt text. */
@@ -3187,7 +3202,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const [highlightRefId, setHighlightRefId] = useState<string | null>(null);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<string | null>(null);
-  const [lightbox, setLightbox] = useState<{ name: string; artwork: string; kind?: "image" | "video"; rel?: string } | null>(null);
+  const [lightbox, setLightbox] = useState<{ name: string; artwork: string; kind?: "image" | "video"; rel?: string; nav?: ZoomNav } | null>(null);
 
   /** Right-click menu for the enlarged generation in the lightbox. */
   const lightboxMenu = useGenerationMenu();
@@ -3687,7 +3702,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       setNodes(next);
       saveLayout({ collapsed: { ...collapsedRef.current } });
     },
-    onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string) => cb.current.setLightbox({ name, artwork, kind, rel }),
+    onZoom: (name: string, artwork: string, kind?: "image" | "video", rel?: string, nav?: ZoomNav) => cb.current.setLightbox({ name, artwork, kind, rel, nav }),
     // Generation nodes queue through the shared per-target queue so extra
     // clicks wait their turn and the button can show "Generating (N queued)".
     onRunImageGen: (model: string, resolution: string, params?: GenParams) => {
@@ -3785,6 +3800,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     onCycleEditGen: (nodeId: string, dir: 1 | -1) => cb.current.onCycleGraphGen("edit", dir, nodeId),
     onCycleEditVideoGen: (nodeId: string, dir: 1 | -1) => cb.current.onCycleGraphGen("video", dir, nodeId),
     onCycleUpscaleGen: (dir: 1 | -1) => cb.current.onCycleGraphGen("upscale", dir),
+    onToggleSelect: (rel: string, selected: boolean) => { void window.cascade.setGenerationSelect(cb.current.prodId, cb.current.shotId, rel, selected); },
     onDeleteGen: async (rel: string) => {
       // A refusal (in use / not a generation) comes back as a message: the
       // workspace error banner sits under this modal, so surface it here.
@@ -4122,13 +4138,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         savedDownsampleVideoRefs: node.downsampleVideoRefs,
         showDownsampleVideoRefs: !shot.graphSequence,
         sourceLabel,
-        items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path })),
+        items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path, select: !!g.select })),
         selected: node.genIndex ?? 0,
         busy: editVideoBusyNodeIds.includes(node.id),
         piped: shot.graphOutputSource === "videogen" && (shot.graphOutputVideoNodeId ?? "vid0") === node.id,
         pending: pendingTarget?.kind === "videoNode" && (pendingTarget.nodeId ?? "vid0") === node.id,
         onFetch: stable.onFetchVideo,
         onGenerate: stable.onRunEditVideo,
+        onToggleSelect: stable.onToggleSelect,
         onSelect: stable.onSelectEditVideoGen,
         onCycle: stable.onCycleEditVideoGen,
         onDeleteGen: stable.onDeleteGen,
@@ -4184,7 +4201,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         savedParams: node.params,
         savedDownsampleVideoRefs: node.downsampleVideoRefs,
         showDownsampleVideoRefs: !shot.graphSequence,
-        items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path, ...(g.draftJobId ? { draftJobId: g.draftJobId } : {}) })),
+        items: (node.gens ?? []).map((g) => ({ url: graphMediaUrl(prod.meta.id, g.path), prompt: g.prompt, path: g.path, select: !!g.select, ...(g.draftJobId ? { draftJobId: g.draftJobId } : {}) })),
         selected: node.genIndex ?? 0,
         hasImageSource: !!node.source,
         busy: videoBusyNodeIds.includes(node.id),
@@ -4194,6 +4211,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         onSelect: stable.onSelectVideoGen,
         onCycle: stable.onCycleVideoGen,
         onUpgradeDraft: stable.onUpgradeDraft,
+        onToggleSelect: stable.onToggleSelect,
         onDeleteGen: stable.onDeleteGen,
         onRefreshGen: stable.onRefreshGen,
         onSaveAsRef: stable.onSaveAsRef,
@@ -5351,8 +5369,8 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
    * the prompt, then wire the edge and tag the prompt at the target socket.
    * Reads everything mutable through refs so it stays correct across the await.
    */
-  const attachGenerationAsReference = async (target: string, handle: string, rel: string) => {
-    const saved = await cb.current.onSaveGenerationAsReference(rel);
+  const attachGenerationAsReference = async (target: string, handle: string, rel: string, name?: string) => {
+    const saved = await cb.current.onSaveGenerationAsReference(rel, name);
     if (!saved) return;
     const refNodeId = `ref:${saved.id}`;
     // Wire + tag through the single-list sync (it also adds the new ref's
@@ -5381,7 +5399,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         attachGenerationDirect(target, conn.targetHandle ?? "", canonicalNodeId(conn.source));
         return;
       }
-      void attachGenerationAsReference(target, conn.targetHandle ?? "", genRel);
+      void attachGenerationAsReference(target, conn.targetHandle ?? "", genRel, generationNodeRefName(canonicalNodeId(conn.source)));
       return;
     }
     // Reference → prompt reference socket: the single-list sync path
@@ -5727,14 +5745,71 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     return false;
   }, [references, shot.graphTweenRefIds, shot]);
 
-  const onConnectEnd = useCallback<OnConnectEnd>((_event, state) => {
+  /** Popup offered when an image/video output is dragged into empty canvas. */
+  const [dropMenu, setDropMenu] = useState<{ x: number; y: number; pos: { x: number; y: number }; source: string; sourceHandle: string | null; media: "image" | "video" } | null>(null);
+  const addAndConnect = (choice: "edit" | "editvideo" | "output", m: NonNullable<typeof dropMenu>) => {
+    captureHistory(true);
+    if (choice === "output") {
+      onConnect({ source: m.source, sourceHandle: m.sourceHandle, target: "output", targetHandle: "in-out" });
+      return;
+    }
+    if (choice === "edit") {
+      const id = nextEditNodeId(editNodes);
+      addTool("edit", m.pos);
+      // Let the new node render so onConnect sees the updated graph.
+      window.setTimeout(() => onConnectRef.current({ source: m.source, sourceHandle: m.sourceHandle, target: editGenNodeId(id), targetHandle: "in-image" }), 60);
+      return;
+    }
+    const id = nextEditVideoNodeId(allVideoNodes);
+    addTool("editvideo", m.pos);
+    window.setTimeout(() => onConnectRef.current({ source: m.source, sourceHandle: m.sourceHandle, target: editVideoGenNodeId(id), targetHandle: "in-video" }), 60);
+  };
+  const onConnectRef = useRef(onConnect);
+  onConnectRef.current = onConnect;
+
+  // A wired source input shows a pinned `@[source]` tag first in the edit
+  // node's prompt; it can't be removed by hand and goes when the source is
+  // disconnected. Reconciled on every change so connect, disconnect, source
+  // deletion and hand edits all converge.
+  useEffect(() => {
+    if (readOnly) return;
+    for (const n of editNodes) {
+      const cur = appliers.current[`edit:${n.id}`]?.get() ?? editPromptValues.get(n.id) ?? n.prompt ?? "";
+      const fixed = enforceSourceTag(cur, !!n.source);
+      if (fixed === cur) continue;
+      if (!applyDraftEdit(`edit:${n.id}`, (t) => enforceSourceTag(t, !!n.source))) cb.current.onEditNodePrompt(n.id, fixed);
+    }
+    // Video, Edit video and Genjutsu nodes: same rule on their source socket.
+    for (const n of allVideoNodes) {
+      const key = isVideoEditFamilyMode(n.mode) ? editVideoApplierKey(n.id) : videoApplierKey(n.id);
+      const cur = appliers.current[key]?.get() ?? videoPromptValues.get(n.id) ?? n.prompt ?? "";
+      const want = !!n.source;
+      const fixed = enforceSourceTag(cur, want);
+      if (fixed === cur) continue;
+      if (!applyDraftEdit(key, (t) => enforceSourceTag(t, want))) patchVideoNode(n.id, { prompt: stripSharedSections(fixed) });
+    }
+  }, [editNodes, editPromptValues, allVideoNodes, videoPromptValues, readOnly]);
+  const onConnectEnd = useCallback<OnConnectEnd>((event, state) => {
     // Input-socket-only disconnect: grab a link at its input (target) end and
     // release it into empty space. Dragging out from an output (source) socket
-    // does nothing so the wire snaps back. Releasing on/near any socket snaps
-    // back instead.
+    // of an image/video node opens an add-and-connect popup instead. Releasing
+    // on/near any socket snaps back instead.
     if (state.isValid || state.toHandle) return;
     const from = state.fromHandle;
     if (!from) return;
+    if (from.type === "source" && !readOnly) {
+      const srcId = canonicalNodeId(String(from.nodeId ?? ""));
+      const media: "image" | "video" | null = srcId === "imagegen" || parseEditGenNode(srcId) ? "image"
+        : parseVideoGenNode(srcId) || parseEditVideoGenNode(srcId) ? "video" : null;
+      if (media) {
+        const me = event as MouseEvent & { changedTouches?: TouchList };
+        const cx = me.clientX ?? me.changedTouches?.[0]?.clientX ?? 0;
+        const cy = me.clientY ?? me.changedTouches?.[0]?.clientY ?? 0;
+        const p = flowRef.current?.screenToFlowPosition({ x: cx, y: cy }) ?? { x: 0, y: 0 };
+        setDropMenu({ x: cx, y: cy, pos: p, source: String(from.nodeId), sourceHandle: (from as { id?: string | null }).id ?? null, media });
+      }
+      return;
+    }
     if (from.type !== "target") return;
     // Remember the wire being dragged off (before the stored-graph removal
     // below) so a direct generation→video-prompt wire can drop its sentinel
@@ -5912,7 +5987,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       cb.current.onUnpipeOutput();
       return;
     }
-  }, [tagged, taggedVideo, taggedEditByNode, unionTagged]);
+  }, [tagged, taggedVideo, taggedEditByNode, unionTagged, readOnly]);
 
   useEffect(() => () => { if (hintTimer.current !== null) window.clearTimeout(hintTimer.current); }, []);
 
@@ -6214,6 +6289,21 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             </NodeHistoryContext.Provider>
             </NodeDeleteContext.Provider>
           {dropHint && <div className="prod-graph-drop-hint">{dropHint}</div>}
+          {dropMenu && (
+            <div className="prod-graph-output-chooser" style={{ left: dropMenu.x, top: dropMenu.y }}>
+              <div className="prod-graph-output-chooser-title">Add and connect</div>
+              {(dropMenu.media === "image"
+                ? [{ id: "edit" as const, label: "Edit image" }, { id: "output" as const, label: "Output" }]
+                : [{ id: "editvideo" as const, label: "Edit video" }, { id: "output" as const, label: "Output" }]
+              ).map((o) => (
+                <button key={o.id} type="button" className="prod-graph-output-chooser-item"
+                  onClick={() => { const m = dropMenu; setDropMenu(null); addAndConnect(o.id, m); }}>
+                  {o.label}
+                </button>
+              ))}
+              <button type="button" className="prod-graph-output-chooser-item" onClick={() => setDropMenu(null)}>Cancel</button>
+            </div>
+          )}
           {outputChooser && (
             <div className="prod-graph-output-chooser" style={{ left: outputChooser.x, top: outputChooser.y }}>
               <div className="prod-graph-output-chooser-title">Route to Frame Output</div>
@@ -6240,6 +6330,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               backdropClassName="prod-graph-lightbox"
               hint={lightbox.kind === "video" ? (lightbox.rel ? "right-click for options" : "") : (lightbox.rel ? "scroll to zoom · drag to pan · right-click for options" : undefined)}
               onClose={() => setLightbox(null)}
+              onNavigate={lightbox.nav && lightbox.nav.items.length > 1 ? (dir) => setLightbox((lb) => (lb ? stepLightbox(lb, dir) : lb)) : undefined}
               onContextMenu={(e) => { if (lightbox.rel) lightboxMenu.open(e, lightbox.rel, { src: lightbox.artwork, media: lightbox.kind }); }}
               onVideoStillSaved={onVideoStillSaved}
             />

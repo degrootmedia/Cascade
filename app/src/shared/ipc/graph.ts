@@ -25,9 +25,27 @@ export interface GraphLayout {
   /** Edge waypoints (bend points) keyed by edge id, in canvas coordinates.
    *  Layout-only: they route connection lines visually and are never graph
    *  nodes; classic view ignores them. */
-  waypoints?: Record<string, { x: number; y: number }[]>;
+  waypoints?: Record<string, { x: number; y: number; id?: string }[]>;
   /** Canvas pan/zoom as last left by the user. */
   viewport?: { x: number; y: number; zoom: number };
+  /** Layout-only frames/groups keyed by frame id. */
+  frames?: Record<string, GraphFrame>;
+  /** Wire rendering style; absent = curved. */
+  wireStyle?: "curved" | "straight";
+}
+
+/** A named, colored frame around canvas nodes (layout only). */
+export interface GraphFrame {
+  id: string;
+  name: string;
+  color: string;
+  members: string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  collapsed?: boolean;
+  deactivated?: boolean;
 }
 
 /** A partial canvas-state update for the `production:updateGraphLayout`
@@ -40,8 +58,11 @@ export interface GraphLayoutPatch {
   collapsed?: Record<string, boolean>;
   /** Edge waypoints by edge id. An explicit empty list deletes the entry
    *  (edge deleted, or Tidy clearing all bends). */
-  waypoints?: Record<string, { x: number; y: number }[]>;
+  waypoints?: Record<string, { x: number; y: number; id?: string }[]>;
   viewport?: { x: number; y: number; zoom: number };
+  /** Frames by id; null deletes the frame. */
+  frames?: Record<string, GraphFrame | null>;
+  wireStyle?: "curved" | "straight";
   /** Node ids whose positions/sizes/collapsed entries should be dropped
    *  (the node was deleted — absence alone can't express a delete in a
    *  per-key merge). */
@@ -223,12 +244,40 @@ export interface GraphEditNode {
  *  An `edit`-mode entry is an edit-video node (id `ev0`, `ev1`, …) that rides
  *  the same list machinery; its `source` is a video-node clip or a reference,
  *  absent = the shot's own clip. */
+/** The role a `GraphVideoNode` plays: a video-generation node
+ *  ("generate"), an edit-video node ("edit"), or a Higgsfield Genjutsu
+ *  node ("genjutsu-motion" = Motion Transfer, "genjutsu-swap" = Object
+ *  Swap). The three non-generate modes are one family: one source video
+ *  in (`in-video`), references via the prompt node, one clip out — they
+ *  share the canvas kinds, submit channel, and provider path. Genjutsu
+ *  nodes differ only in their locked model pair, an optional prompt, and
+ *  the >=1 image-reference requirement. Absent `mode` = "generate". */
+export type GraphVideoNodeMode = "generate" | "edit" | "genjutsu-motion" | "genjutsu-swap";
+
+/** The Genjutsu modes (Higgsfield-only edit-family nodes). */
+export type GenjutsuMode = "genjutsu-motion" | "genjutsu-swap";
+
+/** True for the edit-family modes (an edit-video or Genjutsu node): the
+ *  modes that take a source video instead of a source frame. Every
+ *  dispatch that asks `mode === "edit"` but means "a video-edit node"
+ *  goes through here, so Genjutsu nodes inherit the whole family
+ *  machinery (canvas ids/kinds, source/output wiring, take history). */
+export function isVideoEditFamilyMode(mode: GraphVideoNodeMode | undefined): boolean {
+  return mode === "edit" || mode === "genjutsu-motion" || mode === "genjutsu-swap";
+}
+
+/** True for the two Genjutsu modes. */
+export function isGenjutsuMode(mode: GraphVideoNodeMode | undefined): mode is GenjutsuMode {
+  return mode === "genjutsu-motion" || mode === "genjutsu-swap";
+}
+
 export interface GraphVideoNode {
   /** Stable identity within the shot: "vid0", "vid1", … for generate nodes
-   *  and "ev0", "ev1", … for edit nodes. Absent `mode` = "generate". */
+   *  "ev0", "ev1", … for edit nodes, "gm0"… / "gs0"… for Genjutsu
+   *  Motion Transfer / Object Swap nodes. Absent `mode` = "generate". */
   id: string;
   /** "generate" (default) or "edit" (an edit-video node). */
-  mode?: "generate" | "edit";
+  mode?: GraphVideoNodeMode;
   /** The node's own motion prompt (its `videoprompt` node's text). */
   prompt: string;
   /** Stored clips (newest first) + the selected index. */
@@ -249,6 +298,12 @@ export interface GraphVideoNode {
   refIds?: string[];
   /** Whether the style node is plugged into this node's prompt node. */
   styleConnected?: boolean;
+  /** Proactive 720p downsample: at submit, oversize (>720p) video
+   *  references taking part are swapped to their `<name>_720p` duplicates
+   *  (created on first use) for that submission only — the same substitution
+   *  the manual 720p retry applies, without waiting for a failure. Ignored
+   *  for Genjutsu modes, whose single source clip always uploads as-is. */
+  downsampleVideoRefs?: boolean;
 }
 
 /** One timed shot segment of a sequence node's timeline. A shot sequence is
@@ -335,6 +390,26 @@ export function nextEditVideoNodeId(nodes: { id: string }[]): string {
   while (nodes.some((n) => n.id === `ev${i}`)) i++;
   return `ev${i}`;
 }
+/** The next unused Genjutsu node id in a node list ("gm0", … for Motion
+ *  Transfer, "gs0", … for Object Swap). Canvas ids ride the edit-video
+ *  prefixes (`editvideo:gm0` — only `ev0` keeps the bare legacy id). */
+export function nextGenjutsuNodeId(nodes: { id: string }[], mode: GenjutsuMode): string {
+  const prefix = mode === "genjutsu-motion" ? "gm" : "gs";
+  let i = 0;
+  while (nodes.some((n) => n.id === `${prefix}${i}`)) i++;
+  return `${prefix}${i}`;
+}
+
+/** The edit-family entries of a video node list (edit-video + Genjutsu). */
+export function videoEditFamilyNodes(nodes: GraphVideoNode[] | undefined): GraphVideoNode[] {
+  return (nodes ?? []).filter((n) => isVideoEditFamilyMode(n.mode));
+}
+
+/** The Genjutsu entries of a video node list, optionally one feature only. */
+export function genjutsuNodes(nodes: GraphVideoNode[] | undefined, mode?: GenjutsuMode): GraphVideoNode[] {
+  return (nodes ?? []).filter((n) => isGenjutsuMode(n.mode) && (!mode || n.mode === mode));
+}
+
 /** The edit-mode entries of a video node list. */
 export function editVideoNodes(nodes: GraphVideoNode[] | undefined): GraphVideoNode[] {
   return (nodes ?? []).filter((n) => n.mode === "edit");
@@ -399,6 +474,9 @@ export interface GraphGenItem {
    *  id needed to finalize it at 1080p within the vendor's window. Absent for
    *  ordinary takes and for an already-finalized draft. */
   draftJobId?: string;
+  /** Tagged as a "select": exported with the assembly even when it is not the
+   *  shot's active clip. */
+  select?: boolean;
 }
 
 /** One action block on the in-betweener timeline: a start keyframe, an end

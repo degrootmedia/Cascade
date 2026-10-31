@@ -2,6 +2,7 @@
  * Cascade main process: window creation, IPC wiring, agent lifecycle.
  * All privileged work (API key, file tools, shell) stays in this process.
  */
+import { GENERATION_CHANNELS, generationBlocked } from "../shared/graph/frames.js";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell, Menu, nativeImage, protocol, screen } from "electron";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -17,7 +18,7 @@ import * as productions from "./productions.js";
 import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, applyMagicRefDecision, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
@@ -33,10 +34,11 @@ import { boardFrameHistory } from "../shared/board-frames.js";
 import { createProviders, listAllModelLadders, applyKindOverrides, applyModelSurfaces, resolveProviderId, mediaForModel, getMediaCredits, PROVIDER_IDS, PROVIDER_META } from "./providers/registry.js";
 import { getHiggsfieldCliStatus, resolveHiggsfieldCliBinary, getOpenArtCliStatus, resolveOpenArtCliBinary, applyOptionExposure } from "./providers/api.js";
 import { resolvePromptRefs } from "./providers/refs.js";
-import { applyRefSwapsToIds, applyRefSwapsToPrompt, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags } from "./video-retry.js";
+import { styleTaggedRefIds } from "../shared/magic-refs.js";
+import { applyRefSwapsToIds, applyRefSwapsToPrompt, mergeRefSwaps, proactive720pSwaps, probeVideoInputs, resolveRefSwaps, retry720pOffer, unionVideoInputs, videoRefForEditSource, videoRefsForIds, videoRefsForPromptTags, type ResolvedRefSwap, type VideoInputRef } from "./video-retry.js";
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
-import { assemble, renderAnimatic, assemblyPlan } from "./assembly.js";
+import { assemble, renderAnimatic, assemblyPlan, sendAssetToAssembly } from "./assembly.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
@@ -62,11 +64,14 @@ import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
 import { loadSuiteSession, saveSuiteSession, removeSuiteEntry, upsertSuiteEntry, suiteDirRel, uniqueSuiteRel, imageExtFor, unlinkSuiteFile } from "./suite.js";
 import { cutoutCameraGrid } from "./camera-grid.js";
+import { shrinkImageToJpeg, imageDataUrlToBuffer } from "./image-downsample.js";
+import { IMAGE_IMPORT_LIMIT_BYTES, OVERSIZE_IMAGE_MESSAGE, OVERSIZE_IMAGE_CONVERT_LABEL } from "../shared/image-import.js";
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, ReferenceSaveOptions, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { jobForChannel, jobLabel } from "../shared/ipc.js";
+import { defaultGenjutsuModelId, genjutsuModeForModelId, isGenjutsuMode } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
@@ -1220,6 +1225,13 @@ function registerIpc() {
     ipcMain.handle(channel, async (event, ...args) => { // security-allow: sole registration point — sender + schema checked above
       if (!isTrustedSender(event)) throw new Error(`IPC ${channel}: untrusted sender`);
       validateIpcArgs(channel, args);
+      // Deactivated frames: member nodes are skipped at generation time.
+      if (GENERATION_CHANNELS.has(channel) && typeof args[0] === "string" && typeof args[1] === "string") {
+        const gp = productions.loadProduction(args[0]);
+        const gs = gp?.scenes.flatMap((s) => s.shots).find((s) => s.id === args[1]);
+        const nid = channel === "production:generateTweenBlock" ? undefined : (args[2] as { nodeId?: string } | undefined)?.nodeId;
+        if (gs && generationBlocked(gs.graphLayout, channel, nid)) throw new Error("This node is in a deactivated group - reactivate the group to generate.");
+      }
       // Record generation jobs on the ledger — the wrapper, not the call
       // site, so a generation can't ship without a job record.
       return await runWithJobLedger(jobLedger, channel, args, () => listener(event, ...args));
@@ -1537,7 +1549,9 @@ function registerIpc() {
     workspace: settings.getWorkspace(),
     followProduction: settings.getFollowProduction(),
     accent: settings.getAccent(),
+    theme: settings.getTheme(),
     externalEditor: settings.getExternalEditor(),
+    audioEditor: settings.getAudioEditor(),
   }));
 
   handle("settings:setApiKey", (_e, key: string) => {
@@ -1748,6 +1762,10 @@ function registerIpc() {
     if (typeof color === "string") settings.setAccent(color);
   });
 
+  handle("settings:setTheme", (_e, theme: string) => {
+    if (typeof theme === "string") settings.setTheme(theme);
+  });
+
   handle("settings:pickExternalEditor", async () => {
     const res = await dialog.showOpenDialog(win!, {
       title: "Choose external image editor",
@@ -1772,6 +1790,30 @@ function registerIpc() {
     const validated = await validateExternalEditor(p.trim());
     settings.setExternalEditor(validated);
     return { ok: true, path: validated };
+  });
+
+  handle("settings:pickAudioEditor", async () => {
+    const res = await dialog.showOpenDialog(win!, { title: "Choose external audio editor", properties: ["openFile"], filters: [{ name: "All files", extensions: ["*"] }] });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const validated = await validateExternalEditor(res.filePaths[0]);
+    settings.setAudioEditor(validated);
+    return validated;
+  });
+
+  handle("settings:setAudioEditor", async (_e, p: string | null) => {
+    if (p === null || (typeof p === "string" && p.trim() === "")) { settings.setAudioEditor(null); return; }
+    if (typeof p !== "string") throw new Error("Invalid audio editor value.");
+    settings.setAudioEditor(await validateExternalEditor(p.trim()));
+  });
+
+  handle("audio:editExternally", async (_e, opts: { src?: string }) => {
+    const file = resolveProductionFile({ src: typeof opts?.src === "string" ? opts.src : undefined });
+    if (!file) throw new Error("That audio file is not part of a production.");
+    const p = productions.loadProduction(file.productionId);
+    if (!p) throw new Error("Production not found.");
+    const abs = assetPath(p, file.relPath);
+    if (!fs.existsSync(abs)) throw new Error(`Audio not found on disk: ${file.relPath}`);
+    await openWithExternalEditor(abs, { getEditor: () => settings.getAudioEditor() });
   });
 
   handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }) => {
@@ -1855,6 +1897,34 @@ function registerIpc() {
       return { ok: true, models };
     } catch (e) {
       return { ok: false, error: String(e) };
+    }
+  });
+
+  // Settings "Test connection": listing models proves only that the key can
+  // read the catalog — a key restricted by model/IP or missing the
+  // inference scope (e.g. Cheaper Inference) passes that yet fails at the
+  // first pipeline step. Probe the real submit shape too: one 1-token
+  // completion on the selected model via the same ChatClient path ingest
+  // uses, so a restriction surfaces here with the provider's own reason.
+  handle("models:testConnection", async (): Promise<import("../shared/ipc.js").ModelListResult> => {
+    const list = ipcListeners.get("models:list");
+    if (!list) return { ok: false, error: "Model list is unavailable (no handler registered)." };
+    const listed = (await list(undefined)) as import("../shared/ipc.js").ModelListResult;
+    if (!listed.ok) return listed;
+    const apiKey = settings.getApiKey();
+    if (!apiKey) return listed;
+    const model = settings.getModel() || listed.models[0]?.id;
+    if (!model) return listed;
+    try {
+      await new ChatClient(apiKey, settings.getBaseUrl()).completeOnce(
+        model,
+        [{ role: "user", content: "Reply with the word ok." }],
+        1
+      );
+      return listed;
+    } catch (e) {
+      console.warn(`[settings] connection test: models listed but ${model} probe failed: ${String(e)}`);
+      return { ok: false, error: `Models listed, but a test request to ${model} failed — ${friendlyApiError(e)}` };
     }
   });
 
@@ -1985,6 +2055,7 @@ function registerIpc() {
       projects.add(p.meta.id);
       paths.push(...productions.referenceThumbnailPaths(p));
       paths.push(...productions.generationVideoThumbnailPaths(p));
+      paths.push(...productions.generationImageThumbnailPaths(p));
     }
     const counts = await regenerateRefThumbnails(paths);
     return { ...counts, projects: projects.size };
@@ -2155,6 +2226,8 @@ function registerIpc() {
     const p = productions.importProduction(folder);
     settings.addRecentProduction(p.meta.folder);
     setActiveProduction(p.meta.id);
+    // Follow the imported production's references like a normal open does.
+    refWatcher.watch(p.meta.id, p);
     return p;
   });
 
@@ -2226,13 +2299,28 @@ function registerIpc() {
     const file = res.canceled ? null : res.filePaths[0];
     if (!file) return null;
     try {
-      const buf = fs.readFileSync(file);
-      if (buf.length > 15 * 1024 * 1024) throw new Error("Image is larger than 15 MB.");
-      const ext = path.extname(file).slice(1).toLowerCase().replace("jpg", "jpeg") || "png";
+      let buf: Buffer = fs.readFileSync(file);
+      let ext = path.extname(file).slice(1).toLowerCase().replace("jpg", "jpeg") || "png";
       // "All files" can pick a clip: never mint a fake `data:image/<video ext>`
       // (it would be saved as a .png holding video bytes). Videos enter as
       // media references via drag/paste instead.
       if (/^(mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|wmv|flv|3gp)$/.test(ext)) throw new Error("That's a video file — drag it onto the references panel (or a storyboard frame) to add it as a video reference.");
+      if (/^(mp3|wav|m4a|aac|ogg|flac)$/.test(ext)) throw new Error("That's an audio file — drag it onto the references panel (or the node graph) to add it as an audio reference.");
+      if (buf.length > IMAGE_IMPORT_LIMIT_BYTES) {
+        // Oversize: offer a JPEG downsample instead of refusing the import.
+        // The picked file is only read — the original is never modified;
+        // the converted bytes are what the caller imports.
+        const choice = await dialog.showMessageBox(win!, {
+          type: "question",
+          message: OVERSIZE_IMAGE_MESSAGE,
+          buttons: [OVERSIZE_IMAGE_CONVERT_LABEL, "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        if (choice.response !== 0) return null;
+        buf = shrinkImageToJpeg(buf, { decode: (b) => nativeImage.createFromBuffer(b) });
+        ext = "jpeg";
+      }
       return `data:image/${ext};base64,${buf.toString("base64")}`;
     } catch (e) {
       throw new Error(`Couldn't read that image: ${e instanceof Error ? e.message : String(e)}`);
@@ -2694,7 +2782,7 @@ function registerIpc() {
     // builder) persist their new/updated entries — without them those changes
     // were silently dropped on save. `styles` is included so the style-frame
     // generator's written frame + pending-job record persist the same way.
-    for (const k of ["status", "currentStep", "magicEnabled", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
+    for (const k of ["status", "currentStep", "magicEnabled", "magicBible", "magicRefDecisions", "assembly", "characters", "references", "referenceCategories", "styles"] as const) {
       if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) {
         (fresh as unknown as Record<string, unknown>)[k] = after[k];
       }
@@ -2865,6 +2953,26 @@ function registerIpc() {
         offer
       );
     } catch { /* the offer is best-effort; the real error is rethrown by the caller */ }
+  }
+
+  /** Proactive counterpart of the retry offer, for a video node's ticked
+   *  "Downsample reference video to 720p": build this submission's swaps by
+   *  creating/reusing each oversize input's 720p duplicate up front. Unlike
+   *  the best-effort offer this THROWS (no encoder / failed transcode) so
+   *  the caller submits nothing instead of uploading at native resolution
+   *  against the user's tick. New duplicates ride the job's save. */
+  async function buildProactive720pSwaps(p: Production, inputs: VideoInputRef[]): Promise<ResolvedRefSwap[]> {
+    if (!inputs.length) return [];
+    const bin = await resolveFfmpeg();
+    if (!bin) throw new Error("Downsample reference video to 720p is on, but no video encoder is available — nothing was submitted.");
+    return proactive720pSwaps(p, inputs, {
+      probe: (abs) => probeVideoSize(bin, abs),
+      createDup: (refId) => create720pReference(p, refId, {
+        resolveBin: resolveFfmpeg,
+        run: (b, argv) => runFfmpeg(b, argv),
+        probe: (b, abs) => probeVideoSize(b, abs),
+      }),
+    });
   }
 
   /** Shared runner for the LLM/image-driven steps (3 & 4): status + log + persist. */
@@ -3840,8 +3948,11 @@ function registerIpc() {
     // Upscale submits exactly one image (the source) — extra references would
     // fail the model's single-image rule, so its refIds are ignored.
     if (kind !== "upscale") {
+      const styleTagged = styleTaggedRefIds(p);
       for (const id of Array.isArray(req?.refIds) ? req.refIds : []) {
         if (typeof id !== "string" || !id) continue;
+        // Style-tagged references never upload, even when attached by id.
+        if (styleTagged.has(id)) continue;
         const r = refPool.find((x) => x.id === id);
         if (!r) continue;
         const dataUrl = refArtworkDataUrl(p, r);
@@ -4372,8 +4483,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // image artwork and dropped video clips upload as visual references.
       // Direct generation wires (no saved reference) resolve to the wired
       // node's selected take.
-      // 720p-retry substitution for this submission only (see classic flow).
-      const nodeSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      // 720p substitution for this submission only (see classic flow): the
+      // explicit retry swaps, plus — when the node's "Downsample reference
+      // video to 720p" is ticked — proactive swaps for its oversize inputs.
+      const genNode = (shot.graphVideoNodes ?? []).find((n) => n.id === nodeId);
+      const proactiveSwaps = genNode?.downsampleVideoRefs
+        ? await buildProactive720pSwaps(p, unionVideoInputs(videoRefsForIds(p, opts?.refIds), videoRefsForPromptTags(p, clean.prompt)))
+        : [];
+      if (proactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${proactiveSwaps.length} reference video${proactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
+      const nodeSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), proactiveSwaps);
       if (nodeSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, nodeSwaps);
       const effectiveRefIds = applyRefSwapsToIds(opts?.refIds, nodeSwaps);
       const extraRefs = resolveGenRefIds(p, shot, effectiveRefIds);
@@ -4485,8 +4603,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
         const ref = (p.references ?? []).find((r) => r.id === iid);
         if (ref) {
-          const data = ref.media === "video" ? refMediaDataUrl(p, ref) : refArtworkDataUrl(p, ref);
-          if (data) inputs.push({ name: ref.name, dataUrl: data, ...(ref.media !== "video" && ref.imagePath ? { imageRel: ref.imagePath } : {}) });
+          const data = ref.media ? (refMediaDataUrl(p, ref) ?? refArtworkDataUrl(p, ref)) : refArtworkDataUrl(p, ref);
+          if (data) inputs.push({ name: ref.name, dataUrl: data, ...(!ref.media && ref.imagePath ? { imageRel: ref.imagePath } : {}) });
         }
       }
       if (!inputs.length) throw new Error("Nothing to animate yet — generate the member frames first (or wire references in).");
@@ -4578,10 +4696,34 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         prompt: typeof opts?.prompt === "string" ? opts.prompt.trim() : "",
         ...(opts?.params && typeof opts.params === "object" ? { params: opts.params } : {}),
       };
-      if (!clean.prompt) throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
-      // 720p-retry substitution for this submission only (see classic flow):
+      // Genjutsu nodes (Motion Transfer / Object Swap) ride this handler:
+      // their description is optional, their model is locked to the
+      // node's feature pair, and they keep the source clip's timing.
+      const genjutsuMode = node && isGenjutsuMode(node.mode) ? node.mode : null;
+      if (genjutsuMode) {
+        if (clean.model === "auto") clean.model = defaultGenjutsuModelId(genjutsuMode);
+        else if (genjutsuModeForModelId(clean.model) !== genjutsuMode) {
+          throw new Error(`"${clean.model}" isn't a ${genjutsuMode === "genjutsu-motion" ? "Motion Transfer" : "Object Swap"} model — pick Genjutsu or Genjutsu Lite on this node. Nothing was submitted.`);
+        }
+        clean.durationSec = 0;
+      } else if (!clean.prompt) {
+        throw new Error("Describe the edit first (e.g. \"replace the sky with a sunset\").");
+      }
+      // 720p substitution for this submission only (see classic flow):
       // prompt tags, the source reference, and its file path all follow.
-      const editSwaps = resolveRefSwaps(p, opts?.refSwaps);
+      // A ticked "Downsample reference video to 720p" adds proactive swaps
+      // for oversize inputs — never on Genjutsu (its one source clip
+      // uploads as-is; the node doesn't offer the option).
+      const editProactiveSwaps = !genjutsuMode && node?.downsampleVideoRefs
+        ? await buildProactive720pSwaps(p, unionVideoInputs(
+            videoRefForEditSource(p, { sourceRefId: opts?.sourceRefId, sourcePath: opts?.sourcePath }),
+            node?.source?.kind === "ref" ? videoRefForEditSource(p, { sourceRefId: node.source.refId }) : [],
+            videoRefsForIds(p, opts?.refIds),
+            videoRefsForPromptTags(p, clean.prompt)
+          ))
+        : [];
+      if (editProactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${editProactiveSwaps.length} reference video${editProactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
+      const editSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), editProactiveSwaps);
       if (editSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, editSwaps);
       let sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       if (sourcePath) {
@@ -4627,7 +4769,30 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         videoRefsForIds(p, editEffectiveRefIds),
         videoRefsForPromptTags(p, clean.prompt)
       );
-      emit(`Shot ${shot.number}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      if (genjutsuMode) {
+        // Exactly one video may ride a Genjutsu submit — the source clip.
+        // (Saved-ref inventory here; the provider re-checks every ref,
+        // direct generation wires included, before submitting.)
+        const extraVideo = editVideoInputs.find((v) => v.relPath !== sourcePath && v.refId !== sourceRefId);
+        if (extraVideo) {
+          throw new Error(`Genjutsu takes exactly one video (the source clip) — "${extraVideo.name}" is also a video. Remove it from the references and retry. Nothing was submitted.`);
+        }
+        // Genjutsu accepts 4-30s sources (the site's limits). Probe when
+        // ffmpeg is resolvable; an unreadable duration lets the vendor
+        // rule speak rather than blocking a good clip.
+        try {
+          const bin = await resolveFfmpeg();
+          if (bin) {
+            const probed = await probeMedia(bin, assetPath(p, sourcePath));
+            if (probed.durationSec != null && (probed.durationSec < 4 || probed.durationSec > 30)) {
+              throw new Error(`Genjutsu needs a source clip between 4 and 30 seconds — this one is ${Math.round(probed.durationSec)}s. Trim it and retry. Nothing was submitted.`);
+            }
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes("between 4 and 30 seconds")) throw e;
+        }
+      }
+      emit(`Shot ${shot.number}: ${genjutsuMode ? (genjutsuMode === "genjutsu-motion" ? "Genjutsu motion transfer" : "Genjutsu object swap") : "editing the video"}${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
       let editSubmitted = false;
       const editSink = pendingVideoSink(id, shotId, { kind: "videoNode", ...(sourcePath ? { sourcePath } : {}), nodeId });
       clean.onPending = (rec) => { if (rec) editSubmitted = true; editSink(rec); };
@@ -4677,13 +4842,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   function resolveGenRefIds(p: Production, shot: ProductionShot, refIds: unknown): { name: string; dataUrl: string }[] {
     const extraRefs: { name: string; dataUrl: string }[] = [];
     if (!Array.isArray(refIds)) return extraRefs;
+    // Style-tagged references never upload, even when wired by id.
+    const styleTagged = styleTaggedRefIds(p);
     const pool = [
       ...p.characters.map((c) => ({ id: c.id, name: c.name, data: refArtworkDataUrl(p, c) })),
       ...p.products.map((pr) => ({ id: pr.id, name: pr.name, data: refArtworkDataUrl(p, pr) })),
       ...(p.references ?? []).map((r) => ({
         id: r.id,
         name: r.name,
-        data: r.media === "video" ? refMediaDataUrl(p, r) : refArtworkDataUrl(p, r),
+        data: r.media ? (refMediaDataUrl(p, r) ?? refArtworkDataUrl(p, r)) : refArtworkDataUrl(p, r),
       })),
     ];
     for (const rid of refIds) {
@@ -4702,6 +4869,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         }
         continue;
       }
+      if (typeof rid === "string" && styleTagged.has(rid)) continue;
       const ref = pool.find((r) => r.id === rid && r.data);
       if (ref?.data) extraRefs.push({ name: ref.name, dataUrl: ref.data });
     }
@@ -5518,6 +5686,13 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) return null;
     const kind = mime.startsWith("video/") ? "video" as const : mime.startsWith("audio/") ? "audio" as const : null;
     if (!kind) throw new Error(`Unsupported reference media type: ${mime || "unknown"}`);
+    // The renderer-supplied MIME only picks the kind — the extension must
+    // agree, so an arbitrary file can't be written into referencesDir
+    // under a media mime, and an empty payload never lands as a 0-byte ref.
+    const ext = path.extname(String(fileName ?? "")).slice(1).toLowerCase();
+    const okExt = kind === "video" ? /^(mp4|m4v|mov|webm|mkv|avi)$/ : /^(mp3|wav|m4a|aac|ogg|flac)$/;
+    if (!okExt.test(ext)) throw new Error(`Unsupported ${kind} file ".${ext || "?"}" — expected ${kind === "video" ? "mp4/mov/webm/mkv/avi" : "mp3/wav/m4a/aac/ogg/flac"}.`);
+    if (!bytes || !(bytes instanceof ArrayBuffer) || bytes.byteLength === 0) throw new Error("The media file is empty.");
     const base = path.basename(String(fileName || "clip")).trim() || "clip";
     const parsed = path.parse(base);
     const dir = p.assets.referencesDir;
@@ -5531,6 +5706,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     fs.writeFileSync(assetPath(p, rel), Buffer.from(bytes));
     productionEmit(id, `Added ${kind} reference → ${rel}.`);
     return { path: rel, kind };
+  });
+
+  // Oversize drop/paste imports: shrink a renderer-supplied image data URL
+  // to a JPEG at or under the import limit. The renderer shows the convert
+  // popup first; the source file on disk is never touched.
+  handle("production:downsampleImage", (_e, dataUrl: string): string => {
+    const buf = imageDataUrlToBuffer(dataUrl);
+    const jpeg = shrinkImageToJpeg(buf, { decode: (b) => nativeImage.createFromBuffer(b) });
+    return `data:image/jpeg;base64,${jpeg.toString("base64")}`;
   });
 
   // Step 2/3: save a reference image (inline data URL) into the production's
@@ -5609,6 +5793,69 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     renameReference(p, refId, name, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Magic Prompt reconciliation: slot the user's reference where prompts cite
+  // a different name — save it as an alias and rewrite the tags to canonical.
+  handle("production:assignReferenceAlias", (_e, id: string, citedName: string, refId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    assignReferenceAlias(p, citedName, refId, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  handle("production:dismissMagicRef", (_e, id: string, citedName: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    dismissCitedRefName(p, citedName, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  // Magic Stage 1: build/refresh the Story Bible only, so the user can
+  // review Cast & Sets before any prompt is written. Same queue/rebase
+  // discipline as the full generate below.
+  handle("production:generateMagicBible", async (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    if (!p.scenes.some((s) => s.shots.length)) throw new Error("No shots yet — ingest a script in Step 1 first.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error(apiKeyRequired());
+    productionEmit(id, "Magic Prompt: reading the full script…");
+    try {
+      await enqueueGeneration(id, async () => {
+        const pq = productions.loadProduction(id);
+        if (!pq) throw new Error("Production not found.");
+        const before = structuredClone(pq);
+        await generateMagicPrompts(pq, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl(), undefined, { bibleOnly: true });
+        await enqueueProduction(id, async () => {
+          productions.saveProduction(rebaseProduction(before, pq));
+        });
+      });
+    } catch (e) {
+      productionEmit(id, friendlyApiError(e), "error");
+      throw new Error(friendlyApiError(e));
+    }
+    return productions.loadProduction(id) ?? p;
+  });
+
+  handle("production:setMagicRefDecision", (_e, id: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed: boolean) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    applyMagicRefDecision(p, entityName, { refIds: Array.isArray(refIds) ? refIds : [], textOnly: textOnly === true, pendingCreate: pendingCreate === true, confirmed: confirmed === true }, (m, l) => productionEmit(id, m, l));
+    productions.saveProduction(p);
+    return p;
+  });
+
+  handle("production:describeReference", async (_e, id: string, refId: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const apiKey = settings.getApiKey();
+    if (!apiKey) throw new Error("Add your API key in Settings first.");
+    await describeReference(p, refId, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl());
     productions.saveProduction(p);
     return p;
   });
@@ -5824,6 +6071,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         rects: req.rects,
         labels: req.labels,
         categoryId,
+        existingNames: [
+          ...p.characters.map((c) => c.name),
+          ...p.products.map((c) => c.name),
+          ...(p.references ?? []).map((r) => r.name),
+        ].filter((n): n is string => typeof n === "string"),
       },
       {
         decodeImage: (abs) => nativeImage.createFromPath(abs),
@@ -5939,7 +6191,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already gone */ }
   });
 
-  // Step 2: rescan referencesDir — adopt images the user dropped into the
+  // Step 2: rescan referencesDir — adopt media the user dropped into the
   // folder externally. Every image file no reference/character/product claims
   // becomes a reference (name from the filename); a same-name reference with
   // no image is filled in instead of duplicated.
@@ -5948,33 +6200,36 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!p) return null;
     const dir = p.assets.referencesDir;
     const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+    const VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
+    const AUDIO_FILE = /\.(mp3|wav|m4a|aac|ogg|flac)$/i;
     let rels: string[] = [];
     try {
       rels = fs.readdirSync(assetPath(p, dir))
-        .filter((f) => IMAGE_FILE.test(f))
+        .filter((f) => IMAGE_FILE.test(f) || VIDEO_FILE.test(f) || AUDIO_FILE.test(f))
         .map((f) => `${dir}/${f}`);
     } catch { /* missing folder — nothing to adopt */ }
     const orphans = productions.unclaimedReferenceFiles(rels, p);
     for (const rel of orphans) {
       const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
-      const empty = (p.references ?? []).find((r) => !r.imagePath && r.name.trim().toLowerCase() === name.toLowerCase());
+      const kind = VIDEO_FILE.test(rel) ? "video" as const : AUDIO_FILE.test(rel) ? "audio" as const : null;
+      const empty = (p.references ?? []).find((r) => !r.imagePath && !r.mediaPath && r.name.trim().toLowerCase() === name.toLowerCase());
       if (empty) {
-        empty.imagePath = rel;
+        if (kind) { empty.media = kind; empty.mediaPath = rel; } else empty.imagePath = rel;
         empty.artwork = undefined;
       } else {
         p.references = [...(p.references ?? []), {
           id: `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
           name,
-          imagePath: rel,
+          ...(kind ? { media: kind, mediaPath: rel } : { imagePath: rel }),
           shotIds: [],
         }];
       }
     }
     if (orphans.length > 0) {
       productions.saveProduction(p);
-      productionEmit(id, `Rescanned ${dir}/ — adopted ${orphans.length} reference image${orphans.length === 1 ? "" : "s"}.`, "done");
+      productionEmit(id, `Rescanned ${dir}/ — adopted ${orphans.length} reference file${orphans.length === 1 ? "" : "s"}.`, "done");
     } else {
-      productionEmit(id, `Rescanned ${dir}/ — no new reference images.`);
+      productionEmit(id, `Rescanned ${dir}/ — no new reference files.`);
     }
     return p;
   });
@@ -6053,6 +6308,28 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     });
   });
 
+  handle("production:assemblySend", (_e, id: string, rel: string): string => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const dest = sendAssetToAssembly(p, rel);
+    productionEmit(id, `Sent to assembly folder: ${dest}`);
+    return dest;
+  });
+
+  handle("production:setGenerationSelect", (_e, id: string, shotId: string, rel: string, selected: boolean): Production => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
+    if (!shot) throw new Error("Shot not found.");
+    let hit = false;
+    for (const n of shot.graphVideoNodes ?? []) for (const g of n.gens ?? []) {
+      if (g.path === rel) { if (selected) g.select = true; else delete g.select; hit = true; }
+    }
+    if (!hit) throw new Error("Video generation not found.");
+    productions.saveProduction(p);
+    return p;
+  });
+
   // Step 5: open the export folder in the OS file manager.
   handle("production:assemblyOpenFolder", (_e, id: string) => {
     const p = productions.loadProduction(id);
@@ -6072,6 +6349,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     import: "production:import",
     ingest: "production:ingest",
     setShotPrompt: "production:updateBoardPrompt",
+    generateMagicBible: "production:generateMagicBible",
     generateStyleFrame: "production:generateStyleFrame",
     generateCharacterSheet: "production:generateCharacterSheet",
     generateBoards: "production:generateBoards",

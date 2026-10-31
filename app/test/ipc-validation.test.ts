@@ -46,6 +46,7 @@ describe("ipcContract assembly", () => {
     expect(ipcContract["chat:send"]).toEqual({ method: "sendMessage", kind: "invoke" });
     expect(ipcContract["production:generateVideo"]).toEqual({ method: "generateVideo", kind: "invoke" });
     expect(ipcContract["ledger:get"]).toEqual({ method: "getLedger", kind: "invoke" });
+    expect(ipcContract["models:testConnection"]).toEqual({ method: "testConnection", kind: "invoke" });
   });
 });
 

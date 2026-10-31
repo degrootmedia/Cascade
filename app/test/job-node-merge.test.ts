@@ -118,6 +118,16 @@ describe("mergeJobShotNodes (finished job onto freshest disk state)", () => {
     expect(merged.graphEditNodes![0].gens![merged.graphEditNodes![0].genIndex!].path).toBe("b.jpg");
   });
 
+  it("keeps a take another concurrent job landed on an edit-video node", () => {
+    const prev = { graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "x", gens: [gen("a.mp4")], genIndex: 0 }] } as unknown as ProductionShot;
+    // Job A already committed c.mp4 to disk before job B (same snapshot) commits.
+    const fresh = { graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "x", gens: [gen("c.mp4"), gen("a.mp4")], genIndex: 0 }] } as unknown as ProductionShot;
+    const next = { graphVideoNodes: [{ id: "ev0", mode: "edit", prompt: "x", gens: [gen("b.mp4"), gen("a.mp4")], genIndex: 0 }] } as unknown as ProductionShot;
+    const merged = mergeJobShotNodes(prev, fresh, next);
+    expect(merged.graphVideoNodes![0].gens!.map((g) => g.path)).toEqual(["b.mp4", "c.mp4", "a.mp4"]);
+    expect(merged.graphVideoNodes![0].genIndex).toBe(0);
+  });
+
   it("keeps upscale wiring changed mid-job while landing the upscale", () => {
     const prev = { graphUpscale: { gens: [gen("a.jpg")], genIndex: 0 } } as unknown as ProductionShot;
     const fresh = {

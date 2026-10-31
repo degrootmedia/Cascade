@@ -299,12 +299,26 @@ describe("connectionToEdge: style / brand plugs", () => {
   });
 });
 
-describe("connectionToEdge: fixed pipes carry no wire", () => {
-  it("prompt→generator pipes return null", () => {
+describe("connectionToEdge: prompt pipes", () => {
+  it("paired prompt pipes carry their canonical edge ids", () => {
     const g = baseGraph();
-    expect(connectionToEdge(conn("composer", "imagegen", "in-prompt"), g)).toBeNull();
-    expect(connectionToEdge(conn("videoprompt", "videogen", "in-prompt"), g)).toBeNull();
-    expect(connectionToEdge(conn("editprompt:edit0", "editgen:edit0", "in-prompt"), g)).toBeNull();
+    expect(connectionToEdge(conn("composer", "imagegen", "in-prompt"), g)?.edge.id).toBe("e-cmp-img");
+    expect(connectionToEdge(conn("videoprompt", "videogen", "in-prompt"), g)?.edge.id).toBe("e-vp-vid");
+    expect(connectionToEdge(conn("editprompt:edit0", "editgen:edit0", "in-prompt"), g)?.edge.id).toBe("e-ep-edit:edit0");
+  });
+
+  it("a cross-wired prompt replaces the generator's paired prompt pipe", () => {
+    const g = baseGraph();
+    const cross = connect(g, conn("composer", "videogen", "in-prompt"));
+    const into = cross.edges.filter((e) => e.to.node === "videogen" && e.to.port === "in-prompt");
+    expect(into.map((e) => e.from.node)).toEqual(["composer"]);
+    expect(keysOf(cross)).toContain("e-composer-videogen-prompt");
+    expect(keysOf(cross)).not.toContain("e-vp-vid");
+    // Re-plugging the paired prompt restores the canonical pipe alone.
+    const back = connect(cross, conn("videoprompt", "videogen", "in-prompt"));
+    expect(back.edges.filter((e) => e.to.node === "videogen" && e.to.port === "in-prompt").map((e) => e.from.node)).toEqual(["videoprompt"]);
+    expect(keysOf(back)).toContain("e-vp-vid");
+    expect(keysOf(back)).not.toContain("e-composer-videogen-prompt");
   });
 });
 

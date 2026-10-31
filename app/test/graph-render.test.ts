@@ -12,6 +12,7 @@ import {
   promptRefsFor,
   renderPromptText,
   renderShotPrompt,
+  wiredPromptTarget,
   resolveNodeStyleText,
   stripSharedSections,
   styleEdgePresent,
@@ -210,5 +211,35 @@ describe("reference tags are emitted from the graph edges (step 05 T2)", () => {
     const base = shot({ prompt: "Alpha @[Unmatched]", graphStyleConnected: false });
     const s = { ...base, graph: materializeGraph(base, []) };
     expect(renderShotPrompt(withRef, s, "composer")).toBe("Alpha @[Unmatched]");
+  });
+});
+
+describe("wiredPromptTarget (cross-wired prompt inputs)", () => {
+  it("falls back to the paired prompt when no wire overrides it", () => {
+    const s = graphed(shot({ graphVideoNodes: [{ id: "vid0", prompt: "Drift" }] }));
+    expect(wiredPromptTarget(s, "videogen", { videoprompt: "vid0" })).toEqual({ videoprompt: "vid0" });
+    expect(wiredPromptTarget(shot({}), "videogen", { videoprompt: "vid0" })).toEqual({ videoprompt: "vid0" });
+  });
+
+  it("resolves the prompt node actually wired into a generator's in-prompt", () => {
+    const base = shot({
+      prompt: "Composer words",
+      graphVideoNodes: [{ id: "vid0", prompt: "Drift" }, { id: "ev0", mode: "edit", prompt: "Cut" }],
+      graphEditNodes: [{ id: "edit0", prompt: "Fix" }],
+    });
+    let g = materializeGraph(base, []);
+    const s = (graph: typeof g) => ({ ...base, graph });
+    // Composer feeds the video generator.
+    g = applyConnection(g, connectionToEdge({ source: "composer", target: "videogen", targetHandle: "in-prompt" }, g)!);
+    expect(wiredPromptTarget(s(g), "videogen", { videoprompt: "vid0" })).toBe("composer");
+    // The video prompt feeds the image generator.
+    g = applyConnection(g, connectionToEdge({ source: "videoprompt", target: "imagegen", targetHandle: "in-prompt" }, g)!);
+    expect(wiredPromptTarget(s(g), "imagegen", "composer")).toEqual({ videoprompt: "vid0" });
+    // The edit prompt feeds the edit-video generator.
+    g = applyConnection(g, connectionToEdge({ source: "editprompt:edit0", target: "editvideo", targetHandle: "in-prompt" }, g)!);
+    expect(wiredPromptTarget(s(g), "editvideo", { editvideoprompt: "ev0" })).toEqual({ editprompt: "edit0" });
+    // The edit-video prompt feeds the edit generator.
+    g = applyConnection(g, connectionToEdge({ source: "editvideoprompt", target: "editgen:edit0", targetHandle: "in-prompt" }, g)!);
+    expect(wiredPromptTarget(s(g), "editgen:edit0", { editprompt: "edit0" })).toEqual({ editvideoprompt: "ev0" });
   });
 });

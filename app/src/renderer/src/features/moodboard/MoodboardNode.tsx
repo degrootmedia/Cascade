@@ -10,7 +10,7 @@ import { RefFigure } from "../../components/production/references.js";
 
 /** The wrapper never starts a drag from an interactive control. */
 function isInteractive(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && !!target.closest("input, button, textarea, a, select");
+  return target instanceof HTMLElement && !!target.closest("input, button, textarea, a, select, .prod-graph-audio");
 }
 
 export const MoodboardNode = memo(function MoodboardNode({
@@ -28,6 +28,7 @@ export const MoodboardNode = memo(function MoodboardNode({
   onOpenViewer,
   onContextMenu,
   thumbEdge,
+  inUseTitle,
 }: {
   prodId: string;
   refItem: CustomRef;
@@ -45,6 +46,8 @@ export const MoodboardNode = memo(function MoodboardNode({
   onContextMenu: (e: ReactMouseEvent, id: string) => void;
   /** LOD thumbnail long-edge for the current settled zoom (0 = full-res). */
   thumbEdge: number;
+  /** When set, the in-use node badge shows (see `referenceUsage`). */
+  inUseTitle?: string;
 }) {
   const style: CSSProperties = {
     left: node.x,
@@ -60,6 +63,7 @@ export const MoodboardNode = memo(function MoodboardNode({
   };
   const handleDoubleClick = (e: ReactMouseEvent) => {
     if (isInteractive(e.target)) return;
+    if (refItem.media === "audio") return;
     onOpenViewer(refItem);
   };
   const stop = (e: ReactPointerEvent) => e.stopPropagation();
@@ -79,6 +83,7 @@ export const MoodboardNode = memo(function MoodboardNode({
         onRemove={onRemoveFromBoard}
         onRename={onRename}
         thumbEdge={thumbEdge}
+        inUseTitle={inUseTitle}
         onReorder={() => {}}
       />
       <span className="moodboard-node-rotate" title="Drag to rotate (Shift snaps to 15°)" onPointerDown={(e) => { stop(e); onRotateStart(e, node.refId); }} />
@@ -91,4 +96,5 @@ export const MoodboardNode = memo(function MoodboardNode({
   prev.node === next.node &&
   prev.selected === next.selected &&
   prev.thumbEdge === next.thumbEdge &&
+  prev.inUseTitle === next.inUseTitle &&
   prev.dimmed === next.dimmed);

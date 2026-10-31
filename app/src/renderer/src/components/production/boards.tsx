@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
-import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
+import type { CliModelSchema, OpenArtModelChoice, Production, ProductionShot, ShotColorTag, VideoGenOptions, VideoModelOptions } from "../../../../shared/ipc.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { isImageModel, isVideoModel, shotHasContent } from "../../../../shared/ipc.js";
 import { getMediaDefault } from "./media-defaults.js";
@@ -17,17 +17,17 @@ import { mediaEntryForId, mediaEntryForPath } from "../../../../shared/media-reg
 import { useExternalEditorLabel } from "../../use-external-editor-label.js";
 import { MEDIA_MENU_LABELS } from "../../../../shared/menu-labels.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
-import { closestResolution } from "../resolution.js";
+import { closestResolution, resolutionsForSchema } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
 import { AutoTextarea } from "../AutoTextarea.js";
-import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon } from "../icons.js";
+import { DragHandleIcon, EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, NodesIcon, PlusIcon, RegenerateIcon } from "../icons.js";
 import { openImageSuite } from "../../features/suite/suite-handoff.js";
 import { MediaLightbox } from "../common/MediaLightbox.js";
 import { useClampedMenuStyle } from "../menu-position.js";
 
-function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, onToggleDisabled, zoomOpen, onZoomChange, onZoomNavigate }: {
+function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy, pending, rechecking, videoPending, videoRechecking, onRegenerate, onRecheck, onRecheckVideo, onClearPending, onImport, onOpenGraph, onEdit, onVideo, onTextChange, showScript, onPromptFocus, onFrameSelect, inRange, seqSlot, selected, onDropFrame, onDropFiles, onPromoteHistory, onDeleteGeneration, onSaveAsReference, onVideoStillSaved, draggable, onReorderDragStart, onReorderDrop, onReorderDragOver, onReorderDragEnd, isReorderTarget, isDragging, onInsertAfter, onDelete, onToggleDisabled, onSetColorTag, zoomOpen, onZoomChange, onZoomNavigate }: {
   prod: Production;
   shot: ProductionShot;
   bust: number;
@@ -52,6 +52,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
    *  a job stuck past recovery — it can't be rechecked afterwards). */
   onClearPending?: (shotId: string, kind: "image" | "video") => void;
   onImport: (shotId: string) => void;
+  /** Open the per-shot node graph for this frame (the Nodes button right of
+   *  Import; the prompt side panel keeps its own Nodes button). Optional so
+   *  embedders without a graph host simply don't render the button. */
+  onOpenGraph?: (shotId: string) => void;
   /** Open the AI edit dialog for this frame. */
   onEdit: (shotId: string) => void;
   /** Open the video-generation modal for this frame. */
@@ -97,6 +101,8 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   onDelete?: (shotId: string) => void;
   /** Toggle whether this shot is excluded from the animatic (right-click menu). */
   onToggleDisabled?: (shotId: string) => void;
+  /** Set or clear the frame's color tag (right-click menu). */
+  onSetColorTag?: (shotId: string, tag: ShotColorTag | undefined) => void;
   /** The workspace owns the enlarged-frame lightbox: true when THIS card's
    *  frame is the one on screen, so left/right arrows can step the lightbox
    *  between shots (a card cannot know its neighbours). */
@@ -246,7 +252,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
 
   // Right-click anywhere on the panel → custom menu with Delete shot (red).
   // Text inputs keep their native edit menu, so clicks inside them are ignored.
-  const hasPanelMenu = !!onDelete || !!onToggleDisabled;
+  const hasPanelMenu = !!onDelete || !!onToggleDisabled || !!onSetColorTag;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuStyle = useClampedMenuStyle(menu, menuRef);
@@ -266,7 +272,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     };
   }, [menu]);
   function openPanelMenu(e: React.MouseEvent) {
-    if (!onDelete && !onToggleDisabled) return;
+    if (!onDelete && !onToggleDisabled && !onSetColorTag) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest("input, textarea")) return;
     e.preventDefault();
@@ -285,6 +291,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   function toggleDisabledShot() {
     setMenu(null);
     onToggleDisabled?.(shot.id);
+  }
+  function setShotColorTag(tag: ShotColorTag | undefined) {
+    setMenu(null);
+    onSetColorTag?.(shot.id, tag);
   }
   function deleteMenuGeneration() {
     setMenu(null);
@@ -325,6 +335,10 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     setMenu(null);
     if (relForFolder) void window.cascade.showInFolder({ productionId: prod.meta.id, relPath: relForFolder });
   }
+  function sendMenuToAssembly() {
+    setMenu(null);
+    if (relForFolder) void window.cascade.assemblySend(prod.meta.id, relForFolder);
+  }
   function saveMenuReference() {
     setMenu(null);
     if (saveableRel && onSaveAsReference) onSaveAsReference(shot.id, saveableRel);
@@ -349,7 +363,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     <figure
       ref={cardRef}
       data-shot-id={shot.id}
-      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "") + (shot.disabled ? " disabled" : "")}
+      className={"prod-board" + (selected ? " selected" : "") + (inRange ? " in-range" : "") + (seqSlot ? " seq-slot" : "") + (isDragging ? " dragging" : "") + (isReorderTarget ? " drop-target" : "") + (shot.disabled ? " disabled" : "") + (shot.colorTag ? ` tag-${shot.colorTag}` : "")}
       onContextMenu={hasPanelMenu ? openPanelMenu : undefined}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-cascade-shot-order")) {
@@ -583,6 +597,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             {videoBusy ? "…" : <FilmStripIcon size={12} />}
           </button>
           <button className="prod-board-import" title="Import a frame for this shot" disabled={regenerating} onClick={(e) => { e.stopPropagation(); onImport(shot.id); }}><ImportIcon size={12} /></button>
+          {onOpenGraph && (
+            <button className="prod-board-nodes" title="Open the node graph for this shot" onClick={(e) => { e.stopPropagation(); onOpenGraph(shot.id); }}><NodesIcon size={12} /></button>
+          )}
         </div>
         {pending && (
           <button
@@ -690,6 +707,9 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
                   {MEDIA_MENU_LABELS.openFolder}
                 </button>
               )}
+              {relForFolder && (
+                <button className="ctx-item" onClick={sendMenuToAssembly}>Send to assembly folder</button>
+              )}
               <div className="ctx-sep" />
             </>
           )}
@@ -740,6 +760,28 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
             >
               {shot.disabled ? "Enable shot" : "Disable shot"}
             </button>
+          )}
+          {onSetColorTag && (
+            <>
+              {(["green", "yellow", "red"] as const).map((tag) => (
+                <button
+                  key={tag}
+                  className="ctx-item"
+                  onClick={() => setShotColorTag(tag)}
+                >
+                  <span className={`prod-board-tag-dot tag-${tag}`} aria-hidden />
+                  {shot.colorTag === tag ? "✓ " : ""}{tag[0].toUpperCase() + tag.slice(1)} tag
+                </button>
+              ))}
+              {shot.colorTag && (
+                <button
+                  className="ctx-item"
+                  onClick={() => setShotColorTag(undefined)}
+                >
+                  Remove color tag
+                </button>
+              )}
+            </>
           )}
           {onDelete && (
             <button
@@ -842,7 +884,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     }
     return () => { live = false; };
   }, [model]);
-  const resolutions = modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"];
+  const resolutions = resolutionsForSchema(modelSchema, extraParams as Record<string, unknown>, modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"]);
   // Keep the current selection valid when the model's options arrive — or
   // when the provider switches under the modal (new model list, new options).
   // The dep is the joined id list (not the array) because the parent passes a
@@ -857,7 +899,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     const snapped = snapDurationSec(durationSec, modelOpts);
     if (snapped !== durationSec) setDurationSec(snapped);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelOpts, videoModelIds]);
+  }, [modelOpts, videoModelIds, resolutions.join("|")]);
   useEffect(() => {
     void window.cascade.getOpenArtCredits().then((c) => setCredits(c)).catch(() => {});
     window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => setFrame(d)).catch(() => {});

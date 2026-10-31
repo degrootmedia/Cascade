@@ -4,17 +4,21 @@ import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
+import { inferReferencePurpose } from "../../../../shared/magic-refs.js";
 import { getMediaDefault, rememberMediaDefault, rememberedModel } from "./media-defaults.js";
 import { isQuotableCostModel } from "./generation-cost.js";
 import { GenerationCostSuffix } from "./generation-cost-label.js";
 import { seedModelOptionValues } from "./model-param-defaults.js";
 import { cascadeMedia } from "./animatic.js";
+import { importableImageDataUrl } from "./image-downsample.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import type { PromptContentHandle } from "../TriplePrompt.js";
-import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
+import { EditIcon, FilmStripIcon, ImportIcon, MagnifyIcon, NodesIcon, PlusIcon, RegenerateIcon, TrashIcon, XIcon } from "../icons.js";
+import { formatReferenceUsage, type ReferenceUsage } from "../../../../shared/reference-usage.js";
 import { useImageContextMenu } from "../image-context-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 import { refThumbUrl } from "./thumb-url.js";
+import { AudioRefTile } from "../graph/audio-ref-tile.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "../ModelOptionsForm.js";
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
@@ -229,13 +233,17 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, onAddCategory, onRenameCategory, onAddReference, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved }: {
+export function ReferenceCategorySection({ prodId, categories, items, usage, onAddCategory, onRenameCategory, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   onAddCategory: (name: string) => void;
   onRenameCategory: (id: string, name: string) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
+  /** A video/audio file dropped on a category (media reference import). */
+  onAddMediaFile?: (file: File, categoryId?: string) => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -248,6 +256,8 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
   /** Open the reference-image generation modal targeting a category. */
   onGenerate: (categoryId?: string) => void;
   onEditRef?: (ref: CustomRef) => void;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
   /** Rescan the production's references folder: adopt images added externally. */
   onRescan: () => Promise<void> | void;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
@@ -337,7 +347,7 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAddMediaFile={onAddMediaFile} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -362,13 +372,15 @@ export function ReferenceCategorySection({ prodId, categories, items, onAddCateg
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, selectedIds, onSelect, onAddReference, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, selectedIds, onSelect, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
+  usage?: Map<string, ReferenceUsage>;
   selectedIds: Set<string>;
   onSelect: (id: string, mode: "single" | "toggle" | "range", order: string[]) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
+  onAddMediaFile?: (file: File, categoryId?: string) => void;
   onAttach: (id: string) => void;
   onRemove: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -380,6 +392,8 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
   onEditRef?: (ref: CustomRef) => void;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
@@ -392,10 +406,12 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
       const ids = refDragIds(e.dataTransfer);
       if (ids.length) { onMove(ids, category.id || undefined); return; }
       for (const file of Array.from(e.dataTransfer.files)) {
+        if (file.type.startsWith("video/") || file.type.startsWith("audio/")) { onAddMediaFile?.(file, category.id || undefined); continue; }
         if (!file.type.startsWith("image/")) continue;
-        const reader = new FileReader();
-        reader.onload = () => { if (typeof reader.result === "string") onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, reader.result); };
-        reader.readAsDataURL(file);
+        // Oversize images get the convert-to-JPEG offer (null = cancelled).
+        void importableImageDataUrl(file).then((dataUrl) => {
+          if (dataUrl) onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, dataUrl);
+        }).catch(() => { /* unreadable or unshrinkable drop: nothing to add */ });
       }
     }}>
       <div className="prod-category-head">
@@ -409,7 +425,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
       {open && (
         <div className="prod-ref-grid">
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} inUseTitle={inUseTitleFor(usage, r.id)} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -421,15 +437,20 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, sel
 /** Data-only equality for a category panel: function identities are ignored
  *  (the parent recreates them per render); only visible data matters. */
 function areCategoryPanelsEqual(
-  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
-  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; selectedIds: Set<string> },
+  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
+  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
 ): boolean {
   if (prev.prodId !== next.prodId) return false;
   if (prev.category.id !== next.category.id || prev.category.name !== next.category.name) return false;
   // Selection is a fresh Set on every change, so identity covers any tile
   // entering/leaving the selection (the panel must repaint its highlights).
   if (prev.selectedIds !== next.selectedIds) return false;
-  return areRefItemListsEqual(prev.items, next.items);
+  if (!areRefItemListsEqual(prev.items, next.items)) return false;
+  // The in-use badge repaints when any tile's usage verdict changes.
+  for (const item of next.items) {
+    if (inUseTitleFor(prev.usage, item.id) !== inUseTitleFor(next.usage, item.id)) return false;
+  }
+  return true;
 }
 
 function areRefItemListsEqual(a: CustomRef[], b: CustomRef[]): boolean {
@@ -448,8 +469,25 @@ function areRefItemsEqual(a: CustomRef, b: CustomRef): boolean {
     (a.artwork ?? null) === (b.artwork ?? null) &&
     (a.media ?? null) === (b.media ?? null) &&
     (a.mediaPath ?? null) === (b.mediaPath ?? null) &&
-    (a.categoryId ?? "") === (b.categoryId ?? "")
+    (a.categoryId ?? "") === (b.categoryId ?? "") &&
+    (a.purpose ?? "") === (b.purpose ?? "") &&
+    (a.visualSummary ?? "") === (b.visualSummary ?? "")
   );
+}
+
+/** The in-use marker shared by every reference surface (Design tiles,
+ *  character sheets, moodboard, node-editor shelf): a small node icon shown
+ *  while the reference is tag-cited or wired into a node, so it isn't
+ *  deleted by accident. Renders nothing without a title. */
+export function RefInUseBadge({ title }: { title?: string }) {
+  if (!title) return null;
+  return <span className="prod-ref-inuse" title={title}><NodesIcon size={11} /></span>;
+}
+
+/** Tooltip for a tile's in-use badge, or undefined when the ref is unused. */
+export function inUseTitleFor(usage: Map<string, ReferenceUsage> | undefined, id: string): string | undefined {
+  const u = usage?.get(id);
+  return u ? `In use — ${formatReferenceUsage(u)}` : undefined;
 }
 
 /** Which half of a tile a drag is over: the left half inserts before it, the
@@ -465,9 +503,13 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, variant = "row", thumbEdge }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge, inUseTitle }: {
   prodId: string;
   refItem: CustomRef;
+  categoryName?: string;
+  categoryKind?: string;
+  onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
+  onDescribe?: (ref: CustomRef) => void;
   /** This tile is part of the section's multi-selection. */
   selected?: boolean;
   /** The whole multi-selection — dragging a selected tile drags all of them. */
@@ -492,6 +534,9 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
    *  settled zoom so a zoomed-out board decodes screen-sized bitmaps;
    *  zoom/lightbox/context-menu keep the full-res URL regardless. */
   thumbEdge?: number;
+  /** When set, the in-use node badge shows with this tooltip (the reference
+   *  is tag-cited or wired into a node — see `referenceUsage`). */
+  inUseTitle?: string;
 }) {
   const isNode = variant === "node";
   const r = refItem;
@@ -511,6 +556,8 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   // the context menu also use the full-res `imgUrl` below.
   const displayUrl = isNode ? (thumbEdge ? refThumbUrl(imgUrl ?? "", thumbEdge) : imgUrl) : refThumbUrl(imgUrl ?? "");
   const videoUrl = isVideo ? cascadeMedia(prodId, videoPath!) : undefined;
+  const isAudio = r.media === "audio" && !!r.mediaPath;
+  const audioUrl = isAudio ? cascadeMedia(prodId, r.mediaPath!) : undefined;
   const [zoom, setZoom] = useState<{ name: string; url: string; video: boolean; rel?: string } | null>(null);
   // Which edge a dragged tile currently hovers — drives the insert marker.
   const [dropSide, setDropSide] = useState<"before" | "after" | null>(null);
@@ -657,15 +704,36 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
               : videoActive
               ? <video className="prod-ref-video" src={videoUrl} poster={videoUrl ? refThumbUrl(videoUrl) : undefined} muted loop playsInline preload="metadata" autoPlay onLoadedMetadata={(e) => { try { if (e.currentTarget.currentTime < 0.05) e.currentTarget.currentTime = 0.05; } catch {} }} onMouseEnter={(e) => { try { void e.currentTarget.play().catch(() => {}); } catch {} }} onMouseLeave={(e) => { try { e.currentTarget.pause(); } catch {} }} onError={() => setVideoFailed(true)} draggable onDragStart={handleDragStart} />
               : <div className="prod-ref-blank" title="Hover to load video preview" onMouseEnter={activateVideo} onClick={activateVideo}><FilmStripIcon size={12} /></div>))
-          : <div className="prod-ref-blank">＋</div>}
+          : isAudio && audioUrl
+            ? <div className="prod-ref-audio" draggable={!isNode} onDragStart={isNode ? undefined : handleDragStart}><AudioRefTile url={audioUrl} name={r.name} colorId={r.waveformColor} /></div>
+            : <div className="prod-ref-blank">＋</div>}
+      <RefInUseBadge title={inUseTitle} />
       <div className="prod-ref-actions">
         {(hasImage || isVideo) && <button className="prod-ref-zoom" title={isVideo ? "Play this reference full size" : "Enlarge this reference"} onClick={handleZoom}><MagnifyIcon size={12} /></button>}
-        {!imgUrl && !isVideo && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
+        {!imgUrl && !isVideo && !isAudio && <button className="prod-ref-addimg" title="Import a reference image" onClick={handleAttach}><ImportIcon size={12} /></button>}
         {hasImage && onEditRef && <button className="prod-ref-edit-ai" title="Edit this reference image with AI" onClick={handleEditRef}><EditIcon size={12} /></button>}
         {hasImage && <OpenInSuiteButton productionId={prodId} seed={{ mode: "edit", sourceRefId: r.id }} className="prod-ref-suite" label="◨" title="Open this reference in the Image Suite" />}
         <button className="prod-ref-del" title={isNode ? "Remove from board (the reference still exists)" : "Delete this reference"} onClick={handleRemove}>{isNode ? <XIcon size={12} /> : <TrashIcon size={12} />}</button>
       </div>
       <figcaption><input className="prod-ref-name prod-ref-edit-name" value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} /></figcaption>
+      {!isNode && !isAudio && onSetPurpose && (
+        <div className="prod-ref-purpose-row" title={r.visualSummary ? `Shows: ${r.visualSummary}` : "What Magic may use this reference for"}>
+          <select
+            className="prod-ref-purpose"
+            value={r.purpose ?? inferReferencePurpose(r.name, categoryName ?? "", categoryKind, r.styleOnly)}
+            onChange={(e) => onSetPurpose(r.id, e.target.value as CustomRef["purpose"])}
+            title={r.purpose ? "Reference purpose (Magic casting)" : "Reference purpose — inferred, change to confirm"}
+          >
+            <option value="subject">Subject</option>
+            <option value="environment">Environment</option>
+            <option value="style">Style only</option>
+            <option value="layout">Layout / blockout</option>
+            <option value="inspiration">Inspiration</option>
+          </select>
+          {!r.purpose && <span className="prod-ref-purpose-inferred">auto</span>}
+          {onDescribe && <button className="prod-ref-describe" title={r.visualSummary ? `Shows: ${r.visualSummary} — click to edit` : "Add a one-line 'what this shows' card (helps Magic cast it correctly)"} onClick={() => onDescribe(r)}>{r.visualSummary ? "✎ card" : "+ card"}</button>}
+        </div>
+      )}
       {zoom && (
         <MediaLightbox
           name={zoom.name}
@@ -685,18 +753,26 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, selected = f
   areRefItemsEqual(prev.refItem, next.refItem) &&
   prev.variant === next.variant &&
   prev.thumbEdge === next.thumbEdge &&
+  prev.inUseTitle === next.inUseTitle &&
   prev.selected === next.selected &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
+  prev.categoryName === next.categoryName &&
+  (prev.onSetPurpose ? 1 : 0) === (next.onSetPurpose ? 1 : 0) &&
+  (prev.onDescribe ? 1 : 0) === (next.onDescribe ? 1 : 0) &&
   (prev.onEditRef ? 1 : 0) === (next.onEditRef ? 1 : 0) &&
   (prev.onVideoStillSaved ? 1 : 0) === (next.onVideoStillSaved ? 1 : 0));
 
 export interface PromptReference {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to (tag resolution). */
+  aliases?: string[];
   artwork: string;
   media?: "video" | "audio";
   mediaPath?: string;
+  /** Waveform palette id for an audio reference (CustomRef.waveformColor). */
+  waveformColor?: string;
 }
 
 /** Three-box prompt editor (Style / Content / Brand) with human-readable
@@ -719,9 +795,9 @@ export function allPromptRefs(prod: Production): PromptReference[] {
     seen.add(key);
     out.push(r);
   };
-  for (const r of prod.characters) if (r.name && (r.artwork || r.imagePath)) push({ id: r.id, name: r.name, artwork: img(r) });
-  for (const pr of prod.products) if (pr.name && (pr.artwork || pr.imagePath)) push({ id: pr.id, name: pr.name, artwork: img(pr) });
-  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, artwork: img(r), media: r.media, mediaPath: r.mediaPath });
+  for (const r of prod.characters) if (r.name && (r.artwork || r.imagePath)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r) });
+  for (const pr of prod.products) if (pr.name && (pr.artwork || pr.imagePath)) push({ id: pr.id, name: pr.name, aliases: pr.aliases, artwork: img(pr) });
+  for (const r of prod.references ?? []) if (r.name && (r.artwork || r.imagePath || r.media)) push({ id: r.id, name: r.name, aliases: r.aliases, artwork: img(r), media: r.media, mediaPath: r.mediaPath, waveformColor: r.waveformColor });
   return out;
 }
 
@@ -765,9 +841,11 @@ export function RefMediaGlyph({ media }: { media?: "video" | "audio" }) {
  *  front + back) view, neutral pose/expression/lighting on a plain gray
  *  background (characterSheetPrompt in pipeline.ts). The finished sheet is
  *  attached to the character (created on first build) and shown below. */
-export function CharacterBuilderSection({ prodId, characters, models, references, refNameById, productionQuality, onGenerate }: {
+export function CharacterBuilderSection({ prodId, characters, usage, models, references, refNameById, productionQuality, onGenerate }: {
   prodId: string;
   characters: CharacterSheet[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   models: OpenArtModelChoice[];
   /** Artwork-bearing references for the description box's @ autocomplete +
    *  tag previews (characters, products, custom references). */
@@ -985,6 +1063,7 @@ export function CharacterBuilderSection({ prodId, characters, models, references
               title={`Load ${c.name}'s description and generation settings`}
             >
               <img src={c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork} alt={c.name} />
+              <RefInUseBadge title={inUseTitleFor(usage, c.id)} />
               <div className="prod-ref-actions">
                 <button className="prod-ref-zoom" title="Enlarge this character sheet" onClick={(e) => { e.stopPropagation(); setZoom({ name: c.name, url: c.imagePath ? cascadeMedia(prodId, c.imagePath) : c.artwork! }); }}><MagnifyIcon size={12} /></button>
               </div>

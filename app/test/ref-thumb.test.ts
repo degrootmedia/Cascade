@@ -1,6 +1,7 @@
 /**
- * Node-graph reference images: canvas reference nodes render the full-res
- * `artwork` URL (the graph is a working surface, not a list); the side shelf
+ * Node-graph reference images: canvas reference nodes render a fixed 1024
+ * thumbnail tier (node media never needs high res; full-res only past
+ * that comes from the lightbox — graph/lod.tsx); the side shelf
  * tiles display a small compressed JPEG (`?thumb=1` over the cascade-media
  * protocol) instead of the full-resolution file, and the zoom lightbox keeps
  * the full-res `artwork` URL. Legacy inline data-URL artwork (already
@@ -106,15 +107,16 @@ describe("refThumbUrl", () => {
 });
 
 describe("node-graph reference thumbnails", () => {
-  it("canvas ref nodes load full-res while shelf tiles load the compressed thumb, zoom shows full-res", async () => {
+  it("canvas ref nodes load the fixed tile tier while shelf tiles load the compressed thumb, zoom shows full-res", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     await openShelf(host);
 
-    // Tagged @[Hero] renders a canvas node; its tile uses the full-res URL.
+    // Tagged @[Hero] renders a canvas node; its tile paints the fixed 1024
+    // tier at every zoom, not the full-resolution file.
     const nodeImg = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-media img") as HTMLImageElement;
     expect(nodeImg).toBeTruthy();
-    expect(nodeImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png");
+    expect(nodeImg.getAttribute("src")).toBe("cascade-media://p1/references/hero.png?thumb=1024");
 
     // The shelf lists every reference; disk refs thumb, legacy data URLs pass.
     // (No IntersectionObserver in this environment, so every tile counts as
@@ -183,7 +185,7 @@ describe("node-graph reference thumbnails", () => {
     }
   });
 
-  it("a dragged shelf ref gets a full-res canvas node with full-res zoom", async () => {
+  it("a dragged shelf ref gets a fixed-tier canvas node with full-res zoom", async () => {
     const { root, host } = renderModal();
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
@@ -197,7 +199,7 @@ describe("node-graph reference thumbnails", () => {
     } as unknown as DataTransfer;
     await act(async () => { canvas.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
 
-    const placed = host.querySelector('.prod-graph-node.prod-graph-ref img[src="cascade-media://p1/references/villain.png"]') as HTMLImageElement;
+    const placed = host.querySelector('.prod-graph-node.prod-graph-ref img[src="cascade-media://p1/references/villain.png?thumb=1024"]') as HTMLImageElement;
     expect(placed).toBeTruthy();
 
     const media = placed.closest(".prod-graph-ref-media") as HTMLElement;
@@ -217,7 +219,7 @@ describe("node-graph reference thumbnails", () => {
     expect(eye).toBeTruthy();
     await act(async () => { eye.click(); await new Promise((r) => setTimeout(r, 0)); });
 
-    // The big full-res tile is gone; the small collapsed thumb uses ?thumb=1.
+    // The expanded tile is gone; the small collapsed thumb uses ?thumb=1.
     expect(host.querySelector(".prod-graph-ref-media")).toBeNull();
     const thumb = host.querySelector(".prod-graph-node.prod-graph-ref .prod-graph-ref-thumb img") as HTMLImageElement;
     expect(thumb).toBeTruthy();

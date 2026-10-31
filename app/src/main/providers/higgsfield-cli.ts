@@ -31,6 +31,8 @@
  * substitutes for the live binary in tests, so the module's interface IS
  * the test surface. This module never imports the MCP manager or Electron.
  */
+import { closestResolution } from "../../shared/resolution.js";
+import { resolutionsAllowedByRules } from "../../shared/cel-lite.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -51,6 +53,7 @@ import {
 } from "../../shared/prompt-grammar.js";
 import {
   DRAFT_RESOLUTION,
+  genjutsuModeForModelId,
   resolveAspectRatio,
   type CliModelSchema,
   type CliOptionField,
@@ -277,6 +280,8 @@ interface CliParam {
 interface CliModelDetail {
   params: Map<string, CliParam>;
   roles: string[];
+  /** CEL constraints from `model get` (rules[]). */
+  rules: { cel: string; message?: string }[];
 }
 
 function foldName(s: string): string {
@@ -443,7 +448,14 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
       }
     }
   }
-  return { params, roles };
+  const rules: { cel: string; message?: string }[] = [];
+  if (Array.isArray(obj.rules)) {
+    for (const r of obj.rules) {
+      const cel = r && typeof r === "object" ? (r as { cel?: unknown }).cel : undefined;
+      if (typeof cel === "string" && cel.trim()) rules.push({ cel, message: typeof (r as { message?: unknown }).message === "string" ? (r as { message: string }).message : undefined });
+    }
+  }
+  return { params, roles, rules };
 }
 
 // ---- schema normalization ---------------------------------------------------------
@@ -1023,7 +1035,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       }
       if (req.resolution) {
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
-        const resMatch = resValues.find((v) => v.toLowerCase() === String(req.resolution).toLowerCase());
+        const resMatch = resValues.length ? closestResolution(String(req.resolution), resValues) : undefined;
         if (resMatch) args.push("--resolution", resMatch);
       }
       // Nearest explicit pick wins (see the submit path): a per-surface
@@ -1557,6 +1569,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
     if (!this.isAvailable()) return null;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
+      const supersededPending = !!shot?.pendingImageGen;
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let items: CliListItem[] = [];
@@ -1580,6 +1593,13 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const singleFlag = HiggsfieldCliProvider.singleImageFlag(roles);
       const arrayFlag = HiggsfieldCliProvider.arrayImageFlag(roles);
       const { paths, cleanup } = writeCliTempRefs(refs);
+      // Image generation takes images only — a video/audio reference that
+      // somehow reached here is skipped (never sent as an image).
+      const skippedMedia = refs.filter((r) => !/^data:image\//i.test(r.dataUrl));
+      if (skippedMedia.length) {
+        refs.forEach((r, i) => { if (!/^data:image\//i.test(r.dataUrl)) paths[i] = null; });
+        onNotice?.(`Skipping ${skippedMedia.length} non-image reference(s) — image generation only takes image files (${skippedMedia.map((r) => `"${r.name}"`).join(", ")}).`);
+      }
       /** The flag a reference at `i` rides, or null when it has nowhere to go. */
       const refFlag = (i: number): string | null => {
         if (i === 0 && singleFlag) return singleFlag;
@@ -1607,7 +1627,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
         const resolution = resolutionOverride ?? p.openArt?.resolution ?? "1k";
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
-        const resMatch = resValues.find((v) => v.toLowerCase() === String(resolution).toLowerCase());
+        const resMatch = resValues.length ? closestResolution(String(resolution), resValues) : undefined;
         if (resMatch) args.push("--resolution", resMatch);
         // Quality: the nearest explicit pick wins — a per-surface params pick
         // (node/ref option forms render it) beats the production default, so a
@@ -1720,7 +1740,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
           throw e;
         }
         if (shot?.pendingImageGen) delete shot.pendingImageGen;
-        if (submitted) onPending?.(null);
+        if (submitted || supersededPending) onPending?.(null);
         this.fireGeneration(genMeta);
         return done.buf;
       } finally {
@@ -1892,9 +1912,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
 
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
-      const args = [modelId, "--prompt", fullPrompt];
+      const args = [modelId];
       // Media routing — two mutually exclusive modes, never mixed (several
       // models, e.g. minimax_h3 and wan3_0, reject
       // "start_image/end_image cannot be mixed with reference media"):
@@ -1941,7 +1960,10 @@ export class HiggsfieldCliProvider implements MediaProvider {
         }
         if (!hasImageArray) {
           // Lone start frame — nothing else rides, so nothing can mix.
-          if (refs[0] && isVideoRef(refs[0]) && paths[0] && accepts(["videoreferences", "video"])) {
+          if (refs[0] && isAudioRef(refs[0])) {
+            if (paths[0] && accepts(["audioreferences", "audio"])) args.push("--audio-references", paths[0]);
+            else throw new Error(`"${modelId}" doesn't accept audio references, so "${refs[0].name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
+          } else if (refs[0] && isVideoRef(refs[0]) && paths[0] && accepts(["videoreferences", "video"])) {
             args.push("--video-references", paths[0]);
           } else {
             pushStartFrame();
@@ -1957,13 +1979,18 @@ export class HiggsfieldCliProvider implements MediaProvider {
             }
             if (isAudioRef(r)) {
               if (accepts(["audioreferences", "audio"])) args.push("--audio-references", f);
-              else dropRef(r, i, "isn't accepted as an audio reference");
+              else throw new Error(`"${modelId}" doesn't accept audio references, so "${r.name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
               return;
             }
             args.push("--image-references", f);
           });
         }
       }
+
+      // Cite only after routing: a reference the model couldn't carry
+      // (dropped above) must never be cited as submitted.
+      const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
+      args.splice(1, 0, "--prompt", fullPrompt);
 
       // Schema-driven extras (genre, speedramp, batch_size, an explicit
       // mode, …) from the caller's params map. Runs before the seedance
@@ -2000,7 +2027,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const wantResolution = opts.draft ? DRAFT_RESOLUTION : opts.resolution;
       if (wantResolution) {
         const want = String(wantResolution).replace(/\s+/g, "").toLowerCase();
-        const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        // Honour the model's own CEL rules (e.g. mode "fast" caps at 720p).
+        const allowed = detail ? resolutionsAllowedByRules(detail.rules, { ...(opts.params ?? {}), mode: opts.params?.mode ?? HiggsfieldCliProvider.param(detail, "mode")?.default }, resValues) : resValues;
+        const match = allowed.length ? closestResolution(String(wantResolution), allowed) : undefined;
         if (match) args.push("--resolution", match);
       }
       // Cheap low-res draft: the flag drives 480p. Emitted here (not via the
@@ -2012,6 +2041,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (Higgsfield CLI)…`);
       let done: { buf: Buffer; ext: string; jobId: string };
@@ -2059,7 +2089,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (videoSubmitted) opts.onPending?.(null);
+      if (videoSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);
@@ -2134,11 +2164,31 @@ export class HiggsfieldCliProvider implements MediaProvider {
     const roles = detail ? HiggsfieldCliProvider.roles(detail) : [];
     const accepts = (cands: string[]): boolean => !roles.length || roles.some((r) => cands.includes(r));
 
+    // Genjutsu's vendor rules (verified via `model get`): exactly one
+    // video (the source at refs[0]) and at least one image reference.
+    // Fail before any upload/submit so a mis-wired node costs nothing.
+    const genjutsuMode = genjutsuModeForModelId(modelId);
+    if (genjutsuMode) {
+      const extras = refs.slice(1);
+      const extraVideo = extras.find((r) => /^data:video\//i.test(r.dataUrl));
+      if (extraVideo) {
+        throw new Error(`Genjutsu takes exactly one video (the source clip) — reference "${extraVideo.name}" is a video. Remove it and retry. Nothing was submitted.`);
+      }
+      const extraAudio = extras.find((r) => /^data:audio\//i.test(r.dataUrl));
+      if (extraAudio) {
+        throw new Error(`Genjutsu doesn't take audio references — "${extraAudio.name}" is audio. Remove it and retry. Nothing was submitted.`);
+      }
+      if (!extras.some((r) => /^data:image\//i.test(r.dataUrl))) {
+        throw new Error("Genjutsu needs at least one image reference — wire an image into the prompt node's reference sockets or cite one with @[name]. Nothing was submitted.");
+      }
+    }
+
     const { paths, cleanup } = writeCliTempRefs(refs);
     const uploaded: (string | null)[] = [...paths];
-    const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
     try {
-      const args = [modelId, "--prompt", fullPrompt];
+      // Genjutsu prompts are optional (schema: string|null) — omit an
+      // empty --prompt entirely instead of sending a blank one.
+      const args = [modelId];
       const srcPath = paths[0];
       if (!srcPath) throw new Error("Couldn't load the source video.");
       if (accepts(["videoreferences", "video"])) args.push("--video-references", srcPath);
@@ -2149,13 +2199,22 @@ export class HiggsfieldCliProvider implements MediaProvider {
         const f = paths[i];
         if (!f) return;
         const isVideo = /^data:video\//i.test(r.dataUrl);
-        if (isVideo && accepts(["videoreferences", "video"])) args.push("--video-references", f);
+        const isAudio = /^data:audio\//i.test(r.dataUrl);
+        if (isAudio) {
+          if (accepts(["audioreferences", "audio"])) args.push("--audio-references", f);
+          else throw new Error(`"${modelId}" doesn't accept audio references, so "${r.name}" can't be uploaded — pick an audio-capable model (e.g. Seedance 2.5) or remove the audio reference. Nothing was submitted.`);
+        }
+        else if (isVideo && accepts(["videoreferences", "video"])) args.push("--video-references", f);
         else if (!isVideo && accepts(["imagereferences", "image"])) args.push("--image-references", f);
         else {
           uploaded[i] = null;
           emit(`Reference "${r.name}" has nowhere to go on ${modelId} — continuing without it.`, "error");
         }
       });
+
+      // Cite only after routing (same rule as generateVideoClip).
+      const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
+      if (!(genjutsuMode && !fullPrompt.trim())) args.splice(1, 0, "--prompt", fullPrompt);
 
       if (detail && opts.params) {
         emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);
@@ -2175,8 +2234,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       }
       const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
       if (opts.resolution) {
-        const want = String(opts.resolution).replace(/\s+/g, "").toLowerCase();
-        const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        const match = resValues.length ? closestResolution(String(opts.resolution), resValues) : undefined;
         if (match) args.push("--resolution", match);
       }
       const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];
@@ -2185,6 +2243,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video-edit job via ${modelId} (Higgsfield CLI)…`);
       let done: { buf: Buffer; ext: string; jobId: string };
@@ -2223,7 +2282,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (editSubmitted) opts.onPending?.(null);
+      if (editSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt, "edit");

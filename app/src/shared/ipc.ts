@@ -170,6 +170,10 @@ export interface ChatEvent {
   event: AgentEventIpc;
 }
 
+/** UI color theme (Settings → Appearance). "light" is the Softimage XSI
+ *  gray palette; both themes are token sets in styles.css. */
+export type UiTheme = "dark" | "light";
+
 export interface SettingsView {
   /** Selected LLM API provider id (see shared/providers.ts). */
   provider: string;
@@ -180,8 +184,12 @@ export interface SettingsView {
   followProduction: boolean;
   /** UI accent color (hex). */
   accent: string;
+  /** UI color theme. */
+  theme: UiTheme;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
+  /** Absolute path to the external audio editor, or null when not set. */
+  audioEditor: string | null;
 }
 
 export interface ModelInfo {
@@ -363,8 +371,13 @@ export interface CascadeApi {
   setModel(model: string): Promise<void>;
   setProvider(id: string): Promise<void>;
   setAccent(color: string): Promise<void>;
+  setTheme(theme: UiTheme): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
+  pickAudioEditor(): Promise<string | null>;
+  setAudioEditor(path: string | null): Promise<void>;
+  /** Open an audio asset (cascade-media URL) in the configured audio editor. */
+  editAudioExternally(opts: { src: string }): Promise<void>;
   /** Media model ids the user hides from the generation model dropdowns. */
   getHiddenMediaModels(): Promise<string[]>;
   setHiddenMediaModels(ids: string[]): Promise<void>;
@@ -443,6 +456,10 @@ export interface CascadeApi {
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
   onZoomChanged(cb: () => void): () => void;
   listModels(): Promise<ModelListResult>;
+  /** Settings "Test connection": list models AND send a 1-token completion
+   *  to the selected model, so a key that can list but not run inference
+   *  (model/IP restriction, missing inference scope) fails here. */
+  testConnection(): Promise<ModelListResult>;
   getCredits(): Promise<ChatBalance | null>;
   /** Remaining credit balance on the signed-in OpenArt account (null when OpenArt isn't connected). */
   getOpenArtCredits(): Promise<number | null>;
@@ -551,6 +568,12 @@ export interface CascadeApi {
   /** Step 2: open a native file dialog for a reference image. Returns a data URL or null. */
   pickReferenceImage(): Promise<string | null>;
   /**
+   * Shrink an oversize image data URL to a JPEG data URL at or under the
+   * 15MB import limit (quality first, then dimensions). Throws when the
+   * image can't be decoded or shrunk far enough.
+   */
+  downsampleImage(dataUrl: string): Promise<string>;
+  /**
    * Step 3 node graph: save a dropped video/audio file into the production's
    * referencesDir (on disk, keeping media out of the JSON). Returns the
    * workspace-relative path and the media kind, or null when the production
@@ -585,6 +608,23 @@ export interface CascadeApi {
    * disconnecting. Returns the updated production.
    */
   renameReference(productionId: string, refId: string, name: string): Promise<Production>;
+  /**
+   * Magic Prompt reconciliation: save a script/model cited name as an alias
+   * on the chosen character/product/reference and rewrite its `@[cited]`
+   * tags to the canonical `@[Name]` everywhere. Returns the production.
+   */
+  assignReferenceAlias(productionId: string, citedName: string, refId: string): Promise<Production>;
+  /**
+   * Magic Prompt reconciliation: dismiss a cited name as a plain noun — its
+   * tags become plain text everywhere and the name is remembered.
+   */
+  dismissMagicRef(productionId: string, citedName: string): Promise<Production>;
+  /** Draft a reference's one-line visual-summary card from its image (vision). */
+  describeReference(productionId: string, refId: string): Promise<Production>;
+  /** Magic Stage 1: build/refresh the Story Bible only (Cast & Sets review follows). */
+  generateMagicBible(productionId: string): Promise<Production>;
+  /** Record a Cast & Sets decision for one bible entity (map / text-only / pending create). */
+  setMagicRefDecision(productionId: string, entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed: boolean): Promise<Production>;
   /**
    * Step 2: generate (or AI-edit) a reference image via OpenArt and persist it
    * into the production's referencesDir. With `sourceRefId` the reference's
@@ -1056,6 +1096,10 @@ export interface CascadeApi {
   assemblyRender(productionId: string): Promise<Production>;
   /** Step 5: open the export folder in the OS file manager. */
   assemblyOpenFolder(productionId: string): Promise<void>;
+  /** Immediately copy any production file into the assembly export folder. */
+  assemblySend(productionId: string, rel: string): Promise<string>;
+  /** Tag/untag a video generation as an assembly "select". */
+  setGenerationSelect(productionId: string, shotId: string, rel: string, selected: boolean): Promise<Production>;
   /**
    * Step 3: render the storyboard (panel stills + Audio/Visual boxes) to a
    * landscape PDF via a Save dialog. Remembers the version label + layout on

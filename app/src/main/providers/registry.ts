@@ -83,14 +83,15 @@ export const PROVIDER_IDS: MediaProviderId[] = ["openart", "higgsfield-cli", "op
 export interface ProviderCapabilities {
   imageRefs: boolean;
   videoRefs: boolean;
+  audioRefs: boolean;
   endFrame: boolean;
   tween: boolean;
 }
 
 export const PROVIDER_CAPABILITIES: Record<MediaProviderId, ProviderCapabilities> = {
-  openart: { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
-  "higgsfield-cli": { imageRefs: true, videoRefs: true, endFrame: true, tween: true },
-  "openart-cli": { imageRefs: true, videoRefs: false, endFrame: false, tween: false },
+  openart: { imageRefs: true, videoRefs: true, audioRefs: true, endFrame: true, tween: true },
+  "higgsfield-cli": { imageRefs: true, videoRefs: true, audioRefs: true, endFrame: true, tween: true },
+  "openart-cli": { imageRefs: true, videoRefs: false, audioRefs: false, endFrame: false, tween: false },
 };
 
 /** Coerce a stored/foreign value to a known provider id (unknown → openart). */

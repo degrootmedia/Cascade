@@ -1,4 +1,4 @@
-﻿## 2026-10-21 - Lightbox close icon rendered giant (broad `img` rule vs icon <img>)
+## 2026-10-21 - Lightbox close icon rendered giant (broad `img` rule vs icon <img>)
 
 - Symptom: the new shared lightbox showed a giant red X in the corner. The
   close button's `XIcon` is an `<img class="cascade-icon" width=13>`, but the
@@ -492,3 +492,17 @@ control chars ï¿½ only a byte-level scan found them.
   them vertically. And because `.settings label { display: block; margin: ... }`
   is more specific than a bare `.my-label`, scope label overrides as
   `.settings .my-label { ... }`.
+
+## A supersede-delete that only happens in memory never reaches the persistence sink
+- Symptom: a storyboard 'pending' badge stuck on forever (0000_Co-Mo Santa
+  Tests shot 0200) while jobs.json was empty and newer takes existed.
+- Cause: `imageGenFn` deleted `shot.pendingImageGen` in memory at submit
+  ("fresh submission supersedes"), but the persisted copy is owned by
+  `pendingImageSink`, which was only told `null` when the SAME run had
+  recorded a pending (`pendingRecorded`/`submitted` gate). A synchronous
+  success (no `historyId`, so nothing recorded) never notified the sink.
+- Rule: any in-memory delete of a sink-owned field needs a matching sink
+  notification on EVERY exit that supersedes it — capture "there was a
+  stale record at entry" and OR it into the clear-notify gate. Check all
+  transports/kinds that share the pattern (found in image + video, MCP +
+  both CLIs; fixed 2026-10-27 with sink-level regression tests).

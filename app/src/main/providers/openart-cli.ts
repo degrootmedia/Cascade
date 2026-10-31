@@ -57,7 +57,7 @@ import type {
   VideoModelOptions,
 } from "../../shared/ipc.js";
 import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
-import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
+import { citePrompt, isAudioRef, resolvePromptRefs, styleRefNames } from "./refs.js";
 import {
   defaultCliRun,
   resolveCliOnPath,
@@ -600,6 +600,7 @@ export class OpenArtCliProvider implements MediaProvider {
     let projectId: string | null | undefined;
 
     return async (prompt: string, refs: { name: string; dataUrl: string }[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
+      const supersededPending = !!shot?.pendingImageGen;
       if (shot?.pendingImageGen) delete shot.pendingImageGen;
 
       let models: OpenArtModelChoice[] = [];
@@ -616,9 +617,9 @@ export class OpenArtCliProvider implements MediaProvider {
 
       // Reference art (images only — the CLI has no video/image-edit input
       // on image generation beyond --image files).
-      const imageRefs = refs.filter((r) => !/^data:video\//i.test(r.dataUrl));
+      const imageRefs = refs.filter((r) => /^data:image\//i.test(r.dataUrl));
       if (imageRefs.length < refs.length) {
-        onNotice?.(`Skipping ${refs.length - imageRefs.length} video reference(s) — the OpenArt CLI only takes image files.`);
+        onNotice?.(`Skipping ${refs.length - imageRefs.length} video/audio reference(s) — the OpenArt CLI only takes image files.`);
       }
       const { paths, cleanup } = writeCliTempRefs(imageRefs);
       const uploaded: (string | null)[] = [...paths];
@@ -670,7 +671,7 @@ export class OpenArtCliProvider implements MediaProvider {
           throw e;
         }
         if (shot?.pendingImageGen) delete shot.pendingImageGen;
-        if (submitted) onPending?.(null);
+        if (submitted || supersededPending) onPending?.(null);
         this.fireGeneration(genMeta);
         return done.buf;
       } finally {
@@ -789,6 +790,12 @@ export class OpenArtCliProvider implements MediaProvider {
         `The OpenArt CLI can't send video references (${videoRefs.map((r) => `"${r.name}"`).join(", ")}) — switch to the OpenArt MCP transport for reference-carrying video.`
       );
     }
+    const audioRefs = refs.filter((r) => isAudioRef(r));
+    if (audioRefs.length) {
+      throw new Error(
+        `The OpenArt CLI can't send audio references (${audioRefs.map((r) => `"${r.name}"`).join(", ")}) — switch to the OpenArt MCP transport or Higgsfield for audio-carrying video. Nothing was submitted.`
+      );
+    }
     if (refs.length > 1) {
       throw new Error(
         `The OpenArt CLI video takes a single start-frame image, but ${refs.length} references were supplied (${refs.slice(1).map((r) => `"${r.name}"`).join(", ")} would be silently dropped) — switch to the OpenArt MCP transport for multi-reference video.`
@@ -824,6 +831,7 @@ export class OpenArtCliProvider implements MediaProvider {
       if (projectId) args.push("--project", projectId);
 
       // A fresh submission supersedes any earlier pending job.
+      const supersededVideoPending = !!shot?.pendingVideoGen;
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
       emit(`Shot ${shot.number}: submitting video job via ${modelId} (OpenArt CLI)…`);
       let done: { buf: Buffer; ext: string; historyId: string };
@@ -863,7 +871,7 @@ export class OpenArtCliProvider implements MediaProvider {
         throw e;
       }
       if (shot.pendingVideoGen) delete shot.pendingVideoGen;
-      if (videoSubmitted) opts.onPending?.(null);
+      if (videoSubmitted || supersededVideoPending) opts.onPending?.(null);
 
       const safeExt = /^[a-z0-9]{2,4}$/i.test(done.ext) ? done.ext : "mp4";
       const rel = writeShotVideo(p, shot, done.buf, safeExt);

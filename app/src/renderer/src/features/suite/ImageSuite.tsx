@@ -16,6 +16,7 @@ import type {
   SuiteSeed,
 } from "../../../../shared/ipc.js";
 import {
+  draftFromSuiteEntry,
   emptySuiteSession,
   normalizeSuiteSession,
   type SuiteGenerateRequest,
@@ -34,7 +35,8 @@ import { SuiteCanvas } from "./SuiteCanvas.js";
 import { SuitePromptPanel } from "./SuitePromptPanel.js";
 import { resolveSuiteCompare, seedSourceFrame } from "./suite-compare.js";
 import { resolveSuiteModel, resolveSuiteSurfacePool } from "./suite-models.js";
-import { openImageSuite } from "./suite-handoff.js";
+import { applySuiteSeed, openImageSuite } from "./suite-handoff.js";
+import { reconcileSuiteDraftStyle, stripSuiteStyle, suiteDraftForMode } from "./suite-style.js";
 import { genQueue, genKeys, useGenStatus } from "../../components/production/gen-queue.js";
 
 /** Debounce before persisting the session document to disk. */
@@ -128,7 +130,7 @@ export function ImageSuite({
       // A pending handoff seed overlays the persisted draft once.
       const pending = seedRef.current;
       seedRef.current = null;
-      setSession({ ...normalized, draft: pending ? { ...normalized.draft, ...pending } : normalized.draft });
+      setSession({ ...normalized, draft: suiteDraftForMode(pending ? applySuiteSeed(normalized.draft, pending) : normalized.draft) });
       setBranchParentId(normalized.selectedId);
       setLoaded(true);
     });
@@ -147,7 +149,7 @@ export function ImageSuite({
     setSession((s) => ({
       ...s,
       ...(isSourceHandoff ? { selectedId: null } : {}),
-      draft: { ...s.draft, ...seed },
+      draft: suiteDraftForMode(applySuiteSeed(s.draft, seed)),
     }));
     if (isSourceHandoff) {
       setBranchParentId(null);
@@ -239,6 +241,16 @@ export function ImageSuite({
     setSession((s) => ({ ...s, draft: { ...s.draft, ...patch } }));
   }, []);
 
+  // Keep the generate draft's style pick and its Style paragraph in agreement
+  // (a handoff, replay, restore, or Design-side style edit can desync them):
+  // the applied text wins, so the dropdown, the preview, and the next submit
+  // all describe the same style. Runs until consistent, then no-ops.
+  useEffect(() => {
+    if (!loaded || draft.mode !== "generate") return;
+    const next = reconcileSuiteDraftStyle(draft, prod.styles ?? []);
+    if (next !== draft) patchDraft({ prompt: next.prompt, styleId: next.styleId });
+  }, [draft, loaded, prod.styles, patchDraft]);
+
   // Keep the draft's model a real pick from the active provider's current pool.
   // When the draft is empty or holds a stale cross-vendor pick (a session or
   // handoff from before a provider switch), the form displays the pool's first
@@ -263,7 +275,10 @@ export function ImageSuite({
 
   const submit = useCallback(() => {
     const d = sessionRef.current.draft;
-    if (d.mode !== "upscale" && !d.prompt.trim()) { setError("Describe what to generate or edit first."); return; }
+    // Edit prompts never carry a style — stripped here as the last gate so
+    // no draft path (restored, seeded, replayed) can submit one.
+    const submitPrompt = d.mode === "edit" ? stripSuiteStyle(d.prompt.trim()) : d.prompt.trim();
+    if (d.mode !== "upscale" && !submitPrompt) { setError("Describe what to generate or edit first."); return; }
     if (d.mode !== "generate" && !d.sourceRefId && !d.sourcePath) { setError(`Pick a reference or frame to ${d.mode}.`); return; }
     setError(null);
     // Submit the model the dropdown shows, never a stale/empty draft: an
@@ -275,7 +290,7 @@ export function ImageSuite({
       parentId: branchParentId,
       model,
       resolution: d.resolution,
-      prompt: d.mode === "upscale" ? "" : d.prompt.trim(),
+      prompt: d.mode === "upscale" ? "" : submitPrompt,
       ...(d.aspectRatio ? { aspectRatio: d.aspectRatio } : {}),
       ...(d.mode !== "generate" && d.sourceRefId ? { sourceRefId: d.sourceRefId } : {}),
       ...(d.mode !== "generate" && !d.sourceRefId && d.sourcePath ? { sourcePath: d.sourcePath } : {}),
@@ -291,10 +306,16 @@ export function ImageSuite({
         const entry = await window.cascade.generateSuiteImage(prodId, req);
         // Idempotent: main already appended this entry to the on-disk session
         // (so a tab switch mid-flight doesn't lose it) — skip a second copy
-        // when the reload already picked it up.
-        setSession((s) => (s.entries.some((e) => e.id === entry.id)
-          ? { ...s, selectedId: entry.id }
-          : { ...s, entries: [...s.entries, entry], selectedId: entry.id }));
+        // when the reload already picked it up. The finished entry becomes
+        // the selection, so the draft is re-synced from it: the panel must
+        // show the prompt this generation actually used, not whatever the
+        // draft was edited to (or another entry picked) while it ran.
+        setSession((s) => {
+          const replay = { ...draftFromSuiteEntry(entry), pendingEntity: s.draft.pendingEntity };
+          return s.entries.some((e) => e.id === entry.id)
+            ? { ...s, selectedId: entry.id, draft: replay }
+            : { ...s, entries: [...s.entries, entry], selectedId: entry.id, draft: replay };
+        });
         setBranchParentId(entry.id);
       } catch (e) {
         setError(String(e).replace(/^Error:\s*/, ""));
@@ -303,24 +324,16 @@ export function ImageSuite({
   }, [prodId, branchParentId, quotedCredits, models, upscaleModelIds]);
 
   const selectEntry = useCallback((id: string) => {
-    setSession((s) => ({ ...s, selectedId: id }));
     setBranchParentId(id);
     const entry = sessionRef.current.entries.find((e) => e.id === id);
-    if (entry) {
-      patchDraft({
-        mode: entry.kind,
-        prompt: entry.prompt,
-        model: entry.model,
-        resolution: entry.resolution,
-        ...(entry.aspectRatio ? { aspectRatio: entry.aspectRatio } : {}),
-        ...(entry.sourceRefId ? { sourceRefId: entry.sourceRefId } : {}),
-        ...(!entry.sourceRefId && entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
-        // Replay is exact: an entry without a style clears any current pick.
-        styleId: entry.styleId,
-        ...(entry.params ? { params: entry.params } : {}),
-      });
-    }
-  }, [patchDraft]);
+    // Replay is exact: the whole draft comes from the entry, so nothing from
+    // the previously shown draft (aspect, source, params, style pick) leaks
+    // into the selected image's prompt or its next submit. Only the Cast &
+    // Sets pendingEntity marker survives — it is not part of the entry.
+    setSession((s) => entry
+      ? { ...s, selectedId: id, draft: { ...draftFromSuiteEntry(entry), pendingEntity: s.draft.pendingEntity } }
+      : { ...s, selectedId: id });
+  }, []);
 
   /** Fetch a pending entry's finished result. Still-rendering keeps the
    *  entry pending (notice says so); a dead job lands as failed history. */
@@ -330,7 +343,15 @@ export function ImageSuite({
     setError(null);
     try {
       const updated = await window.cascade.recheckSuiteEntry(prodId, entryId);
-      setSession((s) => ({ ...s, entries: s.entries.map((e) => (e.id === updated.id ? updated : e)), selectedId: updated.id }));
+      // A finished reclaim becomes the selection: re-sync the draft from it
+      // (like a fresh generation) so the panel shows its actual prompt. A
+      // still-pending entry changes nothing but the selection.
+      setSession((s) => ({
+        ...s,
+        entries: s.entries.map((e) => (e.id === updated.id ? updated : e)),
+        selectedId: updated.id,
+        ...(updated.pending ? {} : { draft: { ...draftFromSuiteEntry(updated), pendingEntity: s.draft.pendingEntity } }),
+      }));
       if (updated.pending) setNotice("Still rendering — try Fetch result again in a minute.");
       else if (updated.error && !updated.outputPath) setError(updated.error);
       else setNotice(null);
@@ -356,6 +377,11 @@ export function ImageSuite({
     }
   }, [prodId]);
 
+  // Cast & Sets round-trip: a pending entity from the handoff seed, the
+  // persisted draft, or a production decision awaiting creation.
+  const pendingEntity = draft.pendingEntity
+    ?? Object.values(prod.magicRefDecisions ?? {}).find((d) => d?.pendingCreate && !(d.refIds?.length))?.entityName;
+
   const exportEntry = useCallback(async (target: "references" | "boards") => {
     if (!selected) return;
     // Saving into references creates a named, taggable reference: ask for the
@@ -365,9 +391,11 @@ export function ImageSuite({
     let categoryId: string | undefined;
     if (target === "references") {
       const choice = await askReferenceSave({
-        title: "Save as reference",
-        label: "This name is how prompts cite the reference (@[name]).",
-        initialName: nextNumberedRefName((prod.references ?? []).map((r) => r.name), "Image Suite Gen"),
+        title: pendingEntity ? `Save as reference for ${pendingEntity}` : "Save as reference",
+        label: pendingEntity
+          ? `This will depict “${pendingEntity}” in Magic Prompts. The name is how prompts cite it (@[name]).`
+          : "This name is how prompts cite the reference (@[name]).",
+        initialName: pendingEntity ?? nextNumberedRefName((prod.references ?? []).map((r) => r.name), "Image Suite Gen"),
         confirmLabel: "Save reference",
         categories: prod.referenceCategories ?? [],
       });
@@ -376,12 +404,27 @@ export function ImageSuite({
       categoryId = choice.categoryId;
     }
     try {
+      const beforeIds = new Set((prod.references ?? []).map((r) => r.id));
       const res = await window.cascade.exportSuiteEntry(prodId, selected.id, target, name, categoryId);
-      if (res.production) onProdChange(res.production);
+      if (res.production) {
+        let next = res.production;
+        if (target === "references" && pendingEntity) {
+          const created = (next.references ?? []).find((r) => !beforeIds.has(r.id))
+            ?? (next.references ?? []).find((r) => r.name === name);
+          if (created) {
+            try {
+              next = await window.cascade.setMagicRefDecision(prodId, pendingEntity, [created.id], false, false, false);
+              setSession((s) => ({ ...s, draft: { ...s.draft, pendingEntity: undefined } }));
+              setNotice(`Mapped: ${pendingEntity} → @[${created.name}]. Confirm it with “Looks right” in Cast & Sets.`);
+            } catch { /* mapping can still be done manually in Cast & Sets */ }
+          }
+        }
+        onProdChange(next);
+      }
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
     }
-  }, [prodId, prod, selected, onProdChange]);
+  }, [prodId, prod, selected, onProdChange, pendingEntity]);
 
   return (
     <div className="suite">

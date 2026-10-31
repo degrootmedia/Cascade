@@ -123,3 +123,18 @@ describe("countByShot", () => {
   });
 });
 
+
+describe("queued image generations in one node", () => {
+  it("runs every queued job in order even when each re-enters a stale busy flag", async () => {
+    const q = new GenerationQueue();
+    const ran: string[] = [];
+    // Regression: the node runner used to early-return on a stale busy flag,
+    // silently dropping every job after the first.
+    const job = (n: string) => async () => { ran.push(n); await flush(); };
+    q.enqueue("image:s1", job("a"));
+    q.enqueue("image:s1", job("b"));
+    q.enqueue("image:s1", job("c"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ran).toEqual(["a", "b", "c"]);
+  });
+});

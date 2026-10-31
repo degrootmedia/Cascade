@@ -12,6 +12,7 @@ import { ProvidersSection, resetProviders } from "./sections/ProvidersSection.js
 import { ModelsSection } from "./sections/ModelsSection.js";
 import { ModelExposureSection } from "./sections/ModelExposureSection.js";
 import { CliToolsSection } from "./sections/CliToolsSection.js";
+import { AudioEditorSection, resetAudioEditor } from "./sections/AudioEditorSection.js";
 import { ExternalEditorSection, resetExternalEditor } from "./sections/ExternalEditorSection.js";
 import { McpServersSection } from "./sections/McpServersSection.js";
 import { VoiceSection, resetVoice } from "./sections/VoiceSection.js";
@@ -32,8 +33,8 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           title: "Appearance",
           category: "general",
           description: "Theme, color, and look.",
-          keywords: ["accent", "color", "colour", "theme", "highlight", "appearance"],
-          owns: ["accent"],
+          keywords: ["accent", "color", "colour", "theme", "dark", "light", "highlight", "appearance"],
+          owns: ["accent", "theme"],
           render: () => <AppearanceSection />,
           onReset: resetAppearance,
         },
@@ -114,6 +115,16 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           owns: ["externalEditor"],
           render: () => <ExternalEditorSection />,
           onReset: resetExternalEditor,
+        },
+        {
+          id: "audio-editor",
+          title: "Audio Editor",
+          category: "tools",
+          description: "App opened by Edit Audio.",
+          keywords: ["audio", "editor", "audacity", "sound", "edit", "reaper", "wav", "mp3"],
+          owns: ["audioEditor"],
+          render: () => <AudioEditorSection />,
+          onReset: resetAudioEditor,
         },
         {
           id: "mcp",

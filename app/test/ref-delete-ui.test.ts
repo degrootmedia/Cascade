@@ -6,12 +6,15 @@
  *    brought back an already-deleted (file gone → broken tile) entry. Delete
  *    now goes through one atomic main-side op whose snapshot is authoritative.
  * 2. Deleting a reference piped into a frame output unbinds the pipe.
+ * 3. An in-use reference (the piped one) asks first, naming where it's used;
+ *    an unused one still deletes in one click.
  */
 import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { ProductionWorkspace } from "../src/renderer/src/components/ProductionWorkspace.js";
+import { ConfirmHost } from "../src/renderer/src/components/ConfirmDialog.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
 (globalThis as Record<string, unknown>).ResizeObserver = ROStub;
@@ -120,7 +123,9 @@ async function renderWorkspace(): Promise<{ host: HTMLElement; root: ReturnType<
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(createElement(ProductionWorkspace, {}));
+    // App mounts the confirm host beside the workspace; the in-use delete
+    // guard needs it or confirms resolve "cancel" (by design).
+    root.render(createElement(Fragment, null, createElement(ProductionWorkspace, {}), createElement(ConfirmHost)));
     await new Promise((r) => setTimeout(r, 0));
   });
   const openBtn = host.querySelector(".prod-card-open") as HTMLButtonElement;
@@ -128,9 +133,19 @@ async function renderWorkspace(): Promise<{ host: HTMLElement; root: ReturnType<
   return { host, root };
 }
 
+/** Click the confirm dialog's destructive action when one is showing
+ *  (the dialog portals to document.body, outside the workspace host). */
+async function confirmIfAsked(): Promise<boolean> {
+  const btn = document.querySelector(".confirm-layer .danger") as HTMLButtonElement | null;
+  if (!btn) return false;
+  await act(async () => { btn.click(); await new Promise((r) => setTimeout(r, 0)); });
+  return true;
+}
+
 async function clickFirstDel(host: HTMLElement): Promise<void> {
   const dels = host.querySelectorAll(".prod-ref-del") as NodeListOf<HTMLButtonElement>;
   await act(async () => { dels[0].click(); await new Promise((r) => setTimeout(r, 0)); });
+  await confirmIfAsked();
 }
 
 describe("design-page reference delete", () => {
@@ -176,6 +191,37 @@ describe("design-page reference delete", () => {
     // The piped still stops showing but stays recoverable in frame history.
     expect(shot?.artwork).toBeUndefined();
     expect(shot?.artworkHistory).toContain("boards/0100/shot-0100-old.jpg");
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
+  it("asks before deleting an in-use reference, and not for an unused one", async () => {
+    disk = freshProd();
+    savedProds.length = 0;
+    (globalThis as Record<string, unknown>).window = (globalThis as Record<string, unknown>).window ?? {};
+    (globalThis.window as unknown as Record<string, unknown>).cascade = cascadeMock();
+
+    const { host, root } = await renderWorkspace();
+    const dels = () => host.querySelectorAll(".prod-ref-del") as NodeListOf<HTMLButtonElement>;
+
+    // r2 is piped into Shot 0100's output: deleting it asks first and says where.
+    await act(async () => { dels()[1].click(); await new Promise((r) => setTimeout(r, 0)); });
+    const dialog = document.querySelector(".confirm-layer");
+    expect(dialog).not.toBeNull();
+    expect(dialog!.textContent).toContain("Shot 0100");
+    expect(tileNames(host)).toEqual(["Ref One", "Ref Two", "Ref Three"]);
+
+    // Cancelling keeps everything.
+    const cancel = document.querySelector(".confirm-layer .modal-actions button:not(.danger)") as HTMLButtonElement;
+    await act(async () => { cancel.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(document.querySelector(".confirm-layer")).toBeNull();
+    expect(tileNames(host)).toEqual(["Ref One", "Ref Two", "Ref Three"]);
+
+    // r1 is unused: one click, no dialog.
+    await act(async () => { dels()[0].click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(document.querySelector(".confirm-layer")).toBeNull();
+    expect(tileNames(host)).toEqual(["Ref Two", "Ref Three"]);
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(host);

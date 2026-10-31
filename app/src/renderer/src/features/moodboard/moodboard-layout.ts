@@ -16,6 +16,7 @@ import type {
   MoodboardNodeLayout,
   MoodboardNote,
 } from "../../../../shared/ipc.js";
+import { THUMB_TIERS, thumbTierFor, settledThumbTierFor } from "../../components/production/thumb-url.js";
 
 export const MOODBOARD_VERSION = 1 as const;
 
@@ -31,21 +32,10 @@ export const MB_MIN_ZOOM = 0.1;
 export const MB_MAX_ZOOM = 8;
 export const MB_ROTATE_SNAP = 15;
 
-/** Thumbnail long-edges the media protocol serves (see main/thumbnails.ts). */
-export const MB_THUMB_TIERS = [256, 512, 1024] as const;
-
-/** LOD: the thumbnail long-edge a canvas node needs at a given zoom — the
- *  smallest tier covering its on-screen long edge (`max(w,h) * zoom * dpr`),
- *  or 0 for the full-resolution file when no tier is big enough. Zoomed out
- *  this keeps every visible node's decoded bitmap near its painted size
- *  instead of natural size; zoomed in past the top tier the node swaps back
- *  to the original file. Pure — the canvas feeds it the *settled* zoom so a
- *  zoom gesture doesn't churn srcs mid-flight. */
-export function thumbTierFor(nodeW: number, nodeH: number, zoom: number, dpr: number): number {
-  const needed = Math.max(nodeW, nodeH) * Math.max(zoom, 0) * Math.max(dpr, 1);
-  for (const tier of MB_THUMB_TIERS) if (needed <= tier) return tier;
-  return 0;
-}
+/** Canvas LOD tier math lives in thumb-url.ts (shared with the node graph);
+ *  re-exported here so moodboard imports and tests keep their home. */
+export const MB_THUMB_TIERS = THUMB_TIERS;
+export { thumbTierFor, settledThumbTierFor };
 
 /** Padding between a grouped frame's edge and its outer member nodes. */
 export const MB_FRAME_PAD = 18;
@@ -455,16 +445,9 @@ export function nextFreeSpot(nodes: MoodboardNodeLayout[]): { x: number; y: numb
 export function reconcileMoodboard(layout: MoodboardLayout, refs: MoodboardRefKey[]): MoodboardLayout {
   const ids = new Set(refs.map((r) => r.id));
   const nodes = layout.nodes.filter((n) => ids.has(n.refId));
-  const have = new Set(nodes.map((n) => n.refId));
-  const missing = refs.filter((r) => !have.has(r.id));
-  const nodesChanged = missing.length > 0 || nodes.length !== layout.nodes.length;
-  if (missing.length) {
-    const spot = nextFreeSpot(nodes);
-    let z = nextZ(nodes);
-    for (const n of autoLayoutNodes(missing, spot.y)) {
-      nodes.push({ ...n, x: n.x + spot.x, z: z++ });
-    }
-  }
+  // New refs are NOT auto-placed: unplaced refs live on the shelf
+  // (`offBoardRefs`) until the user adds them to the board.
+  const nodesChanged = nodes.length !== layout.nodes.length;
   // Frames: drop members whose ref is gone, and drop frames left empty. A ref
   // belongs to at most one frame (first frame wins on a hand-edited collision).
   const nodeIds = new Set(nodes.map((n) => n.refId));

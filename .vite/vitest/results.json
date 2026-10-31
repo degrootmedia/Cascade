@@ -1,0 +1,1 @@
+{"version":"2.1.9","results":[[":app/test/providers.test.ts",{"duration":229.12339999999995,"failed":true}],[":app/test/settings-panel.test.ts",{"duration":9.0304000000001,"failed":true}],[":app/test/ipc-validation.test.ts",{"duration":5.255500000000097,"failed":false}]]}

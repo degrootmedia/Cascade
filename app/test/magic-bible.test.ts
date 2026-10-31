@@ -1,0 +1,420 @@
+/**
+ * Magic Prompt rearchitecture: the Story Bible pass + per-scene generation.
+ *
+ * The model must see the WHOLE story (bible) while each shot's own script
+ * visual stays authoritative for what it depicts. These tests pin:
+ *  - the bible builder sends every scene/shot + the rich reference roster,
+ *    and never the stale magic prose;
+ *  - the bible parser only trusts roster-bound citations (aliases resolve to
+ *    canonical names, invented references are dropped);
+ *  - a bulk run = one bible call + one call per scene, the bible is stored,
+ *    and alias tags in replies are canonicalized on the way in;
+ *  - per-shot regeneration reuses the stored bible (no new bible call) and
+ *    touches only its own entry;
+ *  - unresolved cited names are computed deterministically for the queue.
+ */
+import { describe, it, expect, vi } from "vitest";
+import type { Production, ProductionShot } from "../src/shared/ipc.js";
+
+vi.mock("../src/main/scripting.js", () => ({
+  extractScriptText: vi.fn(),
+  isGoogleDocUrl: vi.fn(() => false),
+}));
+
+// Answer bible calls with a bible, scene calls with one fresh prompt per
+// shot row in the request (citing the hero by her SCRIPT name on purpose —
+// canonicalization must rewrite it to the user's reference name).
+const modelCalls = vi.hoisted(() => [] as string[]);
+vi.mock("@core", () => ({
+  ChatClient: class {
+    async completeOnce(_model: string, messages: Array<{ role: string; content: string }>): Promise<{ text: string }> {
+      const user = messages.find((m) => m.role === "user")?.content ?? "";
+      modelCalls.push(user);
+      if (user.includes("Build the STORY BIBLE")) {
+        return {
+          text: JSON.stringify({
+            synopsis: "Ada crosses the valley to confront the villain on the ridge.",
+            assumptions: ["The valley is at dawn."],
+            scenes: [
+              { number: 1, title: "Valley", location: "open valley", timeOfDay: "dawn", beat: "Ada sets out." },
+              { number: 2, title: "Ridge", location: "rocky ridge", beat: "Confrontation." },
+            ],
+            entities: [
+              { name: "Ada the hero", kind: "character", descriptor: "young woman in a red cloak", refName: "Hero", aliases: ["Ada"] },
+              { name: "Ghost Helper", kind: "character", descriptor: "nobody", refName: "NoSuchRef" },
+            ],
+            shotPlans: [
+              { number: "0100", purpose: "establish Ada setting out", framing: "wide", present: ["Ada the hero"], mustCite: ["MainCharacter"] },
+              { number: "0200", purpose: "reveal the villain", framing: "medium", mustCite: ["InventedRef"] },
+              { number: "9999", purpose: "does not exist", mustCite: [] },
+            ],
+          }),
+        };
+      }
+      const nums = [...user.matchAll(/^(\d{4}) \|/gm)].map((m) => m[1]);
+      return {
+        text: JSON.stringify({
+          prompts: nums.map((n) => ({ number: n, prompt: `Fresh ${n} content with @[MainCharacter].` })),
+        }),
+      };
+    }
+  },
+}));
+
+import {
+  applyMagicRefDecision,
+  buildMagicBibleMessages,
+  deriveMagicMustCite,
+  generateMagicPrompts,
+  isMagicBibleStale,
+  magicBibleInputHash,
+  parseMagicBibleReply,
+} from "../src/main/pipeline.js";
+import { computeUnresolvedMagicRefs, inferReferencePurpose, isMagicCitablePurpose, magicCastNeeds, magicCastReviewCount, magicRefRoster } from "../src/shared/magic-refs.js";
+
+function shot(id: string, number: string, visual: string, audio = ""): ProductionShot {
+  return { id, number, audio, visual } as ProductionShot;
+}
+
+function prod(): Production {
+  return {
+    meta: { id: "p1", name: "T", folder: "C:/nonexistent-prod" },
+    magicEnabled: true,
+    scenes: [
+      { number: 1, title: "Valley", shots: [shot("s100", "0100", "Ada walks through the valley.")] },
+      { number: 2, title: "Ridge", shots: [shot("s200", "0200", "The villain appears on the ridge.")] },
+    ],
+    magicPrompts: { s100: "STALE prose about a constellation @[Hero]" },
+    characters: [
+      { id: "c1", name: "Hero", key: "young woman in a red cloak", aliases: ["MainCharacter", "Ada"], imagePath: "references/hero.png" },
+    ],
+    products: [],
+    references: [],
+    styles: [],
+    assets: { outDir: "out" },
+  } as unknown as Production;
+}
+
+describe("magicBibleInputHash / staleness", () => {
+  it("is stable for unchanged inputs and flips when a visual changes", () => {
+    const p = prod();
+    const h = magicBibleInputHash(p);
+    expect(magicBibleInputHash(p)).toBe(h);
+    p.scenes[0].shots[0].visual = "Ada runs through the valley.";
+    expect(magicBibleInputHash(p)).not.toBe(h);
+    expect(isMagicBibleStale(p)).toBe(true);
+  });
+});
+
+describe("buildMagicBibleMessages", () => {
+  it("sends the whole story + rich roster, never the stale magic prose", () => {
+    const p = prod();
+    const { userContent } = buildMagicBibleMessages(p, null);
+    expect(userContent).toContain("Build the STORY BIBLE");
+    expect(userContent).toContain("Scene 1");
+    expect(userContent).toContain("Ada walks through the valley.");
+    expect(userContent).toContain("The villain appears on the ridge.");
+    expect(userContent).toContain("@[Hero]");
+    expect(userContent).toContain("young woman in a red cloak");
+    expect(userContent).toContain("MainCharacter");
+    expect(userContent).not.toContain("STALE prose about a constellation");
+  });
+});
+
+describe("parseMagicBibleReply", () => {
+  it("binds citations to the roster: aliases canonicalize, inventions drop", () => {
+    const p = prod();
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "Ada confronts the villain.",
+      assumptions: ["Dawn."],
+      scenes: [{ number: 1, title: "Valley", beat: "Sets out." }],
+      entities: [
+        { name: "Ada", kind: "character", descriptor: "red cloak", refName: "MainCharacter" },
+        { name: "Ghost", kind: "character", descriptor: "x", refName: "NoSuchRef" },
+      ],
+      shotPlans: [
+        { number: "0100", purpose: "establish", mustCite: ["MainCharacter", "InventedRef"] },
+        { number: "9999", purpose: "ghost shot", mustCite: [] },
+      ],
+    }), p);
+    expect(bible).not.toBeNull();
+    expect(bible!.entities[0].refName).toBe("Hero");
+    expect(bible!.entities[1].refName).toBeUndefined();
+    expect(bible!.shotPlans).toHaveLength(1);
+    expect(bible!.shotPlans[0].mustCite).toEqual(["Hero"]);
+  });
+
+  it("returns null on an unusable reply", () => {
+    expect(parseMagicBibleReply("no json", prod())).toBeNull();
+  });
+});
+
+describe("generateMagicPrompts (bible + per-scene)", () => {
+  it("bulk run: one bible call + one call per scene; bible stored; alias tags canonicalized", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    await generateMagicPrompts(p, "key", "model", () => {});
+    expect(modelCalls).toHaveLength(3);
+    expect(modelCalls[0]).toContain("Build the STORY BIBLE");
+    expect(p.magicBible?.synopsis).toContain("Ada crosses the valley");
+    expect(p.magicBible?.inputHash).toBe(magicBibleInputHash(p));
+    expect(p.magicPrompts?.s100).toBe("Fresh 0100 content with @[Hero].");
+    expect(p.magicPrompts?.s200).toBe("Fresh 0200 content with @[Hero].");
+    // The scene call was grounded in the bible (synopsis visible to the writer).
+    expect(modelCalls[1]).toContain("Ada crosses the valley");
+  });
+
+  it("bibleOnly stage builds the bible and writes NO prompts (Cast & Sets gate)", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    await generateMagicPrompts(p, "key", "model", () => {}, undefined, undefined, { bibleOnly: true });
+    expect(modelCalls).toHaveLength(1);
+    expect(modelCalls[0]).toContain("Build the STORY BIBLE");
+    expect(p.magicBible?.synopsis).toContain("Ada crosses the valley");
+    expect(p.magicPrompts?.s100).toBe("STALE prose about a constellation @[Hero]");
+    expect(p.magicPrompts?.s200).toBeUndefined();
+  });
+
+  it("per-shot regen reuses the stored bible and touches only its entry", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    await generateMagicPrompts(p, "key", "model", () => {});
+    const before = p.magicPrompts?.s200;
+    modelCalls.length = 0;
+    await generateMagicPrompts(p, "key", "model", () => {}, undefined, ["s100"]);
+    expect(modelCalls).toHaveLength(1);
+    expect(modelCalls[0]).not.toContain("Build the STORY BIBLE");
+    expect(modelCalls[0]).toContain("Ada crosses the valley");
+    expect(p.magicPrompts?.s200).toBe(before);
+  });
+});
+
+describe("Junk Drawer-shaped binding (generic roster names, no descriptors)", () => {
+  // Mirrors the real failure: 21 entities, only 3 bound; environment cited
+  // in 3/28 shots; the whole climax with zero citations. Custom refs carry
+  // no descriptors — names + categories are all the binding has to go on.
+  function junkProd(): Production {
+    const p = prod();
+    p.characters = [];
+    p.references = [
+      { id: "r-main", name: "Main Character", categoryId: "cat-heroes", imagePath: "references/main.png", shotIds: [] },
+      { id: "r-v1", name: "Villain 1", categoryId: "cat-villains", imagePath: "references/v1.png", shotIds: [] },
+      { id: "r-v2", name: "Villain 2", categoryId: "cat-villains", imagePath: "references/v2.png", shotIds: [] },
+      { id: "r-env2", name: "Environment 02", categoryId: "cat-env", imagePath: "references/env2.png", shotIds: [] },
+      { id: "r-env1", name: "Environment 01", categoryId: "cat-archive", imagePath: "references/env1.png", shotIds: [] },
+    ] as unknown as Production["references"];
+    p.referenceCategories = [
+      { id: "cat-heroes", name: "Hero Characters" },
+      { id: "cat-villains", name: "Villains" },
+      { id: "cat-env", name: "Environment" },
+      { id: "cat-archive", name: "Archive" },
+    ] as unknown as Production["referenceCategories"];
+    return p;
+  }
+
+  it("fallback-binds groups + locations and derives mustCite from present (environment included)", () => {
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "A paperclip crosses a junk-drawer city.",
+      worldPremise: "A miniature city inside a household junk drawer, streets improvised from drawer contents at paperclip scale.",
+      assumptions: [],
+      scenes: [{ number: 1, title: "Street", location: "junk-drawer alley", beat: "x", settingAnchor: "A narrow alley between towering junk-drawer contents at miniature scale." }],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "A small brightly colored paperclip.", refNames: ["Main Character"] },
+        { name: "safety pin gang", kind: "character", descriptor: "A gang of ordinary metal safety pins." },
+        { name: "junk-drawer alley", kind: "location", descriptor: "A narrow passage between crowded drawer contents." },
+      ],
+      shotPlans: [
+        { number: "0100", purpose: "confrontation", present: ["little paperclip", "safety pin gang", "junk-drawer alley"], mustCite: [] },
+      ],
+    }), junkProd());
+    expect(bible).not.toBeNull();
+    expect(bible!.worldPremise).toContain("junk drawer");
+    expect(bible!.entities.find((e) => e.name === "safety pin gang")?.refNames).toEqual(["Villain 1", "Villain 2"]);
+    expect(bible!.entities.find((e) => e.name === "junk-drawer alley")?.refNames).toEqual(["Environment 02"]);
+    expect(bible!.shotPlans[0].mustCite).toEqual(expect.arrayContaining(["Main Character", "Villain 1", "Villain 2", "Environment 02"]));
+  });
+
+  it("citation discipline: one environment max, primary refs, budget, title shots cite nothing", () => {
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "small", refNames: ["Main Character"] },
+        { name: "safety pin gang", kind: "character", descriptor: "A gang of pins.", refNames: ["Villain 1", "Villain 2"] },
+        { name: "city street", kind: "location", descriptor: "street", refNames: ["Environment 02", "Environment 01"] },
+        { name: "the drawer", kind: "location", descriptor: "container", refNames: ["Environment 02"] },
+        { name: "JUNK DRAWER Title", kind: "other", descriptor: "words" },
+      ],
+      shotPlans: [
+        { number: "0100", purpose: "fight", present: ["city street", "the drawer", "little paperclip", "safety pin gang"], mustCite: ["Environment 01", "Environment 02"] },
+        { number: "0200", purpose: "title", present: ["JUNK DRAWER Title"], mustCite: [] },
+      ],
+    }), junkProd());
+    const fight = bible!.shotPlans[0].mustCite;
+    // Characters first (gang capped at 2), exactly ONE environment ref total.
+    expect(fight).toEqual(["Main Character", "Villain 1", "Villain 2", "Environment 02"]);
+    expect(bible!.shotPlans[1].mustCite).toEqual([]);
+  });
+
+  it("a user's explicit multi-ref map survives derivation in full (heroes case)", () => {
+    const p = junkProd();
+    const entities = [
+      { name: "paperclip heroes", kind: "character" as const, descriptor: "team", refName: "Main Character", refNames: ["Main Character", "Villain 1", "Villain 2"], boundBy: "user" as const, confidence: "high" as const },
+    ];
+    const plans = [{ number: "0100", purpose: "fight", present: ["paperclip heroes"], mustCite: [] as string[] }];
+    deriveMagicMustCite(p, entities, [], plans);
+    expect(plans[0].mustCite).toEqual(["Main Character", "Villain 1", "Villain 2"]);
+    // The same three refs from the MODEL stay capped at the group limit of 2.
+    const modelEntities = [{ ...entities[0], boundBy: "model" as const }];
+    const modelPlans = [{ number: "0100", purpose: "fight", present: ["paperclip heroes"], mustCite: [] as string[] }];
+    deriveMagicMustCite(p, modelEntities, [], modelPlans);
+    expect(modelPlans[0].mustCite).toEqual(["Main Character", "Villain 1"]);
+  });
+
+  it("protagonist bind: the most-present unbound character takes the 'Main Character' ref", () => {
+    const p = junkProd();
+    p.scenes[0].shots.push(
+      shot("s300", "0300", "More street."), shot("s400", "0400", "More street."), shot("s500", "0500", "More street."),
+    );
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [
+        { name: "little paperclip", kind: "character", descriptor: "A small paperclip." },
+        { name: "junk-drawer alley", kind: "location", descriptor: "A narrow passage." },
+      ],
+      shotPlans: ["0100", "0200", "0300", "0400", "0500"].map((number) => ({
+        number, purpose: "beat", present: ["little paperclip", "junk-drawer alley"], mustCite: [],
+      })),
+    }), p);
+    expect(bible!.entities[0].refNames).toEqual(["Main Character"]);
+    expect(bible!.shotPlans[0].mustCite).toContain("Main Character");
+  });
+
+  it("finalize backstop appends omitted must-cite tags and the setting anchor", async () => {
+    modelCalls.length = 0;
+    const p = prod();
+    p.products = [{ id: "pr1", name: "Gondola", imagePath: "references/g.png" } as Production["products"][number]];
+    await generateMagicPrompts(p, "key", "model", () => {});
+    // Simulate a v2 bible whose plan demands the Gondola too, then regen one
+    // shot: the writer mock never cites Gondola and never restates setting.
+    p.magicBible!.worldPremise = "A miniature valley world inside a giant wooden drawer.";
+    p.magicBible!.shotPlans = [{ number: "0200", purpose: "reveal", mustCite: ["Hero", "Gondola"] }];
+    p.magicBible!.inputHash = magicBibleInputHash(p);
+    await generateMagicPrompts(p, "key", "model", () => {}, undefined, ["s200"]);
+    const stored = p.magicPrompts!.s200;
+    expect(stored).toContain("@[Hero]");
+    expect(stored).toContain("@[Gondola]");
+    expect(stored).toContain("Setting: A miniature valley world inside a giant wooden drawer.");
+  });
+});
+
+describe("Cast & Sets decisions + provenance", () => {
+  const reply = JSON.stringify({
+    synopsis: "s", assumptions: [], scenes: [],
+    entities: [
+      { name: "Ada", kind: "character", descriptor: "red cloak", refNames: ["MainCharacter"], bindReason: "lead name" },
+      { name: "alley", kind: "location", descriptor: "narrow passage" },
+    ],
+    shotPlans: [{ number: "0100", purpose: "x", present: ["Ada", "alley"], mustCite: [] }],
+  });
+
+  it("records who bound each entity and why", () => {
+    const bible = parseMagicBibleReply(reply, prod())!;
+    expect(bible.entities[0]).toMatchObject({ boundBy: "model", confidence: "high", bindReason: "lead name" });
+  });
+
+  it("user decisions reapply before model binding on regeneration", () => {
+    const p = prod();
+    p.magicRefDecisions = {
+      ada: { entityName: "Ada", refIds: [], textOnly: true, updatedAt: "2026-01-01" },
+    };
+    const bible = parseMagicBibleReply(reply, p)!;
+    expect(bible.entities[0].refNames).toBeUndefined();
+    expect(bible.entities[0]).toMatchObject({ boundBy: "user", bindReason: "You marked this text-only" });
+    expect(bible.shotPlans[0].mustCite).not.toContain("Hero");
+  });
+
+  it("applyMagicRefDecision maps, aliases, re-derives citations, and needs reflect it", () => {
+    const p = prod();
+    p.magicBible = {
+      version: 1, synopsis: "s", assumptions: [], scenes: [],
+      entities: [{ name: "Ada", kind: "character", descriptor: "red cloak" }],
+      shotPlans: [{ number: "0100", purpose: "x", present: ["Ada"], mustCite: [] }],
+      inputHash: "h", generatedAt: "2026-01-01",
+    };
+    expect(magicCastNeeds(p)[0].status).toBe("unmapped");
+    expect(magicCastReviewCount(p)).toBe(1);
+    applyMagicRefDecision(p, "Ada", { refIds: ["c1"] }, () => {});
+    expect(p.magicBible.entities[0]).toMatchObject({ refNames: ["Hero"], boundBy: "user", confirmed: false });
+    expect(p.magicBible.shotPlans[0].mustCite).toEqual(["Hero"]);
+    expect(p.characters[0].aliases).toContain("Ada");
+    // Mapping alone does NOT confirm: the row stays in review until "Looks right".
+    expect(magicCastNeeds(p)[0].status).toBe("review");
+    applyMagicRefDecision(p, "Ada", { refIds: ["c1"], confirmed: true }, () => {});
+    expect(magicCastNeeds(p)[0]).toMatchObject({ status: "ready", shotNumbers: ["0100"] });
+    // Removing a ref (chip ×) edits the mapping and un-confirms it again.
+    applyMagicRefDecision(p, "Ada", { refIds: [] }, () => {});
+    expect(magicCastNeeds(p)[0].status).toBe("unmapped");
+    applyMagicRefDecision(p, "Ada", { textOnly: true }, () => {});
+    expect(magicCastNeeds(p)[0].status).toBe("text-only");
+    expect(p.magicBible.shotPlans[0].mustCite).toEqual([]);
+  });
+});
+
+describe("computeUnresolvedMagicRefs", () => {
+  it("groups unmatched citations by shot and skips resolved/dismissed names", () => {
+    const p = prod();
+    p.magicPrompts = {
+      s100: "Ada meets @[MysteryFigure] and @[MainCharacter].",
+      s200: "@[MysteryFigure] looms. @[DismissedName] too.",
+    };
+    p.magicDismissedRefs = ["dismissedname"];
+    const unresolved = computeUnresolvedMagicRefs(p);
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0].citedName).toBe("MysteryFigure");
+    expect(unresolved[0].shotNumbers).toEqual(["0100", "0200"]);
+  });
+
+  it("reference purposes: a Blender blockout is layout and never castable (Ref-001 regression)", () => {
+    expect(inferReferencePurpose("Ref-001", "Blender Blockouts")).toBe("layout");
+    expect(inferReferencePurpose("LookDev 01", "LookDev")).toBe("style");
+    expect(inferReferencePurpose("Environment 02", "Environment")).toBe("environment");
+    expect(inferReferencePurpose("Gondola", "Props")).toBe("subject");
+    expect(isMagicCitablePurpose("layout")).toBe(false);
+    expect(isMagicCitablePurpose("environment")).toBe(true);
+
+    const p = prod();
+    p.references = [
+      { id: "r-blk", name: "Ref-001", categoryId: "cat-blk", imagePath: "references/blk.png", shotIds: [] },
+      { id: "r-env", name: "Environment 02", categoryId: "cat-env", imagePath: "references/env.png", shotIds: [] },
+      { id: "r-force", name: "Blockout Hero", categoryId: "cat-blk", purpose: "subject", imagePath: "references/h.png", shotIds: [] },
+    ] as unknown as Production["references"];
+    p.referenceCategories = [
+      { id: "cat-blk", name: "Blender Blockouts" },
+      { id: "cat-env", name: "Environment" },
+    ] as unknown as Production["referenceCategories"];
+    const roster = magicRefRoster(p);
+    const byName = new Map(roster.map((e) => [e.name, e]));
+    expect(byName.get("Ref-001")?.purpose).toBe("layout");
+    expect(byName.get("Ref-001")?.purposeInferred).toBe(true);
+    expect(byName.get("Environment 02")?.purpose).toBe("environment");
+    // An explicit user purpose always wins over inference.
+    expect(byName.get("Blockout Hero")?.purpose).toBe("subject");
+    expect(byName.get("Blockout Hero")?.purposeInferred).toBe(false);
+
+    // The parser can never bind the blockout, even if the model asks for it.
+    const bible = parseMagicBibleReply(JSON.stringify({
+      synopsis: "s", assumptions: [], scenes: [],
+      entities: [{ name: "drawer interior", kind: "location", descriptor: "inside a drawer", refNames: ["Ref-001", "Environment 02"] }],
+      shotPlans: [{ number: "0100", purpose: "establish", present: ["drawer interior"], mustCite: ["Ref-001"] }],
+    }), p);
+    expect(bible!.entities[0].refNames).toEqual(["Environment 02"]);
+    expect(bible!.shotPlans[0].mustCite).toEqual(["Environment 02"]);
+  });
+
+  it("roster carries descriptors, aliases, and artwork presence", () => {
+    const roster = magicRefRoster(prod());
+    expect(roster).toHaveLength(1);
+    expect(roster[0]).toMatchObject({ name: "Hero", kind: "character", descriptor: "young woman in a red cloak", hasArtwork: true });
+    expect(roster[0].aliases).toEqual(["MainCharacter", "Ada"]);
+  });
+});

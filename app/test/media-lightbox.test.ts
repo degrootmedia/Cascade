@@ -4,6 +4,8 @@
  * fails to load falls back to its poster still instead of a black box.
  */
 import { describe, it, expect, vi } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { createElement, act } from "react";
 import { createRoot } from "react-dom/client";
 import { MediaLightbox } from "../src/renderer/src/components/common/MediaLightbox.js";
@@ -33,6 +35,29 @@ function fakeLoaded(img: HTMLImageElement, w: number, h: number): void {
   Object.defineProperty(img, "naturalHeight", { value: h, configurable: true });
   act(() => { img.dispatchEvent(new W.Event("load", { bubbles: true })); });
 }
+
+describe("graph lightbox layering (styles.css)", () => {
+  // The lightbox portals to <body>, so in a popped-out (detached) canvas it
+  // escapes the overlay's stacking context: only its own z-index keeps it
+  // above the detached graph overlay (200) — at 120 it rendered invisibly
+  // behind the canvas. It must also clear the take-history modal it opens
+  // from, while staying below confirm dialogs.
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/renderer/src/styles.css"), "utf8");
+  const zOf = (selector: string): number => {
+    const at = css.indexOf(selector);
+    expect(at, selector).toBeGreaterThanOrEqual(0);
+    const m = /z-index:\s*(\d+)/.exec(css.slice(at, at + 500));
+    expect(m, selector).toBeTruthy();
+    return Number(m![1]);
+  };
+
+  it("stacks above the detached graph overlay and history modal, below confirms", () => {
+    const lightbox = zOf(".prod-graph-lightbox {");
+    expect(lightbox).toBeGreaterThan(zOf(".detached-canvas .prod-graph-overlay {"));
+    expect(lightbox).toBeGreaterThan(zOf(".prod-graph-history-overlay {"));
+    expect(lightbox).toBeLessThan(zOf(".modal-backdrop.confirm-layer {"));
+  });
+});
 
 describe("MediaLightbox", () => {
   it("zooms an image with the wheel and closes on Escape", () => {

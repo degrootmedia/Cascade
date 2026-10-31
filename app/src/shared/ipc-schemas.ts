@@ -57,6 +57,9 @@ const validators: Record<string, (args: unknown[]) => void> = {
   "settings:setExternalEditor": (args) => {
     checkOptionalPathString(args[0], "externalEditor");
   },
+  "settings:setAudioEditor": (args) => {
+    checkOptionalPathString(args[0], "audioEditor");
+  },
   "settings:setPromptTemplates": (args) => {
     const o = args[0];
     if (!o || typeof o !== "object" || Array.isArray(o)) {
@@ -81,6 +84,16 @@ const validators: Record<string, (args: unknown[]) => void> = {
       throw new Error("IPC validation: production name must be 1..256 chars");
     }
     checkPathString(args[1], "folder");
+  },
+  "production:assemblySend": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "rel");
+  },
+  "production:setGenerationSelect": (args) => {
+    checkPathString(args[0], "productionId");
+    checkPathString(args[1], "shotId");
+    checkPathString(args[2], "rel");
+    if (typeof args[3] !== "boolean") throw new Error("IPC validation: setGenerationSelect selected must be a boolean");
   },
   "production:selectGraphTake": (args) => {
     checkPathString(args[0], "productionId");
@@ -149,6 +162,25 @@ const validators: Record<string, (args: unknown[]) => void> = {
             !Number.isFinite(q.x) || !Number.isFinite(q.y) || Math.abs(q.x) > 100000 || Math.abs(q.y) > 100000) {
             throw new Error("IPC validation: updateGraphLayout waypoint coordinates must be finite numbers");
           }
+          if (q.id !== undefined && (typeof q.id !== "string" || q.id.length === 0 || q.id.length > 64)) {
+            throw new Error("IPC validation: updateGraphLayout waypoint id must be a short string");
+          }
+        }
+      }
+    }
+    if (p.wireStyle !== undefined && p.wireStyle !== "curved" && p.wireStyle !== "straight") {
+      throw new Error("IPC validation: updateGraphLayout wireStyle must be curved or straight");
+    }
+    if (p.frames !== undefined) {
+      if (!p.frames || typeof p.frames !== "object" || Array.isArray(p.frames)) throw new Error("IPC validation: updateGraphLayout frames must be an object");
+      for (const [k, f] of Object.entries(p.frames as Record<string, unknown>)) {
+        if (k.length === 0 || k.length > 256) throw new Error("IPC validation: updateGraphLayout frame id invalid");
+        if (f === null) continue;
+        const q = f as Record<string, unknown>;
+        if (!q || typeof q !== "object" || typeof q.name !== "string" || q.name.length > 200 || typeof q.color !== "string" || q.color.length > 32 ||
+          !Array.isArray(q.members) || q.members.length > 500 || q.members.some((m) => typeof m !== "string" || m.length > 256) ||
+          [q.x, q.y, q.width, q.height].some((n) => typeof n !== "number" || !Number.isFinite(n) || Math.abs(n) > 100000)) {
+          throw new Error("IPC validation: updateGraphLayout frame shape invalid");
         }
       }
     }

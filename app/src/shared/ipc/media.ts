@@ -541,3 +541,31 @@ export interface ModelProbeResult {
   error?: string;
   models: ModelProbeEntry[];
 }
+
+/** Which reference media kinds each transport can actually send. Mirrors the
+ *  main-side PROVIDER_CAPABILITIES (kept here so the renderer can warn
+ *  before generation instead of the submit failing). */
+export const PROVIDER_REF_SUPPORT: Record<MediaProviderId, { image: boolean; video: boolean; audio: boolean }> = {
+  openart: { image: true, video: true, audio: true },
+  "higgsfield-cli": { image: true, video: true, audio: true },
+  "openart-cli": { image: true, video: false, audio: false },
+};
+
+const REF_PROVIDER_NAMES: Record<MediaProviderId, string> = {
+  openart: "OpenArt MCP",
+  "higgsfield-cli": "Higgsfield CLI",
+  "openart-cli": "OpenArt CLI",
+};
+
+/** A user-facing warning when any attached reference is a kind the active
+ *  provider can't use, or null when all are usable. */
+export function unusableRefsMessage(
+  id: MediaProviderId,
+  refs: ReadonlyArray<{ name: string; media?: "video" | "audio" }>
+): string | null {
+  const sup = PROVIDER_REF_SUPPORT[id];
+  const bad = refs.filter((r) => (r.media === "video" && !sup.video) || (r.media === "audio" && !sup.audio));
+  if (!bad.length) return null;
+  const list = bad.map((r) => `"${r.name}" (${r.media})`).join(", ");
+  return `${REF_PROVIDER_NAMES[id]} can't use these references: ${list}. They won't be sent — remove them or switch provider before generating.`;
+}

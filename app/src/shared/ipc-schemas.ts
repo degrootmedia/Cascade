@@ -57,6 +57,9 @@ const validators: Record<string, (args: unknown[]) => void> = {
   "settings:setExternalEditor": (args) => {
     checkOptionalPathString(args[0], "externalEditor");
   },
+  "settings:setAudioEditor": (args) => {
+    checkOptionalPathString(args[0], "audioEditor");
+  },
   "settings:setPromptTemplates": (args) => {
     const o = args[0];
     if (!o || typeof o !== "object" || Array.isArray(o)) {

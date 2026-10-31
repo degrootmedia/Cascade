@@ -4,7 +4,7 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { applySavedRevision, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -3078,7 +3078,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Step 3 node graph: run the image generation node (prompt = the
    *  composer's text; result stored on the node, applied when piped). */
   async function runImageGenNode(shotId: string, model: string, resolution: string, params?: Record<string, string>) {
-    if (!prod || nodeImageBusyIds.has(shotId)) return;
+    // No busy guard: the per-node genQueue already serializes submissions, and
+    // a guard here read a stale closure that dropped every queued job after
+    // the first.
+    if (!prod) return;
     setNodeImageBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
@@ -3128,6 +3131,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
           ? cur?.graphImageGens?.[cur?.graphImageGenIndex ?? 0]?.path
           : refSource?.imagePath;
       const videoParams = params ?? node?.params;
+      const badRefs = unusableRefsMessage(mediaProviderId, [...prod.characters, ...prod.products, ...(prod.references ?? [])].filter((r) => (node?.refIds ?? []).includes(r.id)));
+      if (badRefs) { setErr(badRefs); return; }
       // Render the wired prompt at submit time: whichever prompt node is
       // plugged into this generator's prompt input (paired by default).
       const videoTarget = cur ? wiredPromptTarget(cur, videoGenNodeId(node?.id ?? nodeId), { videoprompt: node?.id ?? nodeId }) : { videoprompt: nodeId };
@@ -4073,6 +4078,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** The active provider has no upscale path (OpenArt MCP) — the upscale node
    *  and the Image Suite's Upscale mode are disabled with an explanatory hint. */
+  const refWarning = (() => {
+    if (!prod) return null;
+    const all = [...prod.characters, ...prod.products, ...(prod.references ?? [])];
+    const used = new Set(prod.scenes.flatMap((sc) => sc.shots).flatMap((s) => (s.graphVideoNodes ?? []).flatMap((n) => n.refIds ?? [])));
+    return unusableRefsMessage(mediaProviderId, all.filter((r) => used.has(r.id)));
+  })();
   const upscaleUnavailable = !providerSupportsUpscale(mediaProviderId);
 
   /** The active provider has no video-edit path (OpenArt MCP/CLI) — the
@@ -4768,6 +4779,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               </div>
             </div>
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
+            {refWarning && <div className="hint" role="status">⚠ {refWarning}</div>}
             {shotCount > 0 && (
               <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
               <div

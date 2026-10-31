@@ -17,7 +17,7 @@ import { mediaEntryForId, mediaEntryForPath } from "../../../../shared/media-reg
 import { useExternalEditorLabel } from "../../use-external-editor-label.js";
 import { MEDIA_MENU_LABELS } from "../../../../shared/menu-labels.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
-import { closestResolution } from "../resolution.js";
+import { closestResolution, resolutionsForSchema } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
 import { cascadeMedia } from "./animatic.js";
@@ -884,7 +884,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     }
     return () => { live = false; };
   }, [model]);
-  const resolutions = modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"];
+  const resolutions = resolutionsForSchema(modelSchema, extraParams as Record<string, unknown>, modelOpts?.resolutions?.length ? modelOpts.resolutions : ["480p", "720p", "1080p"]);
   // Keep the current selection valid when the model's options arrive — or
   // when the provider switches under the modal (new model list, new options).
   // The dep is the joined id list (not the array) because the parent passes a
@@ -899,7 +899,7 @@ export function VideoGenModal({ shot, prod, models, prompt: externalPrompt, onSh
     const snapped = snapDurationSec(durationSec, modelOpts);
     if (snapped !== durationSec) setDurationSec(snapped);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelOpts, videoModelIds]);
+  }, [modelOpts, videoModelIds, resolutions.join("|")]);
   useEffect(() => {
     void window.cascade.getOpenArtCredits().then((c) => setCredits(c)).catch(() => {});
     window.cascade.boardThumbnail(prod.meta.id, shot.id).then((d) => setFrame(d)).catch(() => {});

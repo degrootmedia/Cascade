@@ -1,3 +1,4 @@
+import { hasDraggedFiles } from "./drag-files.js";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, VerificationRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, VoiceStatusIpc, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
@@ -695,7 +696,15 @@ export function App() {
             width={sidebarWidth}
           />
           <div className="sidebar-resizer" onMouseDown={startSidebarResize} title="Drag to resize chat history panel" />
-          <main className="chat">
+          <main
+        className="chat"
+        onDragOver={(e) => { if (hasDraggedFiles(e.dataTransfer)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
+        onDrop={(e) => {
+          if (!hasDraggedFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          void attachFiles(e.dataTransfer.files);
+        }}
+      >
         <div className="chat-header">
           {!pureChat && (
             <AgentPicker agents={agents} activeAgentId={activeAgentId} activeMeta={activeMeta} onChange={(id) => { if (!currentId) return; void window.cascade.setSessionAgent(currentId, id); }} onManage={() => setShowAgents(true)} />

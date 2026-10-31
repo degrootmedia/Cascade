@@ -28,7 +28,7 @@ const ALL_SETTINGS_KEYS: Record<keyof SettingsView, true> = {
   followProduction: true,
   accent: true,
   theme: true,
-  externalEditor: true,
+  externalEditor: true, audioEditor: true,
 };
 
 describe("settings registry coverage", () => {
@@ -105,7 +105,7 @@ const VIEW: SettingsView = {
   followProduction: false,
   accent: "#4f8ef7",
   theme: "dark",
-  externalEditor: null,
+  externalEditor: null, audioEditor: null,
 };
 
 function installCascade() {

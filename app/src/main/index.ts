@@ -1543,6 +1543,7 @@ function registerIpc() {
     accent: settings.getAccent(),
     theme: settings.getTheme(),
     externalEditor: settings.getExternalEditor(),
+    audioEditor: settings.getAudioEditor(),
   }));
 
   handle("settings:setApiKey", (_e, key: string) => {
@@ -1781,6 +1782,30 @@ function registerIpc() {
     const validated = await validateExternalEditor(p.trim());
     settings.setExternalEditor(validated);
     return { ok: true, path: validated };
+  });
+
+  handle("settings:pickAudioEditor", async () => {
+    const res = await dialog.showOpenDialog(win!, { title: "Choose external audio editor", properties: ["openFile"], filters: [{ name: "All files", extensions: ["*"] }] });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const validated = await validateExternalEditor(res.filePaths[0]);
+    settings.setAudioEditor(validated);
+    return validated;
+  });
+
+  handle("settings:setAudioEditor", async (_e, p: string | null) => {
+    if (p === null || (typeof p === "string" && p.trim() === "")) { settings.setAudioEditor(null); return; }
+    if (typeof p !== "string") throw new Error("Invalid audio editor value.");
+    settings.setAudioEditor(await validateExternalEditor(p.trim()));
+  });
+
+  handle("audio:editExternally", async (_e, opts: { src?: string }) => {
+    const file = resolveProductionFile({ src: typeof opts?.src === "string" ? opts.src : undefined });
+    if (!file) throw new Error("That audio file is not part of a production.");
+    const p = productions.loadProduction(file.productionId);
+    if (!p) throw new Error("Production not found.");
+    const abs = assetPath(p, file.relPath);
+    if (!fs.existsSync(abs)) throw new Error(`Audio not found on disk: ${file.relPath}`);
+    await openWithExternalEditor(abs, { getEditor: () => settings.getAudioEditor() });
   });
 
   handle("image:showMenu", (_e, opts: { src?: string; x?: number; y?: number; media?: "image" | "video"; productionId?: string; relPath?: string; dataUrl?: string }) => {
@@ -6038,6 +6063,11 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         rects: req.rects,
         labels: req.labels,
         categoryId,
+        existingNames: [
+          ...p.characters.map((c) => c.name),
+          ...p.products.map((c) => c.name),
+          ...(p.references ?? []).map((r) => r.name),
+        ].filter((n): n is string => typeof n === "string"),
       },
       {
         decodeImage: (abs) => nativeImage.createFromPath(abs),

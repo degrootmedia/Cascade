@@ -73,6 +73,8 @@ interface SettingsFile {
   accent: string;
   /** Absolute path to the external image editor executable (e.g. Photoshop). */
   externalEditor: string | null;
+  /** Absolute path to the external audio editor (e.g. Audacity), or null. */
+  audioEditor: string | null;
   /**
    * Media model ids the user hides from the generation model dropdowns
    * (Settings → Models & expenses toggles). Filtered main-side so every
@@ -183,6 +185,7 @@ const DEFAULTS: SettingsFile = {
   accent: "#4f8ef7",
   theme: "dark",
   externalEditor: null,
+  audioEditor: null,
   hiddenMediaModels: [],
   modelKindOverrides: {},
   mediaDefaults: {},
@@ -591,6 +594,15 @@ export function getTheme(): UiTheme {
 export function setTheme(theme: string): void {
   if (theme !== "dark" && theme !== "light") return; // allowlist — it's injected into the DOM
   load().theme = theme;
+  save();
+}
+
+export function getAudioEditor(): string | null {
+  return load().audioEditor ?? null;
+}
+
+export function setAudioEditor(p: string | null): void {
+  load().audioEditor = typeof p === "string" && p.trim() ? p.trim() : null;
   save();
 }
 

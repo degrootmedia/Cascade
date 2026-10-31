@@ -71,7 +71,7 @@ function drawWaveform(canvas: HTMLCanvasElement, peaks: AudioPeaks | null, hex: 
   ctx.globalAlpha = 1;
 }
 
-export function AudioRefTile({ url, name, colorId, onPickColor }: {
+export function AudioRefTile({ url, name, colorId, onPickColor, canEditAudio = true }: {
   /** Playable cascade-media URL for the audio file. */
   url: string;
   name: string;
@@ -79,6 +79,8 @@ export function AudioRefTile({ url, name, colorId, onPickColor }: {
   colorId?: string;
   /** Persist a new waveform color (right-click menu); absent = no menu. */
   onPickColor?: (colorId: string) => void;
+  /** Show a right-click "Edit Audio" action (opens the external audio editor). */
+  canEditAudio?: boolean;
 }) {
   const peaks = useAudioPeaks(url);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -155,7 +157,7 @@ export function AudioRefTile({ url, name, colorId, onPickColor }: {
     <div
       className="prod-graph-audio nodrag"
       onContextMenu={(e) => {
-        if (!onPickColor) return;
+        if (!onPickColor && !canEditAudio) return;
         e.preventDefault();
         e.stopPropagation();
         setMenu({ x: e.clientX, y: e.clientY });
@@ -214,7 +216,7 @@ export function AudioRefTile({ url, name, colorId, onPickColor }: {
         }}
         onEnded={() => { setPlaying(false); setCurrent(0); }}
       />
-      {menu && onPickColor && createPortal(
+      {menu && (onPickColor || canEditAudio) && createPortal(
         <div
           ref={menuRef}
           className="session-context-menu seq-accent-menu prod-graph-audio-menu"
@@ -222,7 +224,10 @@ export function AudioRefTile({ url, name, colorId, onPickColor }: {
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
-          <div className="ctx-title">Waveform color</div>
+          {canEditAudio && (
+            <button className="ctx-item" onClick={() => { setMenu(null); void window.cascade.editAudioExternally({ src: url }).catch(() => {}); }}>Edit Audio</button>
+          )}
+          {onPickColor && <><div className="ctx-title">Waveform color</div>
           <div className="seq-accent-grid">
             {SEQUENCE_ACCENT_COLORS.map((c) => (
               <button
@@ -233,7 +238,7 @@ export function AudioRefTile({ url, name, colorId, onPickColor }: {
                 onClick={() => { onPickColor(c.id); setMenu(null); }}
               />
             ))}
-          </div>
+          </div></>}
         </div>,
         document.body
       )}

@@ -4014,11 +4014,30 @@ function mergeJobNodeLists<T extends JobNode>(
       continue;
     }
     const pn = prevById.get(jn.id);
-    out.push({
-      ...fn,
-      gens: jn.gens,
-      genIndex: rebaseGenIndex(pn?.gens, pn?.genIndex, fn.gens, fn.genIndex, jn.gens, jn.genIndex),
-    });
+    // Concurrent jobs each hold a snapshot: replacing the history with this
+    // job's array would drop takes another job (or the user) landed on disk
+    // meanwhile. Replay only this job's additions/removals onto fresh gens.
+    const prevPaths = new Set((pn?.gens ?? []).map((g) => g.path));
+    const nextPaths = new Set((jn.gens ?? []).map((g) => g.path));
+    const freshUnchanged = JSON.stringify(pn?.gens ?? []) === JSON.stringify(fn.gens ?? []);
+    if (freshUnchanged) {
+      out.push({
+        ...fn,
+        gens: jn.gens,
+        genIndex: rebaseGenIndex(pn?.gens, pn?.genIndex, fn.gens, fn.genIndex, jn.gens, jn.genIndex),
+      });
+      continue;
+    }
+    const added = (jn.gens ?? []).filter((g) => !prevPaths.has(g.path));
+    const removed = new Set([...prevPaths].filter((p) => !nextPaths.has(p)));
+    const kept = (fn.gens ?? []).filter((g) => !removed.has(g.path));
+    const freshPaths = new Set(kept.map((g) => g.path));
+    const merged = [...added.filter((g) => !freshPaths.has(g.path)), ...kept].slice(0, GRAPH_HISTORY_CAP);
+    const jobSel = jn.gens?.[jn.genIndex ?? 0]?.path;
+    const freshSel = fn.gens?.[fn.genIndex ?? 0]?.path;
+    const wantPath = jobSel && added.some((g) => g.path === jobSel) ? jobSel : freshSel;
+    const at = wantPath ? merged.findIndex((g) => g.path === wantPath) : -1;
+    out.push({ ...fn, gens: merged, genIndex: at >= 0 ? at : 0 });
   }
   for (const fn of fresh ?? []) {
     if (seen.has(fn.id) || prevIds.has(fn.id)) continue;

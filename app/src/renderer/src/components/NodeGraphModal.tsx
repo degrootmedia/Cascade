@@ -38,7 +38,13 @@ type CliModelSchema, type GenParams, type GenjutsuMode, type Graph, type GraphEd
 type VideoModelOptions } from "../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceTotalDuration, DRAFT_RESOLUTION, isDraftOnlyModel, type SequenceSegment } from "../../../shared/ipc.js";
 import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from "./ModelOptionsForm.js";
-import { closestResolution } from "./resolution.js";
+import { closestResolution, resolutionsForSchema } from "./resolution.js";
+import { resolutionsAllowedByRules } from "../../../shared/cel-lite.js";
+/** Image resolution choices: the model schema's own list when it declares one, else the stock ladder. */
+function imageResOptions(schema: CliModelSchema | null): string[] {
+  const v = schema?.fields.find((f) => f.name === "resolution")?.values;
+  return v && v.length ? v : ["1k", "2k", "4k"];
+}
 import { enforceSourceTag, composePromptBoxes, parsePromptBoxes, refTagNames, removeRefTag, stripBrandParagraph, syncRefTags } from "../../../shared/prompt-grammar.js";
 import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { referenceUsage } from "../../../shared/reference-usage.js";
@@ -1095,8 +1101,9 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
     setParams(p);
     data.onSaveFields({ graphImageParams: p });
   };
+  const effResolution = closestResolution(resolution, imageResOptions(schema));
   const run = async () => {
-    await data.onGenerate(effModel, resolution, params);
+    await data.onGenerate(effModel, effResolution, params);
   };
   // Live per-config quote (Higgsfield CLI only) for the node's Generate button.
   // Quality rides the production default (the submit bills it), so it prices here.
@@ -1117,10 +1124,8 @@ const ImageGenNodeView = memo(function ImageGenNodeView({ id, data }: NodeProps<
         </select>
       </div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); data.onSaveFields({ graphImageResolution: e.target.value }); rememberMediaDefault("image", { resolution: e.target.value }); }} title="Resolution">
-          <option value="1k">1k</option>
-          <option value="2k">2k</option>
-          <option value="4k">4k</option>
+        <select className="prod-openart-select nodrag" value={effResolution} onChange={(e) => { setResolution(e.target.value); data.onSaveFields({ graphImageResolution: e.target.value }); rememberMediaDefault("image", { resolution: e.target.value }); }} title="Resolution">
+          {imageResOptions(schema).map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
       <div className="nodrag">
@@ -1220,7 +1225,19 @@ const VideoGenNodeView = memo(function VideoGenNodeView({ id, data }: NodeProps<
   // outputs 480p — it is not the Higgfield upgradeable Seedance 2.5, so its
   // resolution ladder collapses to 480p.
   const draftModel = isDraftOnlyModel({ id: model, displayName: data.models.find((m) => m.id === model)?.displayName });
-  const resolutions = draftModel ? [DRAFT_RESOLUTION] : (opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"]);
+  const baseResolutions = draftModel ? [DRAFT_RESOLUTION] : (opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"]);
+  // Narrow by the model's own CEL rules given the current params (e.g. Seedance
+  // mode "fast" only allows 480p/720p).
+  const resolutions = useMemo(() => {
+    const rules = ((schema?.raw as { rules?: { cel?: unknown }[] } | null)?.rules ?? [])
+      .filter((r): r is { cel: string } => typeof r?.cel === "string");
+    if (!rules.length) return baseResolutions;
+    const modeDef = schema?.fields.find((f) => f.name === "mode")?.default;
+    return resolutionsAllowedByRules(rules, { mode: modeDef, ...params }, baseResolutions);
+  }, [schema, params, baseResolutions.join("|")]);
+  useEffect(() => {
+    if (resolutions.length && !resolutions.includes(resolution)) setResolution(closestResolution(resolution, resolutions));
+  }, [resolutions.join("|")]);
   useEffect(() => {
     if (!opts) return;
     if (resolutions.length && !resolutions.includes(resolution)) setResolution(closestResolution(resolution, resolutions));
@@ -1460,7 +1477,7 @@ const EditVideoNodeView = memo(function EditVideoNodeView({ id, data }: NodeProp
   // Both selects lead with Auto: no resolution pick submits the model's
   // default, and no length pick (0) keeps the source clip's timing — the
   // historical edit behaviour, now an explicit choice instead of the only one.
-  const resolutions = opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"];
+  const resolutions = resolutionsForSchema(schema, params, opts?.resolutions?.length ? opts.resolutions : ["480p", "720p", "1080p"]);
   const effResolution = resolutions.includes(resolution) ? resolution : "";
   const save = (patch: Partial<GraphVideoNode>) => data.onSave(data.nodeId, patch);
   const run = async () => {
@@ -1666,9 +1683,7 @@ const EditGenNodeView = memo(function EditGenNodeView({ id, data }: NodeProps<Ed
       </div>
       <div className="prod-graph-gen-controls">
         <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); data.onSave({ resolution: e.target.value }); }} title="Resolution">
-          <option value="1k">1k</option>
-          <option value="2k">2k</option>
-          <option value="4k">4k</option>
+          {imageResOptions(schema).map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
       <div className="nodrag">
@@ -2056,7 +2071,9 @@ const CameraGridNodeView = memo(function CameraGridNodeView({ id, data }: NodePr
     { id: "in-ref-open", kind: "ref", label: "Refs", open: true, top: topAt(refHandles.length + 2) },
     { id: "in-grid", kind: "grid", label: "Grid image", top: topAt(refHandles.length + 3) },
   ];
+  const effResolution = closestResolution(resolution, imageResOptions(schema));
   const generate = () => {
+    const resolution = effResolution;
     const opts: CameraGridGenOptions = { model: effModel, resolution, cols: data.cols, rows: data.rows, ...(Object.keys(params).length ? { params } : {}) };
     // Persist the live picks, then generate with them.
     data.onSave({ model: effModel, resolution, cols: data.cols, rows: data.rows, ...(Object.keys(params).length ? { params } : {}) });
@@ -2113,10 +2130,8 @@ const CameraGridNodeView = memo(function CameraGridNodeView({ id, data }: NodePr
         </select>
       </div>
       <div className="prod-graph-gen-controls">
-        <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); data.onSave({ resolution: e.target.value }); rememberMediaDefault("image", { resolution: e.target.value }); }} title="Resolution">
-          <option value="1k">1k</option>
-          <option value="2k">2k</option>
-          <option value="4k">4k</option>
+        <select className="prod-openart-select nodrag" value={effResolution} onChange={(e) => { setResolution(e.target.value); data.onSave({ resolution: e.target.value }); rememberMediaDefault("image", { resolution: e.target.value }); }} title="Resolution">
+          {imageResOptions(schema).map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
       <div className="nodrag">
@@ -2233,9 +2248,7 @@ const UpscaleNodeView = memo(function UpscaleNodeView({ id, data }: NodeProps<Up
       </div>
       <div className="prod-graph-gen-controls">
         <select className="prod-openart-select nodrag" value={resolution} onChange={(e) => { setResolution(e.target.value); data.onSave({ resolution: e.target.value }); rememberMediaDefault("upscale", { resolution: e.target.value }); }} title="Resolution">
-          <option value="1k">1k</option>
-          <option value="2k">2k</option>
-          <option value="4k">4k</option>
+          {imageResOptions(schema).map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
       <div className="nodrag">

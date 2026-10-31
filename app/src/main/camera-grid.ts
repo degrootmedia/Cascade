@@ -46,6 +46,9 @@ export interface CutoutOptions {
   labels?: string[];
   /** Category id the created references belong to. */
   categoryId?: string;
+  /** Names already used by the production's references; new names are made
+   *  unique against these (case-insensitive) and each other. */
+  existingNames?: string[];
 }
 
 export interface CutoutResult {
@@ -87,6 +90,7 @@ export function cutoutCameraGrid(opts: CutoutOptions, deps: CameraGridDeps): Cut
   const dir = opts.referencesDir.replace(/\/+$/, "");
   const refs: CustomRef[] = [];
   const paths: string[] = [];
+  const taken = new Set((opts.existingNames ?? []).map((n) => n.trim().toLowerCase()));
   opts.rects.forEach((rawRect, i) => {
     const px = pixelRect(rawRect, width, height);
     if (!px) return;
@@ -99,9 +103,12 @@ export function cutoutCameraGrid(opts: CutoutOptions, deps: CameraGridDeps): Cut
       n++;
     }
     deps.writeFile(rel, bytes);
+    let name = panelLabelFor(opts.labels, i);
+    while (taken.has(name.trim().toLowerCase())) name = `${name}_dup`;
+    taken.add(name.trim().toLowerCase());
     const ref: CustomRef = {
       id: deps.newRefId(),
-      name: panelLabelFor(opts.labels, i),
+      name,
       imagePath: rel,
       shotIds: [],
     };

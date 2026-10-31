@@ -31,6 +31,8 @@
  * substitutes for the live binary in tests, so the module's interface IS
  * the test surface. This module never imports the MCP manager or Electron.
  */
+import { closestResolution } from "../../shared/resolution.js";
+import { resolutionsAllowedByRules } from "../../shared/cel-lite.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -278,6 +280,8 @@ interface CliParam {
 interface CliModelDetail {
   params: Map<string, CliParam>;
   roles: string[];
+  /** CEL constraints from `model get` (rules[]). */
+  rules: { cel: string; message?: string }[];
 }
 
 function foldName(s: string): string {
@@ -444,7 +448,14 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
       }
     }
   }
-  return { params, roles };
+  const rules: { cel: string; message?: string }[] = [];
+  if (Array.isArray(obj.rules)) {
+    for (const r of obj.rules) {
+      const cel = r && typeof r === "object" ? (r as { cel?: unknown }).cel : undefined;
+      if (typeof cel === "string" && cel.trim()) rules.push({ cel, message: typeof (r as { message?: unknown }).message === "string" ? (r as { message: string }).message : undefined });
+    }
+  }
+  return { params, roles, rules };
 }
 
 // ---- schema normalization ---------------------------------------------------------
@@ -1024,7 +1035,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       }
       if (req.resolution) {
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
-        const resMatch = resValues.find((v) => v.toLowerCase() === String(req.resolution).toLowerCase());
+        const resMatch = resValues.length ? closestResolution(String(req.resolution), resValues) : undefined;
         if (resMatch) args.push("--resolution", resMatch);
       }
       // Nearest explicit pick wins (see the submit path): a per-surface
@@ -1616,7 +1627,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
         if (aspects.includes(wantAspect)) args.push("--aspect_ratio", wantAspect);
         const resolution = resolutionOverride ?? p.openArt?.resolution ?? "1k";
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
-        const resMatch = resValues.find((v) => v.toLowerCase() === String(resolution).toLowerCase());
+        const resMatch = resValues.length ? closestResolution(String(resolution), resValues) : undefined;
         if (resMatch) args.push("--resolution", resMatch);
         // Quality: the nearest explicit pick wins — a per-surface params pick
         // (node/ref option forms render it) beats the production default, so a
@@ -2016,7 +2027,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
       const wantResolution = opts.draft ? DRAFT_RESOLUTION : opts.resolution;
       if (wantResolution) {
         const want = String(wantResolution).replace(/\s+/g, "").toLowerCase();
-        const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        // Honour the model's own CEL rules (e.g. mode "fast" caps at 720p).
+        const allowed = detail ? resolutionsAllowedByRules(detail.rules, { ...(opts.params ?? {}), mode: opts.params?.mode ?? HiggsfieldCliProvider.param(detail, "mode")?.default }, resValues) : resValues;
+        const match = allowed.length ? closestResolution(String(wantResolution), allowed) : undefined;
         if (match) args.push("--resolution", match);
       }
       // Cheap low-res draft: the flag drives 480p. Emitted here (not via the
@@ -2221,8 +2234,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
       }
       const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
       if (opts.resolution) {
-        const want = String(opts.resolution).replace(/\s+/g, "").toLowerCase();
-        const match = resValues.find((v) => String(v).replace(/\s+/g, "").toLowerCase() === want);
+        const match = resValues.length ? closestResolution(String(opts.resolution), resValues) : undefined;
         if (match) args.push("--resolution", match);
       }
       const aspects = detail ? HiggsfieldCliProvider.aspectRatios(detail) : [];

@@ -188,6 +188,8 @@ export interface SettingsView {
   theme: UiTheme;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
+  /** Absolute path to the external audio editor, or null when not set. */
+  audioEditor: string | null;
 }
 
 export interface ModelInfo {
@@ -372,6 +374,10 @@ export interface CascadeApi {
   setTheme(theme: UiTheme): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
+  pickAudioEditor(): Promise<string | null>;
+  setAudioEditor(path: string | null): Promise<void>;
+  /** Open an audio asset (cascade-media URL) in the configured audio editor. */
+  editAudioExternally(opts: { src: string }): Promise<void>;
   /** Media model ids the user hides from the generation model dropdowns. */
   getHiddenMediaModels(): Promise<string[]>;
   setHiddenMediaModels(ids: string[]): Promise<void>;

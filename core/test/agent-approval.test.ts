@@ -82,6 +82,20 @@ beforeEach(() => {
   state.script = [];
 });
 
+describe("agent live autonomous toggle", () => {
+  it("stops prompting for later tool calls once enabled mid-response", async () => {
+    state.script = [{ tool_calls: [toolCall("danger", "1")] }, { tool_calls: [toolCall("danger", "2")] }, { content: "done" }];
+    let agent: Agent;
+    const requestApproval = vi.fn(async (): Promise<ApprovalDecision> => {
+      agent.setAutonomousMode(true);
+      return "allow";
+    });
+    agent = makeAgent({ requestApproval, extraTools: { danger: dangerTool("danger") } });
+    await agent.send("go");
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("agent approval gate", () => {
   it("asks for approval on a mutating tool by default", async () => {
     state.script = [{ tool_calls: [toolCall("danger")] }, { content: "done" }];

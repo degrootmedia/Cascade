@@ -874,7 +874,6 @@ export function App() {
                   ? "Autonomous mode is on — Cascade acts without asking for approval. Click to turn off."
                   : "Autonomous mode: let Cascade run tools (including OpenArt) without asking for approval each time."
               }
-              disabled={busy}
               onClick={() => {
                 const id = currentId;
                 if (!id) return;

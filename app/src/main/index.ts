@@ -1409,8 +1409,13 @@ function registerIpc() {
     entry.session.autonomousMode = !!on;
     if (entry.session.autonomousMode) entry.session.planMode = false;
     sessions.saveSession(entry.session);
-    entry.agent?.stop();
-    entry.agent = null;
+    if (entry.running && entry.agent) {
+      // Mid-response: update the live agent in place; stopping/dropping it would abort the turn.
+      entry.agent.setAutonomousMode(entry.session.autonomousMode);
+    } else {
+      entry.agent?.stop();
+      entry.agent = null;
+    }
     sendAgentEvent(sessionId, {
       type: "notice",
       text: entry.session.autonomousMode
@@ -1477,7 +1482,6 @@ function registerIpc() {
     }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
-    if (!settings.getWorkspace()) settings.setWorkspace(dir); // first folder becomes the default
     if (entry) {
       entry.agent?.stop();
       entry.agent = null; // workspace changed → rebuild this chat's agent
@@ -1496,7 +1500,6 @@ function registerIpc() {
     }
     settings.addRecentWorkspace(dir);
     if (entry?.session.history.length) sessions.saveSession(entry.session);
-    if (!settings.getWorkspace()) settings.setWorkspace(dir);
     if (entry) {
       entry.agent?.stop();
       entry.agent = null;

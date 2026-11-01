@@ -109,6 +109,14 @@ export class Agent {
     });
   }
 
+  /** Flip autonomous mode on a live agent (even mid-response). The approval
+   *  gate reads the config per tool call, so it applies to the next call.
+   *  Enabling it also leaves plan mode (the two are mutually exclusive). */
+  setAutonomousMode(on: boolean): void {
+    this.config.autonomousMode = on;
+    if (on) this.config.planMode = false;
+  }
+
   /** Wrap the built-in run_command in the selected OS sandbox (default none).
    *  An unavailable backend is surfaced to the user, never silently faked. */
   private applySandboxToRunCommand(pureChat: boolean): void {

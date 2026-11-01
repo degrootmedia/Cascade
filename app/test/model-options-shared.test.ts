@@ -38,6 +38,16 @@ describe("extractOpenArtVideoOptions", () => {
     expect(keys).not.toContain("prompt");
   });
 
+  it("a closed duration set wins over min/max bounds (no unsupported in-between lengths)", () => {
+    const o = extractOpenArtVideoOptions({ duration: { type: "integer", enum: [5, 10], minimum: 4, maximum: 15 } });
+    expect(o.durations).toEqual([5, 10]);
+  });
+
+  it("reads durations from enums nested inside oneOf/anyOf entries", () => {
+    const o = extractOpenArtVideoOptions({ duration: { anyOf: [{ enum: [4, 8, 12] }, { const: -1 }] } });
+    expect(o.durations).toEqual([4, 8, 12]);
+  });
+
   it("keeps a resolution-shaped quality ladder on the resolution list (Wan)", () => {
     const o = extractOpenArtVideoOptions({ quality: { type: "string", enum: ["720p", "1080p"] } });
     expect(o.resolutions).toEqual(["720p", "1080p"]);

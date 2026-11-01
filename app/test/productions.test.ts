@@ -25,7 +25,7 @@ vi.mock("../src/main/scripting.js", () => ({
   isGoogleDocUrl: vi.fn(() => false),
 }));
 
-import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
+import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, generationImageThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
 import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
 import { assemblyPlan } from "../src/main/assembly.js";
@@ -817,6 +817,19 @@ describe("applyRendererState", () => {
     expect(merged.magicPrompts).toEqual({ shot1: "fresh generated", shot2: "untouched" });
   });
 
+  it("keeps the main-owned magicBible over a whole-document save, but takes renderer dismissals", () => {
+    // The bible is written by the bulk Magic pass main-side; a renderer
+    // snapshot can predate it, so the fresh bible always wins. Dismissals
+    // from the reconciliation queue ARE renderer-owned and must land.
+    const bible = { version: 1 as const, synopsis: "fresh", assumptions: [], scenes: [], entities: [], shotPlans: [], inputHash: "h1", generatedAt: "2026-01-01" };
+    const stale = { ...bible, synopsis: "stale", inputHash: "h0" };
+    const fresh = baseProduction({ magicBible: bible });
+    const incoming = baseProduction({ magicBible: stale, magicDismissedRefs: [" MysteryFigure ", "mysteryfigure"] });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.magicBible?.synopsis).toBe("fresh");
+    expect(merged.magicDismissedRefs).toEqual(["mysteryfigure"]);
+  });
+
   it("rebases only the magic keys a job changed, preserving concurrent edits", () => {
     // A generation job holds a snapshot from before it ran. Rebasing must fold
     // back ONLY the keys it changed (shot1), never its stale copy of keys
@@ -978,6 +991,40 @@ describe("board frame selection persistence", () => {
   });
 });
 
+describe("waveformColor read repair", () => {
+  it("keeps a palette id and drops an unknown waveform color on load", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "wave-color", folder: path.join(dataDir, "assets") },
+      references: [
+        { id: "r1", name: "Voiceover", media: "audio", mediaPath: "references/vo.mp3", waveformColor: "teal" },
+        { id: "r2", name: "Theme", media: "audio", mediaPath: "references/theme.mp3", waveformColor: "chartreuse" },
+      ],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("wave-color")!;
+    expect(loaded.references?.find((r) => r.id === "r1")?.waveformColor).toBe("teal");
+    expect(loaded.references?.find((r) => r.id === "r2")?.waveformColor).toBeUndefined();
+  });
+});
+
+describe("purpose/styleOnly read repair", () => {
+  it("an explicit purpose wins over a stale styleOnly flag on load", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "purpose-sync", folder: path.join(dataDir, "assets") },
+      references: [
+        { id: "r1", name: "Untagged", purpose: "subject", styleOnly: true },
+        { id: "r2", name: "Tagged", purpose: "style" },
+        { id: "r3", name: "Legacy", styleOnly: true },
+      ],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("purpose-sync")!;
+    expect(loaded.references?.find((r) => r.id === "r1")?.styleOnly).toBeUndefined();
+    expect(loaded.references?.find((r) => r.id === "r2")?.styleOnly).toBe(true);
+    expect(loaded.references?.find((r) => r.id === "r3")?.styleOnly).toBe(true);
+  });
+});
+
 describe("loadProduction isolation", () => {
   function jobDoc(id: string): Production {
     return baseProduction({
@@ -1071,6 +1118,25 @@ describe("video layout migration", () => {
   });
 });
 
+describe("color tag migration", () => {
+  it("turns the legacy complete marker into a green tag and drops invalid tags on load", () => {
+    const folder = path.join(dataDir, "color-tag-migration");
+    fs.mkdirSync(folder, { recursive: true });
+    const legacy = { id: "shot1", number: "0100", audio: "", visual: "Hero", complete: true } as unknown as ProductionShot;
+    const invalid = { id: "shot2", number: "0200", audio: "", visual: "Sidekick", colorTag: "blue" } as unknown as ProductionShot;
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "color-tag-migration", folder },
+      scenes: [{ number: 1, title: "S1", shots: [legacy, invalid] }],
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("color-tag-migration")!;
+    const [a, b] = loaded.scenes[0].shots;
+    expect(a.colorTag).toBe("green");
+    expect((a as { complete?: unknown }).complete).toBeUndefined();
+    expect(b.colorTag).toBeUndefined();
+  });
+});
+
 describe("unclaimedReferenceFiles", () => {
   it("skips files claimed by a character, product, or reference image/media path", () => {
     const p = baseProduction({
@@ -1143,8 +1209,145 @@ describe("importProduction", () => {
     expect(second.meta.id).toBe(first.meta.id);
   });
 
+  it("recovers dropped video/audio files in references/ as media references", () => {
+    const folder = path.join(dataDir, "external", "Media Film");
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "references", "plate.png"), Buffer.from("png"));
+    fs.writeFileSync(path.join(folder, "references", "voiceover.mp3"), Buffer.from("mp3"));
+    fs.writeFileSync(path.join(folder, "references", "motion.mp4"), Buffer.from("mp4"));
+
+    const p = importProduction(folder);
+    const byName = new Map((p.references ?? []).map((r) => [r.name, r]));
+    expect(byName.get("plate")?.imagePath).toBe("references/plate.png");
+    expect(byName.get("voiceover")).toMatchObject({ media: "audio", mediaPath: "references/voiceover.mp3" });
+    expect(byName.get("motion")).toMatchObject({ media: "video", mediaPath: "references/motion.mp4" });
+  });
+
   it("throws for a folder that doesn't exist", () => {
     expect(() => importProduction(path.join(dataDir, "external", "no-such-folder"))).toThrow(/doesn't exist/);
+  });
+
+  it("rebuilds scenes, shots, and board artwork from script.md + boards/", () => {
+    const folder = path.join(dataDir, "external", "recovered-film-folder");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "0200"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "boards", "0200", "shot-0200-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      [
+        "# Recovered Film — Shot Breakdown",
+        "",
+        "## Scene 1 — Opening",
+        "",
+        "| Shot | Audio | Visual |",
+        "|------|-------|--------|",
+        "| 0100 | Narration \\| one | A lighthouse at dawn |",
+        "| 0200 |  | Waves on rocks |",
+        "",
+        "## Scene 2 — The Letter",
+        "",
+        "| Shot | Audio | Visual |",
+        "|------|-------|--------|",
+        "| 0300 | Dear Mara | Hands open an envelope |",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    // The script.md title wins over the folder basename.
+    expect(p.meta.name).toBe("Recovered Film");
+    expect(p.scenes.map((s) => s.title)).toEqual(["Opening", "The Letter"]);
+    const shots = p.scenes.flatMap((s) => s.shots);
+    expect(shots.map((s) => s.number)).toEqual(["0100", "0200", "0300"]);
+    expect(shots[0].audio).toBe("Narration | one");
+    expect(shots[0].visual).toBe("A lighthouse at dawn");
+    // Existing frames are linked; the unframed shot stays blank.
+    expect(shots[0].artwork).toBe("boards/0100/shot-0100-a.jpg");
+    expect(shots[1].artwork).toBe("boards/0200/shot-0200-a.jpg");
+    expect(shots[2].artwork).toBeUndefined();
+    expect(p.status[1]).toBe("done");
+    expect(p.status[3]).toBeUndefined();
+    // The returned document is fully loaded (stored graphs materialized),
+    // exactly as if it had been opened via production:load.
+    expect(shots[0].graph).toBeTruthy();
+    // And it persists: a fresh load sees the same breakdown.
+    expect(loadProduction(p.meta.id)?.scenes.flatMap((s) => s.shots).map((s) => s.number)).toEqual(["0100", "0200", "0300"]);
+  });
+
+  it("marks the storyboard step done when every recovered shot has a frame", () => {
+    const folder = path.join(dataDir, "external", "Fully Framed");
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      "# Fully Framed — Shot Breakdown\n\n## Scene 1 — Only\n\n| Shot | Audio | Visual |\n|------|-------|--------|\n| 0100 | Hi | A door |\n",
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    expect(p.status[3]).toBe("done");
+    expect(p.currentStep).toBe(3);
+  });
+
+  it("synthesizes shots from board folders when script.md is missing", () => {
+    const folder = path.join(dataDir, "external", "Boards Only");
+    fs.mkdirSync(path.join(folder, "boards", "0300"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "0100"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "boards", "outdated", "x"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "0100", "shot-0100-a.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "boards", "0300", "shot-0300-a.jpg"), "fake-jpeg");
+
+    const p = importProduction(folder);
+    const shots = p.scenes.flatMap((s) => s.shots);
+    expect(shots.map((s) => s.number)).toEqual(["0100", "0300"]);
+    expect(shots.every((s) => !!s.artwork)).toBe(true);
+    // No script was recovered, so Step 1 is not claimed done.
+    expect(p.status[1]).toBeUndefined();
+  });
+
+  it("adopts reference images, style frames, voiceover, and music from disk", () => {
+    const folder = path.join(dataDir, "external", "Assets Film");
+    fs.mkdirSync(path.join(folder, "references"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "styles"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "voiceover"), { recursive: true });
+    fs.mkdirSync(path.join(folder, "music"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "references", "Mara.png"), "fake-png");
+    fs.writeFileSync(path.join(folder, "references", "Old Map.jpg"), "fake-jpeg");
+    fs.writeFileSync(path.join(folder, "styles", "style-abc.png"), "fake-png");
+    fs.writeFileSync(path.join(folder, "voiceover", "narration.mp3"), "fake-mp3");
+    fs.writeFileSync(path.join(folder, "music", "theme.mp3"), "fake-mp3");
+
+    const p = importProduction(folder);
+    expect((p.references ?? []).map((r) => r.name).sort()).toEqual(["Mara", "Old Map"]);
+    expect((p.references ?? []).map((r) => r.imagePath).sort()).toEqual(["references/Mara.png", "references/Old Map.jpg"]);
+    expect(p.styles).toHaveLength(1);
+    expect(p.styles[0].imagePath).toBe("styles/style-abc.png");
+    expect(p.voiceoverPath).toBe("voiceover/narration.mp3");
+    expect(p.musicPath).toBe("music/theme.mp3");
+  });
+
+  it("restores shot prompts from boards/prompts.md as content only", () => {
+    const folder = path.join(dataDir, "external", "Prompted Film");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(
+      path.join(folder, "script.md"),
+      "# Prompted Film — Shot Breakdown\n\n## Scene 1 — Only\n\n| Shot | Audio | Visual |\n|------|-------|--------|\n| 0100 | Hi | A door |\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(folder, "boards", "prompts.md"),
+      "# Prompted Film — Storyboard Prompts\n\n## Shot 0100\n\nStyle: moody watercolor\n\nA red door, close up, brass knob\n\nReferences: @image1 — Mara (artwork attached)\n",
+      "utf8"
+    );
+
+    const p = importProduction(folder);
+    const shot = p.scenes[0].shots[0];
+    expect(shot.prompt).toContain("A red door, close up, brass knob");
+    expect(shot.prompt).not.toContain("Style:");
+    expect(shot.prompt).not.toContain("References:");
+    expect(shot.promptManual).toBe(true);
   });
 });
 
@@ -1336,6 +1539,19 @@ describe("media registry (architecture hardening)", () => {
     const paths = generationVideoThumbnailPaths(p as never);
     expect(paths.some((abs) => abs.endsWith("shot-0100-x.mp4"))).toBe(true);
     expect(paths.some((abs) => abs.endsWith(".jpg"))).toBe(false);
+  });
+
+  it("generationImageThumbnailPaths lists every referenced still, clips excluded", () => {
+    const p = baseProduction({
+      scenes: [{ number: 1, title: "S1", shots: [{
+        id: "s1", number: "0100", audio: "", visual: "v",
+        artwork: "boards/0100/shot-0100-a.jpg",
+        graphVideoNodes: [{ id: "vid0", prompt: "", gens: [{ path: "boards/0100/video/shot-0100-x.mp4", prompt: "", model: "", at: "" }] }],
+      }] }],
+    });
+    const paths = generationImageThumbnailPaths(p as never);
+    expect(paths.some((abs) => abs.endsWith("shot-0100-a.jpg"))).toBe(true);
+    expect(paths.some((abs) => abs.endsWith(".mp4"))).toBe(false);
   });
 });
 

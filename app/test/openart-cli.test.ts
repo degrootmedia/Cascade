@@ -515,5 +515,9 @@ describe("OpenArtCliProvider.generateVideoClip", () => {
       model: `${OPENART_CLI_ID_PREFIX}kling-3-omni`, resolution: "720p", durationSec: 5, prompt: "animate",
     }, () => {}, undefined, [{ name: "V", dataUrl: "data:video/mp4;base64,Vmlk" }]))
       .rejects.toThrow(/can't send video references/);
+    await expect(p.generateVideoClip(prod, s, {
+      model: `${OPENART_CLI_ID_PREFIX}kling-3-omni`, resolution: "720p", durationSec: 5, prompt: "animate",
+    }, () => {}, undefined, [{ name: "Voiceover", dataUrl: "data:audio/mpeg;base64,Vm9pY2U=" }]))
+      .rejects.toThrow(/can't send audio references.*"Voiceover".*Nothing was submitted/);
   });
 });

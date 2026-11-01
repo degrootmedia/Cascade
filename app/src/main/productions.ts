@@ -13,20 +13,23 @@ from "../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
-import { sanitizeGenParams, normalizeShotSequences } from "../shared/ipc.js";
+import { sanitizeGenParams, normalizeShotSequences, isVideoEditFamilyMode, SEQUENCE_ACCENT_COLORS } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
-relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs }
+relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
+parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
 from "./pipeline.js";
+import * as shotter from "./shotter.js";
 import { normalizeMediaRegistry } from "../shared/media-registry.js";
 import { materializeGraph, type GraphRefView } from "../shared/graph/materialize.js";
 import { normalizeGraph } from "../shared/graph/normalize.js";
 import { setStyleEdge } from "../shared/graph/connect.js";
 import { nodeDecl } from "../shared/graph/ports.js";
-import { brandEdgePresent, resolveNodeStyleText, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
+import { brandEdgePresent, resolveNodeStyleText, stripSharedSections, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
 import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
+import { sanitizeAliases } from "../shared/ref-names.js";
 
 export interface ProductionFile extends Production {}
 
@@ -43,6 +46,31 @@ function normalize(p: ProductionFile): ProductionFile {
     delete clean.description;
     return clean;
   });
+  for (const r of p.references) {
+    if (r.purpose !== undefined && !["subject", "environment", "style", "layout", "inspiration"].includes(r.purpose)) delete r.purpose;
+    // An explicit purpose is authoritative for the legacy style flag:
+    // changing the purpose away from style must stop the reference from
+    // being treated as style-tagged (a stale `styleOnly` once kept it so).
+    if (r.purpose !== undefined) {
+      if (r.purpose === "style") r.styleOnly = true;
+      else delete r.styleOnly;
+    }
+    if (r.visualSummary !== undefined) {
+      const clean = typeof r.visualSummary === "string" ? r.visualSummary.trim().slice(0, 300) : "";
+      if (clean) r.visualSummary = clean; else delete r.visualSummary;
+    }
+    if (r.waveformColor !== undefined && !SEQUENCE_ACCENT_COLORS.some((c) => c.id === r.waveformColor)) delete r.waveformColor;
+  }
+  // Reference aliases are read-repaired: sanitized/deduped, canonical dropped.
+  for (const pool of [p.characters, p.products, p.references]) {
+    for (const r of pool as { name: string; aliases?: string[] }[]) {
+      if (r.aliases !== undefined) {
+        const clean = sanitizeAliases(r.aliases, r.name ?? "");
+        if (clean.length) r.aliases = clean;
+        else delete r.aliases;
+      }
+    }
+  }
   p.referenceCategories ??= [];
   p.openArt ??= { model: "auto", resolution: "1k" };
   p.status ??= {};
@@ -61,6 +89,29 @@ function normalize(p: ProductionFile): ProductionFile {
   p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
   p.magicPrompts ??= {};
   if (typeof p.magicEnabled !== "boolean") p.magicEnabled = false;
+  // The Story Bible is main-normalized on generation; read repair only drops
+  // a corrupt shape so a bad file can't poison generation or the merge.
+  if (p.magicBible !== undefined) {
+    const b = p.magicBible as unknown as Record<string, unknown> | null;
+    if (!b || typeof b !== "object" || b.version !== 1 || typeof b.inputHash !== "string" || !Array.isArray(b.shotPlans) || !Array.isArray(b.entities) || !Array.isArray(b.scenes)) {
+      delete (p as { magicBible?: unknown }).magicBible;
+    }
+  }
+  if (p.magicRefDecisions !== undefined) {
+    if (!p.magicRefDecisions || typeof p.magicRefDecisions !== "object" || Array.isArray(p.magicRefDecisions)) {
+      delete (p as { magicRefDecisions?: unknown }).magicRefDecisions;
+    } else {
+      for (const [k, d] of Object.entries(p.magicRefDecisions)) {
+        if (!d || typeof d !== "object" || typeof d.entityName !== "string" || !Array.isArray(d.refIds)) delete p.magicRefDecisions[k];
+        else d.refIds = d.refIds.filter((x) => typeof x === "string");
+      }
+    }
+  }
+  if (p.magicDismissedRefs !== undefined) {
+    p.magicDismissedRefs = Array.isArray(p.magicDismissedRefs)
+      ? [...new Set(p.magicDismissedRefs.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()).filter(Boolean))]
+      : [];
+  }
   // Clean stale magic entries for deleted shots and non-string values
   if (p.magicPrompts && typeof p.magicPrompts === "object") {
     // Outdated panels are preserved verbatim, so their magic prompts count as
@@ -104,6 +155,17 @@ function normalize(p: ProductionFile): ProductionFile {
   // `deleted` entries. (The present/missing disk sweep runs in
   // `loadProduction`'s bootstrap, after the migrations settle the paths.)
   p.media = normalizeMediaRegistry(p.media);
+  // Color tags replaced the short-lived boolean `complete` marker: a marked
+  // shot reads back green-tagged, the legacy key is dropped, and an
+  // out-of-set tag value can't poison the border CSS class downstream.
+  for (const s of [...p.scenes.flatMap((sc) => sc.shots), ...p.outdatedShots]) {
+    const legacy = s as typeof s & { complete?: unknown };
+    if (legacy.complete !== undefined) {
+      if (legacy.complete === true && s.colorTag === undefined) s.colorTag = "green";
+      delete legacy.complete;
+    }
+    if (s.colorTag !== undefined && !(["green", "yellow", "red"] as string[]).includes(s.colorTag)) delete s.colorTag;
+  }
   return p;
 }
 
@@ -329,6 +391,18 @@ export function generationVideoThumbnailPaths(p: ProductionFile): string[] {
     .map((rel) => assetPath(p, rel));
 }
 
+/** Absolute paths of every still image a production references (board
+ *  frames, generation/edit/upscale takes, camera-grid sheets, style frames)
+ *  — the image half of the thumbnail-cache regenerator: graph previews
+ *  paint LOD tiers by settled zoom, so pre-encoding every tier removes the
+ *  first-view resize encode for generated stills, not just references.
+ *  Overlaps `referenceThumbnailPaths` harmlessly (the regenerator dedupes). */
+export function generationImageThumbnailPaths(p: ProductionFile): string[] {
+  return productionMediaRefs(p)
+    .filter((rel) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(rel))
+    .map((rel) => assetPath(p, rel));
+}
+
 export function referenceThumbnailPaths(p: ProductionFile): string[] {
   const imagePaths = [...(p.characters ?? []), ...(p.products ?? []), ...(p.references ?? [])]
     .filter((r) => !!r.imagePath)
@@ -536,29 +610,41 @@ function mergeShotSequences(
 }
 
 /** Merge in-betweener action blocks by keyframe pair (start/end source ids —
- *  block ids are positional and reshuffle when keyframes reorder). The fresh
- *  block owns its generation history; the incoming snapshot owns the block's
- *  prompt and timing. Pairs only the incoming snapshot has are re-derived
- *  from the (incoming) keyframe list by syncTweenBlocks below. */
+ *  block ids are positional and reshuffle when keyframes reorder). The
+ *  incoming snapshot owns block membership, prompts, and timing (like
+ *  mergeGraphNodes); the fresh block owns its generation history. Pairs only
+ *  the incoming snapshot has are adopted (a newly wired in-betweener has no
+ *  persisted blocks until its first timeline edit, so iterating the fresh
+ *  list would drop that edit wholesale); pairs only the fresh list has were
+ *  rewired away renderer-side and drop. syncTweenBlocks later re-derives ids
+ *  and prunes dead keyframes where it runs. */
 function mergeTweenBlocks(
   freshBlocks: TweenBlock[] | undefined,
   incomingBlocks: TweenBlock[] | undefined
 ): TweenBlock[] | undefined {
   if (!incomingBlocks) return freshBlocks;
-  const incomingByPair = new Map<string, TweenBlock>();
-  for (const b of incomingBlocks) {
+  const freshByPair = new Map<string, TweenBlock>();
+  for (const b of freshBlocks ?? []) {
     if (!b) continue;
     const key = `${b.startRefId}→${b.endRefId}`;
-    if (!incomingByPair.has(key)) incomingByPair.set(key, b);
+    if (!freshByPair.has(key)) freshByPair.set(key, b);
   }
-  return (freshBlocks ?? []).map((fb) => {
-    const ib = incomingByPair.get(`${fb.startRefId}→${fb.endRefId}`);
-    if (!ib) return fb;
-    const { gens: _gens, genIndex: _idx, id: _id, startRefId: _s, endRefId: _e, ...rest } = ib;
-    const block: TweenBlock = { ...fb, ...rest };
+  const out: TweenBlock[] = [];
+  const seen = new Set<string>();
+  for (const ib of incomingBlocks) {
+    if (!ib || typeof ib.startRefId !== "string" || typeof ib.endRefId !== "string") continue;
+    const key = `${ib.startRefId}→${ib.endRefId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fb = freshByPair.get(key);
+    // A pair main has never seen has no main-owned history yet — drop any
+    // echoed gens rather than resurrecting takes from a stale snapshot.
+    if (!fb) { out.push({ ...ib, gens: undefined, genIndex: undefined }); continue; }
+    const block: TweenBlock = { ...ib, gens: fb.gens };
     block.genIndex = takeGenIndex(ib.genIndex, ib.gens, fb.genIndex, fb.gens);
-    return block;
-  });
+    out.push(block);
+  }
+  return out;
 }
 
 /**
@@ -793,6 +879,13 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.magicPrompts =
     fresh.magicPrompts && typeof fresh.magicPrompts === "object" ? { ...fresh.magicPrompts } : {};
   if (typeof p.magicEnabled === "boolean") fresh.magicEnabled = p.magicEnabled;
+  // magicBible is main-owned like magicPrompts (written by the bulk Magic
+  // pass main-side): deliberately not copied from the renderer snapshot, so
+  // the fresh on-disk bible always wins. magicDismissedRefs IS renderer-owned
+  // (the reconciliation queue's dismissals ride ordinary saves).
+  if (Array.isArray(p.magicDismissedRefs)) {
+    fresh.magicDismissedRefs = [...new Set(p.magicDismissedRefs.filter((n) => typeof n === "string").map((n) => n.trim().toLowerCase()).filter(Boolean))];
+  }
   // The reference moodboard (node placements, viewport, notes) is renderer-owned
   // like the shot graph layouts. Its shape is repaired on read by the renderer's
   // `normalizeMoodboardLayout`; main only stores it verbatim so a save never
@@ -976,7 +1069,7 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
   shot.prompt = stripField(shot.prompt, "composer");
   shot.graphVideoPrompt = stripField(shot.graphVideoPrompt, "videoprompt");
   for (const n of shot.graphVideoNodes ?? []) {
-    const next = n.mode === "edit"
+    const next = isVideoEditFamilyMode(n.mode)
       ? stripField(n.prompt, { editvideoprompt: n.id })
       : stripField(n.prompt, { videoprompt: n.id });
     if (next !== n.prompt) n.prompt = next ?? "";
@@ -994,15 +1087,15 @@ function stripMigratedCopies(p: Production, shot: ProductionShot, graph: Graph):
 function graphRefViews(p: Production): GraphRefView[] {
   const out: GraphRefView[] = [];
   const seen = new Set<string>();
-  const push = (id: string, name: string, media?: "video" | "audio", artwork?: string): void => {
+  const push = (id: string, name: string, aliases?: string[], media?: "video" | "audio", artwork?: string): void => {
     const key = (name ?? "").trim().toLowerCase();
     if (!id || !key || seen.has(key)) return;
     seen.add(key);
-    out.push({ id, name: name.trim(), media, artwork });
+    out.push({ id, name: name.trim(), aliases, media, artwork });
   };
-  for (const c of p.characters ?? []) push(c.id, c.name, undefined, c.artwork ?? c.imagePath);
-  for (const pr of p.products ?? []) push(pr.id, pr.name, undefined, pr.artwork ?? pr.imagePath);
-  for (const r of p.references ?? []) push(r.id, r.name, r.media, r.artwork ?? r.imagePath ?? r.mediaPath);
+  for (const c of p.characters ?? []) push(c.id, c.name, c.aliases, undefined, c.artwork ?? c.imagePath);
+  for (const pr of p.products ?? []) push(pr.id, pr.name, pr.aliases, undefined, pr.artwork ?? pr.imagePath);
+  for (const r of p.references ?? []) push(r.id, r.name, r.aliases, r.media, r.artwork ?? r.imagePath ?? r.mediaPath);
   return out;
 }
 
@@ -1084,15 +1177,159 @@ export function newProduction(name: string, parentFolder: string): ProductionFil
   return p;
 }
 
+const IMPORT_IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+const IMPORT_VIDEO_FILE = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
+const IMPORT_AUDIO_FILE = /\.(mp3|wav|m4a|aac|ogg|flac)$/i;
+
+/** Workspace-relative paths of the files directly inside an asset dir whose
+ *  names match `rx` (missing dir → none). */
+function listAssetFiles(p: ProductionFile, relDir: string, rx: RegExp): string[] {
+  try {
+    return fs.readdirSync(assetPath(p, relDir), { withFileTypes: true })
+      .filter((e) => e.isFile() && rx.test(e.name))
+      .map((e) => `${relDir}/${e.name}`);
+  } catch {
+    return [];
+  }
+}
+
+/** The newest (by mtime) of the given workspace-relative files, if any. */
+function newestAssetFile(p: ProductionFile, rels: string[]): string | undefined {
+  let best: { rel: string; mtime: number } | undefined;
+  for (const rel of rels) {
+    try {
+      const mtime = fs.statSync(assetPath(p, rel)).mtimeMs;
+      if (!best || mtime > best.mtime) best = { rel, mtime };
+    } catch { /* unreadable — skip */ }
+  }
+  return best?.rel;
+}
+
+/** Rebuild whatever pipeline state an imported folder still carries on disk
+ *  onto the fresh document: the script breakdown (`script.md`), storyboard
+ *  frames/clips (`boards/<NNNN>/`, plus any `boards/import/` drop-ins), shot
+ *  prompts (`boards/prompts.md`), reference images, style frames, and the
+ *  voiceover/music clips. Every artifact is recovered independently — one
+ *  missing or unreadable file never blocks the rest, and nothing on disk is
+ *  deleted or overwritten (`importBoards` copies drop-ins into per-shot
+ *  folders, as it does from Step 3). JSON-only state (style prompt text,
+ *  character/product identities, magic prompts, graph history) cannot be
+ *  recovered from the folder alone. */
+function hydrateImportedProduction(p: ProductionFile): void {
+  // 1. Script breakdown — the deterministic script.md artifact, parsed back
+  //    with the shots' original numbers (no model call).
+  try {
+    const md = fs.readFileSync(assetPath(p, p.assets.scriptMd), "utf8");
+    const parsed = parseScriptMarkdown(md);
+    if (parsed.name) p.meta.name = parsed.name;
+    if (parsed.scenes.length) {
+      p.scenes = parsed.scenes;
+      p.status[1] = "done";
+    }
+  } catch { /* no readable script.md — board folders may still define shots */ }
+
+  // 2. Board folders for shot numbers the script doesn't carry (or the only
+  //    shot source when script.md is gone) become blank shots to hang the
+  //    existing frames on.
+  try {
+    const numbers = fs.readdirSync(assetPath(p, p.assets.boardsDir), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && shotter.isValidNumber(e.name))
+      .map((e) => e.name)
+      .sort();
+    const known = new Set(p.scenes.flatMap((s) => s.shots.map((sh) => sh.number)));
+    const missing = numbers.filter((n) => !known.has(n));
+    if (missing.length) {
+      if (!p.scenes.length) p.scenes = [{ number: 1, title: "Scene 1", shots: [] }];
+      const last = p.scenes[p.scenes.length - 1];
+      for (const n of missing) last.shots.push(shotter.newShot(n));
+      last.shots.sort((a, b) => a.number.localeCompare(b.number));
+    }
+  } catch { /* no boards dir — nothing to synthesize */ }
+
+  const shots = p.scenes.flatMap((s) => s.shots);
+  if (shots.length) {
+    // 3. Shot prompts from the manual-workflow export, stored content-only
+    //    (shared Style/Brand sections re-render from the style system) and
+    //    marked manual so a later re-ingest preserves them.
+    try {
+      const md = fs.readFileSync(assetPath(p, `${p.assets.boardsDir}/prompts.md`), "utf8");
+      const byNumber = parseBoardPromptsMarkdown(md);
+      for (const shot of shots) {
+        if (shot.prompt?.trim()) continue;
+        const content = stripSharedSections(byNumber.get(shot.number) ?? "").trim();
+        if (content) {
+          shot.prompt = content;
+          shot.promptManual = true;
+        }
+      }
+    } catch { /* no prompts.md — prompts re-derive from audio/visual */ }
+
+    // 4. Frames and clips already on disk: adopt boards/import/ drop-ins,
+    //    then re-link each shot to its newest frame / orphan clips.
+    try {
+      const dropped = scanBoardImportFolder(p);
+      if (dropped.length) importBoards(p, dropped, () => {});
+    } catch { /* drop-in adoption is best-effort */ }
+    try { refreshBoardLinks(p); } catch { /* frames can re-link on demand */ }
+    try { refreshShotVideos(p); } catch { /* clips can re-link on demand */ }
+    markBoardsStatus(p);
+  }
+
+  // 5. Reference images — the same adoption as the references-folder rescan
+  //    (name from the filename; character/product identity is JSON-only).
+  try {
+    const rels = listAssetFiles(p, p.assets.referencesDir, IMPORT_IMAGE_FILE);
+    for (const rel of unclaimedReferenceFiles(rels, p)) {
+      const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
+      p.references = [...(p.references ?? []), { id: newRefId(), name, imagePath: rel, shotIds: [] }];
+    }
+    // Dropped video/audio files recover as media references, like the rescan.
+    for (const [rx, kind] of [[IMPORT_VIDEO_FILE, "video"], [IMPORT_AUDIO_FILE, "audio"]] as const) {
+      for (const rel of unclaimedReferenceFiles(listAssetFiles(p, p.assets.referencesDir, rx), p)) {
+        const name = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim() || "Reference";
+        p.references = [...(p.references ?? []), { id: newRefId(), name, media: kind, mediaPath: rel, shotIds: [] }];
+      }
+    }
+  } catch { /* references can be rescanned later from Step 2 */ }
+
+  // 6. Style frames (look plates). Collision copies (`<id> (2).png`) are
+  //    older writes of the same style — the newest file per base wins. The
+  //    style's prompt text is JSON-only, so recovered styles start blank.
+  try {
+    const byBase = new Map<string, string[]>();
+    for (const rel of listAssetFiles(p, STYLES_DIR, IMPORT_IMAGE_FILE)) {
+      const base = path.basename(rel).replace(/\.[^.]+$/, "").replace(/\s+\(\d+\)$/, "");
+      byBase.set(base, [...(byBase.get(base) ?? []), rel]);
+    }
+    for (const [base, rels] of byBase) {
+      const imagePath = newestAssetFile(p, rels);
+      if (!imagePath) continue;
+      p.styles = [...(p.styles ?? []), { id: randomUUID(), index: (p.styles?.length ?? 0) + 1, name: base, prompt: "", imagePath }];
+    }
+  } catch { /* style frames can be re-attached from Step 2 */ }
+
+  // 7. Voiceover / music — the newest clip in each folder.
+  p.voiceoverPath ??= newestAssetFile(p, listAssetFiles(p, p.assets.voiceoverDir, IMPORT_AUDIO_FILE));
+  p.musicPath ??= newestAssetFile(p, listAssetFiles(p, p.assets.musicDir, IMPORT_AUDIO_FILE));
+
+  // 8. Land where the recovered work is: storyboard when frames exist,
+  //    design when only the breakdown came back.
+  if (shots.length) {
+    p.currentStep = shots.some((s) => s.artwork || s.graphImageGens?.length) ? 3 : 2;
+  }
+}
+
 /**
  * Re-register an existing production folder (e.g. after moving to a new PC
  * or wiping app data, the userData/productions/ JSON is gone but the folder
  * with boards/, script.md, … survives). The folder ITSELF becomes the
  * production folder — unlike newProduction, no subfolder is created. Missing
- * asset dirs are scaffolded non-destructively; existing files are never
- * touched. Pipeline state starts fresh (the old JSON is gone), so the user
- * re-ingests the script from Step 1. Re-importing an already-registered
- * folder returns the existing document instead of a duplicate.
+ * asset dirs are scaffolded non-destructively, and the pipeline state the
+ * folder still carries on disk (script breakdown, storyboard frames/clips,
+ * prompts, references, style frames, voiceover/music) is rebuilt onto the
+ * new document by `hydrateImportedProduction`. Re-importing an
+ * already-registered folder returns the existing document instead of a
+ * duplicate.
  */
 export function importProduction(folder: string): ProductionFile {
   let stat: fs.Stats;
@@ -1144,8 +1381,13 @@ export function importProduction(folder: string): ProductionFile {
       /* non-fatal: user may add it later */
     }
   }
+  // Rebuild the pipeline state the folder still carries (script, storyboard,
+  // references, …) instead of presenting an empty production.
+  hydrateImportedProduction(p);
   saveProduction(p);
-  return p;
+  // Return the fully loaded document (stored graphs + media registry
+  // materialized), exactly as a production:load would hand it over.
+  return loadProduction(p.meta.id) ?? p;
 }
 
 /**

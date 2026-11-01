@@ -261,11 +261,27 @@ describe("video", () => {
 });
 
 describe("reference wiring", () => {
-  it("runs the magic-prompt pass", async () => {
+  it("runs the magic-prompt pass: bible first, then prompts when the cast is settled", async () => {
     const { host, run } = makeHost({ activeId: () => "p1" });
-    run.mockResolvedValueOnce(prod());
+    run.mockResolvedValue(prod());
     await call(makeProductionAgentTools(host).cascade_generate_magic_prompts, {});
-    expect(run).toHaveBeenCalledWith("generateMagicPrompts", "p1");
+    expect(run.mock.calls.map((c) => c[0])).toEqual(["generateMagicBible", "generateMagicPrompts"]);
+  });
+
+  it("stops at the bible when cast decisions need the user (never silently writes)", async () => {
+    const { host, run } = makeHost({ activeId: () => "p1" });
+    const withBible = prod({
+      magicBible: {
+        version: 1, synopsis: "s", assumptions: [], scenes: [],
+        entities: [{ name: "Little Paperclip", kind: "character", descriptor: "small" }],
+        shotPlans: [], inputHash: "h", generatedAt: "2026-01-01",
+      },
+    } as Partial<Production>);
+    run.mockResolvedValueOnce(withBible);
+    const out = await call(makeProductionAgentTools(host).cascade_generate_magic_prompts, {});
+    expect(run.mock.calls.map((c) => c[0])).toEqual(["generateMagicBible"]);
+    expect(JSON.stringify(out)).toContain("Cast & Sets");
+    expect(JSON.stringify(out)).toContain("Little Paperclip");
   });
 
   it("sets one shot's prompt", async () => {

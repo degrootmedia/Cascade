@@ -45,13 +45,17 @@ describe("canConnect truth table", () => {
     expect(canConnect(ep("imagegen", "image"), to("tween", "in-tween-3"))).toBe(true);
     expect(canConnect(ep("videogen", "video"), to("output", "in-out"))).toBe(true);
     expect(canConnect(ep("videogen", "video"), to("editvideo", "in-video"))).toBe(true);
+    // Any prompt node may feed any generator's prompt input.
+    expect(canConnect(ep("composer", "text"), to("videogen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("videoprompt", "text"), to("imagegen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("editprompt", "text"), to("editvideo", "in-prompt"))).toBe(true);
   });
   it("rejects cross-media and wrong-kind edges", () => {
     expect(canConnect(ep("videogen", "video"), to("videogen", "in-image"))).toBe(false);
     expect(canConnect(ep("videogen", "video"), to("tween", "in-tween-0"))).toBe(false);
     expect(canConnect(ep("imagegen", "image"), to("editvideo", "in-video"))).toBe(false);
     expect(canConnect(ep("brand", "text"), to("composer", "in-style"))).toBe(false);
-    expect(canConnect(ep("composer", "text"), to("videogen", "in-prompt"))).toBe(false);
+    expect(canConnect(ep("style", "text"), to("videogen", "in-prompt"))).toBe(false);
     expect(canConnect(ep("style", "text"), to("output", "in-out"))).toBe(false);
   });
   it("every node kind declares at least one port", () => {

@@ -12,7 +12,7 @@
 import { afterAll, describe, it, expect, vi } from "vitest";
 import * as fs from "node:fs";
 import type { Production } from "../src/shared/ipc.js";
-import { isFresh, revOf, isStaleRevisionError, applySavedRevision } from "../src/shared/snapshot-freshness.js";
+import { isFresh, revOf, isStaleRevisionError, applySavedRevision, sameSnapshotExceptRev } from "../src/shared/snapshot-freshness.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -105,6 +105,25 @@ describe("applySavedRevision (whole-document saves adopt the stamped rev)", () =
     expect(applySavedRevision(local, 5)).toBe(local);
     expect(applySavedRevision(local, 2)).toBe(local);
     expect(applySavedRevision(local, 0)).toBe(local);
+  });
+});
+
+describe("sameSnapshotExceptRev (layout-save echo skip)", () => {
+  it("is true when only the rev differs (the save carried no news)", () => {
+    const a = { rev: 3, meta: { id: "p1" }, scenes: [{ shots: [{ id: "a", graphLayout: { viewport: { x: 1, y: 2, zoom: 0.5 } } }] }] };
+    const b = { rev: 4, meta: { id: "p1" }, scenes: [{ shots: [{ id: "a", graphLayout: { viewport: { x: 1, y: 2, zoom: 0.5 } } }] }] };
+    expect(sameSnapshotExceptRev(a, b)).toBe(true);
+    expect(sameSnapshotExceptRev(a, a)).toBe(true);
+  });
+
+  it("is false when any other field moved (concurrent main-side change)", () => {
+    const a = { rev: 3, scenes: [{ shots: [{ id: "a", prompt: "old" }] }] };
+    const b = { rev: 4, scenes: [{ shots: [{ id: "a", prompt: "new" }] }] };
+    expect(sameSnapshotExceptRev(a, b)).toBe(false);
+  });
+
+  it("treats a missing rev as comparable", () => {
+    expect(sameSnapshotExceptRev({ scenes: [] }, { rev: 9, scenes: [] })).toBe(true);
   });
 });
 

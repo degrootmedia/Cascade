@@ -105,25 +105,15 @@ describe("autoLayoutNodes", () => {
 });
 
 describe("reconcileMoodboard", () => {
-  it("auto-places new refs below existing content and prunes orphans", () => {
-    const base = normalizeMoodboardLayout({
-      nodes: [
-        { refId: "keep", x: 100, y: 50, w: 200, h: 200, z: 3 },
-        { refId: "gone", x: 0, y: 0, w: 200, h: 200, z: 1 },
-      ],
-    });
-    const next = reconcileMoodboard(base, refs("keep", "new"));
-    expect(next.nodes.map((n) => n.refId).sort()).toEqual(["keep", "new"]);
-    const keep = next.nodes.find((n) => n.refId === "keep")!;
-    expect(keep).toMatchObject({ x: 100, y: 50, w: 200, h: 200, z: 3 });
-    const added = next.nodes.find((n) => n.refId === "new")!;
-    // New node sits below the surviving content's bottom edge.
-    expect(added.y).toBeGreaterThanOrEqual(50 + 200);
-    expect(added.z).toBeGreaterThan(3);
+  it("does not auto-place new refs (they stay on the shelf) and prunes orphans", () => {
+    const b = normalizeMoodboardLayout({ nodes: [{ refId: "keep", x: 0, y: 0, w: 200, h: 200, z: 1 }] });
+    const r = reconcileMoodboard(b, refs("keep", "new"));
+    expect(r.nodes.map((n) => n.refId)).toEqual(["keep"]);
+    expect(offBoardRefs(r, refs("keep", "new") as never).map((x) => x.id)).toEqual(["new"]);
   });
 
   it("is a no-op identity when nothing changed", () => {
-    const base = reconcileMoodboard(normalizeMoodboardLayout(null), refs("a", "b"));
+    const base = normalizeMoodboardLayout({ nodes: [{ refId: "a", x: 0, y: 0 }, { refId: "b", x: 0, y: 0 }] });
     const again = reconcileMoodboard(base, refs("a", "b"));
     expect(again.nodes.map((n) => n === base.nodes.find((m) => m.refId === n.refId))).toEqual([true, true]);
   });

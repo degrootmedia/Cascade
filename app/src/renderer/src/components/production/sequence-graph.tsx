@@ -13,7 +13,8 @@
  * disabled with a hint.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GenParams, GraphLayout, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
+import { mergeGraphLayoutPatch } from "../../../../shared/graph/layout.js";
+import type { GenParams, GraphLayout, GraphLayoutPatch, GraphVideoNode, OpenArtModelChoice, Production, ProductionShot, SequenceSegment, ShotSequence } from "../../../../shared/ipc.js";
 import { normalizeSequenceSegments, sequenceSelectedTake, sequenceSegmentLine, sequenceTotalDuration } from "../../../../shared/ipc.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import {
@@ -32,7 +33,7 @@ import { getPromptTemplate } from "./prompt-templates.js";
 /** The generators a sequence canvas hides entirely: image generation (with
  *  its composer prompt node) and the shot-only generator nodes. Only video
  *  generation and video editing remain, plus the frames/refs and the output. */
-export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand"] as const;
+export const SEQUENCE_HIDDEN_TOOLS = ["imagegen", "edit", "tween", "cameraGrid", "upscale", "brand", "genjutsu-motion", "genjutsu-swap"] as const;
 
 /** The sequence's member frames as locked reference inputs: image nodes exactly
  *  like reference nodes, live-linked to each shot's current output frame
@@ -106,7 +107,7 @@ export interface SequenceEditVideoGenOpts {
 }
 
 /** Statement of what the sequence's graph can host. */
-export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
+export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onWaveformColorRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
   prod: Production;
   seq: ShotSequence;
   imageModels: OpenArtModelChoice[];
@@ -132,6 +133,7 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
   onDropFile: (file: File) => Promise<GraphRef | null> | void;
   onPasteFiles?: (files: File[]) => Promise<GraphRef[]>;
   onRenameRef?: (refId: string, name: string) => void;
+  onWaveformColorRef?: (refId: string, colorId: string) => void;
   onSaveGenerationAsReference?: (rel: string) => Promise<GraphRef | null>;
   /** A video lightbox's saved still comes back here (the workspace applies it). */
   onVideoStillSaved?: (next: Production) => void;
@@ -359,11 +361,12 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onDropFile={onDropFile}
       onPasteFiles={onPasteFiles}
       onRenameRef={onRenameRef}
+      onWaveformColorRef={onWaveformColorRef}
       onGraphField={onGraphField}
       sequenceFramePrompts={framePrompts}
       onSequenceSegments={setSegments}
       onRevertFramePrompt={revertFramePrompt}
-      onSaveLayout={(layout: GraphLayout) => onGraphField((g) => ({ graphLayout: { ...(g.graphLayout ?? {}), ...layout } }))}
+      onSaveLayout={(layout: GraphLayoutPatch) => onGraphField((g) => ({ graphLayout: mergeGraphLayoutPatch(g.graphLayout, layout) }))}
       onRunImageGen={async () => {}}
       onRunVideoGen={runVideoGen}
       onRunEditVideo={runEditVideo}

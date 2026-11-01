@@ -107,10 +107,18 @@ function mimeToExt(mime: string): string {
   if (/png/i.test(mime)) return "png";
   if (/webp/i.test(mime)) return "webp";
   if (/gif/i.test(mime)) return "gif";
+  // Audio first: `audio/mp4` is an .m4a file, not a video .mp4.
+  if (/^audio\//i.test(mime)) {
+    if (/wav/i.test(mime)) return "wav";
+    if (/ogg/i.test(mime)) return "ogg";
+    if (/flac/i.test(mime)) return "flac";
+    if (/aac/i.test(mime)) return "aac";
+    if (/mp4|m4a/i.test(mime)) return "m4a";
+    return "mp3";
+  }
   if (/mp4/i.test(mime)) return "mp4";
   if (/quicktime/i.test(mime)) return "mov";
   if (/webm/i.test(mime)) return "webm";
-  if (/m4a/i.test(mime)) return "m4a";
   return "jpg";
 }
 

@@ -12,12 +12,19 @@ import type { DetachedCanvasContext } from "../../../shared/ipc/window.js";
 import { ProductionWorkspace } from "./ProductionWorkspace.js";
 import { ConfirmHost } from "./ConfirmDialog.js";
 import { NamePromptHost } from "./NamePromptDialog.js";
+import { applyAccent, applyTheme, normalizeTheme } from "../theme.js";
 
 export function DetachedCanvasApp() {
   const [ctx, setCtx] = useState<DetachedCanvasContext | null>(null);
   const [title, setTitle] = useState("Canvas");
 
   useEffect(() => {
+    // Authoritative appearance for this window too (main.tsx already painted
+    // the cached theme pre-render; accent had no detached coverage before).
+    void window.cascade
+      .getSettings()
+      .then((s) => { applyAccent(s.accent); applyTheme(normalizeTheme(s.theme)); })
+      .catch(() => {});
     const offCtx = window.cascade.onCanvasContext((next) => setCtx(next));
     const offSel = window.cascade.onCanvasSelectionChanged((e) => {
       setCtx((prev) => (prev ? { ...prev, frameId: e.frameId } : prev));

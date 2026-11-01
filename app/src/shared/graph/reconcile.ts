@@ -58,6 +58,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.refHandles as string[]).every((v, i) => v === (b.refHandles as string[])[i]) &&
     (a.openHandleId as string) === (b.openHandleId as string),
   videogen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.hasImageSource as boolean) === (b.hasImageSource as boolean) &&
     (a.selected as number) === (b.selected as number) &&
     sameGenItems(a.items, b.items) &&
@@ -71,6 +73,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.stitched as boolean) === (b.stitched as boolean) &&
     (a.reencoded as boolean) === (b.reencoded as boolean),
   editgen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.sourceHint as string) === (b.sourceHint as string) &&
     (a.prompt as string) === (b.prompt as string) &&
     (a.sourceRefId as string | undefined) === (b.sourceRefId as string | undefined) &&
@@ -82,7 +86,8 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
   sequenceprompt: (a, b) =>
     promptNodeEqual(a, b) && JSON.stringify(a.segments) === JSON.stringify(b.segments),
   editprompt: promptNodeEqual,
-  editvideoprompt: promptNodeEqual,
+  editvideoprompt: (a, b) =>
+    promptNodeEqual(a, b) && (a.mode as string | undefined) === (b.mode as string | undefined),
   style: (a, b) => (a.value as string) === (b.value as string),
   brand: (a, b) => (a.include as boolean) === (b.include as boolean),
   ref: (a, b) =>
@@ -92,14 +97,20 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.sourced as boolean) === (b.sourced as boolean) &&
     (a.missing as boolean) === (b.missing as boolean) &&
     (a.collapsed as boolean) === (b.collapsed as boolean) &&
-    (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined),
+    (a.mediaPath as string | undefined) === (b.mediaPath as string | undefined) &&
+    (a.media as string | undefined) === (b.media as string | undefined) &&
+    (a.mediaUrl as string | undefined) === (b.mediaUrl as string | undefined) &&
+    (a.waveformColor as string | undefined) === (b.waveformColor as string | undefined),
   frame: (a, b) =>
     (a.previewUrl as string) === (b.previewUrl as string) &&
     (a.previewKind as string) === (b.previewKind as string) &&
     (a.bound as boolean) === (b.bound as boolean),
   imagegen: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
+    ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
     (a.selected as number) === (b.selected as number) && sameGenItems(a.items, b.items) && (a.busy as boolean) === (b.busy as boolean),
   editvideo: (a, b) =>
+    (a.savedModel as string | undefined) === (b.savedModel as string | undefined) &&
     (a.selected as number) === (b.selected as number) &&
     sameGenItems(a.items, b.items) &&
     (a.busy as boolean) === (b.busy as boolean) &&
@@ -109,7 +120,9 @@ export const CANVAS_TYPE_EQUAL: Record<string, NodeDataEqual> = {
     (a.savedResolution as string | undefined) === (b.savedResolution as string | undefined) &&
     (a.savedDurationSec as number | undefined) === (b.savedDurationSec as number | undefined) &&
     ((a.models as unknown[] | undefined)?.length ?? 0) === ((b.models as unknown[] | undefined)?.length ?? 0) &&
-    (a.sourceLabel as string | null) === (b.sourceLabel as string | null),
+    (a.sourceLabel as string | null) === (b.sourceLabel as string | null) &&
+    (a.mode as string | undefined) === (b.mode as string | undefined) &&
+    (a.imageRefCount as number | undefined) === (b.imageRefCount as number | undefined),
   cameraGrid: (a, b) =>
     (a.busy as boolean | undefined) === (b.busy as boolean | undefined) &&
     (a.sheetUrl as string | null) === (b.sheetUrl as string | null) &&

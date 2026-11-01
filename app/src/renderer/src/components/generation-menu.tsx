@@ -17,6 +17,17 @@ export interface GenerationMenuTarget {
   media?: "image" | "video";
 }
 
+/** Production + relative path for the "Send to assembly folder" action,
+ *  derived from the take's cascade-media URL. */
+export function assemblySendTarget(t: { rel: string; src?: string }): { productionId: string; relPath: string } | null {
+  if (!t.src || !t.src.startsWith("cascade-media://")) return null;
+  try {
+    const u = new URL(t.src);
+    if (!u.hostname || !t.rel) return null;
+    return { productionId: u.hostname, relPath: t.rel };
+  } catch { return null; }
+}
+
 const VIDEO_REL_RX = /\.(mp4|webm|mov|m4v|mkv|avi)$/i;
 
 /** Whether a target is a video clip (explicit `media` wins; else the path). */
@@ -37,7 +48,9 @@ function targetIsVideo(t: GenerationMenuTarget): boolean {
  * "Save as reference" is offered whenever the caller can act on it; "Delete
  * generation…" appears only where deletion is already wired.
  */
-export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onRefresh, onEditInSuite, extra }: {
+export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onRefresh, onEditInSuite, selectTag, extra }: {
+  /** Video takes: tag/untag as an assembly "select". */
+  selectTag?: { selected: boolean; onToggle: (rel: string, selected: boolean) => void };
   menu: GenerationMenuTarget | null;
   onClose: () => void;
   /** Copy this take into referencesDir as a new reference (via the save popup). */
@@ -72,6 +85,7 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
   if (!menu) return null;
   const src = menu.src;
   const isVideo = targetIsVideo(menu);
+  const sendInfo = assemblySendTarget(menu);
   return createPortal(
     <div
       ref={ref}
@@ -81,6 +95,16 @@ export function GenerationMenu({ menu, onClose, onSaveAsReference, onDelete, onR
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >
       {extra}
+      {selectTag && isVideo && (
+        <button className="ctx-item" onClick={() => { selectTag.onToggle(menu.rel, !selectTag.selected); onClose(); }}>
+          {selectTag.selected ? "Remove select tag" : "Tag as select (export with assembly)"}
+        </button>
+      )}
+      {sendInfo && (
+        <button className="ctx-item" onClick={() => { onClose(); void window.cascade.assemblySend(sendInfo.productionId, sendInfo.relPath); }}>
+          Send to assembly folder
+        </button>
+      )}
       {src && (
         <>
           <button className="ctx-item" onClick={() => { onClose(); void window.cascade.saveImage(src); }}>

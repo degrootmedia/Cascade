@@ -38,9 +38,22 @@ export const STYLE_FRAME_SUBJECT = "figure in plain clothing, mid-shot";
 /** The built-in neutral style-frame setting. */
 export const STYLE_FRAME_SETTING = "softly lit interior";
 
+/** The visual traits a style image may lend — the ONLY things it may lend.
+ *  Shared by the LOOK clause (style frames) and the providers' style-only
+ *  clause (style references) so both style paths speak identically. */
+export const STYLE_ONLY_TRAITS =
+  "medium, color palette, lighting, line quality, texture and grain, and rendering technique";
+
+/** Everything a style image must never contribute, named one by one — models
+ *  kept leaking exactly these under a generic "do not copy its subject". */
+export const STYLE_ONLY_FORBIDDEN =
+  "people, characters, faces, figures, clothing, objects, props, setting, location, background, composition, framing, camera angle, pose, or text";
+
 /** The built-in LOOK clause prepended to every board prompt when a style frame is active. */
 export const LOOK_CLAUSE =
-  "Look reference (reference image 1): match its medium, palette, lighting, line/texture and rendering treatment. Do not copy its subject matter.";
+  `Look reference (reference image 1) — STYLE ONLY: match only its ${STYLE_ONLY_TRAITS}. ` +
+  `STRICT: do not copy, include, or reproduce anything depicted in reference image 1 — none of its ${STYLE_ONLY_FORBIDDEN} may appear. ` +
+  `Depict only what the description and content references below describe; wherever they conflict with reference image 1, the description wins.`;
 
 /** The shared clause bodies for the wide / detail / medium / face buckets; the
  *  per-size distribution strings below set the counts. Kept as fragments so the

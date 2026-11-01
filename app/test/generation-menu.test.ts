@@ -72,7 +72,7 @@ describe("GenerationMenu native media actions", () => {
       onDelete: () => {},
     });
     expect(labels()).toEqual([
-      "Save image as…", "Copy image", "Edit externally", "Open file folder",
+      "Send to assembly folder", "Save image as…", "Copy image", "Edit externally", "Open file folder",
       "Save as reference", "Delete generation…",
     ]);
 
@@ -98,7 +98,7 @@ describe("GenerationMenu native media actions", () => {
       menu: { x: 0, y: 0, rel: "boards/0100/video/shot-0100.mp4", src: "cascade-media://p1/shot-0100.mp4", media: "video" },
       onClose: () => {},
     });
-    expect(labels()).toEqual(["Save video as…", "Open file folder"]);
+    expect(labels()).toEqual(["Send to assembly folder", "Save video as…", "Open file folder"]);
   });
 
   it("falls back to the path extension when media is omitted", async () => {

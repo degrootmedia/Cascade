@@ -14,6 +14,9 @@ export interface ConfirmDestructiveOptions {
   body?: string;
   confirmLabel: string;
   cancelLabel?: string;
+  /** Confirm button styling: destructive red (default) or the plain button
+   *  for non-destructive choices (e.g. "Convert to JPEG"). */
+  danger?: boolean;
 }
 
 interface PendingConfirm extends ConfirmDestructiveOptions {
@@ -81,7 +84,7 @@ export function ConfirmHost() {
           <button ref={cancelRef} onClick={() => settle(false)}>
             {current.cancelLabel ?? "Cancel"}
           </button>
-          <button className="danger" onClick={() => settle(true)}>
+          <button className={current.danger === false ? undefined : "danger"} onClick={() => settle(true)}>
             {current.confirmLabel}
           </button>
         </div>

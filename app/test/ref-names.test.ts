@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
-import { sanitizeReferenceName, referenceNameError, suggestSuiteRefName, nextNumberedRefName } from "../src/shared/ref-names.js";
+import { sanitizeReferenceName, referenceNameError, suggestSuiteRefName, nextNumberedRefName, canonicalRefName, refAliasConflict, resolveRefByTagName, sanitizeAliases } from "../src/shared/ref-names.js";
 import { askName, askReferenceSave, NamePromptHost, type ReferenceSaveChoice } from "../src/renderer/src/components/NamePromptDialog.js";
 
 describe("reference name helpers", () => {
@@ -35,6 +35,44 @@ describe("reference name helpers", () => {
     expect(suggestSuiteRefName("  A gondola at dawn, wide shot\nmore detail")).toBe("A gondola at dawn, wide shot");
     expect(suggestSuiteRefName("")).toBe("Suite");
     expect(suggestSuiteRefName("@[x] !!!")).toBe("x !!!".replace(/!/g, "!"));
+  });
+});
+
+describe("reference aliases (Magic Prompt reconciliation)", () => {
+  const refs = [
+    { id: "c1", name: "Hero", aliases: ["MainCharacter", "the protagonist"] },
+    { id: "r1", name: "Gondola", aliases: ["boat"] },
+    { id: "r2", name: "Villain" },
+  ];
+
+  it("resolves a cited tag by canonical name or alias, case-insensitively", () => {
+    expect(resolveRefByTagName(refs, "Hero")?.id).toBe("c1");
+    expect(resolveRefByTagName(refs, "maincharacter")?.id).toBe("c1");
+    expect(resolveRefByTagName(refs, "THE PROTAGONIST")?.id).toBe("c1");
+    expect(resolveRefByTagName(refs, "Boat")?.id).toBe("r1");
+    expect(resolveRefByTagName(refs, "Nobody")).toBeUndefined();
+    expect(canonicalRefName(refs, "maincharacter")).toBe("Hero");
+    expect(canonicalRefName(refs, "Nobody")).toBeUndefined();
+  });
+
+  it("an exact canonical name beats another ref's alias", () => {
+    const clash = [
+      { id: "a", name: "Boat" },
+      { id: "b", name: "Gondola", aliases: ["boat"] },
+    ];
+    expect(resolveRefByTagName(clash, "boat")?.id).toBe("a");
+  });
+
+  it("sanitizes aliases: dedupes, drops the canonical name, drops empties", () => {
+    expect(sanitizeAliases([" hero ", "Hero", "Main Character", "main  character", "[]@/"], "Hero")).toEqual(["Main Character"]);
+    expect(sanitizeAliases(undefined, "Hero")).toEqual([]);
+  });
+
+  it("flags an alias another reference already owns (name or alias)", () => {
+    expect(refAliasConflict(refs, "r2", "hero")).toBe("Hero");
+    expect(refAliasConflict(refs, "r2", "BOAT")).toBe("Gondola");
+    expect(refAliasConflict(refs, "c1", "maincharacter")).toBeNull();
+    expect(refAliasConflict(refs, "r2", "sidekick")).toBeNull();
   });
 });
 

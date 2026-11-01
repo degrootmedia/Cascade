@@ -81,6 +81,24 @@ export function renameRefTag(text: string, oldName: string, newName: string): st
   return text.replace(refTagPattern(oldName), () => `@[${newName}]`);
 }
 
+/** Name of the pinned tag standing for a node's wired source input. */
+export const SOURCE_TAG_NAME = "source";
+
+/**
+ * Make the text's source tag state match `connected`: connected → exactly one
+ * `@[source]`, always the first thing in the prompt (hand-deleted or dragged
+ * elsewhere is repaired); disconnected → every `@[source]` removed.
+ * Idempotent: already-correct text is returned unchanged.
+ */
+export function enforceSourceTag(text: string, connected: boolean): string {
+  const tag = `@[${SOURCE_TAG_NAME}]`;
+  if (!connected) return hasRefTag(text, SOURCE_TAG_NAME) ? removeRefTag(text, SOURCE_TAG_NAME) : text;
+  const matches = refTagMatches(text).filter((m) => m.name.toLowerCase() === SOURCE_TAG_NAME);
+  if (matches.length === 1 && text.trimStart().startsWith(tag) && text.indexOf(matches[0].tag) === text.length - text.trimStart().length) return text;
+  const rest = removeRefTag(text, SOURCE_TAG_NAME);
+  return rest ? `${tag}\n\n${rest}` : tag;
+}
+
 /** Strip every `@[Name]` tag (used to compare the non-tag text of two prompts). */
 export function stripRefTags(text: string): string {
   return text.replace(/@\[[^\]]+\]/g, "");

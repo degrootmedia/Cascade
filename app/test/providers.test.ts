@@ -195,7 +195,9 @@ describe("PROVIDER_CAPABILITIES", () => {
     const { PROVIDER_CAPABILITIES, PROVIDER_IDS } = await import("../src/main/providers/registry.js");
     expect(PROVIDER_IDS).toEqual(expect.arrayContaining(["openart", "higgsfield-cli", "openart-cli"]));
     expect(PROVIDER_IDS).not.toContain("higgsfield");
-    expect(PROVIDER_CAPABILITIES["openart-cli"]).toEqual({ imageRefs: true, videoRefs: false, endFrame: false, tween: false });
+    expect(PROVIDER_CAPABILITIES["openart-cli"]).toEqual({ imageRefs: true, videoRefs: false, audioRefs: false, endFrame: false, tween: false });
+    expect(PROVIDER_CAPABILITIES["openart"].audioRefs).toBe(true);
+    expect(PROVIDER_CAPABILITIES["higgsfield-cli"].audioRefs).toBe(true);
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].videoRefs).toBe(true);
     expect(PROVIDER_CAPABILITIES["higgsfield-cli"].endFrame).toBe(true);
   });
@@ -246,8 +248,8 @@ describe("applyModelSurfaces", () => {
 });
 
 describe("style refs", () => {
-  it("auto-attaches style-only refs with a style-only clause; content refs get none", async () => {
-    const { resolvePromptRefs, citePrompt, styleRefNames } = await import("../src/main/providers/refs.js");
+  it("never resolves style-tagged refs for upload; citePrompt still fences one if submitted", async () => {
+    const { resolvePromptRefs, citePrompt, styleRefNames, styleOnlyClause } = await import("../src/main/providers/refs.js");
     const p = {
       characters: [],
       products: [],
@@ -257,15 +259,56 @@ describe("style refs", () => {
       ],
       referenceCategories: [],
     } as unknown as import("../src/shared/ipc.js").Production;
-    // No @[Noir] tag — style ref still attaches.
+    // Style-tagged refs never upload — cited or not (see style-ref-upload.test.ts).
     const { resolved, extras } = resolvePromptRefs(p, "a shot @[Hero]", 1, false);
-    expect(extras.map((e) => e.name)).toContain("Noir");
-    expect(extras.map((e) => e.name)).toContain("Hero");
-    const refs = [{ name: "Hero", dataUrl: "data:image/png;base64,BBBB" }, ...extras.filter((e) => e.name === "Noir").map((e) => ({ name: e.name, dataUrl: e.dataUrl }))];
+    expect(extras.map((e) => e.name)).toEqual(["Hero"]);
+    expect(resolved).toBe("a shot @image2");
+    const refs = [{ name: "Hero", dataUrl: "data:image/png;base64,BBBB" }, { name: "Noir", dataUrl: "data:image/png;base64,AAAA" }];
     const cited = citePrompt("a shot @image1 @image2", refs, refs.map(() => "x"), styleRefNames(p));
-    expect(cited).toContain("provided for style only");
+    // The clause LEADS the wire prompt (it used to trail at the very end,
+    // where models weight it least) and names every leak channel.
+    expect(cited.startsWith(styleOnlyClause(2))).toBe(true);
+    expect(cited).toContain("Reference image 2 — STYLE ONLY");
+    expect(cited).toContain("do not copy, include, or reproduce anything depicted in reference image 2");
+    for (const forbidden of ["people", "faces", "clothing", "objects", "setting", "background", "composition", "camera angle", "pose"]) {
+      expect(cited).toContain(forbidden);
+    }
+    expect(cited).toContain("the prompt wins");
     // Content ref gets no clause.
-    expect(cited.match(/provided for style only/g)?.length).toBe(1);
+    expect(cited.match(/STYLE ONLY/g)?.length).toBe(1);
+    expect(cited).toContain("Hero (reference image 1)");
     expect(cited).not.toContain("Render consistently with the other shots in this production.");
+    // Re-citing an already-cited prompt adds nothing.
+    expect(citePrompt(cited, refs, refs.map(() => "x"), styleRefNames(p))).toBe(cited);
+  });
+
+  it("emits one clause per submitted style ref, each citing its own position", async () => {
+    const { resolvePromptRefs, citePrompt, styleRefNames, styleOnlyClause } = await import("../src/main/providers/refs.js");
+    const p = {
+      characters: [],
+      products: [],
+      references: [
+        { id: "s1", name: "Noir", imagePath: undefined, artwork: "data:image/png;base64,AAAA", styleOnly: true },
+        { id: "s2", name: "Sepia", imagePath: undefined, artwork: "data:image/png;base64,CCCC", styleOnly: true },
+        { id: "c1", name: "Hero", imagePath: undefined, artwork: "data:image/png;base64,BBBB" },
+      ],
+      referenceCategories: [],
+    } as unknown as import("../src/shared/ipc.js").Production;
+    const { extras } = resolvePromptRefs(p, "a shot @[Hero]", 0, false);
+    expect(extras.map((e) => e.name)).toEqual(["Hero"]);
+    const refs = [{ name: "Hero", dataUrl: "data:image/png;base64,BBBB" }, { name: "Noir", dataUrl: "data:image/png;base64,AAAA" }, { name: "Sepia", dataUrl: "data:image/png;base64,CCCC" }];
+    const cited = citePrompt("a shot @image1", refs, refs.map(() => "x"), styleRefNames(p));
+    // Regression: the old phrase-level dedupe suppressed every clause after
+    // the first, so Sepia shipped with no style-only instruction at all.
+    expect(cited.startsWith(styleOnlyClause(2))).toBe(true);
+    expect(cited).toContain(styleOnlyClause(3));
+    expect(cited.match(/STYLE ONLY/g)?.length).toBe(2);
+    expect(cited.indexOf(styleOnlyClause(3))).toBeLessThan(cited.indexOf("a shot"));
+    // A style ref whose upload failed gets no clause (no media to anchor
+    // to); Sepia becomes the 2nd submitted ref, so its clause cites 2.
+    const partial = citePrompt("a shot @image1", refs, ["x", null, "x"], styleRefNames(p));
+    expect(partial.match(/STYLE ONLY/g)?.length).toBe(1);
+    expect(partial).toContain(styleOnlyClause(2));
+    expect(partial).not.toContain(styleOnlyClause(3));
   });
 });

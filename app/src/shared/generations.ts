@@ -10,7 +10,7 @@
  * model/prompt and aren't recoverable from the vendor account.
  */
 import type { GraphGenItem, ProductionShot } from "./ipc.js";
-import { TWEEN_KEY_IMGGEN, editNodeKeyframe } from "./ipc.js";
+import { TWEEN_KEY_IMGGEN, editNodeKeyframe, isGenjutsuMode, isVideoEditFamilyMode } from "./ipc.js";
 import { resolveShotDisplay } from "./selected-output.js";
 
 export type GenerationKind = "image" | "video" | "edit" | "editvideo" | "tween" | "upscale";
@@ -71,7 +71,13 @@ export function frameOrigin(shot: ProductionShot, rel: string | undefined): Fram
     switch (gen.kind) {
       case "image": return { code: "IMG", label: "Image gen node" };
       case "edit": return { code: "EDIT", label: "Edit image node" };
-      case "video": return { code: "VIDEO", label: "Video gen node" };
+      case "video": {
+        const node = gen.nodeId ? (shot.graphVideoNodes ?? []).find((n) => n.id === gen.nodeId) : undefined;
+        if (node?.mode === "genjutsu-motion") return { code: "GENJUTSU", label: "Genjutsu Motion Transfer node" };
+        if (node?.mode === "genjutsu-swap") return { code: "GENJUTSU", label: "Genjutsu Object Swap node" };
+        if (node?.mode === "edit") return { code: "V-EDIT", label: "Video edit node" };
+        return { code: "VIDEO", label: "Video gen node" };
+      }
       case "editvideo": return { code: "V-EDIT", label: "Video edit node" };
       case "upscale": return { code: "UPSCALE", label: "Upscale node" };
       case "tween": return { code: "TWEEN", label: "Tween node" };
@@ -114,13 +120,12 @@ export function generationInUse(shot: ProductionShot, gen: GenerationRef): strin
       return null;
     }
     const sourceId = gen.nodeId ?? "vid0";
-    if (node?.mode === "edit" && shot.graphOutputSource === "videogen" && shot.graphOutputVideoNodeId === node.id) {
+    if (node && isVideoEditFamilyMode(node.mode) && shot.graphOutputSource === "videogen" && shot.graphOutputVideoNodeId === node.id) {
       return "the storyboard's current clip";
     }
     if (shot.graphVideoToEditVideo) return "the edit-video node's source clip";
-    if ((shot.graphVideoNodes ?? []).some((n) => n.mode === "edit" && n.source?.kind === "video" && n.source.nodeId === sourceId)) {
-      return "the edit-video node's source clip";
-    }
+    const familySource = (shot.graphVideoNodes ?? []).find((n) => isVideoEditFamilyMode(n.mode) && n.source?.kind === "video" && n.source.nodeId === sourceId);
+    if (familySource) return isGenjutsuMode(familySource.mode) ? "a Genjutsu node's source clip" : "the edit-video node's source clip";
     return null;
   }
   if (gen.kind === "editvideo") {

@@ -1,3 +1,18 @@
+## 2026-10-21 - Lightbox close icon rendered giant (broad `img` rule vs icon <img>)
+
+- Symptom: the new shared lightbox showed a giant red X in the corner. The
+  close button's `XIcon` is an `<img class="cascade-icon" width=13>`, but the
+  lightbox card's media rule (`.prod-ref-lightbox-card img { width:auto; ... }`)
+  outranks the width attribute, so the 365pt source SVG painted near full size.
+- Rules:
+  1. Any container rule that styles content `img`s must exclude `.cascade-icon`
+     (`img:not(.cascade-icon)`) — the shelf/poster rules already did; the
+     lightbox card rule predated icons living inside it. When adding an icon
+     button inside a media container, check its `img` rules first.
+  2. Icon semantics: X = close/dismiss a surface, trashcan = delete/remove a
+     thing. Sharing one glyph for both reads as a bug to users.
+
+
 # Lessons (judgment lessons only)
 
 Mechanical rules live in tests, not here: see `app/test/lessons-guards.test.ts`,
@@ -85,3 +100,17 @@ store tests. Each entry below: what happened, what to do instead, how you can te
 - Model-driven pickers read their options per selected model at render time and re-validate on change.
 - Keep prompt display and transport forms separate; remove generated sections paragraph-scoped; queue debounced prompt saves latest-value-first; cache per-shot prompt display and ignore null refresh results.
 - Storyboard history derives from generation nodes; promotion updates the node's selected index and output pipe, not only `artwork`.
+
+## A supersede-delete that only happens in memory never reaches the persistence sink
+- Symptom: a storyboard 'pending' badge stuck on forever (0000_Co-Mo Santa
+  Tests shot 0200) while jobs.json was empty and newer takes existed.
+- Cause: `imageGenFn` deleted `shot.pendingImageGen` in memory at submit
+  ("fresh submission supersedes"), but the persisted copy is owned by
+  `pendingImageSink`, which was only told `null` when the SAME run had
+  recorded a pending (`pendingRecorded`/`submitted` gate). A synchronous
+  success (no `historyId`, so nothing recorded) never notified the sink.
+- Rule: any in-memory delete of a sink-owned field needs a matching sink
+  notification on EVERY exit that supersedes it — capture "there was a
+  stale record at entry" and OR it into the clear-notify gate. Check all
+  transports/kinds that share the pattern (found in image + video, MCP +
+  both CLIs; fixed 2026-10-27 with sink-level regression tests).

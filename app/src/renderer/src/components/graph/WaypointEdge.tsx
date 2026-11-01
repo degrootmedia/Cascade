@@ -14,7 +14,7 @@
  * `nodrag` and swallow their pointerdown, so a waypoint drag never becomes
  * a connection drag or a canvas pan.
  */
-import { createContext, useContext, useRef, useState } from "react";
+import { createContext, useContext, useRef } from "react";
 import { BaseEdge, useReactFlow, type EdgeProps } from "@xyflow/react";
 
 export interface WaypointHandlers {
@@ -26,6 +26,11 @@ export interface WaypointHandlers {
    *  keypress can never also delete a node. */
   select: (edgeId: string, index: number) => void;
   selected: { edgeId: string; index: number } | null;
+  /** Live (uncommitted) drag, shared so every wire through a shared point redraws. */
+  live?: { edgeId: string; index: number; id?: string; pos: { x: number; y: number } } | null;
+  /** Wire rendering style; absent = curved. */
+  wireStyle?: "curved" | "straight";
+  setLive?: (v: { edgeId: string; index: number; id?: string; pos: { x: number; y: number } } | null) => void;
 }
 
 export const WaypointContext = createContext<WaypointHandlers | null>(null);
@@ -64,16 +69,28 @@ export function waypointInsertIndex(
   return best;
 }
 
+/** SVG path through the points: straight segments or Bezier (horizontal tangents). */
+export function wirePath(full: { x: number; y: number }[], style: "curved" | "straight" = "curved"): string {
+  if (style === "straight") return full.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+  let d = `M${full[0].x},${full[0].y}`;
+  for (let i = 1; i < full.length; i++) {
+    const a = full[i - 1], b = full[i];
+    const k = Math.max(Math.abs(b.x - a.x) / 2, 20);
+    d += ` C${a.x + k},${a.y} ${b.x - k},${b.y} ${b.x},${b.y}`;
+  }
+  return d;
+}
+
 export function WaypointEdge({ id, sourceX, sourceY, targetX, targetY, style, markerEnd, data }: EdgeProps) {
   const handlers = useContext(WaypointContext);
   const { screenToFlowPosition } = useReactFlow();
-  const stored = (data?.waypoints as { x: number; y: number }[] | undefined) ?? [];
-  const [drag, setDrag] = useState<{ index: number; pos: { x: number; y: number } } | null>(null);
+  const stored = (data?.waypoints as { x: number; y: number; id?: string }[] | undefined) ?? [];
   const downAt = useRef<{ x: number; y: number } | null>(null);
 
-  const pts = stored.map((p, i) => (drag?.index === i ? drag.pos : p));
+  const live = handlers?.live;
+  const pts = stored.map((p, i) => (live && (live.id ? p.id === live.id : live.edgeId === id && live.index === i) ? live.pos : p));
   const full = [{ x: sourceX, y: sourceY }, ...pts, { x: targetX, y: targetY }];
-  const path = full.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+  const path = wirePath(full, handlers?.wireStyle);
 
   const onLinePointerDown = (e: React.PointerEvent) => {
     downAt.current = { x: e.clientX, y: e.clientY };
@@ -92,13 +109,13 @@ export function WaypointEdge({ id, sourceX, sourceY, targetX, targetY, style, ma
     e.stopPropagation();
     handlers.select(id, index);
     const move = (ev: PointerEvent) => {
-      setDrag({ index, pos: screenToFlowPosition({ x: ev.clientX, y: ev.clientY }) });
+      handlers.setLive?.({ edgeId: id, index, id: stored[index]?.id, pos: screenToFlowPosition({ x: ev.clientX, y: ev.clientY }) });
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const pos = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-      setDrag(null);
+      handlers.setLive?.(null);
       handlers.move(id, index, pos);
     };
     window.addEventListener("pointermove", move);

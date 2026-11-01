@@ -48,13 +48,18 @@ export interface LogLine {
   action?: Retry720pAction;
 }
 
+/** Media URL whose `#t=` fragment makes the <video> element show a still frame. */
+export function videoStillSrc(prodId: string, rel: string): string {
+  return `cascade-media://${prodId}/${encodeURIComponent(rel)}#t=0.1`;
+}
+
 const animaticThumbCache = new Map<string, string>();
-function AnimaticThumb({ prodId, shotId, artwork, explicitRel, title }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string; /** Hover text override (timeline blocks pass the block's status line so the full-bleed artwork doesn't bury it). */ title?: string }) {
+function AnimaticThumb({ prodId, shotId, artwork, explicitRel, videoRel, title }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string; /** Shot's video clip: the thumbnail is a still frame decoded from it. */ videoRel?: string; /** Hover text override (timeline blocks pass the block's status line so the full-bleed artwork doesn't bury it). */ title?: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     // A sequence's held still renders directly (see the return below) — no
     // board-thumbnail fetch for it.
-    if (explicitRel) return;
+    if (explicitRel || videoRel) return;
     let live = true;
     const key = `${prodId}:${shotId}:${artwork ?? ""}`;
     const cached = animaticThumbCache.get(key);
@@ -73,7 +78,8 @@ function AnimaticThumb({ prodId, shotId, artwork, explicitRel, title }: { prodId
       }).catch(() => {});
     }
     return () => { live = false; };
-  }, [prodId, shotId, artwork, explicitRel]);
+  }, [prodId, shotId, artwork, explicitRel, videoRel]);
+  if (videoRel) return <video className="prod-timeline-thumb" src={videoStillSrc(prodId, videoRel)} preload="metadata" muted playsInline disablePictureInPicture tabIndex={-1} title={title ?? "Still frame from this shot's video"} />;
   if (explicitRel) return <img className="prod-timeline-thumb" src={`cascade-media://${prodId}/${encodeURIComponent(explicitRel)}`} alt="Held still" title={title ?? "The sequence output's held still"} />;
   if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboard" />;
   return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title={title ?? "Primary frame for this shot"} />;
@@ -1338,7 +1344,7 @@ export function AnimaticTimeline({
                         prodId={prodId}
                         shotId={s.shotIds[0] ?? s.id}
                         artwork={s.artwork}
-                        explicitRel={s.kind === "sequence" && !s.videoPath ? s.artwork : undefined}
+                        explicitRel={s.kind === "sequence" && !s.videoPath ? s.artwork : undefined} videoRel={s.videoPath || undefined}
                         title={blockTitle}
                       />
                     )

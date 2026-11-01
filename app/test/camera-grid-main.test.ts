@@ -62,6 +62,16 @@ describe("cutoutCameraGrid", () => {
     ]);
   });
 
+  it("gives repeated angle names unique reference names", () => {
+    const { deps } = makeDeps();
+    const first = cutoutCameraGrid(base, deps);
+    const second = cutoutCameraGrid({ ...base, existingNames: first.refs.map((r) => r.name) }, deps);
+    expect(first.refs.map((r) => r.name)).toEqual(["Front", "Angle 2"]);
+    expect(second.refs.map((r) => r.name)).toEqual(["Front_dup", "Angle 2_dup"]);
+    const dupLabels = cutoutCameraGrid({ ...base, labels: ["Front", "front"] }, deps);
+    expect(new Set(dupLabels.refs.map((r) => r.name.toLowerCase())).size).toBe(2);
+  });
+
   it("suffixes a collision rather than overwriting", () => {
     const { deps } = makeDeps();
     cutoutCameraGrid(base, deps);

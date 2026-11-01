@@ -4,13 +4,15 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, providerSupportsVideoEdit, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
-import { applySavedRevision, isFresh, isStaleRevisionError, revOf } from "../../../shared/snapshot-freshness.js";
+import { applySavedRevision, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
+import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-usage.js";
 import { ShotTable } from "./ShotTable.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
+import { importableImageDataUrl } from "./production/image-downsample.js";
 import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
 import { nextNumberedRefName } from "../../../shared/ref-names.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
@@ -19,6 +21,9 @@ import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
+import { MagicCastReview } from "./production/magic-cast-review.js";
+import { magicCastReviewCount, type MagicCastNeed } from "../../../shared/magic-refs.js";
+import { askName } from "./NamePromptDialog.js";
 import { BoardCard, EditBoardModal, StoryboardPdfModal, VideoGenModal } from "./production/boards.js";
 import { OutdatedSection } from "./production/outdated.js";
 import { SequenceBarChrome, SequenceBarLayer, SequenceCreateStrip, type SequenceBarTarget } from "./production/sequence-bar.js";
@@ -40,7 +45,8 @@ import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
-import { renderShotPrompt, renderPromptText, promptRefsFor } from "../../../shared/graph/render.js";
+import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wiredPromptTarget } from "../../../shared/graph/render.js";
+import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
@@ -175,6 +181,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const pending = takePendingSuiteSeed();
       if (pending) setSuiteSeed(pending.seed);
       setShowSuite(true);
+      // The node graph / sequence canvas / frame lightbox render OVER the
+      // step content — without closing them the suite opens invisibly
+      // underneath and "Edit in Suite" from a graph take does nothing.
+      setGraphShotId(null);
+      setSeqCanvasId(null);
+      setBoardZoomId(null);
       setShowExpenses(false);
       setShowMoodboard(false);
     };
@@ -270,6 +282,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [boardDropTarget, setBoardDropTarget] = useState<string | null>(null);
   const boardDragRef = useRef<string | null>(null);
   const [magicBusy, setMagicBusy] = useState(false);
+  /** Cast & Sets review modal visibility + the entity currently saving. */
+  const [castReviewOpen, setCastReviewOpen] = useState(false);
+  const [castBusy, setCastBusy] = useState<string | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   /** Reference ids with a delete in flight — guards double-clicks while the
    *  atomic main-side delete runs. */
@@ -438,6 +453,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     recheckVideo: (id: string) => void;
     clearPending: (id: string, kind: "image" | "video") => void;
     importFrame: (id: string) => void;
+    openGraph: (id: string) => void;
     edit: (id: string) => void;
     video: (id: string) => void;
     textChange: (id: string, patch: { audio: string; visual: string }) => void;
@@ -456,6 +472,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     insertAfter: (id: string) => void;
     remove: (id: string) => void;
     toggleDisabled: (id: string) => void;
+    setColorTag: (id: string, tag: ShotColorTag | undefined) => void;
     zoomChange: (id: string | null) => void;
     zoomNavigate: (id: string, dir: -1 | 1) => void;
   }>(null as never);
@@ -465,6 +482,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     recheckVideo: (id) => void recheckVideo(id),
     clearPending: (id, kind) => void clearPending(id, kind),
     importFrame: (id) => void importFrames(id),
+    // Focus first: the graph composer reads the prompt scoped to
+    // promptShotId, so opening for an unfocused shot must move focus to it
+    // (the side-panel Nodes button never needs this — its shot is focused).
+    openGraph: (id) => { focusPrompt(id, ""); setGraphShotId(id); },
     edit: (id) => setEditShotId(id),
     video: (id) => setVideoShotId(id),
     textChange: (id, patch) => void saveShotText(id, patch),
@@ -506,6 +527,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     },
     remove: (id) => deleteBoardShot(id),
     toggleDisabled: (id) => toggleShotDisabled(id),
+    setColorTag: (id, tag) => setShotColorTag(id, tag),
     zoomChange: (id) => setBoardZoomId(id),
     zoomNavigate: (id, dir) => {
       const current = prodRef.current;
@@ -528,6 +550,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onRecheckVideo: (id: string) => boardHandlerRef.current.recheckVideo(id),
     onClearPending: (id: string, kind: "image" | "video") => boardHandlerRef.current.clearPending(id, kind),
     onImport: (id: string) => boardHandlerRef.current.importFrame(id),
+    onOpenGraph: (id: string) => boardHandlerRef.current.openGraph(id),
     onEdit: (id: string) => boardHandlerRef.current.edit(id),
     onVideo: (id: string) => boardHandlerRef.current.video(id),
     onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
@@ -546,6 +569,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onInsertAfter: (id: string) => boardHandlerRef.current.insertAfter(id),
     onDelete: (id: string) => boardHandlerRef.current.remove(id),
     onToggleDisabled: (id: string) => boardHandlerRef.current.toggleDisabled(id),
+    onSetColorTag: (id: string, tag: ShotColorTag | undefined) => boardHandlerRef.current.setColorTag(id, tag),
     onZoomChange: (id: string | null) => boardHandlerRef.current.zoomChange(id),
     onZoomNavigate: (id: string, dir: -1 | 1) => boardHandlerRef.current.zoomNavigate(id, dir),
   }), []);
@@ -554,6 +578,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // While a range is being built the strip owns the slot space (the bars step
   // aside, so the two never overlap); once created/cleared the bars return.
   const showCreateStrip = seqSelection.size >= 2;
+  // Which references are tag-cited or wired into a node anywhere in the
+  // production — drives the in-use badge on Design/moodboard tiles.
+  const refUsage = useMemo(() => (prod ? referenceUsage(prod) : undefined), [prod]);
   const seqMemberIds = useMemo(() => {
     const set = new Set<string>();
     for (const s of prod?.shotSequences ?? []) for (const id of s.shotIds) set.add(id);
@@ -1332,6 +1359,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   async function removeRef(id: string) {
     const current = prodRef.current;
     if (!current || removingRefIds.has(id)) return;
+    // Guard the accident the in-use badge warns about: deleting a cited or
+    // wired reference takes its prompts/nodes down with it, so name them.
+    const usage = referenceUsage(current).get(id);
+    if (usage) {
+      const ref = (current.references ?? []).find((r) => r.id === id);
+      if (!(await confirmDestructive({ title: `Delete ${ref?.name ?? "this reference"}?`, body: `It's in use — ${formatReferenceUsage(usage)}. Deleting it can't be undone.`, confirmLabel: "Delete anyway" }))) return;
+    }
     setRemovingRefIds((prev) => new Set(prev).add(id));
     setErr(null);
     try {
@@ -1365,6 +1399,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
+  }
+  /** Step 2: a video/audio file dropped on a references category becomes a
+   *  media reference in that category — the panel already chose the name
+   *  (filename) and category, so no save popup like the graph drop shows. */
+  async function addDroppedMediaReference(file: File, categoryId?: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const name = uniqueRefName((current.references ?? []).map((r) => r.name), file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
+    try {
+      const saved = await window.cascade.addReferenceMedia(current.meta.id, file.name, file.type, await file.arrayBuffer());
+      if (!saved) { setErr("Couldn't save the dropped media file."); return; }
+      saveRefOnly(name, { media: saved.kind, mediaPath: saved.path, categoryId });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+  /** Set an audio reference's waveform color (per-file; follows the asset
+   *  into every canvas that shows it). */
+  function setRefWaveformColor(id: string, colorId: string) {
+    const current = prodRef.current;
+    if (!current) return;
+    const refs = current.references ?? [];
+    if (!refs.some((r) => r.id === id && r.waveformColor !== colorId)) return;
+    saveField({ references: refs.map((r) => (r.id === id ? { ...r, waveformColor: colorId } : r)) });
   }
   async function attachRefArtwork(id: string) {
     const dataUrl = await window.cascade.pickReferenceImage();
@@ -1434,6 +1492,41 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   function renameCategory(id: string, name: string) {
     if (!prod || !name.trim()) return;
     saveField({ referenceCategories: (prod.referenceCategories ?? []).map((c) => c.id === id ? { ...c, name: name.trim() } : c) });
+  }
+
+  function setRefPurpose(id: string, purpose: CustomRef["purpose"]) {
+    if (!prod) return;
+    saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, purpose, styleOnly: purpose === "style" ? true : undefined } : r)) });
+  }
+
+  /** Edit a reference's one-line "what this shows" card (Magic binding aid).
+   *  Empty input clears it; when empty, offer a vision auto-draft first. */
+  function describeRef(ref: CustomRef) {
+    if (!prod) return;
+    void (async () => {
+      let initial = ref.visualSummary ?? "";
+      if (!initial && (ref.artwork || ref.imagePath)) {
+        try {
+          const drafted = await window.cascade.describeReference(prod.meta.id, ref.id);
+          applySnapshot(drafted); void refreshList();
+          const fresh = (drafted.references ?? []).find((r) => r.id === ref.id);
+          initial = fresh?.visualSummary ?? "";
+          if (initial) return;
+        } catch { /* fall through to manual entry */ }
+      }
+      const text = await askName({
+        title: `What does “${ref.name}” show?`,
+        label: "One line Magic uses to cast this reference correctly (not prompt direction). Clear it to remove.",
+        initial,
+        confirmLabel: "Save card",
+        validate: () => null,
+      });
+      if (text === null) return;
+      const latest = prodRef.current;
+      if (!latest) return;
+      const clean = text.trim().slice(0, 300);
+      saveField({ references: (latest.references ?? []).map((r) => (r.id === ref.id ? { ...r, visualSummary: clean || undefined } : r)) });
+    })();
   }
 
   function moveReference(ids: string[], categoryId?: string) {
@@ -1647,11 +1740,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!prod || styleFrameBusy) return;
     const file = Array.from(files).find((f) => f.type.startsWith("image/"));
     if (!file) return;
-    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
     setStyleFrameBusy(styleId);
     setErr(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const dataUrl = await importableImageDataUrl(file);
+      if (!dataUrl) { setStyleFrameBusy(null); return; }
       if (!prodRef.current) { setStyleFrameBusy(null); return; }
       apply(window.cascade.setStyleFrame(prodRef.current.meta.id, styleId, dataUrl).finally(() => setStyleFrameBusy(null)));
     } catch (e) {
@@ -1757,10 +1850,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  reference (for the node graph to place it on the canvas). */
   async function createReferenceFromFile(file: File): Promise<{ id: string; name: string; artwork: string } | null> {
     if (!prodRef.current) return null;
-    if (file.size > 15 * 1024 * 1024) {
-      setErr("That image is larger than 15 MB — use a smaller one.");
-      return null;
-    }
     if (!file.type.startsWith("image/")) {
       setErr(`${file.name}: not an image file.`);
       return null;
@@ -1769,13 +1858,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const choice = await promptReferenceSave(nextRefName(), { title: "Save pasted image as reference" });
     if (!choice || prodRef.current?.meta.id !== prodId) return null;
     const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
-    let dataUrl: string;
+    let dataUrl: string | null;
     try {
-      dataUrl = await fileToDataUrl(file);
+      dataUrl = await importableImageDataUrl(file);
     } catch {
       setErr("Couldn't read the pasted image.");
       return null;
     }
+    if (!dataUrl || prodRef.current?.meta.id !== prodId) return null;
     const imagePath = await persistRefImage(dataUrl, name);
     if (!imagePath) { setErr("Couldn't save the pasted image."); return null; }
     const id = uid("ref");
@@ -2110,10 +2200,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       return;
     }
     const file = media;
-    if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
     setImportBusy(true); setErr(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const dataUrl = await importableImageDataUrl(file);
+      if (!dataUrl) return;
       const next = await window.cascade.importBoardImage(prod.meta.id, shotId, file.name, dataUrl);
       setProd(next);
       bustOne(shotId);
@@ -2451,12 +2541,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
     try {
       if (kind === "image") {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => { if (typeof reader.result === "string") resolve(reader.result); else reject(reader.error ?? new Error("Couldn't read the file.")); };
-          reader.onerror = () => reject(reader.error ?? new Error("Couldn't read the file."));
-          reader.readAsDataURL(file);
-        });
+        const dataUrl = await importableImageDataUrl(file);
+        if (!dataUrl) return null;
         const imagePath = await persistRefImage(dataUrl, name);
         if (!imagePath) { setErr("Couldn't save the dropped image."); return null; }
         const id = saveRefOnly(name, { imagePath, categoryId: choice.categoryId });
@@ -2588,16 +2674,56 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  re-enable); enabling shows the stored magic content. */
   function toggleMagic() {
     if (!prod || magicBusy) return;
+    // First enable with nothing generated yet: bible first, then Cast & Sets.
+    if (!prod.magicEnabled && !(prod.magicPrompts && Object.keys(prod.magicPrompts).length)) {
+      startCastReview();
+      return;
+    }
     setMagicBusy(true); setErr(null);
     const run = prod.magicEnabled
       ? window.cascade.setMagicEnabled(prod.meta.id, false)
-      : (prod.magicPrompts && Object.keys(prod.magicPrompts).length)
-        ? window.cascade.setMagicEnabled(prod.meta.id, true)
-        : window.cascade.generateMagicPrompts(prod.meta.id);
+      : window.cascade.setMagicEnabled(prod.meta.id, true);
     void run.then((next) => {
       applySnapshot(next); void refreshList();
       void refreshPromptAfterMagic(next);
     }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** Magic stage 1: build/refresh the Story Bible, then open Cast & Sets.
+   *  Writing prompts happens only from the review's Write action. */
+  function startCastReview() {
+    if (!prod || magicBusy) return;
+    setMagicBusy(true); setErr(null);
+    void window.cascade.generateMagicBible(prod.meta.id).then((next) => {
+      applySnapshot(next); void refreshList();
+      setCastReviewOpen(true);
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setMagicBusy(false));
+  }
+
+  /** One Cast & Sets decision (map / text-only / pending create). Mapping
+   *  edits pass confirmed=false: only "Looks right" moves a row to Ready. */
+  function decideCast(entityName: string, refIds: string[], textOnly: boolean, pendingCreate: boolean, confirmed = false) {
+    if (!prod || castBusy) return;
+    setCastBusy(entityName); setErr(null);
+    void window.cascade.setMagicRefDecision(prod.meta.id, entityName, refIds, textOnly, pendingCreate, confirmed).then((next) => {
+      applySnapshot(next); void refreshList();
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setCastBusy(null));
+  }
+
+  /** Send a cast need to the Image Suite to create its reference; the need
+   *  is marked pending first so the flow survives leaving and returning. */
+  function createCastInSuite(need: MagicCastNeed) {
+    if (!prod || castBusy) return;
+    setCastBusy(need.entityName); setErr(null);
+    void window.cascade.setMagicRefDecision(prod.meta.id, need.entityName, [], false, true, false).then((next) => {
+      applySnapshot(next); void refreshList();
+      setCastReviewOpen(false);
+      openImageSuite(prod.meta.id, {
+        mode: "generate",
+        prompt: `${need.descriptor || need.entityName}${next.magicBible?.worldPremise ? ` — ${next.magicBible.worldPremise}` : ""}`,
+        pendingEntity: need.entityName,
+      });
+    }).catch((e) => setErr(String(e).replace(/^Error:\s*/, ""))).finally(() => setCastBusy(null));
   }
 
   /** Regenerate all Magic content prompts (stays enabled). Both views refresh. */
@@ -2952,13 +3078,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Step 3 node graph: run the image generation node (prompt = the
    *  composer's text; result stored on the node, applied when piped). */
   async function runImageGenNode(shotId: string, model: string, resolution: string, params?: Record<string, string>) {
-    if (!prod || nodeImageBusyIds.has(shotId)) return;
+    // No busy guard: the per-node genQueue already serializes submissions, and
+    // a guard here read a stale closure that dropped every queued job after
+    // the first.
+    if (!prod) return;
     setNodeImageBusyIds((prev) => new Set(prev).add(shotId));
     setErr(null);
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const frameParams = params ?? cur?.graphImageParams;
-      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: liveFocusedPrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
+      // The prompt wired into the image node's prompt input wins; the
+      // composer (the paired/live board prompt) is the default wire.
+      const imageTarget = cur ? wiredPromptTarget(cur, "imagegen", "composer") : "composer";
+      const framePrompt = cur && imageTarget !== "composer" ? renderShotPrompt(prod, cur, imageTarget) : liveFocusedPrompt;
+      const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: framePrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
       setProd(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
@@ -2998,9 +3131,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
           ? cur?.graphImageGens?.[cur?.graphImageGenIndex ?? 0]?.path
           : refSource?.imagePath;
       const videoParams = params ?? node?.params;
-      // Render the video prompt from the plugged references at submit time.
+      const badRefs = unusableRefsMessage(mediaProviderId, [...prod.characters, ...prod.products, ...(prod.references ?? [])].filter((r) => (node?.refIds ?? []).includes(r.id)));
+      if (badRefs) { setErr(badRefs); return; }
+      // Render the wired prompt at submit time: whichever prompt node is
+      // plugged into this generator's prompt input (paired by default).
+      const videoTarget = cur ? wiredPromptTarget(cur, videoGenNodeId(node?.id ?? nodeId), { videoprompt: node?.id ?? nodeId }) : { videoprompt: nodeId };
+      const videoContent = cur ? promptContent(cur, videoTarget) : "";
       const videoPrompt = cur
-        ? renderPromptText((node?.prompt ?? "").trim() ? node!.prompt : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, { videoprompt: nodeId }))
+        ? renderPromptText(videoContent.trim() ? videoContent : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, videoTarget))
         : getPromptTemplate("videoMotion");
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { nodeId, prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: node?.refIds ?? [], ...(refSwaps?.length ? { refSwaps } : {}), ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
       setProd(next);
@@ -3038,9 +3176,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     try {
       const cur = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
       const node = (cur?.graphVideoNodes ?? []).find((n) => n.id === nodeId);
-      // Render the edit prompt from the node's plugged references at submit time.
+      // Render the wired prompt at submit time (paired prompt by default);
+      // the paired path keeps the live view text as its fallback.
+      const evTarget = cur ? wiredPromptTarget(cur, editVideoGenNodeId(nodeId), { editvideoprompt: nodeId }) : { editvideoprompt: nodeId };
+      const evOwn = typeof evTarget === "object" && "editvideoprompt" in evTarget && evTarget.editvideoprompt === nodeId;
       const editVideoPrompt = cur
-        ? renderPromptText(node?.prompt ?? prompt, promptRefsFor(prod, cur, { editvideoprompt: nodeId }))
+        ? renderPromptText(evOwn ? (node?.prompt ?? prompt) : promptContent(cur, evTarget), promptRefsFor(prod, cur, evTarget))
         : prompt;
       // Source: a wired video node's selected clip, a wired video reference, or
       // the shot's own video (the default when the source socket is empty).
@@ -3094,7 +3235,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       // Render the edit prompt from the plugged references at submit time —
       // the stored node prompt is content-only, so the live style/brand text
       // is always current (no baked copy from connect time).
-      const editPrompt = cur ? renderShotPrompt(prod, cur, { editprompt: nodeId }) : (node?.prompt ?? "");
+      const editPrompt = cur ? renderShotPrompt(prod, cur, wiredPromptTarget(cur, `editgen:${nodeId}`, { editprompt: nodeId })) : (node?.prompt ?? "");
       const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: editPrompt, model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
       setProd(next);
       bustOne(shotId);
@@ -3285,7 +3426,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setProd(next);
     try {
       const merged = await window.cascade.updateGraphLayout(current.meta.id, shotId, layout);
-      applySnapshot(merged);
+      // A viewport-only save whose round-trip brought no news (nothing else
+      // moved main-side meanwhile) adopts just the stamped rev: wholesale-
+      // applying the snapshot would bust every shot/prod identity and
+      // rebuild the open canvas to show a pan/zoom the user already sees.
+      // Any other difference falls back to the full snapshot apply.
+      const viewportOnly = "viewport" in layout && Object.keys(layout).length === 1;
+      if (viewportOnly && sameSnapshotExceptRev(next, merged)) adoptSavedRev(merged);
+      else applySnapshot(merged);
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
     }
@@ -3548,6 +3696,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
   }
 
+  /** Storyboard: set or clear the frame's border color tag (right-click
+   *  menu, reversible). A visual marker only — no pipeline effect. The flag
+   *  rides the normal whole-document save, like `toggleShotDisabled`. */
+  function setShotColorTag(shotId: string, tag: ShotColorTag | undefined) {
+    const current = prodRef.current;
+    if (!current) return;
+    saveField({
+      scenes: current.scenes.map((sc) => ({
+        ...sc,
+        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, colorTag: tag } : s)),
+      })),
+    });
+  }
+
   /** Step 3: turn the current shift-click range into a shot sequence. The
    *  overlap guard lives in `sequenceOverlapReason` (a shot belongs to at
    *  most one sequence); the strip shows its verdict inline. */
@@ -3715,11 +3877,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Same copy as `saveAsReference`, but resolves the created reference so the
    *  node graph can place its node and wire it to the socket it was dropped on. */
-  async function saveGenerationAsReferenceRef(shotId: string, rel: string): Promise<GraphRef | null> {
+  async function saveGenerationAsReferenceRef(shotId: string, rel: string, name?: string): Promise<GraphRef | null> {
     const current = prodRef.current;
     if (!current || !rel) return null;
     const prodId = current.meta.id;
-    const choice = await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
+    // A wired node output is named after its node (no popup); a manual save asks.
+    const choice = name ? { name } : await promptReferenceSave(nextSavedRefName(), { title: "Save as reference" });
     if (!choice || prodRef.current?.meta.id !== prodId) return null;
     try {
       const next = await window.cascade.saveGenerationAsReference(prodId, shotId, rel, undefined, choice);
@@ -3915,11 +4078,18 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** The active provider has no upscale path (OpenArt MCP) — the upscale node
    *  and the Image Suite's Upscale mode are disabled with an explanatory hint. */
+  const refWarning = (() => {
+    if (!prod) return null;
+    const all = [...prod.characters, ...prod.products, ...(prod.references ?? [])];
+    const used = new Set(prod.scenes.flatMap((sc) => sc.shots).flatMap((s) => (s.graphVideoNodes ?? []).flatMap((n) => n.refIds ?? [])));
+    return unusableRefsMessage(mediaProviderId, all.filter((r) => used.has(r.id)));
+  })();
   const upscaleUnavailable = !providerSupportsUpscale(mediaProviderId);
 
   /** The active provider has no video-edit path (OpenArt MCP/CLI) — the
    *  edit-video node is disabled with an explanatory hint. */
   const videoEditUnavailable = !providerSupportsVideoEdit(mediaProviderId);
+  const genjutsuUnavailable = !providerSupportsGenjutsu(mediaProviderId);
 
   /** The Seedance 2.5 draft → 1080p finalize is Higgsfield-CLI only. */
   const draftUpgradeAvailable = providerSupportsDraftUpgrade(mediaProviderId);
@@ -4319,10 +4489,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
                     if (files.length) {
                       const file = files[0];
-                      if (file.size > 15 * 1024 * 1024) { setErr("That image is larger than 15 MB — use a smaller one."); return; }
                       try {
-                        const dataUrl = await fileToDataUrl(file);
-                        await styleFromImageDataUrl(dataUrl);
+                        const dataUrl = await importableImageDataUrl(file);
+                        if (dataUrl) await styleFromImageDataUrl(dataUrl);
                       } catch { setErr("Couldn't read the dropped image."); }
                     }
                   }}
@@ -4387,6 +4556,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               <CharacterBuilderSection
                 prodId={prod.meta.id}
                 characters={prod.characters}
+                usage={refUsage}
                 models={imageCharacterModels}
                 references={allPromptRefs(prod)}
                 refNameById={referenceNamesById(prod)}
@@ -4417,9 +4587,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 prodId={prod.meta.id}
                 categories={prod.referenceCategories ?? []}
                 items={prod.references ?? []}
+                usage={refUsage}
                 onAddCategory={addCategory}
                 onRenameCategory={renameCategory}
                 onAddReference={addRef}
+                onAddMediaFile={(file, categoryId) => void addDroppedMediaReference(file, categoryId)}
                 onAttach={(id) => void attachRefArtwork(id)}
                 onRemove={removeRef}
                 onRename={(id, name) => void updateRef(id, name)}
@@ -4428,6 +4600,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onGenerate={(categoryId) => setRefGen({ categoryId })}
                 onEditRef={(ref) => setRefGen({ refId: ref.id })}
                 onRescan={rescanRefFolder}
+                onSetPurpose={setRefPurpose}
+                onDescribe={describeRef}
                 onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
             </DesignSection>
@@ -4465,12 +4639,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 >
                   {magicBusy ? "…" : prod.magicEnabled ? <><MagicIcon size={13} /> Magic On</> : <><MagicIcon size={13} /> Magic Prompt</>}
                 </button>
+                {prod.magicBible && (
+                  <button
+                    className="prod-btn prod-magic-refresh"
+                    disabled={magicBusy}
+                    onClick={() => setCastReviewOpen(true)}
+                    title="Review who/what depicts each character, environment, and prop before prompts are written"
+                  >
+                    Cast &amp; sets{magicCastReviewCount(prod) ? ` · ${magicCastReviewCount(prod)} to review` : ""}
+                  </button>
+                )}
                 {prod.magicEnabled && (
                   <button
                     className="prod-btn prod-magic-refresh"
                     disabled={magicBusy}
-                    onClick={regenMagic}
-                    title="Regenerate Magic Prompts (AI will re-generate all content prompts)"
+                    onClick={startCastReview}
+                    title="Re-read the script, review Cast & sets, then regenerate all Magic Prompts"
                   >
                     <RegenerateIcon size={13} /> Regenerate all magic prompts
                   </button>
@@ -4485,6 +4669,18 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 <> {mediaProviderName}{mediaProviderId.endsWith("-cli") ? " CLI isn't set up" : " MCP isn't connected"}, so use <strong>Export prompts</strong> to generate frames externally.</>
               )}
             </p>
+            {castReviewOpen && prod.magicBible && (
+              <MagicCastReview
+                prod={prod}
+                busy={castBusy}
+                onMap={(entityName, refIds) => decideCast(entityName, refIds, false, false, false)}
+                onConfirm={(entityName, refIds) => decideCast(entityName, refIds, false, false, true)}
+                onTextOnly={(entityName) => decideCast(entityName, [], true, false, false)}
+                onCreateInSuite={createCastInSuite}
+                onClose={() => setCastReviewOpen(false)}
+                onWrite={() => { setCastReviewOpen(false); regenMagic(); }}
+              />
+            )}
             <div className="prod-boards-controls">
               <div className="prod-boards-config-row">
                   <label className="prod-openart-label">Model
@@ -4583,6 +4779,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               </div>
             </div>
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
+            {refWarning && <div className="hint" role="status">⚠ {refWarning}</div>}
             {shotCount > 0 && (
               <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
               <div
@@ -4628,6 +4825,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onRecheckVideo={boardActions.onRecheckVideo}
                     onClearPending={boardActions.onClearPending}
                     onImport={boardActions.onImport}
+                    onOpenGraph={boardActions.onOpenGraph}
                     onEdit={boardActions.onEdit}
                     onVideo={boardActions.onVideo}
                     onTextChange={boardActions.onTextChange}
@@ -4653,6 +4851,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     onInsertAfter={boardActions.onInsertAfter}
                     onDelete={boardActions.onDelete}
                     onToggleDisabled={boardActions.onToggleDisabled}
+                    onSetColorTag={boardActions.onSetColorTag}
                     zoomOpen={boardZoomId === shot.id}
                     onZoomChange={boardActions.onZoomChange}
                     onZoomNavigate={boardActions.onZoomNavigate}
@@ -4759,7 +4958,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   videoModels={videoModels}
                   endFrameModelIds={endFrameModelIds}
                   upscaleUnavailable={upscaleUnavailable}
-                  videoEditUnavailable={videoEditUnavailable}
+                  videoEditUnavailable={videoEditUnavailable} genjutsuUnavailable={genjutsuUnavailable}
                   draftUpgradeAvailable={draftUpgradeAvailable}
                   defaultImageModel={prod.openArt?.model ?? imageModels[0]?.id ?? ""}
                   defaultImageResolution={prod.openArt?.resolution ?? "1k"}
@@ -4781,7 +4980,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   cameraGridBusy={graphShotId ? (remoteBusy?.cameraGrid ?? []).includes(graphShotId) : false}
                   upscaleBusy={graphShotId ? (remoteBusy?.upscale ?? []).includes(graphShotId) : false}
                   videoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => nodeVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
-                  editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => n.mode === "edit" && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
+                  editVideoBusyNodeIds={graphShotId ? (gs.graphVideoNodes ?? []).filter((n) => isVideoEditFamilyMode(n.mode) && nodeEditVideoBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   editBusyNodeIds={graphShotId ? (gs.graphEditNodes ?? []).filter((n) => nodeEditBusyAll.has(`${graphShotId}:${n.id}`)).map((n) => n.id) : []}
                   busyTweenBlock={graphShotId ? tweenBusyAll[graphShotId] ?? null : null}
                   tweenStitching={graphShotId ? tweenStitchingAll.has(graphShotId) : false}
@@ -4789,10 +4988,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onCycleGraphGen={(kind, dir, nodeId) => { if (graphShotId) cycleGraphGen(graphShotId, kind, dir, nodeId); }}
           onDeleteGeneration={(rel) => (graphShotId ? deleteGeneration(graphShotId, rel) : undefined)}
                   onSaveAsReference={(rel) => { if (graphShotId) saveAsReference(graphShotId, rel); }}
-                  onSaveGenerationAsReference={(rel) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel) : Promise.resolve(null)}
+                  onSaveGenerationAsReference={(rel, name) => graphShotId ? saveGenerationAsReferenceRef(graphShotId, rel, name) : Promise.resolve(null)}
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}
+                  onWaveformColorRef={(id, colorId) => setRefWaveformColor(id, colorId)}
                   onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
                   onPipeImageToVideo={(nodeId) => { if (graphShotId) pipeImageToVideo(graphShotId, nodeId); }}
                   onPipeEditToVideo={(nodeId, sourceNodeId) => { if (graphShotId) pipeEditToVideo(graphShotId, nodeId, sourceNodeId); }}
@@ -4837,6 +5037,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onDropFile={(file) => addFileReference(seq.shotIds[0] ?? seq.id, file)}
                   onPasteFiles={(files) => addPastedReferences(seq.shotIds[0] ?? seq.id, files)}
                   onRenameRef={(refId, name) => { void updateRef(refId, name); }}
+                  onWaveformColorRef={(refId, colorId) => setRefWaveformColor(refId, colorId)}
                   onSaveGenerationAsReference={(rel) => saveSequenceGenerationAsReference(seqCanvasId, rel)}
                   onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
                   onDeleteGeneration={(rel) => deleteSequenceTake(seqCanvasId, rel)}

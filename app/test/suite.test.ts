@@ -14,6 +14,7 @@ const { dataDir } = vi.hoisted(() => {
 vi.mock("electron", () => ({ app: { getPath: () => dataDir } }));
 
 import {
+  draftFromSuiteEntry,
   emptySuiteSession,
   isProductionRelative,
   normalizeSuiteSession,
@@ -57,6 +58,46 @@ describe("isProductionRelative", () => {
     expect(isProductionRelative("C:/Windows/x.png")).toBe(false);
     expect(isProductionRelative("")).toBe(false);
     expect(isProductionRelative("a\0b")).toBe(false);
+  });
+});
+
+describe("draftFromSuiteEntry (exact replay)", () => {
+  it("copies the entry verbatim: prompt, model, refs, style, params", () => {
+    const e = entry("1", {
+      prompt: "Style: ink wash\n\na hero @[Gandalf]",
+      styleId: "st1",
+      aspectRatio: "4:3",
+      refIds: ["r1", "r2"],
+      params: { quality: "high" },
+    });
+    expect(draftFromSuiteEntry(e)).toEqual({
+      mode: "generate",
+      prompt: "Style: ink wash\n\na hero @[Gandalf]",
+      model: "openart:foo",
+      resolution: "1k",
+      refIds: ["r1", "r2"],
+      aspectRatio: "4:3",
+      styleId: "st1",
+      params: { quality: "high" },
+    });
+  });
+
+  it("leaves absent optionals absent so a previous draft can't leak in", () => {
+    const d = draftFromSuiteEntry(entry("2"));
+    expect(d.aspectRatio).toBeUndefined();
+    expect(d.sourceRefId).toBeUndefined();
+    expect(d.sourcePath).toBeUndefined();
+    expect(d.styleId).toBeUndefined();
+    expect(d.params).toBeUndefined();
+  });
+
+  it("keeps an edit entry's source mutually exclusive and style-free", () => {
+    const d = draftFromSuiteEntry(entry("3", { kind: "edit", prompt: "Style: ink wash\n\nbrighten it", sourcePath: "boards/0100/f.png", styleId: "st1" }));
+    expect(d.prompt).toBe("brighten it");
+    expect(d.mode).toBe("edit");
+    expect(d.sourcePath).toBe("boards/0100/f.png");
+    expect(d.sourceRefId).toBeUndefined();
+    expect(d.styleId).toBeUndefined();
   });
 });
 

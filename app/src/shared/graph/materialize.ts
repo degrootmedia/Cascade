@@ -18,16 +18,19 @@
  * time), so there is no wire to migrate.
  */
 import type { Graph, GraphEdge, GraphNode, GraphVideoNode, ProductionShot } from "../ipc.js";
-import { TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
+import { TWEEN_KEY_IMGGEN, isVideoGenRef, isVideoEditFamilyMode, parseEditNodeKeyframe, videoGenNodeId, videoPromptNodeId, editVideoGenNodeId, editVideoPromptNodeId } from "../ipc.js";
 import { hasBrandParagraph, refTagNames } from "../prompt-grammar.js";
 import { compactPromptRefEdges, editVideoEdgeId, videoEdgeId, videoNodeCanvasId, tweenKeyToNode } from "./connect.js";
 import { REF_SOCKET_RE } from "./ports.js";
 import { normalizeGraph } from "./normalize.js";
+import { buildRefNameIndex, refLookupKey } from "../ref-names.js";
 
 /** Minimal reference view the materializer needs: identity, name (tag match), media, artwork. */
 export interface GraphRefView {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to (tag resolution). */
+  aliases?: string[];
   /** Dropped video/audio files carry media; absent = image. */
   media?: "video" | "audio";
   artwork?: string;
@@ -97,7 +100,7 @@ export function tweenActive(shot: ProductionShot): boolean {
 export function editVideoActive(shot: ProductionShot): boolean {
   const positions = shot.graphLayout?.positions ?? {};
   return !!(
-    (shot.graphVideoNodes ?? []).some((n) => n.mode === "edit") ||
+    (shot.graphVideoNodes ?? []).some((n) => isVideoEditFamilyMode(n.mode)) ||
     positions.editvideo || positions.editvideoprompt ||
     shot.graphOutputSource === "editvideo"
   );
@@ -110,12 +113,12 @@ export function editVideoActive(shot: ProductionShot): boolean {
  * become `ref:missing-N` nodes exactly as the canvas draws them.
  */
 export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Graph {
-  const byName = new Map(refs.map((r) => [r.name.toLowerCase(), r]));
+  const byName = buildRefNameIndex(refs);
   const refIds = new Set(refs.map((r) => r.id));
   const prompt = shot.prompt ?? "";
   const videoNodes = videoNodesFor(shot);
-  const generateVideoNodes = videoNodes.filter((n) => n.mode !== "edit");
-  const editVidNodes = videoNodes.filter((n) => n.mode === "edit");
+  const generateVideoNodes = videoNodes.filter((n) => !isVideoEditFamilyMode(n.mode));
+  const editVidNodes = videoNodes.filter((n) => isVideoEditFamilyMode(n.mode));
   const editNodes = shot.graphEditNodes ?? [];
   const positions = shot.graphLayout?.positions ?? {};
 
@@ -134,10 +137,11 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   const seenNames = new Set<string>();
   const addNames = (names: string[]): void => {
     for (const name of names) {
-      const lc = name.toLowerCase();
+      const citedRef = byName.get(refLookupKey(name));
+      const lc = citedRef ? `id:${citedRef.id}` : name.toLowerCase();
       if (seenNames.has(lc)) continue;
       seenNames.add(lc);
-      unionNames.push(name);
+      unionNames.push(citedRef ? citedRef.name : name);
     }
   };
   addNames(refTagNames(prompt));
@@ -153,7 +157,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
 
   // Reference nodes: tagged in any prompt, plus layout-placed (untagged) ones.
   unionNames.forEach((name, i) => {
-    const ref = byName.get(name.toLowerCase());
+    const ref = byName.get(refLookupKey(name));
     addNode(`ref:${ref?.id ?? `missing-${i}`}`, "ref", name);
   });
   for (const id of Object.keys(positions)) {
@@ -259,9 +263,9 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
 
   // Reference → prompt edges, in each prompt's tag order (socket index = order).
   const tagNodeId = (name: string): string => {
-    const idx = unionNames.findIndex((n) => n.toLowerCase() === name.toLowerCase());
-    const ref = byName.get(name.toLowerCase());
-    return `ref:${ref?.id ?? `missing-${idx}`}`;
+    const cited = byName.get(refLookupKey(name));
+    const idx = unionNames.findIndex((n) => n.toLowerCase() === (cited ? cited.name : name).toLowerCase());
+    return `ref:${cited?.id ?? `missing-${idx}`}`;
   };
   const refEdges = (names: string[], target: string): void => {
     names.forEach((name, i) => {
@@ -278,7 +282,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   // reference): rebuilt from the node's gen-ref sentinels in `refIds`,
   // continuing the socket indices past the tag edges so the two never collide.
   for (const n of [...drawVideoNodes, ...drawEditVidNodes]) {
-    const target = n.mode === "edit" ? editVideoPromptNodeId(n.id) : videoPromptNodeId(n.id);
+    const target = isVideoEditFamilyMode(n.mode) ? editVideoPromptNodeId(n.id) : videoPromptNodeId(n.id);
     const base = refTagNames(n.prompt ?? "").length;
     (n.refIds ?? []).filter((id) => isVideoGenRef(id)).forEach((genId, g) => {
       const idx = base + g;
@@ -378,7 +382,7 @@ export function materializeGraph(shot: ProductionShot, refs: GraphRefView[]): Gr
   if (shot.graphOutputSource === "videogen") {
     const named = shot.graphOutputVideoNodeId ? allVideoForEdit.find((n) => n.id === shot.graphOutputVideoNodeId) : undefined;
     if (named) {
-      const edgeId = named.mode === "edit" ? editVideoEdgeId("e-editvideo-out", named.id) : videoEdgeId("e-vid-out", named.id);
+      const edgeId = isVideoEditFamilyMode(named.mode) ? editVideoEdgeId("e-editvideo-out", named.id) : videoEdgeId("e-vid-out", named.id);
       edge(edgeId, videoNodeCanvasId(named), "out", "output", "in-out");
     } else if (hasVideo && drawVideoNodes[0]) {
       edge(videoEdgeId("e-vid-out", drawVideoNodes[0].id), videoGenNodeId(drawVideoNodes[0].id), "out", "output", "in-out");

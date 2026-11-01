@@ -33,6 +33,10 @@ export interface ProductionMeta {
   shotCount: number;
 }
 
+/** A storyboard frame's border color tag (right-click menu): a user-managed
+ *  status signal painted around the frame. Marker only — no pipeline effect. */
+export type ShotColorTag = "green" | "yellow" | "red";
+
 export interface ProductionShot {
   /** Stable identity — survives renumbering and reordering. */
   id: string;
@@ -273,6 +277,12 @@ graphImageGenIndex?: number;
    *  and the Step 5 export. Generation, numbering, and media are untouched,
    *  so re-enabling restores it exactly. */
   disabled?: boolean;
+  /** The frame's color tag in the storyboard (right-click menu), painted as
+   *  a border in the tag color. A marker only — generation, the animatic,
+   *  and export are all unaffected. Absent = untagged. (The short-lived
+   *  boolean `complete` marker it replaced reads back as `"green"` via the
+   *  read-repair in productions.ts.) */
+  colorTag?: ShotColorTag;
   /** True once a re-ingest moved this shot out of the active storyboard into
    *  `Production.outdatedShots`. Its media was relocated to
    *  `boards/outdated/<id>/` so a fresh shot re-using its number can't
@@ -293,6 +303,8 @@ export interface ProductionScene {
 export interface CharacterSheet {
   id: string;
   name: string;
+  /** Script/model names this reference also answers to: an `@[Alias]` tag resolves to this entry (see `resolveRefByTagName` in ref-names.ts). */
+  aliases?: string[];
   /** Canonical descriptor prepended to every prompt using this character. */
   key: string;
   /** Reference image (data URL) attached in Step 2. */
@@ -320,15 +332,26 @@ export interface CharacterSheetBuilder {
   params?: Record<string, string | number | boolean | string[]>;
 }
 
-/** A product whose look must stay consistent (label, packaging, hero item). */
+/** A product whose look must stay consistent (label, packaging, hero item). Aliases: script/model names an `@[Alias]` tag may use for it. */
 export interface ProductRef {
   id: string;
   name: string;
   /** Reference image (data URL) attached in Step 2. */
   artwork?: string;
+  /** Script/model names this reference also answers to (`@[Alias]` → this). */
+  aliases?: string[];
   /** Workspace-relative path of the reference image on disk. */
   imagePath?: string;
 }
+
+/** What a reference is FOR — governs whether Magic may cast/cite it:
+ *  - `subject`: a character, product, or prop that appears in frame.
+ *  - `environment`: a set/location/backdrop.
+ *  - `style`: look only; prompt/LLM context, never uploaded, never a subject.
+ *  - `layout`: blockouts/composition plates; generation inputs, never cast.
+ *  - `inspiration`: mood only; never uploaded as a subject.
+ *  Absent = infer from name/category (strong signals only), else `subject`. */
+export type ReferencePurpose = "subject" | "environment" | "style" | "layout" | "inspiration";
 
 /** A user-added reference (material, texture, mood, hero prop) that must be
  *  applied to specific shots. Created in Step 2; associated to shots in Step 3. */
@@ -351,14 +374,26 @@ export interface CustomRef {
   shotIds?: string[];
   /** User-created category; absent means uncategorized. */
   categoryId?: string;
-  /** Style-only override: auto-attaches with a style-only clause. */
+  /** Script/model names this reference also answers to (`@[Alias]` → this). */
+  aliases?: string[];
+  /** Style-only override: style-tagged (context only, never uploaded).
+   *  Kept in sync with an explicit `purpose` on read. */
   styleOnly?: boolean;
+  /** What this reference is for (Magic casting/citation). See ReferencePurpose. */
+  purpose?: ReferencePurpose;
+  /** One-line "what this image shows" card for Magic binding and tooltips.
+   *  User-editable; may be auto-drafted by vision. NOT prompt direction. */
+  visualSummary?: string;
+  /** Waveform color for an audio reference: a `SEQUENCE_ACCENT_COLORS`
+   *  palette id (hex is presentation only). Absent = the `blue` default.
+   *  Set from the audio node's right-click menu; follows the file. */
+  waveformColor?: string;
 }
 
 export interface ReferenceCategory {
   id: string;
   name: string;
-  /** "style" refs auto-attach to every submission with a style-only clause. */
+  /** "style" refs are style-tagged: prompt context only, never uploaded. */
   kind?: "content" | "style";
 }
 
@@ -601,6 +636,106 @@ export interface MoodboardLayout {
   frames?: MoodboardFrame[];
 }
 
+/** One entity in the Magic Prompt Story Bible: a character, product,
+ *  location, or prop the whole storyboard must describe consistently.
+ *  `refName` binds it to the user's reference (canonical citable name);
+ *  absent means the script needs it but no reference exists yet. */
+export interface MagicBibleEntity {
+  name: string;
+  kind: "character" | "product" | "location" | "prop" | "other";
+  /** Canonical one-line visual descriptor every shot reuses verbatim. */
+  descriptor: string;
+  refName?: string;
+  /** Every roster reference depicting this entity (groups bind several,
+   *  e.g. a gang → Villain 1/2/3). `refName` mirrors the first entry. */
+  refNames?: string[];
+  /** Who bound this entity: the user (Cast & Sets review), the bible model,
+   *  or deterministic auto-binding. User bindings are never overridden. */
+  boundBy?: "user" | "model" | "auto";
+  confidence?: "high" | "medium" | "low";
+  /** Plain-language why ("Matched Villains category", "You mapped this"). */
+  bindReason?: string;
+  /** The user explicitly confirmed this mapping ("Looks right"). Mapping
+   *  edits alone do NOT confirm — the row stays in review until then. */
+  confirmed?: boolean;
+  /** Other names the script uses for this entity. */
+  aliases?: string[];
+}
+
+/** Per-scene beat in the Magic Prompt Story Bible. */
+export interface MagicBibleScene {
+  number: number;
+  title: string;
+  location?: string;
+  timeOfDay?: string;
+  beat: string;
+  /** Compressed standalone setting sentence for this scene (where we are,
+   *  what the surroundings are made of, at what scale) — restated in every
+   *  shot prompt so the image model needs no other context. */
+  settingAnchor?: string;
+}
+
+/** Per-shot storytelling plan in the Magic Prompt Story Bible. */
+export interface MagicBibleShotPlan {
+  /** Displayed 4-digit shot number ("0100"). */
+  number: string;
+  /** What this shot does in the story (establish / reveal / payoff / …). */
+  purpose: string;
+  /** Framing intent (wide/medium/closeup, angle) for rhythm across cuts. */
+  framing?: string;
+  /** Entity names (bible names) visible in frame. */
+  present?: string[];
+  /** Canonical reference names this shot MUST cite as `@[Name]`. */
+  mustCite: string[];
+}
+
+/** The whole-script analysis Magic Prompt generation is grounded in.
+ *  Main-owned (generated main-side in one bounded pass over the full
+ *  breakdown; whole-document renderer saves never overwrite it). */
+export interface MagicBible {
+  version: 1;
+  synopsis: string;
+  /** One-sentence world/setting premise (scale, place, what the world is
+   *  made of) that EVERY shot prompt restates — the image model sees one
+   *  prompt at a time and has no memory of this bible. */
+  worldPremise?: string;
+  /** Fill-ins the model chose where the script was silent — user-visible. */
+  assumptions: string[];
+  scenes: MagicBibleScene[];
+  entities: MagicBibleEntity[];
+  shotPlans: MagicBibleShotPlan[];
+  /** Hash of the inputs (shots + reference roster); mismatch = stale. */
+  inputHash: string;
+  generatedAt: string;
+  model?: string;
+}
+
+/** A user's Cast & Sets decision for one bible entity, keyed in
+ *  `Production.magicRefDecisions` by normalized entity name. Reapplied
+ *  deterministically on every bible regeneration before any model binding. */
+export interface MagicRefDecision {
+  entityName: string;
+  /** Mapped reference ids (empty when text-only or pending creation). */
+  refIds: string[];
+  textOnly?: boolean;
+  /** Explicitly confirmed via "Looks right". Absent on legacy decisions
+   *  (treated as confirmed); mapping edits write `false` until confirmed. */
+  confirmed?: boolean;
+  /** User went off to create this reference (suite/RefGen) — resumable. */
+  pendingCreate?: boolean;
+  updatedAt: string;
+}
+
+/** One cited name no reference resolves (Magic Prompt reconciliation). */
+export interface MagicUnresolvedRef {
+  /** The name as cited, e.g. "MainCharacter" from `@[MainCharacter]`. */
+  citedName: string;
+  /** Shot numbers (display) citing it, in storyboard order. */
+  shotNumbers: string[];
+  /** Deterministically suggested existing reference (canonical name). */
+  suggestedRefName?: string;
+}
+
 export interface Production {
   meta: ProductionMeta;
   /** Pipeline step the user is focused on (1..5). */
@@ -656,6 +791,17 @@ export interface Production {
    *  remain separate. The original prompts stay in `shot.prompt` untouched. */
   magicPrompts?: Record<string, string>;
   magicEnabled?: boolean;
+  /** Magic Prompt Story Bible: the whole-script analysis (synopsis,
+   *  entities, assumptions, per-shot plans) the bulk Magic pass writes and
+   *  per-scene/per-shot generation is grounded in. Main-owned like
+   *  `magicPrompts`; absent on productions that never ran the new pass. */
+  magicBible?: MagicBible;
+  /** Cast & Sets review decisions (user mappings / text-only / pending
+   *  creates), keyed by normalized entity name. Main-owned like the bible. */
+  magicRefDecisions?: Record<string, MagicRefDecision>;
+  /** Cited names the user dismissed in Magic reconciliation ("plain noun,
+   *  not a reference") — stored lowercased; renderer-owned via saves. */
+  magicDismissedRefs?: string[];
   /** Board-wide storyboard seed: fixed once per production so the same style
    *  frame + frozen model/resolution repeats as closely as the vendor allows. */
   lookSeed?: number;

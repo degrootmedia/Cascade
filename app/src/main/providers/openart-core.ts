@@ -171,12 +171,21 @@ export function extractOpenArtVideoOptions(props: Record<string, unknown>): Vide
       // — the sentinel const (-1/0/auto) is filtered out by the n > 0 check.
       for (const c of [...(p.oneOf ?? []), ...(p.anyOf ?? [])]) {
         const cand = (c as { const?: unknown } | null | undefined)?.const;
+        const nestedEnum = (c as { enum?: unknown[] } | null | undefined)?.enum;
+        if (Array.isArray(nestedEnum)) {
+          for (const v of nestedEnum) {
+            const n = openArtDurationNumber(v);
+            if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
+          }
+        }
         if (cand === undefined) continue;
         const n = openArtDurationNumber(cand);
         if (Number.isFinite(n) && n > 0 && n <= 120) nums.add(Math.round(n));
       }
-      // Numeric bounds as a range (integer/number, or type-less min/max).
-      if ((p.minimum !== undefined || p.maximum !== undefined) &&
+      // Numeric bounds as a range (integer/number, or type-less min/max) —
+      // only when no closed set was published: an explicit list wins over
+      // bounds, which would otherwise add unsupported in-between lengths.
+      if (nums.size === 0 && (p.minimum !== undefined || p.maximum !== undefined) &&
           (p.type === undefined || p.type === "integer" || p.type === "number")) {
         const min = Number(p.minimum) > 0 ? Math.ceil(Number(p.minimum)) : 1;
         const max = Number(p.maximum) > 0 ? Math.floor(Number(p.maximum)) : min + 15;

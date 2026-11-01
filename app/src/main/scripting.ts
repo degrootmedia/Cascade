@@ -33,11 +33,15 @@ function clean(text: string): string {
 }
 
 async function fromPdf(buf: Buffer): Promise<string> {
-  // Import the inner entry point: the package root runs debug code when it
-  // thinks it's executed outside a bundler. Types come from pdf-parse.d.ts.
-  const { default: pdf } = await import("pdf-parse/lib/pdf-parse.js");
-  const parsed = await pdf(buf);
-  return parsed.text;
+  // pdf-parse v2 is class-based; the v1 "pdf-parse/lib/pdf-parse.js"
+  // subpath no longer exists in the package's exports map.
+  const { PDFParse } = await import("pdf-parse");
+  const parser = new PDFParse({ data: buf });
+  try {
+    return (await parser.getText()).text;
+  } finally {
+    await parser.destroy();
+  }
 }
 
 async function fromDocx(buf: Buffer): Promise<string> {
@@ -60,7 +64,19 @@ async function fromGoogleDoc(url: string): Promise<string> {
     );
   }
   if (!res.ok) throw new Error(`Google Docs export failed (HTTP ${res.status})`);
-  return await res.text();
+  const text = await res.text();
+  // A doc that isn't link-shared doesn't reliably 403 here: the export can
+  // land on a sign-in/interstitial WEB PAGE with HTTP 200. Returning that
+  // HTML as "script text" sends a login page to the LLM — observed live:
+  // the same script ingested fine as .docx while the Google-link attempts
+  // failed at both LLM providers. Refuse HTML with the sharing hint.
+  const contentType = res.headers?.get("content-type") ?? "";
+  if (contentType.includes("text/html") || /^\s*(<!doctype html|<html[\s>])/i.test(text)) {
+    throw new Error(
+      "Google returned a web page instead of the document — set sharing to “Anyone with the link”, or download it as .docx and import the file."
+    );
+  }
+  return text;
 }
 
 /**

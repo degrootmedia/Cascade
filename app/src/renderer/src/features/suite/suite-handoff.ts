@@ -6,7 +6,7 @@
  * would add a channel for nothing. `App.tsx` listens for `SUITE_OPEN_EVENT`,
  * switches to the suite view, and the suite drains the pending seed on mount.
  */
-import type { SuiteSeed } from "../../../../shared/ipc.js";
+import type { SuiteDraft, SuiteSeed } from "../../../../shared/ipc.js";
 
 export const SUITE_OPEN_EVENT = "cascade:suite-open";
 
@@ -26,8 +26,23 @@ function normalizeSeed(seed?: Partial<SuiteSeed>): SuiteSeed {
   if (seed?.aspectRatio) draft.aspectRatio = seed.aspectRatio;
   if (seed?.sourceRefId) draft.sourceRefId = seed.sourceRefId;
   if (!seed?.sourceRefId && seed?.sourcePath) draft.sourcePath = seed.sourcePath;
+  if (seed?.styleId) draft.styleId = seed.styleId;
   if (seed?.params) draft.params = seed.params;
+  if (typeof seed?.pendingEntity === "string" && seed.pendingEntity.trim()) draft.pendingEntity = seed.pendingEntity.trim();
   return draft;
+}
+
+/** Merge a handoff seed over the suite's current draft. The seed is
+ *  authoritative for the fields it carries a prompt with: its style pick
+ *  replaces (or clears) the draft's, and its edit source replaces the
+ *  draft's — the source kinds are mutually exclusive everywhere the draft
+ *  is read (a leftover `sourceRefId` would shadow the handed-off frame's
+ *  `sourcePath` in the picker, the canvas, and the submit alike). */
+export function applySuiteSeed(draft: SuiteDraft, seed: SuiteSeed): SuiteDraft {
+  const next: SuiteDraft = { ...draft, ...seed, styleId: seed.styleId };
+  if (seed.sourceRefId) next.sourcePath = undefined;
+  else if (seed.sourcePath) next.sourceRefId = undefined;
+  return next;
 }
 
 /** Open the suite (optionally pre-seeded) for a production. Dispatches the

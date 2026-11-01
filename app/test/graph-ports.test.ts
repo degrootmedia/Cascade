@@ -69,12 +69,23 @@ describe("refOutputMedia", () => {
 });
 
 describe("canConnect", () => {
-  // Fixed prompt pipes: text flows prompt→generator, kind-gated.
+  // Prompt pipes: text flows prompt→generator; any prompt kind may feed
+  // any generator's prompt input.
   it("composer→imagegen:in-prompt yes; cross prompt pipes no", () => {
     expect(canConnect(ep("composer", "out", "text"), to("imagegen", "in-prompt"))).toBe(true);
     expect(canConnect(ep("videoprompt", "out", "text"), to("videogen", "in-prompt"))).toBe(true);
-    expect(canConnect(ep("composer", "out", "text"), to("videogen", "in-prompt"))).toBe(false);
-    expect(canConnect(ep("videoprompt", "out", "text"), to("imagegen", "in-prompt"))).toBe(false);
+    expect(canConnect(ep("composer", "out", "text"), to("videogen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("videoprompt", "out", "text"), to("imagegen", "in-prompt"))).toBe(true);
+    // Every prompt kind feeds every generator's prompt input.
+    expect(canConnect(ep("composer", "out", "text"), to("editgen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("composer", "out", "text"), to("editvideo", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("editprompt", "out", "text"), to("videogen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("editvideoprompt", "out", "text"), to("editgen", "in-prompt"))).toBe(true);
+    expect(canConnect(ep("videoprompt", "out", "text"), to("editvideo", "in-prompt"))).toBe(true);
+    // Non-prompt text sources still cannot feed a prompt input.
+    expect(canConnect(ep("style", "out", "text"), to("videogen", "in-prompt"))).toBe(false);
+    expect(canConnect(ep("brand", "out", "text"), to("imagegen", "in-prompt"))).toBe(false);
+    expect(canConnect(ep("imagegen", "out", "image"), to("videogen", "in-prompt"))).toBe(false);
   });
 
   it("style→in-style yes; brand→in-style and text→in-style no", () => {

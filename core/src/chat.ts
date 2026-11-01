@@ -73,20 +73,66 @@ export function isTransientFailure(msg: string): boolean {
   );
 }
 
-/** Map raw HTTP/network failures to messages a non-developer can act on. */
+/**
+ * The provider's own reason, extracted from an OpenAI-style error body
+ * embedded in a raw failure (`HTTP 403: {"error":{"message":…,"code":…}}`),
+ * formatted as ` (HTTP 403: <message> [<code>])` for display next to the
+ * friendly mapping. Regex rather than JSON.parse: throw sites truncate the
+ * body, so the JSON is often incomplete. Empty when the raw failure carries
+ * neither a status nor a body message.
+ */
+function providerErrorDetail(msg: string): string {
+  const statusMatch = /HTTP (\d{3})/.exec(msg);
+  const status = statusMatch?.[1];
+  const message = /"message"\s*:\s*"([^"]{1,200})"/.exec(msg)?.[1];
+  const code = /"code"\s*:\s*"([^"]{1,80})"/.exec(msg)?.[1];
+  // No error envelope to parse (observed live: bare upstream failures whose
+  // body is plain text or HTML): fall back to the body's own words after
+  // the status prefix so the detail is more than a naked "(HTTP 401)".
+  let raw = "";
+  if (status && !message && !code && statusMatch) {
+    raw = msg.slice(statusMatch.index + statusMatch[0].length).replace(/^:\s*/, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+  const inner = [
+    status ? `HTTP ${status}` : "",
+    message ?? raw,
+    code ? `[${code}]` : "",
+  ].filter(Boolean).join(" ").replace(/^HTTP (\d{3}) /, "HTTP $1: ");
+  return inner ? ` (${redactSecrets(inner)})` : "";
+}
+
+/** Map raw HTTP/network failures to messages a non-developer can act on.
+ *  Mapped HTTP failures keep the provider's own detail (status, message,
+ *  code) appended — several callers rethrow only this friendly string, so
+ *  dropping the detail would destroy the only evidence in the logs. */
 export function friendlyApiError(e: unknown): string {
   const msg = String(e);
-  if (msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
-    return "Your API key was rejected. Check it in Settings.";
+  const lower = msg.toLowerCase();
+  const detail = providerErrorDetail(msg);
+  // Balance first: wallet providers send 402/insufficient_balance, but the
+  // code can also ride a 403 — a funds problem must never read as a bad key.
+  // ("insufficient permissions" is deliberately NOT matched here.)
+  if (msg.includes("HTTP 402") || lower.includes("insufficient_balance") || lower.includes("insufficient credits") || lower.includes("insufficient funds")) {
+    return `You're out of credits/balance — top up your account, then try again.${detail}`;
   }
-  if (msg.includes("HTTP 402") || msg.toLowerCase().includes("insufficient")) {
-    return "You're out of credits. Top up or wait for your monthly reset.";
+  if (msg.includes("HTTP 401") || lower.includes("invalid_api_key")) {
+    return `Your API key was rejected. Check it in Settings.${detail}`;
+  }
+  // 403 is not a bad key: the key authenticated but the provider refused
+  // this request — a key restricted by model/IP or missing the inference
+  // scope passes GET /models yet fails here (Cheaper Inference behaves
+  // exactly this way), and "check your key" sends the user in circles.
+  if (msg.includes("HTTP 403")) {
+    return `Your API key isn't allowed to make this request. The key may be restricted to certain models or IPs, or lack inference permission — check the key's restrictions with your provider, or pick a different model in Settings.${detail}`;
+  }
+  if (lower.includes("insufficient")) {
+    return `You're out of credits/balance — top up your account, then try again.${detail}`;
   }
   if (msg.includes("HTTP 429")) {
-    return "Rate limited by the API — wait a minute and try again.";
+    return `Rate limited by the API — wait a minute and try again.${detail}`;
   }
   if (msg.includes("HTTP 504") || msg.includes("upstream_timeout")) {
-    return "The model timed out repeatedly. Try again, or switch to a faster model.";
+    return `The model timed out repeatedly. Try again, or switch to a faster model.${detail}`;
   }
   // The API wraps every upstream model failure in a generic banner that hides
   // the real reason (provider refusal, content-policy block, timeout, outage).
@@ -95,7 +141,7 @@ export function friendlyApiError(e: unknown): string {
     return "The model failed to respond. This is often a temporary outage, a safety/content block, or a model-specific issue — try again, switch to a different model, or rephrase the request.";
   }
   if (/HTTP 5\d\d/.test(msg)) {
-    return "The API service is temporarily unavailable — try again in a moment.";
+    return `The API service is temporarily unavailable — try again in a moment.${detail}`;
   }
   if (msg.includes("fetch failed") || msg.includes("ENOTFOUND") || msg.includes("EAI_AGAIN") || msg.includes("ECONNRE")) {
     return "Can't reach the API — check your internet connection.";

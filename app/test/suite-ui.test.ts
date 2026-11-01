@@ -172,6 +172,68 @@ describe("SuitePromptPanel style selection", () => {
   });
 });
 
+describe("SuitePromptPanel style dropdown reflects the applied style (Item 3)", () => {
+  it("shows the matching style when the prompt carries its text but the pick was lost", async () => {
+    await renderPanel(
+      { mode: "generate", prompt: "Style: soft-3D look\n\na gondola", model: "openart:x", resolution: "1k", refIds: [] },
+      () => {}
+    );
+    const select = document.querySelector(".prod-prompt-style") as HTMLSelectElement;
+    expect(select.value).toBe("st1");
+  });
+
+  it("shows a removable Custom state for style text no Design style owns, and None strips it without reselecting", async () => {
+    let patched: Partial<SuiteDraft> | null = null;
+    await renderPanel(
+      { mode: "generate", prompt: "Style: some historical look\n\na gondola", model: "openart:x", resolution: "1k", refIds: [] },
+      (p) => { patched = p; }
+    );
+    const select = document.querySelector(".prod-prompt-style") as HTMLSelectElement;
+    // Not "none": a style IS applied, and the dropdown must say so.
+    expect(select.value).not.toBe("");
+    await act(async () => {
+      select.value = "";
+      select.dispatchEvent(new (globalThis as any).window.Event("change", { bubbles: true }));
+    });
+    expect(patched!.styleId).toBeUndefined();
+    expect(patched!.prompt).toBe("a gondola");
+  });
+
+  it("still shows None when no style text is applied and no pick is set", async () => {
+    await renderPanel(
+      { mode: "generate", prompt: "a gondola", model: "openart:x", resolution: "1k", refIds: [] },
+      () => {}
+    );
+    const select = document.querySelector(".prod-prompt-style") as HTMLSelectElement;
+    expect(select.value).toBe("");
+  });
+});
+
+describe("SuitePromptPanel edit mode never carries a style (Item 2)", () => {
+  it("strips the Style paragraph and clears the style pick when switching to Edit", async () => {
+    let patched: Partial<SuiteDraft> | null = null;
+    await renderPanel(
+      { mode: "generate", prompt: "Style: soft-3D look\n\na gondola", model: "openart:x", resolution: "1k", refIds: [], styleId: "st1" },
+      (p) => { patched = p; }
+    );
+    const editTab = Array.from(document.querySelectorAll(".suite-prompt-tab")).find((b) => b.textContent === "Edit image") as HTMLButtonElement;
+    expect(editTab).toBeTruthy();
+    await act(async () => { editTab.click(); });
+    expect(patched!.mode).toBe("edit");
+    expect(patched!.prompt).toBe("a gondola");
+    expect(patched!.prompt).not.toContain("Style:");
+    expect(patched!.styleId).toBeUndefined();
+  });
+
+  it("shows no Style box for an edit draft whose stored prompt still has one", async () => {
+    // The draft is normalized before it reaches the panel (Item 2 helper),
+    // so this pins the panel contract: edit mode renders no style control.
+    await renderPanel({ mode: "edit", prompt: "brighten it", model: "openart:x", resolution: "1k", refIds: [], sourceRefId: "r1" }, () => {});
+    expect(document.querySelector(".prod-prompt-style")).toBeNull();
+    expect(document.querySelector(".prompt-content-editor")?.textContent).toBe("brighten it");
+  });
+});
+
 describe("SuitePromptPanel queued generations", () => {
   it("shows the queued count and stays clickable while generating", async () => {
     const onSubmit = vi.fn();

@@ -1,3 +1,4 @@
+import { hasDraggedFiles } from "./drag-files.js";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { AgentEventIpc, AgentMeta, ApprovalRequestIpc, VerificationRequestIpc, ChatBalance, MediaProviderId, MediaProviderInfo, ModelInfo, SessionGoal, SessionMeta, SessionTasks, SettingsView, VoiceStatusIpc, WorkspaceInstructionsInfo, ActiveProductionInfo } from "../../shared/ipc.js";
 import type { ChatAttachment, DisplayItem } from "./types.js";
@@ -26,7 +27,7 @@ import { clipboardText } from "./clipboard.js";
 import { AttachFileIcon, XIcon } from "./components/icons.js";
 import { expandCommand } from "../../shared/commands.js";
 
-import { applyAccent } from "./theme.js";
+import { applyAccent, applyTheme, normalizeTheme } from "./theme.js";
 
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
@@ -246,6 +247,7 @@ export function App() {
     ]);
     setSettings(s);
     applyAccent(s.accent);
+    applyTheme(normalizeTheme(s.theme));
     setSessionList(list);
     setCredits(c);
     void window.cascade.getVoiceEnabled().then(setVoiceEnabled).catch(() => {});
@@ -694,7 +696,15 @@ export function App() {
             width={sidebarWidth}
           />
           <div className="sidebar-resizer" onMouseDown={startSidebarResize} title="Drag to resize chat history panel" />
-          <main className="chat">
+          <main
+        className="chat"
+        onDragOver={(e) => { if (hasDraggedFiles(e.dataTransfer)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
+        onDrop={(e) => {
+          if (!hasDraggedFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          void attachFiles(e.dataTransfer.files);
+        }}
+      >
         <div className="chat-header">
           {!pureChat && (
             <AgentPicker agents={agents} activeAgentId={activeAgentId} activeMeta={activeMeta} onChange={(id) => { if (!currentId) return; void window.cascade.setSessionAgent(currentId, id); }} onManage={() => setShowAgents(true)} />

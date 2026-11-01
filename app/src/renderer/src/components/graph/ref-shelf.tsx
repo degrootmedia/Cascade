@@ -11,6 +11,8 @@ import { usePersistedCollapsed, usePersistedNumber } from "../production/persist
 import { refThumbUrl } from "../production/thumb-url.js";
 import { MagnifyIcon } from "../icons.js";
 import type { GraphRef } from "./ref-node.js";
+import { RefInUseBadge, inUseTitleFor } from "../production/references.js";
+import type { ReferenceUsage } from "../../../../shared/reference-usage.js";
 
 /* ------------------------------------------------------------------ */
 /* Reference shelf                                                     */
@@ -134,9 +136,10 @@ function qShelfMatch(refs: GraphRef[], query: string): GraphRef[] {
  *  Show-more button so large groups don't mount hundreds of rows at once.
  *  A just-saved reference (`highlightId`) forces its group open and scrolls
  *  its tile into view, regardless of the persisted collapsed/page state. */
-function ShelfGroup({ prodId, group, query, onCanvasRefIds, highlightId, onDismissHighlight, onZoom }: {
+function ShelfGroup({ prodId, group, usage, query, onCanvasRefIds, highlightId, onDismissHighlight, onZoom }: {
   prodId: string;
   group: { title: string; refs: GraphRef[] };
+  usage?: Map<string, ReferenceUsage>;
   query: string;
   onCanvasRefIds: ReadonlySet<string>;
   /** Reference id to reveal + pulse (a just-saved reference), or null. */
@@ -224,6 +227,7 @@ function ShelfGroup({ prodId, group, query, onCanvasRefIds, highlightId, onDismi
                   ? <ShelfThumb src={r.artwork} alt={r.name} />
                   : <div className="prod-graph-shelf-blank">{r.media === "video" ? "\u25B6" : r.media === "audio" ? "\u266A" : "?"}</div>}
                 <span className="prod-graph-shelf-name" title={`Reference @[${r.name}]`}>@[{r.name}]</span>
+                <RefInUseBadge title={inUseTitleFor(usage, r.id)} />
                 {onCanvas && <span className="prod-graph-shelf-check">on canvas</span>}
                 {(r.artwork || (r.media === "video" && r.mediaPath)) && (
                   <button
@@ -284,10 +288,12 @@ export function shelfGroupsFor(
  *  a canvas doesn't mount (and thumbnail-encode) every reference; toggling it
  *  open loads the shelf on demand. A non-null `highlightId` forces it open,
  *  clears the filter, and pulses the tile (the "saved as reference" reveal). */
-export function RefShelf({ prodId, prod, references, onCanvasRefIds, highlightId, onDismissHighlight, onZoom }: {
+export function RefShelf({ prodId, prod, references, usage, onCanvasRefIds, highlightId, onDismissHighlight, onZoom }: {
   prodId: string;
   prod: Pick<Production, "characters" | "products" | "references" | "referenceCategories">;
   references: GraphRef[];
+  /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
+  usage?: Map<string, ReferenceUsage>;
   /** Ref ids already placed/wired on this canvas ("on canvas", not draggable). */
   onCanvasRefIds: ReadonlySet<string>;
   /** Reference id to reveal + pulse (a just-saved reference), or null. */
@@ -370,6 +376,7 @@ export function RefShelf({ prodId, prod, references, onCanvasRefIds, highlightId
                 key={group.title}
                 prodId={prodId}
                 group={group}
+                usage={usage}
                 query={shelfQuery}
                 onCanvasRefIds={onCanvasRefIds}
                 highlightId={highlightId}

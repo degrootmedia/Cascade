@@ -223,6 +223,13 @@ export function assemblyPlan(p: Production): AssemblyPlan {
         (shot.graphVideoNodes ?? []).some((n) => (n.gens?.length ?? 0) > 0);
       if (!clipRel && stillRel && expectedClip) suspiciousStills.push(shot.number);
 
+      // Selects: video generations tagged as selects ship with the assembly
+      // even when they are not the shot's active clip (deduped by source).
+      for (const node of shot.graphVideoNodes ?? []) {
+        (node.gens ?? []).forEach((g, gi) => {
+          if (g.select && g.path) addMedia(g.path, `clips/selects/${shot.number}-${node.id}-${gi + 1}${extOf(g.path, ".mp4")}`);
+        });
+      }
       if (stillRel) addMedia(stillRel, `shots/${shot.number}${extOf(stillRel, ".png")}`);
       if (clipRel) {
         const mediaRel = addMedia(clipRel, `clips/${shot.number}${extOf(clipRel, ".mp4")}`);
@@ -610,6 +617,7 @@ export async function assemble(
   for (const m of plan.media) {
     const srcAbs = assetPath(p, m.srcRel);
     const destAbs = path.join(mediaAbs, m.mediaRel);
+    fs.mkdirSync(path.dirname(destAbs), { recursive: true });
     if (!fs.existsSync(srcAbs)) {
       emit(`Missing source, skipped: ${m.srcRel}`, "error");
       continue;
@@ -752,4 +760,18 @@ export async function renderAnimatic(
       /* best effort */
     }
   }
+}
+// ---- send any asset to the assembly folder ---------------------------------
+
+/** Copy one workspace file straight into `<exportDir>/media/sent/`. Returns the
+ *  destination path relative to the production root. */
+export function sendAssetToAssembly(p: Production, rel: string): string {
+  const srcAbs = assetPath(p, rel);
+  if (!fs.existsSync(srcAbs)) throw new Error(`File not found: ${rel}`);
+  const exportDir = p.assembly?.exportDir ?? `${p.assets.outDir}/${p.assets.assemblyDir}`;
+  const destRel = `${exportDir}/media/sent/${path.basename(rel)}`;
+  const destAbs = assetPath(p, destRel);
+  fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+  fs.copyFileSync(srcAbs, destAbs);
+  return destRel;
 }

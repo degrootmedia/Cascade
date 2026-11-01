@@ -24,6 +24,8 @@ import stopButtonUrl from "../assets/icons/stop-button.svg";
 import tokenUrl from "../assets/icons/token.svg";
 import trashUrl from "../assets/icons/trash.svg";
 import videoEditingUrl from "../assets/icons/video-editing.svg";
+import genjutsuMotionUrl from "../assets/icons/genjutsu-motion.svg";
+import genjutsuSwapUrl from "../assets/icons/genjutsu-swap.svg";
 import xUrl from "../assets/icons/X.svg";
 
 interface IconProps {
@@ -80,6 +82,10 @@ export const InbetweenIcon = (p: IconProps) => <Icon src={inbetweenUrl} {...p} /
 export const FilmStripIcon = (p: IconProps) => <Icon src={filmStripUrl} {...p} />;
 /** Blue film frame with a pencil — the edit-video node. */
 export const EditVideoIcon = (p: IconProps) => <Icon src={videoEditingUrl} {...p} />;
+/** Film frame with a running figure — the Genjutsu Motion Transfer node. */
+export const GenjutsuMotionIcon = (p: IconProps) => <Icon src={genjutsuMotionUrl} {...p} />;
+/** Film frame with swap arrows — the Genjutsu Object Swap node. */
+export const GenjutsuSwapIcon = (p: IconProps) => <Icon src={genjutsuSwapUrl} {...p} />;
 /** Wallet/receipt — expenses ledger. */
 export const ExpensesIcon = (p: IconProps) => <Icon src={expensesUrl} {...p} />;
 /** Open blue eye — show the models hidden from the dropdowns. */

@@ -60,7 +60,7 @@ export function graphEdgesToFlow(
     selected: Set<string>;
     colors: SocketColors;
     /** Stored edge waypoints (layout-only bend points) by edge id. */
-    waypoints?: Record<string, { x: number; y: number }[]>;
+    waypoints?: Record<string, { x: number; y: number; id?: string }[]>;
     /** Reference nodes' output media by node id (refOutputMedia results). */
     refMediaByNode?: Record<string, GraphMedia>;
   }

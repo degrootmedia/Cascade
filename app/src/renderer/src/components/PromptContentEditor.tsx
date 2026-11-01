@@ -400,7 +400,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
 
   /** Insert plain text at the caret as a literal text node. Chromium's
    *  `insertText` turns embedded newlines into block elements / `<br>`, which
-   *  `textContent` drops — so paragraph breaks (and pasted text) are inserted
+   *  `textContent` drops — so paragraph breaks are inserted
    *  by hand here to survive the save/reload round trip. */
   function insertPlainText(raw: string) {
     const el = elRef.current;
@@ -420,6 +420,30 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     sel.removeAllRanges();
     sel.addRange(after);
     commitText();
+  }
+
+  /** Insert pasted text through the text model (like Backspace/Delete) so
+   *  any `@[Name]` tags in it render as chips right away. A plain text-node
+   *  insert leaves them as literal text forever: `commitText` records the
+   *  result in `emitted`, so the parent's echo is suppressed and no rebuild
+   *  ever chip-ifies them — the graph still wires the references (it parses
+   *  the plain text), but the box never shows the tags. Selections that
+   *  reach outside the box keep the plain range-based insert. */
+  function insertPastedText(raw: string) {
+    const el = elRef.current;
+    if (!el) return;
+    const text = raw.replace(/\r\n?/g, "\n");
+    if (!text) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) {
+      insertPlainText(raw);
+      return;
+    }
+    const { start, end } = selectionOffsets(el);
+    const cur = el.textContent ?? "";
+    applyEdit(el, cur.slice(0, start) + text + cur.slice(end), start + text.length);
   }
 
   /** Build the box DOM from plain text: text nodes + non-editable tag chips. */
@@ -709,7 +733,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
         onPaste={(e) => {
           e.preventDefault();
           const t = clipboardText(e.clipboardData);
-          if (t) { pushUndo("paste"); insertPlainText(t); }
+          if (t) { pushUndo("paste"); insertPastedText(t); }
         }}
         onDrop={(e) => {
           e.preventDefault();

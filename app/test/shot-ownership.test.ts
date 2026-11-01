@@ -99,7 +99,7 @@ const FULL_FIELD_SHOT: ProductionShot = {
   graphMigrated: true,
   pendingImageGen: { prompt: "p", model: "m", at: "" },
   pendingVideoGen: { prompt: "p", model: "m", at: "" },
-  disabled: false, outdated: true, outdatedAt: "2026-01-01T00:00:00.000Z",
+  disabled: false, colorTag: "yellow", outdated: true, outdatedAt: "2026-01-01T00:00:00.000Z",
 };
 
 describe("shot field ownership", () => {
@@ -201,5 +201,20 @@ describe("shot field ownership", () => {
     expect(shot.pendingImageGen).toBeDefined();
     expect(shot.pendingVideoGen).toBeDefined();
     expect(shot.graphMigrated).toBe(true);
+  });
+
+  it("carries the renderer's color tag through a whole-document save (set and clear)", () => {
+    // The color tag is a plain renderer-owned field, like
+    // `disabled`: classified copy, and an explicit undefined clears it.
+    expect(SHOT_FIELD_OWNERSHIP.colorTag).toEqual(
+      expect.objectContaining({ owner: "renderer", merge: "copy" })
+    );
+    const plain: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const wrap = (shot: ProductionShot) =>
+      baseProduction({ scenes: [{ number: 1, title: "S1", shots: [shot] }] });
+    const marked = applyRendererState(wrap(plain), wrap({ ...plain, colorTag: "red" }));
+    expect(marked.scenes[0].shots[0].colorTag).toBe("red");
+    const cleared = applyRendererState(wrap({ ...plain, colorTag: "green" }), wrap({ ...plain, colorTag: undefined }));
+    expect(cleared.scenes[0].shots[0].colorTag).toBeUndefined();
   });
 });

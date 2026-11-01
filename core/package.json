@@ -6,13 +6,21 @@
   "main": "src/index.ts",
   "scripts": {
     "cli": "tsx src/cli.ts",
+    "review": "tsx src/review-cli.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "format": "prettier --write src",
+    "check:fast": "tsc --noEmit && eslint src"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.2",
+    "eslint": "^10.14.0",
+    "prettier": "^3.9.10",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^2.1.0"
   }
 }

@@ -1,0 +1,11 @@
+{
+  "batch": "harness-improvements",
+  "items": [
+    { "id": "H1", "title": "Automatic checks: stop gate + auto-format + lint", "batch": "harness-improvements", "status": "passing" },
+    { "id": "H2", "title": "Standing workflow rules in CASCADE.md and batch preamble", "batch": "harness-improvements", "status": "passing" },
+    { "id": "H3", "title": "Split lessons.md by enforceability", "batch": "harness-improvements", "status": "passing" },
+    { "id": "H4", "title": "Batch scoreboard (batch-state, progress, session-start)", "batch": "harness-improvements", "status": "passing" },
+    { "id": "H5", "title": "Fresh-eyes read-only reviewer", "batch": "harness-improvements", "status": "in-progress" },
+    { "id": "H6", "title": "UI verification kit (launch, screenshot, logs)", "batch": "harness-improvements", "status": "passing" }
+  ]
+}

@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, planContinuation, continuationPrompt, type ChatMessage, type AgentTool, type GoalRecord } from "@core";
+import { prettierFormat, Agent, ChatClient, suggestChatTitle, friendlyApiError, loadWorkspaceInstructions, workspaceInstructionsFile, planContinuation, continuationPrompt, type ChatMessage, type AgentTool, type GoalRecord } from "@core";
 import * as settings from "./settings.js";
 import * as sessions from "./sessions.js";
 import { searchSessions } from "./session-search.js";
@@ -136,6 +136,15 @@ function reportCrash(kind: string, err: unknown): void {
   } catch {
     /* the window may already be gone */
   }
+}
+
+// UI-verification hooks (scripts/ui-verify.mjs). Both are opt-in via env and
+// inert in normal use: an isolated profile dir, and a local-only CDP port that
+// Playwright attaches to.
+if (process.env.CASCADE_USER_DATA) app.setPath("userData", process.env.CASCADE_USER_DATA);
+if (process.env.CASCADE_DEBUG_PORT) {
+  app.commandLine.appendSwitch("remote-debugging-port", process.env.CASCADE_DEBUG_PORT);
+  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
 }
 
 // Keep the app alive and diagnosable instead of dying on an uncaught error.
@@ -1028,6 +1037,9 @@ function ensureAgent(entry: LiveChat): Agent {
           ? entry.session.verifyCommands
           : (settings.getVerifyCommands(workspace) ?? [])
       ).map((c) => c.name),
+      // Formatting is the harness's job: Prettier runs on each edited file when
+      // the workspace has it installed (silent no-op otherwise).
+      formatFile: prettierFormat,
       extraTools,
       lazyTools,
       lazyGroupNotes,

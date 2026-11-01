@@ -66,3 +66,5 @@ export {
 } from "./sandbox.js";
 export type { SandboxDeps, SandboxMode, SandboxWrap } from "./sandbox.js";
 export * from "./types.js";
+export { prettierFormat, isFormattable } from "./format.js";
+export type { FormatFile } from "./format.js";

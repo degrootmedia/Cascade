@@ -39,7 +39,15 @@ interface ToolExecution {
   mutated?: boolean;
 }
 
+/** The only tools a reviewer agent gets. No edit, write or command tool. */
+export const REVIEWER_TOOLS = ["read_file", "list_directory", "glob", "grep"] as const;
+
 export class Agent {
+  /** Names of the tools this agent can call (for tests and diagnostics). */
+  get toolNames(): string[] {
+    return Object.keys(this.tools);
+  }
+
   private messages: ChatMessage[] = [];
   private client: ChatClient;
   private sessionAllowed = new Set<string>(); // tools granted "always allow" this session
@@ -55,6 +63,8 @@ export class Agent {
   private journal = new FileJournal();
   /** Verification config resolved once per agent (static config or host resolver). */
   private verificationResolved = false;
+  /** True when the most recent verification run had failures not yet re-checked. */
+  private lastVerifyFailed = false;
   private resolvedVerification: VerificationConfig | null = null;
   /** Notices queued during construction (before the host can receive events). */
   private pendingNotices: string[] = [];
@@ -63,8 +73,13 @@ export class Agent {
   constructor(private config: AgentConfig) {
     this.client = new ChatClient(config.apiKey, config.baseUrl);
     const pureChat = config.pureChat === true;
-    this.tools = pureChat ? {} : { ...TOOLS, ...config.extraTools };
-    this.lazyTools = pureChat ? {} : (config.lazyTools ?? {});
+    const reviewer = config.reviewerMode === true && !pureChat;
+    this.tools = pureChat
+      ? {}
+      : reviewer
+        ? Object.fromEntries(REVIEWER_TOOLS.map((n) => [n, TOOLS[n]]))
+        : { ...TOOLS, ...config.extraTools };
+    this.lazyTools = pureChat || reviewer ? {} : (config.lazyTools ?? {});
     this.applySandboxToRunCommand(pureChat);
     this.toolDefinitions = Object.values(this.tools).map((t) => t.definition);
     // Session grants are persisted by the host, so a rebuilt agent re-seeds the
@@ -213,6 +228,7 @@ export class Agent {
       // feedback loop. Both are inert unless a verification config resolves.
       let dirty = false;
       let repairRound = 0;
+      this.lastVerifyFailed = false;
       for (let iter = 0; iter < maxIter; iter++) {
         // Re-check the budget every few iterations: a long autonomous run can
         // push large tool results (production digests, command output) into the
@@ -236,6 +252,17 @@ export class Agent {
         if (streamedText) onEvent({ type: "text-done", text: streamedText });
 
         if (!message.tool_calls?.length) {
+          // Stop gate: the last checks failed and the model is trying to end the
+          // turn without fixing them. Re-run the checks; if still failing and
+          // repair budget remains, feed the failure back and keep going.
+          if (this.lastVerifyFailed && iter < maxIter - 1) {
+            const v = await this.verifyAfterMutation(repairRound);
+            if (v !== null) {
+              const blocked = v > repairRound;
+              repairRound = v;
+              if (blocked) continue;
+            }
+          }
           onEvent({ type: "agent-done", finalText: contentText(message.content), totalCredits: this.totalCredits });
           return;
         }
@@ -347,6 +374,8 @@ export class Agent {
     onEvent({ type: "verification-result", results });
 
     const failures = results.filter((r) => !passed(r));
+    // Remembered so a final answer can't end the turn over an unfixed failure.
+    this.lastVerifyFailed = failures.length > 0;
     if (!failures.length) return repairRound;
 
     const max = maxRepairRounds(config);
@@ -357,6 +386,7 @@ export class Agent {
       this.messages.push({ role: "user", content: feedback });
       return round;
     }
+    this.lastVerifyFailed = false; // budget spent: do not re-gate the stop
     onEvent({ type: "verification-exhausted", rounds: repairRound });
     this.messages.push({
       role: "user",
@@ -460,6 +490,19 @@ export class Agent {
     } catch (e: unknown) {
       isError = true;
       result = e instanceof WorkspaceError ? `ERROR: ${e.message}` : `ERROR: ${String(e)}`;
+    }
+    // Auto-format the file the agent just wrote (best-effort, never fails the call).
+    if (
+      !isError &&
+      this.config.formatFile &&
+      (call.function.name === "write_file" || call.function.name === "edit_file") &&
+      typeof args.path === "string"
+    ) {
+      try {
+        await this.config.formatFile(args.path, ws);
+      } catch {
+        /* formatting is best-effort */
+      }
     }
     onEvent({ type: "tool-result", name: call.function.name, result, isError, images });
     // A mutating tool that succeeded marks the workspace dirty so the loop can

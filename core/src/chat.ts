@@ -197,10 +197,40 @@ export class ChatClient {
 
     const combined = signal ? AbortSignal.any([idle.signal, signal]) : idle.signal;
 
+    // Anthropic rejects empty text/tool-result content and empty tool arguments;
+    // other providers tolerate them, so sanitize on the wire only.
+    messages = messages.map((m: any) => {
+      if (m.role === "tool" && (m.content === "" || m.content == null)) return { ...m, content: "(no output)" };
+      if (m.role === "assistant" && m.tool_calls?.length) {
+        return {
+          ...m,
+          content: m.content === "" ? null : m.content,
+          tool_calls: m.tool_calls.map((t: any) =>
+            t.function?.arguments?.trim() ? t : { ...t, function: { ...t.function, arguments: "{}" } }
+          ),
+        };
+      }
+      if (m.role === "assistant" && m.content === "") return { ...m, content: "(empty)" };
+      return m;
+    });
+    // Anthropic validates tool schemas strictly: names must match
+    // ^[A-Za-z0-9_-]{1,64}$ and parameters must be an object schema. Third-party
+    // (MCP) tools sometimes violate this, which fails the whole request.
+    const seen = new Set<string>();
+    tools = (tools ?? [])
+      .map((t: any) => {
+        const name = String(t.function?.name ?? "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+        const p: any = { ...(t.function?.parameters ?? {}) };
+        delete p.$schema;
+        if (p.type !== "object") p.type = "object";
+        if (!p.properties || typeof p.properties !== "object") p.properties = {};
+        return { ...t, function: { ...t.function, name, description: t.function?.description || name, parameters: p } };
+      })
+      .filter((t: any) => t.function.name && !seen.has(t.function.name) && !!seen.add(t.function.name));
     const payload = {
       model,
       messages,
-      tools,
+      ...(tools.length ? { tools } : {}),
       stream: true,
       stream_options: { include_usage: true },
       // Generous output budget: long tool-call arguments (e.g. a corrected file
@@ -210,12 +240,31 @@ export class ChatClient {
     };
     console.log(`[chat] streaming payload (${model}, ${messages.length} msgs, ${tools?.length ?? 0} tools):`);
     logChatMetadata("chat.request", messages, { model });
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify(payload),
-      signal: combined,
-    });
+    const send = (p: Record<string, unknown>) =>
+      fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify(p),
+        signal: combined,
+      });
+    let res = await send(payload);
+    // Some upstream models (notably Anthropic via Gab) reject optional fields
+    // the others accept. On a 400, retry with progressively plainer requests.
+    if (res.status === 400) {
+      const { stream_options: _so, ...noUsage } = payload as Record<string, unknown>;
+      const attempts: Record<string, unknown>[] = [
+        noUsage,
+        { ...noUsage, max_tokens: 8192 },
+        { ...noUsage, max_tokens: 4096 },
+      ];
+      for (const p of attempts) {
+        const r = await send(p);
+        if (r.status !== 400) {
+          res = r;
+          break;
+        }
+      }
+    }
 
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
@@ -288,7 +337,11 @@ export class ChatClient {
       .sort((a, b) => Number(a) - Number(b))
       .map((k) => {
         const p = toolCallParts[Number(k)];
-        return { id: p.id, type: "function" as const, function: { name: p.name, arguments: p.args } };
+        // Anthropic-backed models reject tool calls whose arguments are not valid JSON
+        // (a no-arg call streams ""), so normalize to an object.
+        let args = p.args.trim();
+        if (!args) args = "{}";
+        return { id: p.id, type: "function" as const, function: { name: p.name, arguments: args } };
       });
 
     // A 200 stream that ends with no content and no tool call is a failed

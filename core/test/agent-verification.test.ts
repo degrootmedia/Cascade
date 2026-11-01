@@ -185,6 +185,34 @@ describe("agent verification loop", () => {
     expect(h.runner).toHaveBeenCalledTimes(2);
   });
 
+  it("stop gate: a final answer over failing checks is blocked and fed back", async () => {
+    state.script = [{ tool_calls: [toolCall("mut")] }, { content: "done" }, { content: "done again" }];
+    const h = makeAgent({
+      extraTools: { mut: mutTool("mut") },
+      verification: { commands: [{ name: "typecheck", argv: ["npm", "run", "typecheck"] }], maxRepairRounds: 2 },
+      runner: () => [failResult("typecheck")],
+    });
+    await h.agent.send("go");
+    const rounds = h.events.filter((e) => e.type === "repair-round").map((e) => (e as { round: number }).round);
+    expect(rounds).toEqual([1, 2]);
+    expect(h.events.filter((e) => e.type === "agent-done")).toHaveLength(1);
+    expect(h.runner).toHaveBeenCalledTimes(3);
+  });
+
+  it("formats a file after a successful write_file, not after a failed one", async () => {
+    const formatFile = vi.fn(async () => true);
+    state.script = [{ tool_calls: [toolCall("write_file", { path: "a.ts", content: "x" })] }, { content: "done" }];
+    const events: AgentEvent[] = [];
+    const agent = new Agent({
+      apiKey: "k", model: "m", workspaceRoot: "/ws", formatFile,
+      extraTools: { write_file: mutTool("write_file") },
+      requestApproval: async (): Promise<ApprovalDecision> => "allow",
+      onEvent: (e) => events.push(e),
+    });
+    await agent.send("go");
+    expect(formatFile).toHaveBeenCalledWith("a.ts", "/ws");
+  });
+
   it("a plan-mode-blocked mutation triggers no verification", async () => {
     state.script = [
       { tool_calls: [toolCall("write_file", { path: "src/a.ts", content: "x" })] },
@@ -200,3 +228,4 @@ describe("agent verification loop", () => {
     expect(h.runner).not.toHaveBeenCalled();
   });
 });
+

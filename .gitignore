@@ -31,3 +31,5 @@ app/release-0.6.5/Cascade Setup 0.6.5.exe.blockmap
 # Bundled whisper.cpp binaries (fetched via app/scripts/fetch-whisper.mjs)
 app/resources/whisper/*
 !app/resources/whisper/.gitkeep
+
+tasks/screenshots/

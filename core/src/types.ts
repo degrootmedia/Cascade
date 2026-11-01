@@ -236,6 +236,12 @@ export interface AgentConfig {
   /** Pure chat: no tools, no workspace, minimal prompt — web-chat-like. */
   pureChat?: boolean;
   /**
+   * Reviewer mode: READ-ONLY by construction. Only read_file, list_directory,
+   * glob and grep exist; write_file, edit_file, run_command, extraTools and
+   * lazyTools are never registered, so the model has no way to call them.
+   */
+  reviewerMode?: boolean;
+  /**
    * Plan mode: the agent researches and writes a written plan, but cannot
    * mutate the workspace (write/edit/run_command are gated) until the user
    * reviews and approves the plan. Enforced in the loop, not just prompted.
@@ -285,6 +291,11 @@ export interface AgentConfig {
    * Returning null leaves verification off for this agent.
    */
   resolveVerification?: () => Promise<VerificationConfig | null>;
+  /**
+   * Auto-format seam: called with the workspace-relative path after a
+   * successful write_file/edit_file. Omitted ⇒ no formatting (loop unchanged).
+   */
+  formatFile?: (relPath: string, workspaceRoot: string) => Promise<boolean>;
   /** Injectable runner for verification (defaults to `runVerification`). */
   verificationRunner?: VerifyRunner;
   /**

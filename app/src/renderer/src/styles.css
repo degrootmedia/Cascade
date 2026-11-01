@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 
-/* Full-color SVG icons (assets/icons/*) â€” the shared default is a small,
+/* Full-color SVG icons (assets/icons/*) — the shared default is a small,
    inline-flex, non-draggable image that sits on the text baseline. */
 .cascade-icon {
   display: inline-block;
@@ -723,7 +723,7 @@ body {
 .prod-category-toggle:hover { background: var(--bg-raised); color: var(--accent); }
 .prod-category-name { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text); padding: 4px 6px; font-size: .9rem; font-weight: 600; }
 .prod-category-name:not(:disabled):hover, .prod-category-name:not(:disabled):focus { border-color: var(--border); outline: none; background: var(--bg-raised); }
-/* AI-generate button in a category header â€” creates a reference in that category. */
+/* AI-generate button in a category header — creates a reference in that category. */
 .prod-ref-gen-btn {
   display: flex;
   align-items: center;
@@ -966,7 +966,7 @@ body {
 .prod-board.drop-target { outline: none; }
 .prod-board.drop-target .prod-board-frame { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 6px 20px color-mix(in srgb, var(--accent) 25%, transparent); }
 .prod-board-number { font-family: ui-monospace, Consolas, monospace; font-size: 0.68rem; color: var(--text-dim); text-align: center; letter-spacing: 0.02em; }
-/* Insertion indicator â€” obvious gap marker shown between cards */
+/* Insertion indicator — obvious gap marker shown between cards */
 .prod-board-insert-indicator {
   position: absolute;
   left: -10px;
@@ -998,7 +998,7 @@ body {
 }
 .prod-board-end-zone.drop-target { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
 .prod-board-end-label { pointer-events: none; }
-/* Board insert "+" â€” anchored to the frame region (top of the card, same 16:9
+/* Board insert "+" — anchored to the frame region (top of the card, same 16:9
    box) so it is always vertically centered on the frame, not the whole card.
    The anchor is click-through; only the button is interactive. */
 .prod-board-insert-anchor {
@@ -1052,7 +1052,7 @@ body {
 .prod-board-add:hover { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .prod-board-drag-handle {
   position: absolute;
-  /* Top center of the frame â€” the top-left corner belongs to the zoom button
+  /* Top center of the frame — the top-left corner belongs to the zoom button
      and the upper-right to the history frame's "Make Primary" pill. */
   top: 6px;
   left: 50%;
@@ -1192,7 +1192,7 @@ body {
 .prod-board-frame-img { cursor: pointer; }
 .prod-board-frame-video { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
 .prod-board-empty { color: var(--text-dim); font-size: 12px; }
-/* "This frame has a clip" badge â€” a large film strip centered over the frame
+/* "This frame has a clip" badge — a large film strip centered over the frame
    until the hover-preview video loads, so a shot's video is discoverable
    without hovering first. */
 .prod-board-video-badge {
@@ -1242,7 +1242,7 @@ body {
 .prod-board-zoom:hover { border-color: var(--accent); color: var(--accent); }
 .prod-board-zoom:disabled { opacity: 0 !important; }
 .prod-board-frame:hover .prod-board-zoom { opacity: 1; }
-/* Bottom-center action row â€” Regenerate, Edit, Movie, Import in order. */
+/* Bottom-center action row — Regenerate, Edit, Movie, Import in order. */
 .prod-board-actions {
   position: absolute;
   bottom: 6px;
@@ -1314,13 +1314,13 @@ body {
 .prod-ref-autocomplete img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
 .prod-ref-tag-previews { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 
-/* Media references (video/audio) have no thumbnail â€” show a glyph instead. */
+/* Media references (video/audio) have no thumbnail — show a glyph instead. */
 .prod-ref-chip-ico { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 14px; font-size: 0.62rem; line-height: 1; color: var(--text-dim); }
 .prod-ref-autocomplete .prod-ref-chip-ico { width: 26px; height: 26px; font-size: 0.8rem; }
 .prod-ref-tag-previews span { position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); font-size: .68rem; cursor: help; }
 .prod-ref-tag-previews img { display: none; position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 90; width: 96px; height: 72px; object-fit: cover; border: 1px solid var(--border); border-radius: 5px; box-shadow: 0 5px 16px rgba(0,0,0,.5); }
 .prod-ref-tag-previews span:hover img { display: block; }
-/* "Manually edited â€” refresh from design" chip shown on board cards whose
+/* "Manually edited — refresh from design" chip shown on board cards whose
    prompt the user has edited by hand (survives re-ingestion until refreshed). */
 .prod-board-prompt-refresh {
   display: inline-flex;
@@ -1378,7 +1378,7 @@ body {
 /* Per-shot render-style override (overrides the Step 2 master style). Shown in
    the prompt sidebar directly above the leading Style: paragraph it drives. */
 .prod-prompt-style { width: 100%; }
-/* Prompt-box label carrying its docked control (sidebar brand toggle) â€” the
+/* Prompt-box label carrying its docked control (sidebar brand toggle) — the
    toggle's margin-left pushes it to the row's right end. */
 .prod-prompt-box-label-row { display: flex; align-items: center; gap: 8px; }
 /* Per-shot Audio/Visual direction boxes under each board frame (Step 3).
@@ -1728,7 +1728,7 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
 }
 .prod-ref-add select:focus { outline: none; border-color: var(--accent); }
 
-/* Global accent button â€” used by Step 4 (Generate VO, etc.). Scoped copies
+/* Global accent button — used by Step 4 (Generate VO, etc.). Scoped copies
  * in .prod-create/.prod-ingest and .modal-actions remain for older call
  * sites, but the canonical class lives here. */
 button.primary {
@@ -2460,7 +2460,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-disable:hover { color: var(--text); border-color: var(--accent); }
 .shot-disable.active { color: var(--accent); border-color: var(--accent); }
 .shot-row.empty-drop { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); font-size: 0.78rem; }
-/* Hover "+" in the gaps between rows and scenes â€” inserts a blank shot / adds
+/* Hover "+" in the gaps between rows and scenes — inserts a blank shot / adds
    a scene (hidden while dragging). On hover the gap blooms into a faded green
    band spanning the full width, the neighbours ease apart Â±10px to preview
    the space the insert will take, and the "+" fades in. Negative margins fold
@@ -2518,7 +2518,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .shot-table.dragging .scene-insert-zone { pointer-events: none; }
 .shot-table.dragging .shot-row,
 .shot-table.dragging .shot-scene { transform: none; transition: none; }
-/* Explicit between-row dropzones â€” collapsed when idle, expanded when dragging */
+/* Explicit between-row dropzones — collapsed when idle, expanded when dragging */
 .shot-drop-zone { height: 10px; margin: 0; border-radius: 6px; border: 1px dashed transparent; display: flex; align-items: center; justify-content: center; transition: height 0.12s, background 0.12s, border-color 0.12s; overflow: hidden; }
 .shot-drop-zone:not(.idle) { border-color: color-mix(in srgb, var(--border) 70%, transparent); background: color-mix(in srgb, var(--bg-raised) 50%, transparent); }
 .shot-drop-zone.active { height: 34px; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
@@ -3081,7 +3081,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* Let the parent grow to fit all tool cards â€” no capped height / inner scroll */
+  /* Let the parent grow to fit all tool cards — no capped height / inner scroll */
   max-height: none;
   overflow: visible;
 }
@@ -3708,7 +3708,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   font-variant-numeric: tabular-nums;
 }
 /* Live credit quote: self-contained pill so the price reads as one unit
- * inside Generate-button labels (vertically centered â€” the tooltip carries
+ * inside Generate-button labels (vertically centered — the tooltip carries
  * the "about"). Solid accent with a thin white border, matching the accent
  * buttons. Pure CSS: zero JS cost. */
 .cost-pill {
@@ -4254,7 +4254,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   background: var(--bg);
 }
 .prod-refgen-source span { font-size: 0.78rem; color: var(--text-dim); line-height: 1.45; }
-/* The @-tag prompt editor inside the reference modal â€” a bigger surface than
+/* The @-tag prompt editor inside the reference modal — a bigger surface than
    the frame edit boxes, so generation prompts have room to breathe. */
 .prod-refgen-prompt {
   width: 100%;
@@ -4293,7 +4293,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-char-view-opt.active { border-color: var(--accent); color: var(--accent); background: var(--bg-raised); }
 .prod-char-sheets { margin-top: 18px; }
-/* Gray "+" thumbnail â€” starts a new character prompt (always first in the grid). */
+/* Gray "+" thumbnail — starts a new character prompt (always first in the grid). */
 .prod-char-new {
   width: 140px;
   height: 110px;
@@ -4311,7 +4311,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   transition: border-color .12s, color .12s, background .12s;
 }
 .prod-char-new:hover { border-color: var(--accent); color: var(--accent); background: var(--bg-raised); }
-/* Selectable character-sheet thumbnail â€” click loads the character's last
+/* Selectable character-sheet thumbnail — click loads the character's last
    description + settings; the selected one is highlighted. */
 .prod-char-sel { cursor: pointer; }
 .prod-char-sel.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -4362,7 +4362,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 /* ---------- Node graph (visual prompt construction) ---------- */
 .prod-graph-open { margin-left: auto; flex-shrink: 0; }
 .prod-graph-overlay { z-index: 90; }
-/* The video dialog can open FROM the node graph (output node) â€” stack it above. */
+/* The video dialog can open FROM the node graph (output node) — stack it above. */
 .prod-video-overlay { z-index: 100; }
 .prod-graph-panel {
   width: min(1500px, 96vw);
@@ -4481,7 +4481,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-shelf-blank { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.72rem; font-weight: 700; }
 .prod-graph-shelf-name { font-size: 0.68rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .prod-graph-shelf-item.on-canvas { opacity: 0.55; cursor: default; }
-.prod-graph-shelf-item.on-canvas img, .prod-graph-shelf-item.on-canvas .prod-graph-shelf-blank { filter: grayscale(0.4); }
+.prod-graph-shelf-item.on-canvas img:not(.cascade-icon), .prod-graph-shelf-item.on-canvas .prod-graph-shelf-blank { filter: grayscale(0.4); }
 .prod-graph-shelf-check { font-size: 0.62rem; color: var(--accent); white-space: nowrap; }
 .prod-graph-shelf-empty { font-size: 0.7rem; color: var(--text-dim); padding: 10px 4px; line-height: 1.5; }
 .prod-graph-shelf-thumb { flex-shrink: 0; width: 42px; height: 32px; }
@@ -5056,7 +5056,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prompt-content-editor:focus { outline: none; border-color: var(--accent); }
 .prod-graph-composer .prompt-content-editor { min-height: 180px; }
-/* Draggable @[Name] reference chips â€” purple to match the node graph's
+/* Draggable @[Name] reference chips — purple to match the node graph's
    reference color. */
 .prompt-tag-chip {
   display: inline-block;
@@ -5075,7 +5075,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prompt-tag-chip:active { cursor: grabbing; }
 .prompt-tag-chip.dragging { opacity: 0.55; box-shadow: 0 0 0 2px color-mix(in srgb, #a78bfa 35%, transparent); }
-/* Visible drop caret while dragging a tag â€” fixed 2px line that tracks the pointer. */
+/* Visible drop caret while dragging a tag — fixed 2px line that tracks the pointer. */
 .prompt-drop-caret {
   position: fixed;
   width: 2px;

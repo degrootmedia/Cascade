@@ -1,494 +1,87 @@
-﻿## 2026-10-21 - Lightbox close icon rendered giant (broad `img` rule vs icon <img>)
+# Lessons (judgment lessons only)
 
-- Symptom: the new shared lightbox showed a giant red X in the corner. The
-  close button's `XIcon` is an `<img class="cascade-icon" width=13>`, but the
-  lightbox card's media rule (`.prod-ref-lightbox-card img { width:auto; ... }`)
-  outranks the width attribute, so the 365pt source SVG painted near full size.
-- Rules:
-  1. Any container rule that styles content `img`s must exclude `.cascade-icon`
-     (`img:not(.cascade-icon)`) — the shelf/poster rules already did; the
-     lightbox card rule predated icons living inside it. When adding an icon
-     button inside a media container, check its `img` rules first.
-  2. Icon semantics: X = close/dismiss a surface, trashcan = delete/remove a
-     thing. Sharing one glyph for both reads as a bug to users.
+Mechanical rules live in tests, not here: see `app/test/lessons-guards.test.ts`,
+`app/test/source-guards.test.ts`, `app/test/voice.test.ts` (pinned whisper URL),
+`app/test/prompt-grammar.test.ts` (idempotent brand insert) and the `structuredClone`
+store tests. Each entry below: what happened, what to do instead, how you can tell.
 
-## 2026-10-10 — a third-party download URL is a runtime dependency: probe it, don't assume it
+## Selection is not focus in editors
+- Happened: node-graph prompt blanked after a style change; a caret restored into an unfocused contenteditable looked like user focus, so the real update was deferred forever.
+- Do: gate "don't clobber the user's edit" on `document.activeElement`, never on a selection alone.
+- Tell: "closing and reopening fixes it" means local state is stuck out of sync with a correct prop; check echo/sync guards first.
 
-- Symptom (caught before shipping voice input): `ensureWhisperModel` built the
-  ggml URL as `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/models/
-  ggml-<size>.bin`, citing a plausible-looking path from an older doc. The live
-  HEAD is **404** — the converted models live at the repo ROOT
-  (`.../resolve/main/ggml-<size>.bin`); the `models/` prefix was never a real
-  path (that is the CMake source dir, not the HF repo layout).
-- Rules:
-  1. Any hard-coded download URL (models, binaries, release assets) is a
-     runtime dependency. Verify it with a live `curl -sIL` (expect a 2xx/302
-     with a real content-length) BEFORE wiring it, and pin the exact URL in a
-     unit test so a future edit can't silently break it.
-  2. Release assets aren't always on the `latest` tag — whisper.cpp attaches
-     its Windows binaries to NIGHTLY (`b####`) tags, and `latest` has zero
-     assets. Query the releases list for the asset by name, don't assume
-     `latest`.
-  3. Do the end-to-end run with the EXACT argv the code builds (fetched binary
-     + a real sample) before calling the feature done — the transcript of
-     `samples/jfk.wav` via `-m … -f … -otxt -of … --no-prints` is the proof the
-     spawn contract is right.
+## Shot-owned drafts and read paths
+- Happened: Magic Prompt text bled between frames (unkeyed composer, whole-document saves, rebase copying a whole map, reads blocked behind a long write queue).
+- Do: key components by the entity that owns their draft; keep per-key maps that long jobs mutate single-writer (main); never let a read await a queue stuck behind an unrelated job; make live text carry its shot id.
+- Tell: another shot's text appears, or a panel goes blank during bulk generation.
 
-## 2026-09-27 — Node-graph prompt blanked after a style change (selection ≠ focus)
+## Never claim a UI control exists without grepping its call site
+- Happened: told the user about a "Refresh" button that only existed as an IPC entry plus CSS.
+- Do: grep the renderer for the IPC method/class and confirm an onClick calls it.
+- Tell: contract entry + stylesheet rule but no caller.
 
-- Symptom: changing the style plugged into a node made the composer prompt in
-  the node graph disappear; the side panel (behind it) stayed correct, and
-  closing/reopening the graph brought the text back. Only auto-derived shots
-  (no manual `shot.prompt`) were affected.
-- Cause: two layers.
-  1. `PromptContentEditor`'s `deferExternalWhileFocused` guard treated a
-     selection living inside the box (`inBox`) as focus. But the effect's own
-     rebuild path restores a caret into the box **even while it is unfocused**,
-     so once the style swap pushed a transient empty content through (auto
-     shots render `Style: …` alone from the renderer's snapshot, then main's
-     authoritative refetch restores the content), the restoring update was
-     deferred forever — the box held `inBox` with no focus.
-  2. The transient itself: the style dropdown eagerly re-renders the prompt
-     from the render-closure snapshot, which cannot reproduce main's
-     auto-derived board prompt.
-- Fix: require actual focus (`document.activeElement === el ||
-  el.contains(document.activeElement)`) before deferring, not merely a
-  selection. The defer still protects caret position while typing.
-- Rules:
-  1. A selection inside a contenteditable is NOT proof of focus. Programmatic
-     caret restoration sets one while unfocused. Gate "don't clobber the
-     user's edit" behavior on `document.activeElement`, and treat `inBox` as a
-     secondary signal only.
-  2. A component that both writes a caret and defers external updates must not
-     let its own writes look like user intent.
-  3. "Reopen fixes it" is the signature of local component state stuck out of
-     sync with a correct prop — look at the sync/echo guards (`emitted`,
-     `inBox`) before the data layer.
+## Advisory previews must mirror the submit's required inputs
+- Happened: cost quotes hid whenever a mode needed media the probe didn't send.
+- Do: mirror required inputs; retry once only on the specific rejection message.
+- Tell: the pill silently disappears for some modes.
 
-## 2026-09-25 — Magic Prompt bled between frames (four stacked races)
+## Relocating an asset that several fields share
+- Do: update every field that points at it, memoize the move per old path, wire it into renumber path-patching, and bump `PRODUCTION_SCHEMA_VERSION` for any new one-time migration (a guard test flags a changed migration set).
+- Tell: clips orphaned after reorder; migration never runs on stamped documents.
 
-- Symptom: with Magic Prompt on, a frame's prompt sometimes went blank in the
-  side panel while the node view looked fine, and sometimes showed a *different*
-  shot's prompt.
-- Six independent causes, all fixed:
-  1. **Composer draft not scoped to its shot.** `NodeGraphModal` wasn't keyed by
-     shot, so switching frames (detached-window selection) reused the same
-     composer instance; its local draft (the old shot's) could be emitted under
-     the new shot's id on blur/close. Fix: `key={graphShotId}` remounts the
-     modal so the departing draft flushes to its own shot.
-  2. **Whole-document saves carried `magicPrompts`.** `saveField`/`saveProduction`
-     snapshots predate a long generation, so accepting their map reverted fresh
-     prompts. Fix: `applyRendererState` treats `magicPrompts` as main-owned (like
-     `promptOverrides`); every renderer magic edit goes through
-     `production:updateBoardPrompt` (the frame-drop tag was rerouted too).
-  3. **Rebase copied the whole map.** `rebaseProduction` replaced
-     `fresh.magicPrompts` with the job's snapshot map, reverting concurrent
-     per-shot edits. Fix: `applyMagicPromptDelta` folds only the changed keys.
-  4. **Reads blocked on the save queue.** The prompt fetch awaited
-     `promptSaveQueue`, which is chained behind main's per-production generation
-     queue — a bulk magic run left the side panel blank. Fix: bounded 300ms race;
-     the post-save snapshot refetches, so a read that slips ahead self-corrects.
-  5. **Composer edits didn't reach the side panel live.** The composer kept a
-     local draft and only published on blur (and for tag reorders), so the side
-     panel — bound to the shared `focusedPrompt` — lagged behind a node-graph
-     edit. Fix: publish on every change; the local draft still owns the DOM
-     (echo suppressed by `emitted`) and the save is coalesced by the prompt
-     queue's latest-value guard. The side panel already updated per keystroke
-     when *it* was edited, so this makes the two views symmetric.
-  6. **The live prompt wasn't shot-scoped.** `focusedPrompt` was a bare string,
-     so a stale/async write for one shot could be rendered under another (the
-     "side panel shows the other frame's prompt" report). Fix: pair it with
-     `focusedPromptShot` and only render when it matches the focused shot; key
-     the side panel by `promptShotId` too. A cross-shot display is now
-     impossible regardless of which async path last wrote the text.
-- Rules:
-  1. Per-key maps that long jobs mutate (magicPrompts) must have ONE writer:
-     main. Never accept them from a whole-document save; never rebase the whole
-     map.
-  2. A React component whose local draft belongs to an entity (shot) must be
-     keyed by that entity, or a switch silently transfers the draft.
-  3. Read paths must not await a write queue that can be stuck behind an
-     unrelated long job. Bound the wait and let the post-write snapshot correct
-     it.
-  4. Regression tests: assert against the on-disk map (main-owned), and make the
-     "stuck save" test fail without the bounded race (it does).
+## Re-derive test expectations when a representation changes
+- Do: derive each expectation from the new semantics; use distinct timestamps in fixtures when order matters.
+- Tell: a "newest-first" assertion that is flaky across same-millisecond writes.
 
-## 2026-09-25 — never claim a UI control exists without grepping its call site
+## Refactors: diff control flow, not text
+- Happened: a dropped `if (equal) return old;` caused an infinite render loop that looked like a test-runner hang.
+- Do: list every early return/break in the old block and confirm the new one has it; A/B with git stash.
+- Tell: the runner hangs at the banner.
 
-- Symptom: told the user a per-frame "Refresh" button clears one shot's magic
-  prompt. `production:refreshBoardPrompt` existed in the IPC contract and
-  `.prod-board-prompt-refresh` existed in CSS, so it *looked* wired — but no
-  renderer component ever called it. There was no such button; the CSS/IPC were
-  orphans. The user was (rightly) baffled.
-- Rule: before telling a user where a control is, grep the RENDERER for the IPC
-  method / class name and confirm an `onClick` actually calls it. A contract
-  entry + stylesheet rule proves nothing about the UI.
-- Related fix shipped alongside: a stale magic entry survived regeneration
-  because (a) the gap-fill re-read the shot's own effective prompt — in magic
-  mode that IS the stale entry — and (b) the request re-sent the stale PROSE as
-  "current content", so the model parroted it. Both removed: gaps fill from the
-  script visual, the request sends only the draft's reference TAG NAMES, and
-  each shot is generated in its OWN call so adjacent similar shots can't bleed.
-  New per-frame IPC `production:regenerateMagicPrompt` + side-panel/graph buttons
-  give a real per-frame escape hatch.
+## Job persistence: files on disk are not proof of a saved record
+- Do: verify the production JSON after a job, not only the files. (The rebase copy list itself is guarded by `lessons-guards.test.ts`.)
+- Tell: file on disk, no record pointing at it, success emitted.
 
-## 2026-09-24 — new node type missing its data-equality case (stale node data)
+## Never hold a document reference across an await (clone-on-load covers most of it)
+- Tell: "file written, no record, no error" means the record landed on a detached object.
 
-- Symptom: connecting a reference to the edit-video prompt node added the
-  `@[name]` tag to the prompt but drew no connection line.
-- Cause: `NodeGraphModal`'s node-reconciliation effect classifies each derived
-  node's visible data with a per-`type` `equal` check before deciding to reuse
-  the old node. `editvideoprompt` had no case, so `equal` stayed `true` and the
-  node's `data` (including `refHandles`) was frozen at first mount — the newly
-  added `in-ref-N` socket never appeared, so the stored edge had no target
-  handle to attach to. The graph edge and tag were both written correctly.
-- Rule: every node view added to `nodeTypes` must also be added to BOTH the
-  `buildDerived` output and the reconciliation `equal` chain. Missing the
-  latter fails silently (edge written, wire invisible). Regression test:
-  `graph-shelf.test.ts` "wires a reference into the edit-video prompt node's
-  numbered socket" — assert the numbered handle appears after a connect.
+## Model capability classification (no automated check yet)
+- Do: classify from structured fields; use the description only when structured fields are silent.
 
-## 2026-09-22 — identical sibling blocks in NodeGraphModal; PowerShell rewrite (3rd)
+## Probe the real reply shape
+- Do: probe the live server before trusting typecheck; silent catch-to-null paths hide failures. (Nested-JSON parsing is guarded by a test.)
 
-- Symptom: adding a second node view, an Edit whose `oldString` was a generic
-  four-line state-declaration block (`const [schema…]` / `const busy = data.busy`
-  / `const genMenu…` / `const effModel…`) matched the WRONG sibling
-  (`EditVideoNodeView`) and silently deleted its `const prompt = data.savedPrompt
-  ?? ""` binding while leaving the new component without its state. Typecheck
-  surfaced it (`prompt` resolved to `window.prompt`; `setBusy` undefined).
-- Rule: in `NodeGraphModal.tsx` (and any file with several near-identical node
-  views) an Edit's `oldString` MUST include a component-unique anchor (the
-  surface-specific class string, the component name, or a neighbouring unique
-  line). After editing a shared-looking block, grep the intended component to
-  confirm the change landed there, not on a sibling.
-- Did the forbidden PowerShell text rewrite AGAIN (`[IO.File]::ReadAllText` /
-  `.Replace` / `WriteAllText`) for a pure-ASCII rename in 4 files. Byte-scanned
-  clean (0 U+FFFD, 0 control chars) but it is still the wrong tool. Strengthen:
-  the Edit tool (or several Edit calls) is the ONLY way to change file text,
-  regardless of how mechanical the rename looks.
+## Option lookups must use the submission's mode selection; mirror vendor form schemas field for field
+- Tell: an enum offers a value the submitted mode rejects, or a required sub-field is dropped.
 
-## 2026-09-21 — live cost quotes break on media-requiring modes
+## Backend mode-inference rejections are binding problems
+- Do: retry once with the anchor role rebound, reusing uploaded media; exclude tween submissions.
 
-- Symptom: Higgsfield CLI video generation costs stopped populating on the
-  Generate buttons. The quote pill only shows when `generate cost` returns a
-  number; it silently hides on any failure, so a config the CLI rejects reads
-  as "no cost".
-- Cause: the cost probe deliberately sends no media (zero uploads), but a
-  per-surface / per-shot `mode` such as seedance_2_5's `omni_reference` (or
-  gemini's `image-to-video`) is rejected by the CLI without a media item:
-  "mode 'omni_reference' requires at least one reference media item". The
-  submit works because it always carries the source frame; the quote didn't.
-- Fix: on a media/reference rejection only, retry once with a 1×1 placeholder
-  bound to the model's start-image role (`--start-image`, else `--image`).
-  References don't move the price, so the retry prices the same config.
-- Rule: an advisory preflight that claims to "mirror the submit" must mirror
-  the submit's *required* inputs too, or it silently disagrees. Gate the
-  fallback on the rejection message so unrelated failures don't spawn twice.
+## Measure before optimizing
+- Do: benchmark the real component on several axes (shots, refs, categories); memoized children need reference-stable props.
 
-## 2026-09-14 — relocating an asset that several fields share
+## Verify the artifact the user actually runs
+- Do: rebuild/repackage so the tested binary carries the change; restart the Electron main process after adding IPC handlers.
+- Tell: renderer changes work while new IPC says "No handler registered".
 
-- Moving a generated file into a new folder must UPDATE EVERY field that
-  points at it, and the move must be memoized per old path: the first field's
-  move deletes the source, so the next field's `existsSync` check sees the
-  source gone and leaves that reference on the old path. Clips are reached
-  through `videoPath`, `graphVideoGens`, `graphEditVideoGens`,
-  `graphTweenOutput`, and tween block `gens` — all of them, plus every future
-  renumber path-patch list.
-- When an asset moves into a folder that another mutation already relocates,
-  wire it into that mutation too. `relocateBoardsForRenumber` renames
-  `boards/<old>` → `boards/<new>` and renames inner `shot-<old>-` files, but
-  its stored-path patch loop only knew about frame fields — putting clips in
-  `boards/<n>/video/` silently orphaned them on shot reorder until the video
-  fields were added to the same loop.
-- A new one-time migration needs `PRODUCTION_SCHEMA_VERSION` bumped, or every
-  already-stamped document skips the walk (perf fast path) and the migration
-  never runs.
+## Paid probes must be resumable
+- Do: structure as phases (submit, then followup `<jobId>`) and dry-run against fakes first.
 
-# Lessons
+## Icon semantics and Settings checkboxes
+- Do: X means close, trashcan means delete. Reset checkboxes inside `.settings` (`flex: none; width: auto`) and scope label overrides as `.settings .my-label` (a guard test checks the reset exists).
 
-## 2026-10-13 — the primary is excluded from history by design; ties in sort order are stable, not flaky
+## Editing files
+- Do: use the Edit tool for all text changes. Encoding damage is caught by `lessons-guards.test.ts`.
+- When editing files with near-identical sibling blocks (e.g. `NodeGraphModal.tsx`), include a component-unique anchor in the edit and grep the intended component afterwards.
 
-- Symptom (during Phase 4 test conversion): rewrote the classic-edit history
-  expectation to include the just-created edit take — wrong. `boardFrameHistory`
-  deliberately excludes the CURRENT primary (it is shown as the frame, not
-  browsed), so the newest take never appears in its own history list.
-- Related: two `recordGraphEditGen` calls in the same millisecond produce
-  identical `at` timestamps; the newest-first sort ties and V8's stable sort
-  keeps node order. That is deterministic (not flaky) — but an expectation of
-  strict newest-first across two rapid generations is wrong. Prefer
-  distinct timestamps in fixtures when order matters, or assert set-wise.
-- Rule: when converting assertions across a representation change, re-derive
-  each expectation from the new semantics instead of mechanically mapping
-  old-field → new-field. A quick throwaway vitest run that prints the actual
-  structure beats theorizing about sort ties.
-
-## 2026-10-13 — every contract channel must have a handler, including main→renderer broadcasts
-
-- Symptom: the app died at startup with `unhandledRejection: IPC channel
-  "production:jobsChanged" is declared in the contract but has no handler`.
-  The drift guard at the end of `registerIpc` (index.ts) iterates the WHOLE
-  `ipcContract` and throws on any channel with no registration — and a
-  main→renderer broadcast channel (renderers subscribe in preload, never
-  send on it) has no `on()` handler, so the guard treats it as drift.
-- Rule: adding a `kind: "send"` channel that main only broadcasts still
-  needs a registration — the pattern-consistent one is a documented no-op
-  `on(channel, () => {})` next to the broadcast wiring (that's how the guard
-  stays satisfied for every other broadcast-only channel). Verify the
-  startup path after adding any channel: grep the built `out/main/index.js`
-  for the channel name (it should appear in the contract check AND the
-  registration), and remember the guard runs at app boot, so a missed
-  handler is a fatal startup error, not a lazy failure.
-
-## 2026-10-12 — extracting a refactored chain: preserve the early-exit, then run the heavy suite
-
-- Symptom: after replacing `NodeGraphModal`'s inline per-type equality chain
-  with a call into the new `shared/graph/reconcile.ts`, `graph-shelf.test.ts`
-  hung forever at the RUN banner — no test even started. The `Edit` oldString
-  ended at `if (equal) return old;` and the newString didn't include it, so
-  `changed = true` ran unconditionally and every reconciliation pass rebuilt
-  every node → `setNodes` → re-render → infinite loop. It looked like a
-  module-load problem; it was a dropped two-line early-exit.
-- Rules:
-  1. When a refactor deletes or moves a block, diff the control flow, not
-     just the text: enumerate every early-return/break the old block had and
-     confirm the new one has it (the missing `if (equal) return old;` was the
-     ONLY semantic difference in a 40-line replacement).
-  2. An infinite render loop in React shows up as "the test runner hangs at
-     the banner" — diagnose with a git-stash A/B (original runs, modified
-     hangs) before touching anything else. `git worktree add` needs a fresh
-     node_modules; stashing tracked changes in the same checkout is faster.
-  3. Extract-then-wire refactors keep full semantics: the unknown-canvas-type
-     case must stay EQUAL (the historical reuse-the-old-node default), not
-     become unequal or throw.
-
-No session-specific lessons yet.
-
-- Storyboard history must derive from the generation nodes, including edits. Promoting a frame must update the owning node's selected index and output pipe, not just `artwork`, or read-time reconciliation will undo the selection. Test promotion followed by save/load, and ensure storyboard edits use the edit-node recorder.
-
-- Renderer-only changes hot-reload, but the Electron **main process** keeps the build it
-  started with. New `ipcMain.handle`s don't exist until the main process restarts (full
-  `npm run dev` restart, or `npm run package` for the packaged exe). Symptom: renderer
-  changes all work while every new IPC errors with "No handler registered for 'X'" and
-  new main-side migrations/recorders never fire. Check `out/main/index.js` for the new
-  handler names before re-coding â€” if the build carries them, the fix is restarting.
-- When simplifying a UI workflow, remove its assignment dependency too; the replacement interaction must own the state transition.
-- Prompt display and transport forms must stay separate; UI refreshes should never use MCP transport tokens.
-- Generated prompt sections must be removed with paragraph-scoped matching, never an end-of-string wildcard that can consume user content.
-- Debounced prompt editors need a serialized latest-value queue before generation; otherwise IPC responses can save or display stale snapshots.
-- Per-shot prompt display needs a cache plus retry when generation updates persistence asynchronously; null refresh results must not replace visible content.
-- Data URLs loaded from IPC should be cached with a content-key (e.g. shot-id + path) and fetched lazily per consumer; reading every shot's audio file eagerly on step entry wastes memory on long productions.
-- Model-driven option pickers must look up their choices per selected model at render time, not at fetch time; otherwise switching the model leaves the dependent select in a stale state. On model change, validate the current selection against the new allow-list and fall back to the first option when it's no longer valid.
-- Live audio mixing should expose the gain node through a ref so a slider can update it without tearing down the AudioContext; rebuilding the graph for each volume tick produces audible glitches.
-- When the data model owns a single resource for the whole production (one VO, one music track) rather than per-shot, drop the per-shot field at the same time the renderer UI loses its per-shot affordance â€” keeping both in sync prevents stale fields from reappearing in the type and breaking the save handler's whitelist.
-- Audio waveforms belong in their own decoded `AudioBuffer` (not the raw ArrayBuffer) so playback and visualization share one decode. The buffer can be downsampled to one `min/max` peak per ~2px column for a smooth canvas curve without redrawing on every frame.
-- Resizable UI affordances need a visible handle AND a `cursor: ns-resize` (or appropriate) so the drag target is discoverable; a transparent handle that only lights up on hover reads as dead space.
-- Drag-to-seek widgets must compute the seek position from the *same element's* `getBoundingClientRect()` that the user is interacting with, not from a sibling's rect. When two bars (scrubber + strip) both want to be seekable, each needs its own pointer handlers and its own ref to map cursor â†’ progress correctly.
-- Pointer events bubble, so any inner draggable (shot handles, future draggable children) must call `e.stopPropagation()` on `pointerdown` to prevent a parent seek handler from also firing and fighting for the same gesture.
-- Dual-format asset storage (original + served) should be split behind a single `write(...)` helper that both the generation and import paths call, so the layout never drifts: original in `originals/`, served (re-encoded) in the live dir, and the live path is the only one the renderer ever reads. A separate lazy migration handles the layout for older data on load.
-- Time-input parsers should accept the common variants the user actually types (`mm:ss`, `hh:mm:ss`, `1m30s`, `45s`, plain seconds) rather than locking to one format. The cost of a small regex ladder is much less than the cost of users being told their input was "invalid".
-- `<audio src="data:â€¦">` with multi-MB base64 payloads often fails to play silently â€” Chromium bails on data URLs past a few hundred KB. The portable fix is a one-line `useObjectUrl(dataUrl)` hook that converts the data URL to a `Blob` + `URL.createObjectURL` and revokes it on cleanup. The same blob URL works for `fetch()`/decode pipelines (AudioContext, etc.), so the conversion only has to happen once at the IPC boundary.
-- Inline native `<audio controls>` need a sane min-width + height in CSS â€” at `height: 28px` the play button is clipped in some Chromium versions, and at no `min-width` the flex parent squashes the timeline scrubber to ~0px.
-- Stable replacement filenames must not be the only reload key: when an imported asset is overwritten in place, bump an explicit renderer content key so same-extension replacements refetch and rebuild the audio URL.
-- Serving audio to the renderer as `data:` base64 over IPC is the wrong architecture for large clips (90 s+ VO). Chromium silently bails on multi-MB data URLs in `<audio>`, `fetch(dataUrl)` can reject, and `atob` on a 6 MB string can OOM. The definitive fix is a privileged custom protocol (`protocol.registerSchemesAsPrivileged` with `stream`/`supportFetchAPI`/`bypassCSP` before `app.whenReady`, then `protocol.handle`) that streams the file from disk with `Accept-Ranges`/206 support, and hands the renderer a `scheme://id/path` URL. No base64, no IPC size limits, seekable `<audio>`, and `fetch()`-able for AudioContext decode.
-- Two "fixed, still broken" rounds meant the change never reached the artifact the user actually runs. Verify the run target before iterating on the fix: a rebuilt `out/` doesn't touch a packaged `win-unpacked/Cascade.exe` or the NSIS setup exe â€” repackage (`npm run package`) so the tested binary carries the change.
-- On decode-audio failure, never `onVoDurationKnown(0)` if a sibling `<audio>` metadata handler can still report the real duration â€” a decode fallback must not clobber a valid value or the UI locks at 0:00.
-- Imported media should keep their original filenames (only synthesized/generated clips get a stable name like `voiceover.mp3`). Collision-handle (`name (2).ext`) instead of silently renaming; keep the old file unlink-on-replace so the project folder doesn't accumulate orphans.
-- Swapping `src` on a shared media element forces Chromium to re-open/demux/decode and paints the element's black backdrop â€” for any "switch between clips" UI, mount one element per clip (pooled, LRU-capped, visibility-toggled) so cuts become pixel swaps; proactive Â±neighbour mounting masks cold loads.
-- React's delegated wheel/touch listeners are passive: `e.preventDefault()` inside a component's `onWheel` cannot stop page scroll. Attach a native listener with `{ passive: false }` when an element needs to own the wheel gesture (zooming timelines/canvases).
-- Anchoring zoom on a moving reference (playhead): compute target scrollLeft from (refTime Ã— newScale âˆ’ refTime Ã— oldScale âˆ’ oldScrollLeft), store it in a ref, apply in `useLayoutEffect` after the resized content commits. Also freeze auto-follow while the user is drag-scrubbing or it fights the cursor.
-- When a canvas visualization must redraw per scroll-frame, precompute fixed-bucket min/max peaks once from raw PCM instead of rescanning samples every frame (same idea as per-decode AudioBuffer peaks).
-- Paid probe scripts must be crash-safe: `node --check` catches syntax but NOT missing identifiers, and a crash mid-probe can strand a spend. Structure every paid probe as resumable phases (submit â†’ followup `<jobId>`), and dry-run the full code path against fakes before the live run. The followup mode rescued the 2-credit refs probe after a UUID_RX ReferenceError.
-- Never append to markdown files via PowerShell `Add-Content`/here-strings on this machine â€” backslash sequences become tabs and non-ASCII chars turn into mojibake; use file-edit tooling instead.
-
-## 2026-08-27 â€” OpenArt credits line missing (video modal)
-- Bug: shared parseJsonObject cut replies at the FIRST }, so any reply with a
-  nested object ({"user":{...},"credits":N}) parsed to null and the IPC silently
-  returned null -> renderer hid the credits line.
-- Rules:
-  1. Never write a JSON extractor with a first-} heuristic; parse first { to
-     last } (full parse first). Nested objects are the norm, not the exception.
-  2. When wiring a new IPC/data path, test against the REAL reply shape (probe the
-     live server first) instead of only running typecheck â€” silent catch -> null
-     paths hide failures from the UI.
-  3. Silent .catch(() => {}) in the renderer is fine for UX, but pairs badly with
-     a lossy parser â€” verify the data survives the whole chain.
-- When consolidating duplicated helpers into a shared module, preserve every call site's guards ï¿½ an "append if absent" check is load-bearing. effectivePrompt originally guarded its brand append with !hasBrand, and the shared insertBrandParagraph lost that guard, so a manual prompt that already carried Brand identity: (written by the brand toggle) got a duplicate paragraph, which parsePromptBoxes then leaked into the Content box. Always port the guard into the shared helper (make it idempotent) and add a regression test for the exact user-visible scenario.
-- OpenArt's per-model form schemas must be mirrored field-for-field, not filtered by convention: building a startFrame object by mapping only url/id keys silently dropped the required type ("image") and label sub-fields, and Grok 1.5's schema rejected the submission ("startFrame.type: expected image"). When filling an object-shaped schema field, copy every declared sub-property from the reference (exact name, then url/id/type/label aliases), and fall back to the whole reference when nothing maps.
-- Video-option lookups must use the SAME mode selection as the actual submission: options were fetched from the first mode with options while generation submitted the first mode whose form parses, so a later mode's enum could leak resolutions (e.g. 1080p) the submitted mode never accepts. Align the two selections, and don't change mode-picking logic in one place without the other.
-
-## 2026-09-02 â€” edit-image node output shows in the graph but not the storyboard
-- Bug: the node graph's "Frame output" preview derives from the piped gen node's
-  selected output (`graphEditGens[graphEditGenIndex].path`), but the storyboard
-  reads `shot.artwork` â€” a separately-maintained mirror. When the pipe's apply
-  raced a renderer `production:save` (or a pipe was bound while the node was
-  empty and the later generation's `if (graphOutputSource === "editgen")`
-  check read a stale disk state), `shot.artwork` stayed empty/missing and the
-  storyboard showed nothing while the node view was correct. Real data confirmed
-  it: shot 1800 had `graphOutputSource: "editgen"`, a valid `graphEditGens[0]`
-  file on disk, and `artwork` empty.
-- Rule: when two surfaces read the same output, don't keep a second cached
-  field that must be re-applied everywhere â€” make the pipe authoritative and
-  RE-DERIVE the mirror at read/write time. `syncBoardOutputToPipe(shot)` runs on
-  every `loadProduction` (self-heals existing docs) and inside
-  `applyRendererState` (so a stale renderer save can never clobber the piped
-  frame back out). Test the exact user-visible desync, not just the happy path.
-
-## 2026-09-03 â€” character builder output vanished on save (rebaseProduction whitelist)
-- Bug: the Step 2 character builder generated a sheet (file written to disk) but
-  the character never appeared in the Load-character dropdown and the mirrored
-  reference never landed in the references panel. Same for the older
-  reference-image generator. Root cause: both run under `runProductionJob`,
-  whose `rebaseProduction` reloads the freshest on-disk production and copies
-  ONLY a hardcoded top-level field list (`status`, `currentStep`, `magicEnabled`,
-  `magicPrompts`, `assembly`) plus per-shot fields â€” `characters`,
-  `references`, and `referenceCategories` mutations were silently dropped on
-  save, leaving disk files orphaned (no production entry points at them).
-- Rules:
-  1. `rebaseProduction` is a denylist-by-default, not a merge: ANY top-level
-     collection a `runProductionJob`/`runProductionStep` handler mutates must be
-     added to its copy list, or the change disappears while `emit("â€¦done")` and
-     the on-disk file say otherwise. Grep the runner's call sites for what they
-     mutate, and keep the list in sync.
-  2. Files written to disk during a job are NOT proof of persistence â€” a
-     `refsDir`/`boardsDir` artifact can exist while no production field points
-     at it. Verify the production JSON after a job, not just the file.
-  3. When a job mutates renderer-owned collections (characters/references),
-     wholesale-copy from the job's copy on change; the concurrent-edit window is
-     the job duration and matches how `status`/`assembly` are already handled.
-
-## Lesson: PowerShell text cmdlets corrupt non-ASCII source files (2026-09-07)
-
-Mistake: rewrote `higgsfield.ts` with `(Get-Content $p) -replace ... | Set-Content -Encoding UTF8`.
-PowerShell 5.1 `Get-Content` decodes UTF-8 as ANSI (cp1252), so every em dash
-became literal mojibake; `FAILED_RX` silently stopped matching a real
-`ï¿½ cancelled` job reply. The scripted repair (latin1 round-trip) restored most
-chars but cp1252's unmappable bytes became U+FFFD irreversibly, plus stray
-control chars ï¿½ only a byte-level scan found them.
-
-- Rules:
-  1. NEVER use PowerShell text cmdlets (Get-Content/Set-Content/-replace
-     pipelines) to rewrite source files. Use the Edit tool. If a scripted
-     rewrite is unavoidable, do it in node at byte level: read utf8, replace
-     in JS, write utf8.
-  2. After ANY scripted file rewrite, grep the file for non-ASCII/control
-     residue (`[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]`) before
-     trusting the change.
-  3. Encoding damage hides as logic bugs, not syntax errors ï¿½ a regex over
-     prose (em dash separators) is exactly where it bites. Tests that match
-     real server prose are the safety net.
-
-- Media-model capability flags must come from structured fields only (media/modes/output_type), never free-text descriptions. OpenArt descriptions routinely mention both modalities ('image and video'), so a /video/ match on the description blob misflags image models (e.g. 'Wan 2.7 Image', 'Grok Imagine Image 2.0') as video and pollutes every video dropdown plus the expense-image classification. Test with a fixture whose description mentions video but whose structured fields are image-only.
-
-- Structured-only model classification can DROP models whose structured fields carry no modality tokens (both flags false = invisible everywhere). Use structured fields to decide, but fall back to the description only when structured fields are completely silent ï¿½ that fixes description false-positives without the recall regression.
-
-## 2026-09-10 â€” node-editor perf: two unmeasured fixes missed the bottleneck
-
-- Symptom: opening the node editor is slow on large productions. First round
-  (lazy + capped shelf thumbnails, per-group window of 24) made "no noticeable
-  difference."
-- Root cause of the miss: the fixes were reasoned, not measured. The real costs
-  were (a) `BoardCard` was un-memoized, so every workspace state change
-  (opening the graph = `setGraphShotId`) re-rendered every card â€” 600 cards
-  â‰ˆ 194 ms per render â€” and (b) per-group windowing doesn't bound total items
-  when a project has many small categories (200 cats Ã— 15 refs â‰ˆ 2 985 items
-  â‰ˆ 640 ms). Both were invisible without a benchmark.
-- Rules:
-  1. Before optimizing, write a throwaway benchmark that mounts the real
-     component with representative large inputs (varied shapes: few-big vs
-     many-small) and logs `performance.now()` + a React `<Profiler>`. Delete it
-     after. The bottleneck is usually not the one you can reason to.
-  2. "Large project" is multi-dimensional â€” shots, references, categories. Test
-     each axis; a fix that only bounds one axis (per-group window) won't help
-     projects large along another (group count).
-  3. A list of memoized children is only memoized if their props are
-     reference-stable. Plain `function` handlers recreated each render + inline
-     lambdas defeat `memo`. Route per-item callbacks through a `latestRef` +
-     stable `useMemo` delegator (keeps them fresh AND stable) and pass the item
-     id into the callback.
-  4. Per-group virtualization still needs a per-group viewport gate
-     (`IntersectionObserver`) or a project with many tiny groups mounts
-     everything at once. jsdom has no IO â€” write the gating test with a
-     controllable IO stub.
-
-## Async renderer updates vs. closure snapshots in save helpers
-- Symptom: dragging a second edit-image node onto the graph made it vanish
-  instantly.
-- Cause: `saveGraphLayout` rebuilt `scenes` from the render-closure `prod`
-  instead of `prodRef.current`. A graph mutation saves its shot fields (via
-  `saveGraphShotFields` -> `saveField`, which updates `prodRef`) immediately
-  before the layout save, so the stale `prod` clobbered the just-added node.
-- Rule: every workspace save helper that rewrites `scenes`/`shots` must read
-  `prodRef.current`, never the render-closure `prod`. When two saves fire in
-  one event (field change then layout), the later must build on the former's
-  result.
-
-## 2026-09-12 — Store cache aliasing silently drops finished generations
-
-- Symptom: an edit-image node run billed (ledger), wrote its files to
-  `boards/`, but the history entry never appeared. No error anywhere — the
-  job reported success. `script.md`'s mtime proved a renderer
-  `production:save` landed mid-generation.
-- Cause: `store.ts` hands out the cached document graph by reference, and
-  `loadProduction` passed it through. The job held shot/node refs across the
-  generation `await`; the mid-run renderer save (`applyRendererState`)
-  replaced the cached graph's `scenes`, detaching the job's refs. The job
-  then recorded onto orphaned objects and the rebase commit saved without
-  the new generation. File on disk, nothing in history, success emitted.
-- Fix: `loadProduction` returns `structuredClone(p)` — every holder gets a
-  private graph, rebase merges by value. File is tens of KB, so the copy is
-  microseconds; the cache still skips the JSON.parse on hits.
-- Rules:
-  1. Never hold a document object reference across an `await` in main — or
-     make sharing impossible (clone on load). A same-thread save cannot
-     interleave synchronous code, so the await is the only detachment
-     window; any save in that window must not pull the graph out from under
-     a holder.
-  2. "File written, no record, no error" means the record landed on a
-     detached object — check object identity (cache aliasing), not just the
-     record call.
-  3. Regression test must reproduce the interleaving through the real store
-     (job load → holder refs → renderer save → record → commit), not just the
-     pure record function.
-
-## 2026-09-11 — Higgsfield t2v+refs 422: rebind, don't just surface
-
-- Symptom: Seedance 2.5 video generation with a board frame + playblast ref
-  failed with `mode 't2v' does not accept reference media` (422). The adapter
-  bound ordinary submissions to `image_references`/`video_references` only, so
-  the backend inferred text-to-video mode and the refs had no legal mode.
-- Fix: on that exact validation shape, retry ONCE with the source frame
-  rebound to `start_image` (the image-to-video anchor), reusing the already
-  uploaded media ids — no re-upload, same prompt. Tween submissions are
-  excluded (keyframes already bind start/end slots), as are models declaring
-  no `start_image`; both surface the 422 as-is with the submitted param dump.
-- Rules:
-  1. A backend mode-inference rejection is a binding problem, not a prompt
-     problem — retry with the anchor role before giving up.
-  2. Keep the per-ref role table (`boundRoles`) parallel to the upload table
-     so a retry can rebind without re-uploading; assert both submits in tests
-     (snapshot params at capture — the retry mutates the same object).
-
-## 2026-09-16 — PowerShell content rewrite, second offense
-
-- Did it again: `(Get-Content …) -replace … | Set-Content` on a test file to
-  refactor act() blocks, despite the 2026-09-07 lesson. Got lucky (ASCII-only
-  file, byte scan clean: zero U+FFFD), then redid the remaining edits with
-  the Edit tool.
-- Rule (strengthened): the Edit tool is the ONLY way to modify file text. If
-  a tabular/renaming edit feels too big for one Edit call, split it into
-  several Edit calls - never reach for a shell rewrite, regardless of file
-  encoding.
-
-## 2026-10-02 - Settings checkbox inherited the full-width input rule
-
-- Symptom: the new MCP "On demand" toggle ran off the right edge of the
-  Settings window. `.settings input, .settings select { flex: 1; width: 100% }`
-  matches EVERY input, including `type="checkbox"`, so the checkbox claimed
-  the whole row and pushed its label text past the clip.
-- Rule: inside Settings, any checkbox/toggle must be reset - scope a rule like
-  `.settings .my-control input[type="checkbox"] { flex: none; width: auto;
-  padding: 0; margin: 0; }`. When a control lives in a flex column, also add
-  `flex: none` to its inputs/textareas so the inherited `flex: 1` can't stretch
-  them vertically. And because `.settings label { display: block; margin: ... }`
-  is more specific than a bare `.my-label`, scope label overrides as
-  `.settings .my-label { ... }`.
+## Audio, media and timeline UI
+- Serve large media over the `cascade-media://` streaming protocol, not base64 over IPC.
+- Use one decoded `AudioBuffer` for playback and waveforms; precompute peaks once.
+- Attach `{ passive: false }` native wheel listeners when an element owns the wheel gesture.
+- Compute seek positions from the interacted element's own rect; stop `pointerdown` propagation on inner draggables.
+- Pool one media element per clip instead of swapping `src`; a decode failure must not overwrite a valid duration.
+- Keep original filenames for imports; collision-handle instead of renaming.
+- Drop per-shot fields when the data model moves to one production-wide resource.
+- Model-driven pickers read their options per selected model at render time and re-validate on change.
+- Keep prompt display and transport forms separate; remove generated sections paragraph-scoped; queue debounced prompt saves latest-value-first; cache per-shot prompt display and ignore null refresh results.
+- Storyboard history derives from generation nodes; promotion updates the node's selected index and output pipe, not only `artwork`.

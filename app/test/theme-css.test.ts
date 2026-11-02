@@ -30,11 +30,13 @@ function block(selector: string): { text: string; start: number; end: number } {
 
 const dark = block(':root, [data-theme="dark"]');
 const light = block('[data-theme="light"]');
+const graphite = block('[data-theme="graphite"]');
 /** styles.css with both token blocks removed — what component rules may use. */
 const rest =
   css.slice(0, dark.start) +
   css.slice(dark.end, light.start) +
-  css.slice(light.end);
+  css.slice(light.end, graphite.start) +
+  css.slice(graphite.end);
 
 /** Content colors: the literal IS the value (hue spectrum, magic rainbow,
  *  moodboard canvas presets, sticky-note paper). Anything else must be a var. */
@@ -86,6 +88,27 @@ describe("theme token unification", () => {
     expect(light.text).toContain("color-scheme: light");
     // Light only overrides tokens that exist in dark (no orphan tokens).
     for (const t of lightTokens) expect(darkTokens.has(t), `orphan light token ${t}`).toBe(true);
+  });
+
+  it("graphite redefines the surfaces as the clean neutral ramp", () => {
+    const darkTokens = definedTokens(dark.text);
+    const graphiteTokens = definedTokens(graphite.text);
+    for (const t of ["--bg", "--bg-panel", "--bg-raised", "--bg-elev", "--bg-inset", "--border", "--text", "--text-dim"]) {
+      expect(graphiteTokens.has(t), `graphite ${t}`).toBe(true);
+    }
+    expect(graphite.text).toContain("--bg: #151517");
+    expect(graphite.text).toContain("--bg-panel: #1b1b1c");
+    expect(graphite.text).toContain("--bg-raised: #2c2c2e");
+    expect(graphite.text).toContain("--text: #ffffff");
+    expect(graphite.text).toContain("color-scheme: dark");
+    // Graphite only overrides tokens that exist in dark (no orphan tokens).
+    for (const t of graphiteTokens) expect(darkTokens.has(t), `orphan graphite token ${t}`).toBe(true);
+  });
+
+  it("minimal icon tint is white on dark themes, dark gray on light", () => {
+    expect(dark.text).toContain("--icon-tint: #ffffff");
+    expect(graphite.text).toContain("--icon-tint: #ffffff");
+    expect(light.text).toContain("--icon-tint: #333333");
   });
 });
 

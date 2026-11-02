@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { DetachedCanvasApp } from "./components/DetachedCanvasApp.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
-import { applyTheme, readCachedTheme } from "./theme.js";
+import { applyIconSet, applyTheme, readCachedIconSet, readCachedTheme } from "./theme.js";
 import "./styles.css";
 
 // The detached canvas window boots the same bundle with `?window=detached`
@@ -24,6 +24,7 @@ window.addEventListener("unhandledrejection", (e) => {
 // Paint the cached theme before first render (both windows share this
 // bundle + localStorage); App re-applies the authoritative setting on load.
 applyTheme(readCachedTheme());
+applyIconSet(readCachedIconSet());
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

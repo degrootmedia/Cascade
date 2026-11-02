@@ -12,7 +12,7 @@ import type { DetachedCanvasContext } from "../../../shared/ipc/window.js";
 import { ProductionWorkspace } from "./ProductionWorkspace.js";
 import { ConfirmHost } from "./ConfirmDialog.js";
 import { NamePromptHost } from "./NamePromptDialog.js";
-import { applyAccent, applyTheme, normalizeTheme } from "../theme.js";
+import { applyAccent, applyIconSet, applyTheme, normalizeIconSet, normalizeTheme } from "../theme.js";
 
 export function DetachedCanvasApp() {
   const [ctx, setCtx] = useState<DetachedCanvasContext | null>(null);
@@ -23,7 +23,7 @@ export function DetachedCanvasApp() {
     // the cached theme pre-render; accent had no detached coverage before).
     void window.cascade
       .getSettings()
-      .then((s) => { applyAccent(s.accent); applyTheme(normalizeTheme(s.theme)); })
+      .then((s) => { applyAccent(s.accent); applyTheme(normalizeTheme(s.theme)); applyIconSet(normalizeIconSet(s.iconSet)); })
       .catch(() => {});
     const offCtx = window.cascade.onCanvasContext((next) => setCtx(next));
     const offSel = window.cascade.onCanvasSelectionChanged((e) => {

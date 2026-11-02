@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { createJobLedger, runWithJobLedger } from "../src/main/jobs.js";
-import { jobForChannel, jobLabel, jobsToCanvasBusy, type JobRecord } from "../src/shared/ipc.js";
+import { jobForChannel, jobLabel, jobStateLabel, jobsToCanvasBusy, type JobRecord } from "../src/shared/ipc.js";
 
 const makeLedger = (persisted: JobRecord[] = []) => {
   const persistedRuns: JobRecord[][] = [];
@@ -127,6 +127,79 @@ describe("crash reconciliation", () => {
     h.succeed();
     const last = persistedRuns[persistedRuns.length - 1];
     expect(last.map((j) => j.state)).toEqual(["running"]);
+  });
+});
+
+describe("queue states, record-before-submit and migration (1a)", () => {
+  it("records the job as queued with a settings snapshot BEFORE fn runs", async () => {
+    const { ledger } = makeLedger();
+    let stateInsideFn = "";
+    await runWithJobLedger(ledger, "production:generateVideoNode", ["p1", "s1", { nodeId: "v1", prompt: "x" }], async () => {
+      stateInsideFn = ledger.snapshot("p1").jobs[0].state;
+    });
+    // Until the provider accepts the job (task id stored) it is "submitting".
+    expect(stateInsideFn).toBe("submitting");
+    const j = ledger.snapshot("p1").jobs[0];
+    expect(j.settings).toEqual(["s1", { nodeId: "v1", prompt: "x" }]);
+    expect(j.state).toBe("succeeded");
+  });
+
+  it("walks queued -> submitting -> running -> fetching -> succeeded and keeps the task id", () => {
+    const { ledger } = makeLedger();
+    const h = ledger.begin({ productionId: "p1", kind: "video", label: "v", initialState: "queued" });
+    const seen = [ledger.get(h.id)!.state];
+    h.markSubmitting(); seen.push(ledger.get(h.id)!.state);
+    h.setTaskId("task-1"); h.markRunning(); seen.push(ledger.get(h.id)!.state);
+    h.markFetching(); seen.push(ledger.get(h.id)!.state);
+    h.succeed(); seen.push(ledger.get(h.id)!.state);
+    expect(seen).toEqual(["queued", "submitting", "running", "fetching", "succeeded"]);
+    expect(ledger.get(h.id)!.taskId).toBe("task-1");
+  });
+
+  it("cancel is final and later transitions are ignored", () => {
+    const { ledger } = makeLedger();
+    const h = ledger.begin({ productionId: "p1", kind: "video", label: "v" });
+    expect(ledger.cancel(h.id)).toBe(true);
+    h.succeed();
+    expect(ledger.get(h.id)!.state).toBe("cancelled");
+    expect(ledger.cancel(h.id)).toBe(false);
+  });
+
+  it("one failure does not affect other jobs", () => {
+    const { ledger } = makeLedger();
+    const a = ledger.begin({ productionId: "p1", kind: "video", label: "a" });
+    const b = ledger.begin({ productionId: "p1", kind: "video", label: "b" });
+    a.fail("bad reference");
+    expect(ledger.get(b.id)!.state).toBe("running");
+  });
+
+  it("recovery: submitting -> interrupted (never resubmitted); resumable kept; no-resume interrupted; old files load", () => {
+    const base = { productionId: "p1", kind: "video" as const, label: "v", startedAt: "2026-10-12T00:00:00.000Z" };
+    const persisted: JobRecord[] = [
+      { ...base, id: "sub", state: "submitting" },
+      { ...base, id: "run-res", state: "running", taskId: "t1", provider: "fake" },
+      { ...base, id: "run-nores", state: "running", taskId: "t2", provider: "nope" },
+      { ...base, id: "legacy", state: "running" },
+      { ...base, id: "fail", state: "failed", error: "x" },
+      { ...base, id: "done", state: "succeeded" },
+    ];
+    const ledger = createJobLedger({ loadPersisted: () => persisted, canResume: (j) => j.provider === "fake" });
+    const st = (id: string) => ledger.get(id)?.state;
+    expect(st("sub")).toBe("interrupted");
+    expect(ledger.get("sub")!.error).toMatch(/not resubmitted/);
+    expect(st("run-res")).toBe("running");
+    expect(ledger.resumable.map((j) => j.id)).toEqual(["run-res"]);
+    expect(st("run-nores")).toBe("interrupted");
+    expect(ledger.get("run-nores")!.error).toMatch(/does not support resuming/);
+    expect(st("legacy")).toBe("interrupted");
+    expect(st("fail")).toBe("failed");
+    expect(st("done")).toBeUndefined();
+  });
+
+  it("maps states to plain-language labels", () => {
+    expect(jobStateLabel("succeeded")).toBe("Done");
+    expect(jobStateLabel("running")).toBe("Generating");
+    expect(jobStateLabel("interrupted")).toBe("Interrupted");
   });
 });
 

@@ -6338,3 +6338,82 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* Unplugged source input: the pinned @[source] chip goes red until rewired. */
 .react-flow__node.source-missing .prompt-tag-chip[data-tag="@[source]"] { background: color-mix(in srgb, var(--danger) 25%, transparent); border-color: var(--danger); color: var(--danger); }
+
+.prod-queue-btn {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.prod-queue-btn--busy { color: var(--text); }
+.prod-queue-btn--attn { border-color: var(--danger); }
+.prod-queue-btn--done { color: var(--text); }
+.prod-queue-btn-count { font-variant-numeric: tabular-nums; font-weight: 600; }
+.prod-queue-btn-warn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--danger); color: var(--bg-panel);
+  font-size: 0.7rem; font-weight: 700; line-height: 1;
+}
+.prod-queue-btn-track { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden; }
+.prod-queue-btn-bar {
+  position: absolute; left: 0; bottom: 0; height: 2px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.prod-queue-btn-track--shimmer::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 40%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 45%, transparent), transparent);
+  animation: prod-queue-shimmer 1.4s linear infinite;
+}
+@keyframes prod-queue-shimmer { from { left: -40%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .prod-queue-btn-track--shimmer::after { animation: none; left: 30%; } }
+
+.prod-queue-wrap { position: relative; display: inline-flex; }
+.prod-queue-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 50;
+  width: 360px; max-height: 60vh; overflow: auto;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px; font-size: 0.8rem; box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.prod-queue-panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.prod-queue-panel-x { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 1rem; }
+.prod-queue-empty { color: var(--text-dim); padding: 8px 2px; }
+.prod-queue-row { border-top: 1px solid var(--border); padding: 6px 2px; }
+.prod-queue-row-open { display: flex; gap: 8px; cursor: pointer; border-radius: 6px; padding: 2px; }
+.prod-queue-row-open:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.prod-queue-thumb {
+  flex: none; width: 40px; height: 40px; border-radius: 4px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--text-dim); border: 1px solid var(--border);
+}
+.prod-queue-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.prod-queue-row-body { flex: 1; min-width: 0; }
+.prod-queue-row-meta { color: var(--text-dim); display: flex; justify-content: space-between; gap: 8px; font-size: 0.75rem; }
+.prod-queue-row-elapsed { font-variant-numeric: tabular-nums; }
+.prod-queue-row-note { color: var(--text-dim); margin-top: 2px; font-size: 0.75rem; }
+.prod-queue-bar { height: 3px; margin-top: 4px; background: var(--border); border-radius: 2px; overflow: hidden; position: relative; }
+.prod-queue-bar > span { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.prod-queue-bar--indeterminate > span {
+  position: absolute; width: 35%; animation: prod-queue-indeterminate 1.3s ease-in-out infinite;
+}
+@keyframes prod-queue-indeterminate { from { left: -35%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .prod-queue-bar--indeterminate > span { animation: none; left: 30%; } }
+.prod-queue-footer {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; color: var(--text-dim);
+}
+.prod-queue-footer button { font-size: 0.75rem; cursor: pointer; }
+.prod-queue-row-main { display: flex; justify-content: space-between; gap: 8px; }
+.prod-queue-row-state { color: var(--text-dim); white-space: nowrap; }
+.prod-queue-row--failed .prod-queue-row-state, .prod-queue-row--interrupted .prod-queue-row-state { color: var(--danger); }
+.prod-queue-row-error { color: var(--danger); margin-top: 2px; word-break: break-word; }
+.prod-queue-row-actions { display: flex; gap: 6px; margin-top: 4px; }
+.prod-queue-row-actions button { font-size: 0.75rem; cursor: pointer; }

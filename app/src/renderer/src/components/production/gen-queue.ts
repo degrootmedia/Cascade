@@ -1,4 +1,5 @@
 import { useEffect, useReducer } from "react";
+import { isActiveJobState, jobTargetKey, type JobRecord } from "../../../../shared/ipc.js";
 
 /** Snapshot of one generation target's queue. */
 export interface GenStatus {
@@ -23,9 +24,26 @@ const IDLE: GenStatus = { running: false, pending: 0 };
  * counted locally.
  */
 export class GenerationQueue {
-  private queues = new Map<string, (() => Promise<unknown>)[]>();
-  private active = new Set<string>();
+  /** Calls dispatched from this window that have not settled yet, per key. */
+  private inflight = new Map<string, number>();
+  /** Active (queued/running/...) ledger jobs per key, from the main ledger. */
+  private ledgerActive = new Map<string, number>();
   private listeners = new Set<() => void>();
+
+  /** Feed the main-process ledger's jobs. The ledger owns scheduling, so this
+   *  is the cross-window source of the busy/queued counts. */
+  setLedgerJobs(jobs: JobRecord[]): void {
+    const next = new Map<string, number>();
+    for (const j of jobs) {
+      if (!isActiveJobState(j.state)) continue;
+      const key = jobTargetKey(j.kind, [j.productionId, j.shotId, j.nodeId ? { nodeId: j.nodeId } : {}]);
+      if (key) next.set(key, (next.get(key) ?? 0) + 1);
+    }
+    let same = next.size === this.ledgerActive.size;
+    if (same) for (const [k, v] of next) if (this.ledgerActive.get(k) !== v) same = false;
+    this.ledgerActive = next;
+    if (!same) this.notify();
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -39,43 +57,27 @@ export class GenerationQueue {
   }
 
   status(key: string): GenStatus {
-    const queue = this.queues.get(key);
-    return { running: this.active.has(key), pending: queue ? queue.length : 0 };
+    // Display only: the larger of what this window just dispatched and what the
+    // ledger reports (covers jobs started from the other window / the agent).
+    const total = Math.max(this.inflight.get(key) ?? 0, this.ledgerActive.get(key) ?? 0);
+    return { running: total > 0, pending: Math.max(0, total - 1) };
   }
 
-  /** Queue `job` behind whatever is already running for `key`. `job` owns its
-   *  own error handling (the queue swallows rejections so one failure can't
-   *  stall the rest). */
+  /** Dispatch `job` immediately. The main-process scheduler serializes per
+   *  target, so this window never holds work back. `job` owns its own error
+   *  handling; rejections are swallowed here. */
   enqueue(key: string, job: () => Promise<unknown>): void {
-    const queue = this.queues.get(key) ?? [];
-    queue.push(job);
-    this.queues.set(key, queue);
-    // Already draining: the new pending count is the only change to publish.
-    // Otherwise `drain` publishes after it takes the first job.
-    if (this.active.has(key)) this.notify();
-    else void this.drain(key);
-  }
-
-  /** Run the key's jobs back-to-back. `active` stays set across consecutive
-   *  jobs so a button never flickers to idle between queued generations. */
-  private async drain(key: string): Promise<void> {
-    if (this.active.has(key)) return;
-    if (!this.queues.get(key)?.length) return;
-    this.active.add(key);
-    for (;;) {
-      const job = this.queues.get(key)?.shift();
-      if (!job) break;
-      // Published after the shift, so `pending` excludes the running job.
-      this.notify();
-      try {
-        await job();
-      } catch {
-        /* the job surfaces its own error */
-      }
-    }
-    this.active.delete(key);
-    this.queues.delete(key);
+    this.inflight.set(key, (this.inflight.get(key) ?? 0) + 1);
     this.notify();
+    const done = (): void => {
+      const n = (this.inflight.get(key) ?? 1) - 1;
+      if (n > 0) this.inflight.set(key, n);
+      else this.inflight.delete(key);
+      this.notify();
+    };
+    let p: Promise<unknown>;
+    try { p = Promise.resolve(job()); } catch { p = Promise.resolve(); }
+    void p.catch(() => { /* the job surfaces its own error */ }).then(done);
   }
 }
 

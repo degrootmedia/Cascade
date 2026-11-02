@@ -1010,6 +1010,12 @@ export interface CascadeApi {
    * reloads and is identical across windows (the ledger is main-authoritative).
    */
   jobsSnapshot(productionId: string): Promise<JobSnapshot>;
+  /** Cancel an active ledger job (queued jobs never start). */
+  jobsCancel(jobId: string): Promise<boolean>;
+  /** Remove a finished/failed/interrupted job from the queue panel. */
+  jobsDismiss(jobId: string): Promise<void>;
+  /** Re-run a failed/interrupted/cancelled job from its recorded settings. */
+  jobsRetry(jobId: string): Promise<void>;
   /**
    * Subscribe to job-ledger changes. Fires for every production (filter by
    * `snapshot.productionId`); returns the unsubscribe function.

@@ -26,7 +26,8 @@ import { McpManager } from "./mcp.js";
 import { assetPathInFolder } from "./pipeline.js";
 import { resolveProductionFile, classifyCopyImageSource, type CopyImageTarget } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, mergeJobShotNodes, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
-import { createJobLedger, runWithJobLedger } from "./jobs.js";
+import { createJobLedger, recordProviderTask, resumeRecoveredJobs, runWithJobLedger } from "./jobs.js";
+import { capabilitiesFor, providerFromModel } from "./providers/capabilities.js";
 import { externalEditorLabel } from "../shared/editor-label.js";
 import { MEDIA_MENU_LABELS } from "../shared/menu-labels.js";
 import { createRefWatcher, type RefChange } from "./ref-watch.js";
@@ -70,7 +71,7 @@ import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type Suite
 import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, ReferenceSaveOptions, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
-import { jobForChannel, jobLabel } from "../shared/ipc.js";
+import { isActiveJobState, jobForChannel, jobLabel } from "../shared/ipc.js";
 import { defaultGenjutsuModelId, genjutsuModeForModelId, isGenjutsuMode } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
@@ -1200,6 +1201,8 @@ function registerIpc() {
   // silent drop or an indefinite spinner.
   const jobLedgerFile = path.join(app.getPath("userData"), "jobs.json");
   const jobLedger = createJobLedger({
+    // Resume only where the provider can look a task up by id.
+    canResume: (j) => capabilitiesFor(j.provider).canResume,
     persist(active) {
       try {
         const tmp = `${jobLedgerFile}.tmp`;
@@ -1216,11 +1219,9 @@ function registerIpc() {
       }
     },
   });
-  // The recovered (interrupted) jobs are no longer "running" — clear the file
-  // so a second crash can't re-mark them.
-  if (jobLedger.interrupted.length) {
-    try { fs.writeFileSync(jobLedgerFile, "[]", "utf8"); } catch { /* best-effort */ }
-  }
+  // Interrupted and failed jobs stay in the file until dismissed or retried
+  // (the ledger persists them); recovery is idempotent, so a second crash
+  // cannot re-mark or resubmit anything.
   const broadcastJobs = (snapshot: JobSnapshot): void => {
     for (const w of BrowserWindow.getAllWindows()) {
       try {
@@ -1229,6 +1230,29 @@ function registerIpc() {
     }
   };
   jobLedger.subscribe(broadcastJobs);
+  // Restart recovery: the ledger was reconciled at construction (before any
+  // handler exists). Resumable jobs are polled by task id through the existing
+  // recheck handlers - never resubmitted - which fetch, save and apply the
+  // result with the same wiring rules as an uninterrupted run.
+  setTimeout(() => {
+    if (!jobLedger.resumable.length) return;
+    void resumeRecoveredJobs(jobLedger, {
+      async poll(job) {
+        const video = ["video", "videoNode", "editVideoNode", "sequenceVideo", "sequenceEditVideo", "recheckVideo", "tweenBlock", "fetchVideos"].includes(job.kind);
+        const channel = job.kind === "styleFrame" || job.kind === "recheckStyleFrame" ? "production:recheckStyleFrame"
+          : video ? "production:recheckVideo" : "production:recheckBoard";
+        const fn = ipcListeners.get(channel);
+        if (!fn || !job.shotId) throw new Error("Cannot resume this job: its target is unknown.");
+        await fn(undefined, job.productionId, job.shotId);
+        const p = productions.loadProduction(job.productionId);
+        const shot = p?.scenes.flatMap((s) => s.shots).find((s) => s.id === job.shotId);
+        const stillPending = channel === "production:recheckVideo" ? !!shot?.pendingVideoGen
+          : channel === "production:recheckBoard" ? !!shot?.pendingImageGen
+          : !!p?.styles?.some((s) => s.id === job.shotId && s.pendingImageGen);
+        return stillPending ? "pending" : "done";
+      },
+    });
+  }, 2000);
 
   function handle(channel: string, listener: (event: import("electron").IpcMainInvokeEvent, ...args: any[]) => unknown): void {
     if (!(channel in ipcContract)) throw new Error(`Undeclared IPC channel "${channel}" — add it to ipcContract in shared/ipc.ts`);
@@ -2911,6 +2935,9 @@ function registerIpc() {
    *  it can never cross the job's own commit. */
   function pendingImageSink(id: string, shotId: string, wrap?: (rec: PendingImageGen) => PendingImageGen): (rec: PendingImageGen | null) => void {
     return (rec) => {
+      // The provider accepted the job: store its task id on the ledger job
+      // (synchronously, still inside the job's async context).
+      if (rec?.historyId) recordProviderTask(rec.historyId, providerFromModel(rec.model), rec.model);
       void enqueueProduction(id, async () => {
         const fresh = productions.loadProduction(id);
         const shot = fresh?.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -2924,6 +2951,7 @@ function registerIpc() {
 
   function pendingVideoSink(id: string, shotId: string, target?: PendingVideoTarget): (rec: PendingVideoGen | null) => void {
     return (rec) => {
+      if (rec?.historyId) recordProviderTask(rec.historyId, providerFromModel(rec.model), rec.model);
       void enqueueProduction(id, async () => {
         const fresh = productions.loadProduction(id);
         const shot = fresh?.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -5315,6 +5343,35 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return jobLedger.snapshot(typeof productionId === "string" ? productionId : undefined);
   });
 
+  const jobIdArg = (v: unknown): string => {
+    if (typeof v !== "string" || !v || v.length > 200) throw new Error("Invalid job id.");
+    return v;
+  };
+  handle("production:jobsCancel", (_e, jobId: string): boolean => jobLedger.cancel(jobIdArg(jobId)));
+  handle("production:jobsDismiss", (_e, jobId: string): void => { jobLedger.dismiss(jobIdArg(jobId)); });
+  // Retry replays the recorded channel + settings through the same wrapped
+  // door as a fresh call (new ledger job). Replayed args come from disk, so
+  // they are re-validated like a fresh IPC call. The new job is recorded
+  // BEFORE the old record is dropped, so a failure can never lose the job.
+  handle("production:jobsRetry", (_e, jobId: string): void => {
+    const old = jobLedger.get(jobIdArg(jobId));
+    if (!old || isActiveJobState(old.state)) throw new Error("This job can't be retried.");
+    if (old.taskId && old.state === "interrupted") {
+      throw new Error("This job was already accepted by the provider and may still finish there. Check the shot for a pending result (recheck) instead of retrying, to avoid paying twice.");
+    }
+    const channel = old.channel;
+    const fn = channel ? ipcListeners.get(channel) : undefined;
+    const args = [old.productionId, ...(Array.isArray(old.settings) ? old.settings : [])];
+    if (!channel || !fn || !jobForChannel(channel, args)) throw new Error("This job can't be retried: its original request wasn't recorded.");
+    validateIpcArgs(channel, args);
+    if (GENERATION_CHANNELS.has(channel) && typeof args[1] === "string") {
+      const gs = productions.loadProduction(args[0] as string)?.scenes.flatMap((s) => s.shots).find((s) => s.id === args[1]);
+      const nid = channel === "production:generateTweenBlock" ? undefined : (args[2] as { nodeId?: string } | undefined)?.nodeId;
+      if (gs && generationBlocked(gs.graphLayout, channel, nid)) throw new Error("This node is in a deactivated group - reactivate the group to generate.");
+    }
+    void runWithJobLedger(jobLedger, channel, args, () => fn(undefined as never, ...args)).catch(() => { /* recorded as failed */ });
+    jobLedger.dismiss(old.id);
+  });
   // Step 3: persist one shot's canvas state through the ONE layout write-
   // through. The merge is per-key (positions/sizes/collapsed fold node by
   // node; deletions are explicit), so two windows moving different nodes fold

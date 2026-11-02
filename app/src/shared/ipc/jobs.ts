@@ -34,7 +34,25 @@ export type JobKind =
   | "magicPrompts"
   | "suite";
 
-export type JobState = "running" | "succeeded" | "failed" | "interrupted";
+/** Lifecycle: queued -> submitting -> running -> fetching -> succeeded.
+ *  `failed`, `cancelled` and `succeeded` are final; `interrupted` stays until
+ *  the user's explicit Retry. The original four names keep their meaning. */
+export type JobState = "queued" | "submitting" | "running" | "fetching" | "succeeded" | "failed" | "cancelled" | "interrupted";
+
+/** States that still occupy the queue (not final, not interrupted). */
+export const ACTIVE_JOB_STATES: readonly JobState[] = ["queued", "submitting", "running", "fetching"];
+export const isActiveJobState = (s: JobState): boolean => ACTIVE_JOB_STATES.includes(s);
+/** Final states: never picked up again by recovery. */
+export const isFinalJobState = (s: JobState): boolean => s === "succeeded" || s === "failed" || s === "cancelled";
+
+/** Plain-language label for the queue panel (UI layer only; internal names unchanged). */
+export function jobStateLabel(s: JobState): string {
+  const labels: Record<JobState, string> = {
+    queued: "Queued", submitting: "Generating", running: "Generating", fetching: "Fetching",
+    succeeded: "Done", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted",
+  };
+  return labels[s];
+}
 
 /** One generation job's record. Non-terminal jobs are persisted so a crash
  *  leaves them recoverable (see the `interrupted` state). */
@@ -51,8 +69,22 @@ export interface JobRecord {
   label: string;
   startedAt: string;
   finishedAt?: string;
-  /** The failure reason when `state === "failed"`. */
+  /** The failure reason when `state === "failed"`, or why it was interrupted. */
   error?: string;
+  provider?: string;
+  model?: string;
+  /** Replayable snapshot of the generation request (the IPC args after the
+   *  production id), used by Retry. JSON-serializable. */
+  settings?: unknown;
+  /** The provider's task id, stored the moment the provider accepts the job.
+   *  Once set, the job is tracked by it and never submitted again. */
+  taskId?: string;
+  /** Provider-reported progress 0-100, when it reports one. */
+  progress?: number;
+  /** Where the job came from (UI door or chat agent). */
+  origin?: "ui" | "agent";
+  /** The IPC channel that started this job — lets the queue panel retry it. */
+  channel?: string;
 }
 
 /** The ledger state for one production: every non-terminal job plus a bounded
@@ -77,7 +109,7 @@ export function jobsToCanvasBusy(productionId: string, jobs: JobRecord[]): Canva
   const cameraGrid = new Set<string>();
   const upscale = new Set<string>();
   for (const job of jobs) {
-    if (job.state !== "running") continue;
+    if (!isActiveJobState(job.state)) continue;
     const shot = job.shotId;
     switch (job.kind) {
       case "frameNode":
@@ -177,6 +209,38 @@ export function jobForChannel(channel: string, args: unknown[]): { kind: JobKind
   return { kind, shotId, nodeId };
 }
 
+/** The scheduler's per-target serialization key — the same keys the renderer
+ *  `genKeys` used, so "one job per target at a time" now lives in main.
+ *  Null = no per-target serialization (videos, storyboard batches, ... stay
+ *  concurrent exactly as before). args[0] is the production id. */
+export function jobTargetKey(kind: JobKind, args: unknown[]): string | null {
+  const prod = String(args[0] ?? "");
+  const a1 = typeof args[1] === "string" && args[1] ? args[1] : "";
+  const o = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? (args[2] as Record<string, unknown>) : {};
+  const nodeId = typeof o.nodeId === "string" ? o.nodeId : "";
+  switch (kind) {
+    case "frameNode":
+    case "boardRecheck":
+      return a1 ? `image:${a1}` : null;
+    case "editNode":
+      return a1 ? `edit:${a1}:${nodeId}` : null;
+    case "cameraGrid":
+      return a1 ? `camgrid:${a1}` : null;
+    case "upscale":
+      return a1 ? `upscale:${a1}` : null;
+    case "suite":
+      return `suite:${prod}`;
+    case "referenceImage":
+      return `ref:${prod}`;
+    case "characterSheet":
+      return `char:${a1 || "new"}`;
+    case "styleFrame":
+      return a1 ? `style:${a1}` : null;
+    default:
+      return null;
+  }
+}
+
 /** Short user-facing label for each job kind (the progress events stream the
  *  detail; this is the ledger's one-liner). */
 export function jobLabel(kind: JobKind): string {
@@ -205,4 +269,27 @@ export function jobLabel(kind: JobKind): string {
     suite: "Generating (Image Suite)",
   };
   return labels[kind];
+}
+
+/** Header-button summary of a production's queue. Pure.
+ *  `fraction` is overall progress across the active jobs plus the recently
+ *  succeeded ones (0-1); null when nothing is active. A job without a
+ *  provider-reported progress counts as 0 until it finishes. */
+export interface QueueSummary {
+  active: number;
+  queued: number;
+  needsAttention: number;
+  fraction: number | null;
+}
+export function queueSummary(jobs: JobRecord[]): QueueSummary {
+  const active = jobs.filter((j) => isActiveJobState(j.state));
+  const done = jobs.filter((j) => j.state === "succeeded").length;
+  const partial = active.reduce((n, j) => n + Math.min(100, Math.max(0, j.progress ?? 0)) / 100, 0);
+  const total = active.length + done;
+  return {
+    active: active.length,
+    queued: active.filter((j) => j.state === "queued").length,
+    needsAttention: jobs.filter((j) => j.state === "failed" || j.state === "interrupted").length,
+    fraction: active.length === 0 || total === 0 ? null : (done + partial) / total,
+  };
 }

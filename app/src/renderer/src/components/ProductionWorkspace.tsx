@@ -49,6 +49,9 @@ import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wired
 import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
+import { QueuePanel } from "./production/QueuePanel.js";
+import { useQueueButton } from "./production/useQueueButton.js";
+import { jobOpensNodeView } from "./production/queue-format.js";
 import { jobsToCanvasBusy, type JobRecord } from "../../../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../../../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
@@ -1175,18 +1178,21 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // mirror — the ledger drives both windows, so no renderer-to-renderer
   // state ever crosses.)
   const [ledgerJobs, setLedgerJobs] = useState<JobRecord[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueBtnRef = useRef<HTMLButtonElement>(null);
+  const queueBtn = useQueueButton(ledgerJobs);
   useEffect(() => {
     if (!activeProdId || typeof window.cascade.jobsSnapshot !== "function") return;
     let live = true;
     void window.cascade.jobsSnapshot(activeProdId)
-      .then((s) => { if (live) setLedgerJobs(s.jobs); })
+      .then((s) => { if (live) { setLedgerJobs(s.jobs); genQueue.setLedgerJobs(s.jobs); } })
       .catch(() => {});
     return () => { live = false; };
   }, [activeProdId]);
   useEffect(() => {
     if (typeof window.cascade.onJobsChanged !== "function") return;
     return window.cascade.onJobsChanged((s) => {
-      if (s.productionId === prodRef.current?.meta.id) setLedgerJobs(s.jobs);
+      if (s.productionId === prodRef.current?.meta.id) { setLedgerJobs(s.jobs); genQueue.setLedgerJobs(s.jobs); }
     });
   }, []);
   // The ledger's running jobs, projected onto the canvas busy shape the node
@@ -2592,6 +2598,29 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       }
     });
     await promptSaveQueue.current;
+  }
+
+  /** Queue panel: "Shot 0100 \u00B7 node vid1" style description of a job's target. */
+  function describeJobTarget(job: JobRecord): string {
+    const shot = job.shotId ? prod?.scenes.flatMap((s) => s.shots).find((s) => s.id === job.shotId) : undefined;
+    const parts: string[] = [];
+    if (shot) parts.push(`Shot ${shot.number}`);
+    if (job.nodeId) parts.push(`node ${job.nodeId}`);
+    return parts.length ? parts.join(" \u00B7 ") : job.label;
+  }
+  function jobThumb(job: JobRecord): string | undefined {
+    const shot = job.shotId ? prod?.scenes.flatMap((s) => s.shots).find((s) => s.id === job.shotId) : undefined;
+    return prod && shot?.artwork ? cascadeMedia(prod.meta.id, shot.artwork) : undefined;
+  }
+  /** Take the user to a job's shot/node, switching views as needed. */
+  function openJob(job: JobRecord) {
+    if (!job.shotId || !prod) return;
+    const exists = prod.scenes.some((s) => s.shots.some((s2) => s2.id === job.shotId));
+    if (!exists) return;
+    setShowSuite(false); setShowExpenses(false); setShowMoodboard(false);
+    focusPrompt(job.shotId, "");
+    if (jobOpensNodeView(job)) setGraphShotId(job.shotId);
+    setQueueOpen(false);
   }
 
   function focusPrompt(shotId: string, _prompt: string) {
@@ -4187,6 +4216,45 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         />
         <span className="prod-folder" title={prod.meta.folder}>{prod.meta.folder}</span>
         <span className="prod-shotcount">{shotCount} shots</span>
+        {(() => {
+          const busy = queueBtn.active > 0;
+          const showBar = busy || queueBtn.justDone;
+          const pct = queueBtn.justDone ? 100 : Math.round((queueBtn.fraction ?? 0) * 100);
+          return (
+            <span className="prod-queue-wrap">
+              <button
+                ref={queueBtnRef}
+                className={"prod-queue-btn" + (busy ? " prod-queue-btn--busy" : "") + (queueBtn.warn ? " prod-queue-btn--attn" : "") + (queueBtn.justDone ? " prod-queue-btn--done" : "")}
+                title={busy ? `${queueBtn.active} active generation${queueBtn.active === 1 ? "" : "s"} \u2014 ${pct}% overall` : "Generations"}
+                onClick={() => {
+                  setQueueOpen((o) => !o);
+                  queueBtn.acknowledge();
+                }}
+              >
+                <span>Generations</span>
+                {busy && <span className="prod-queue-btn-count">{queueBtn.active}</span>}
+                {queueBtn.justDone && <span className="prod-queue-btn-count" aria-label="All done">{"\u2713"}</span>}
+                {queueBtn.warn && <span className="prod-queue-btn-warn" title="A generation failed or was interrupted" aria-label="Warning">!</span>}
+                {showBar && (
+                  <span className={"prod-queue-btn-track" + (busy && queueBtn.shimmer ? " prod-queue-btn-track--shimmer" : "")}>
+                    <span className="prod-queue-btn-bar" style={{ width: `${pct}%` }} />
+                  </span>
+                )}
+              </button>
+              {queueOpen && (
+                <QueuePanel
+                  jobs={ledgerJobs}
+                  anchorRef={queueBtnRef}
+                  projectName={undefined}
+                  describeTarget={describeJobTarget}
+                  thumbFor={jobThumb}
+                  onOpenJob={openJob}
+                  onClose={() => setQueueOpen(false)}
+                />
+              )}
+            </span>
+          );
+        })()}
         <button className="prod-close" onClick={close}>Close</button>
       </header>
 

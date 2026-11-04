@@ -30,6 +30,8 @@
   --accent: #4f8ef7;
   --on-accent: #fff;
   --on-overlay: #fff;
+  /* Minimal icon-set glyph tint (white on dark themes, dark gray on light) */
+  --icon-tint: #ffffff;
   /* Status */
   --danger: #e5534b;
   --danger-bright: #ff6b6b;
@@ -78,6 +80,7 @@
   --border: #8a8a8a;
   --text: #202226;
   --text-dim: #4d5054;
+  --icon-tint: #333333;
   --danger: #b92c22;
   --danger-bright: #c92a20;
   --danger-soft: #b3402f;
@@ -102,6 +105,27 @@
   color-scheme: light;
 }
 
+/* Graphite theme — clean modern dark: a pure neutral-gray ramp (no blue
+   cast) with white text. Only surfaces/text/scrollbars change; status and
+   category colors and the user's accent are inherited from the dark base. */
+[data-theme="graphite"] {
+  --bg: #151517;
+  --bg-panel: #1b1b1c;
+  --bg-raised: #2c2c2e;
+  --bg-elev: #232325;
+  --bg-inset: #101011;
+  --surface-hover: #343436;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --border: #3a3a3c;
+  --text: #ffffff;
+  --text-dim: #a1a1a6;
+  --icon-tint: #ffffff;
+  --scrollbar: #454547;
+  --scrollbar-hover: #5a5a5c;
+  --scrollbar-faint: #2e2e30;
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 
 /* Full-color SVG icons (assets/icons/*) — the shared default is a small,
@@ -113,6 +137,20 @@
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+/* Minimal icon set: the outline SVG (assets/icons/minimal/*) is a CSS mask
+   painted with the theme's --icon-tint. Size comes from --cascade-icon-size
+   so contextual .cascade-icon width/height rules still win. */
+.cascade-icon-minimal {
+  width: var(--cascade-icon-size, 16px);
+  height: var(--cascade-icon-size, 16px);
+  background-color: var(--icon-tint);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 /* Icon + label buttons: center the glyph next to the text. */
 button:has(> .cascade-icon) {
@@ -3727,6 +3765,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .theme-swatch { background: var(--bg-panel); color: var(--text); border-color: var(--border); }
 .theme-swatch.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .theme-swatch-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; background: var(--bg); border: 1px solid var(--text-dim); }
+.icon-set-preview { display: inline-flex; align-items: center; gap: 3px; }
 .accent-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .accent-swatch {
   width: 24px;

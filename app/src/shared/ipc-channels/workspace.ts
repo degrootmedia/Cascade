@@ -18,6 +18,7 @@ export const settingsChannels = {
   "settings:setProvider": { method: "setProvider", kind: "invoke" },
   "settings:setAccent": { method: "setAccent", kind: "invoke" },
   "settings:setTheme": { method: "setTheme", kind: "invoke" },
+  "settings:setIconSet": { method: "setIconSet", kind: "invoke" },
   "settings:pickExternalEditor": { method: "pickExternalEditor", kind: "invoke" },
   "settings:setExternalEditor": { method: "setExternalEditor", kind: "invoke" },
   "settings:pickAudioEditor": { method: "pickAudioEditor", kind: "invoke" },

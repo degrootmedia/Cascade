@@ -12,6 +12,7 @@ import { SettingsPanel } from "../src/renderer/src/components/SettingsPanel.js";
 import { buildSettingsRegistry } from "../src/renderer/src/components/settings/registry.js";
 import { highlightSegments, matchSections } from "../src/renderer/src/components/settings/search.js";
 import { sectionFromHash } from "../src/renderer/src/components/settings/open-settings.js";
+import { applyIconSet } from "../src/renderer/src/theme.js";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -28,6 +29,7 @@ const ALL_SETTINGS_KEYS: Record<keyof SettingsView, true> = {
   followProduction: true,
   accent: true,
   theme: true,
+  iconSet: true,
   externalEditor: true, audioEditor: true,
 };
 
@@ -105,6 +107,7 @@ const VIEW: SettingsView = {
   followProduction: false,
   accent: "#4f8ef7",
   theme: "dark",
+  iconSet: "colorful",
   externalEditor: null, audioEditor: null,
 };
 
@@ -143,6 +146,7 @@ function installCascade() {
     setModel: async (id: string) => { writes.push(["setModel", id]); },
     setAccent: async (c: string) => { writes.push(["setAccent", c]); },
     setTheme: async (t: string) => { writes.push(["setTheme", t]); },
+    setIconSet: async (s: string) => { writes.push(["setIconSet", s]); },
     setExternalEditor: async (p: string | null) => { writes.push(["setExternalEditor", p]); },
     clearDefaultWorkspace: async () => { writes.push(["clearDefaultWorkspace", null]); },
     openSkillsFolder: async () => {},
@@ -212,6 +216,37 @@ describe("settings deep link", () => {
     expect(document.documentElement.dataset.theme).toBe("light");
     expect(lightChip.className).toContain("selected");
     delete document.documentElement.dataset.theme;
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(container);
+  });
+
+  it("Appearance theme picker applies + persists the graphite theme", async () => {
+    const { container, root } = await mount("#settings/appearance");
+    const chip = container.querySelector('.theme-swatch[data-theme="graphite"]') as HTMLButtonElement;
+    expect(chip).not.toBeNull();
+    expect(chip.textContent).toContain("Graphite");
+    await act(async () => { chip.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(writes).toContainEqual(["setTheme", "graphite"]);
+    expect(document.documentElement.dataset.theme).toBe("graphite");
+    expect(chip.className).toContain("selected");
+    delete document.documentElement.dataset.theme;
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(container);
+  });
+
+  it("Appearance icon set picker applies + persists the minimal set", async () => {
+    const { container, root } = await mount("#settings/appearance");
+    const chip = container.querySelector('.icon-set-swatch[data-icon-set="minimal"]') as HTMLButtonElement;
+    expect(chip).not.toBeNull();
+    expect(chip.textContent).toContain("Minimal");
+    await act(async () => { chip.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(writes).toContainEqual(["setIconSet", "minimal"]);
+    expect(document.documentElement.dataset.iconSet).toBe("minimal");
+    expect(chip.className).toContain("selected");
+    await act(async () => { applyIconSet("colorful"); });
+    delete document.documentElement.dataset.iconSet;
     await act(async () => { root.unmount(); });
     document.body.removeChild(container);
   });

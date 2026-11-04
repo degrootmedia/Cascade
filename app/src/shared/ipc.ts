@@ -173,8 +173,14 @@ export interface ChatEvent {
 }
 
 /** UI color theme (Settings → Appearance). "light" is the Softimage XSI
- *  gray palette; both themes are token sets in styles.css. */
-export type UiTheme = "dark" | "light";
+ *  gray palette and "graphite" is the clean neutral dark; every theme is a
+ *  token set in styles.css. */
+export type UiTheme = "dark" | "light" | "graphite";
+
+/** UI icon set (Settings → Appearance). "colorful" is the original full-color
+ *  artwork; "minimal" is single-color outline glyphs tinted by the theme's
+ *  --icon-tint token (white on dark themes, dark gray on light). */
+export type UiIconSet = "colorful" | "minimal";
 
 export interface SettingsView {
   /** Selected LLM API provider id (see shared/providers.ts). */
@@ -188,6 +194,8 @@ export interface SettingsView {
   accent: string;
   /** UI color theme. */
   theme: UiTheme;
+  /** UI icon set. */
+  iconSet: UiIconSet;
   /** Absolute path to the external image editor, or null when not set. */
   externalEditor: string | null;
   /** Absolute path to the external audio editor, or null when not set. */
@@ -374,6 +382,7 @@ export interface CascadeApi {
   setProvider(id: string): Promise<void>;
   setAccent(color: string): Promise<void>;
   setTheme(theme: UiTheme): Promise<void>;
+  setIconSet(iconSet: UiIconSet): Promise<void>;
   pickExternalEditor(): Promise<string | null>;
   setExternalEditor(path: string | null): Promise<void>;
   pickAudioEditor(): Promise<string | null>;

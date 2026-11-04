@@ -1590,6 +1590,7 @@ function registerIpc() {
     followProduction: settings.getFollowProduction(),
     accent: settings.getAccent(),
     theme: settings.getTheme(),
+    iconSet: settings.getIconSet(),
     externalEditor: settings.getExternalEditor(),
     audioEditor: settings.getAudioEditor(),
   }));
@@ -1800,6 +1801,10 @@ function registerIpc() {
 
   handle("settings:setAccent", (_e, color: string) => {
     if (typeof color === "string") settings.setAccent(color);
+  });
+
+  handle("settings:setIconSet", (_e, iconSet: string) => {
+    if (typeof iconSet === "string") settings.setIconSet(iconSet);
   });
 
   handle("settings:setTheme", (_e, theme: string) => {

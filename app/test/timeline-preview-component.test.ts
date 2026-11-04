@@ -180,7 +180,7 @@ describe("TimelinePreview", () => {
       // Simulate 2.0s of playback in 100ms frames.
       for (let i = 0; i < 20; i++) {
         nowMs += 100;
-        const cb = rafCb;
+        const cb = rafCb as FrameRequestCallback | null;
         rafCb = null;
         await act(async () => { cb?.(nowMs); });
       }

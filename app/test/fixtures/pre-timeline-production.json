@@ -1,0 +1,140 @@
+{
+  "meta": {
+    "id": "prod-fixture",
+    "name": "Pre-Timeline Fixture",
+    "folder": "C:/cascade-fixture-prod",
+    "createdAt": "2026-10-01T00:00:00.000Z",
+    "updatedAt": "2026-10-01T00:00:00.000Z",
+    "stepDone": 4,
+    "shotCount": 7
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Fixture",
+      "shots": [
+        {
+          "id": "s1",
+          "number": "0100",
+          "audio": "",
+          "visual": "Opening clip shot, slipped.",
+          "artwork": "boards/0100/shot-0100.jpg",
+          "videoPath": "boards/0100/video/clip-0100.mp4",
+          "videoOffsetSec": 1.5,
+          "durationSec": 4
+        },
+        {
+          "id": "s2",
+          "number": "0200",
+          "audio": "",
+          "visual": "Still-only shot.",
+          "artwork": "boards/0200/shot-0200.jpg",
+          "durationSec": 2.5
+        },
+        {
+          "id": "s3",
+          "number": "0300",
+          "audio": "",
+          "visual": "Blank shot, no frame and no clip.",
+          "durationSec": 3
+        },
+        {
+          "id": "s4",
+          "number": "0400",
+          "audio": "",
+          "visual": "Muted clip shot.",
+          "videoPath": "boards/0400/video/clip-0400.mp4",
+          "muted": true,
+          "durationSec": 5
+        },
+        {
+          "id": "s5",
+          "number": "0500",
+          "audio": "",
+          "visual": "Sequence member one.",
+          "artwork": "boards/0500/shot-0500.jpg",
+          "durationSec": 3
+        },
+        {
+          "id": "s6",
+          "number": "0600",
+          "audio": "",
+          "visual": "Sequence member two.",
+          "artwork": "boards/0600/shot-0600.jpg",
+          "durationSec": 3
+        },
+        {
+          "id": "s7",
+          "number": "0700",
+          "audio": "",
+          "visual": "Disabled shot — excluded from the animatic.",
+          "videoPath": "boards/0700/video/clip-0700.mp4",
+          "disabled": true,
+          "durationSec": 9
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "shotSequences": [
+    {
+      "id": "seq1",
+      "name": "Sequence 01",
+      "shotIds": ["s5", "s6"],
+      "enabled": true,
+      "durationSec": 6,
+      "graph": {
+        "id": "seq1",
+        "number": "Sequence 01",
+        "audio": "",
+        "visual": "",
+        "graphOutputSource": "videogen",
+        "graphVideoNodes": [
+          {
+            "id": "vid0",
+            "prompt": "",
+            "genIndex": 0,
+            "gens": [
+              {
+                "path": "out/sequences/seq1/take.mp4",
+                "prompt": "",
+                "model": "fixture",
+                "at": "2026-10-01T00:00:00.000Z"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "voiceoverPath": "voiceover/voiceover.mp3",
+  "voiceoverVolume": 0.8,
+  "musicPath": "music/music.mp3",
+  "musicVolume": 0.4,
+  "media": [
+    { "id": "m-clip0100", "path": "boards/0100/video/clip-0100.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-still0100", "path": "boards/0100/shot-0100.jpg", "kind": "image", "origin": "generated", "state": "present" },
+    { "id": "m-still0200", "path": "boards/0200/shot-0200.jpg", "kind": "image", "origin": "generated", "state": "present" },
+    { "id": "m-clip0400", "path": "boards/0400/video/clip-0400.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-seqtake", "path": "out/sequences/seq1/take.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-vo", "path": "voiceover/voiceover.mp3", "kind": "audio", "origin": "imported", "state": "present" },
+    { "id": "m-music", "path": "music/music.mp3", "kind": "audio", "origin": "imported", "state": "present" }
+  ],
+  "status": {},
+  "assembly": { "fps": 24, "width": 1920, "height": 1080, "exportDir": "out/assembly" },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "schemaVersion": 3
+}

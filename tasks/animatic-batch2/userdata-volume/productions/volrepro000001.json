@@ -1,0 +1,216 @@
+{
+  "meta": {
+    "id": "volrepro000001",
+    "name": "Volume repro",
+    "folder": "D:\\Cascade\\tasks\\animatic-batch2\\seed-volume",
+    "createdAt": "2026-11-04T21:10:33.649Z",
+    "updatedAt": "2026-11-04T21:10:44.344Z",
+    "stepDone": 4,
+    "shotCount": 1
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Scene",
+      "shots": [
+        {
+          "id": "shot1",
+          "number": "0100",
+          "audio": "",
+          "visual": "red",
+          "durationSec": 6,
+          "graphMigrated": true,
+          "graphVideoNodes": [
+            {
+              "id": "vid0",
+              "prompt": "",
+              "gens": [
+                {
+                  "path": "videos/red6s.mp4",
+                  "prompt": "",
+                  "model": "auto",
+                  "at": "",
+                  "mediaId": "7da7da8c-47ff-4f09-9a20-a723736e5a1b"
+                }
+              ],
+              "genIndex": 0
+            }
+          ],
+          "graph": {
+            "version": 1,
+            "nodes": [
+              {
+                "id": "composer",
+                "kind": "composer",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "style",
+                "kind": "style",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "brand",
+                "kind": "brand",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "output",
+                "kind": "output",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "imagegen",
+                "kind": "imagegen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videoprompt",
+                "kind": "videoprompt",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videogen",
+                "kind": "videogen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              }
+            ],
+            "edges": [
+              {
+                "id": "e-cmp-img",
+                "from": {
+                  "node": "composer",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "imagegen",
+                  "port": "in-prompt"
+                }
+              },
+              {
+                "id": "e-vp-vid",
+                "from": {
+                  "node": "videoprompt",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "videogen",
+                  "port": "in-prompt"
+                }
+              }
+            ],
+            "migrated": true
+          }
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "status": {},
+  "assembly": {
+    "fps": 24,
+    "width": 640,
+    "height": 360,
+    "exportDir": "out/assembly"
+  },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "name": "V1"
+      },
+      {
+        "id": "a1",
+        "kind": "audio",
+        "name": "A1",
+        "volume": 0.05
+      }
+    ],
+    "clips": [
+      {
+        "id": "c1",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 6,
+        "srcRel": "videos/red6s.mp4",
+        "name": "red6s.mp4",
+        "shotId": "shot1"
+      },
+      {
+        "id": "ac1",
+        "trackId": "a1",
+        "sourceKind": "audio",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 8,
+        "srcRel": "audio/tone8s.mp3",
+        "name": "tone8s.mp3"
+      }
+    ]
+  },
+  "outdatedShots": [],
+  "referenceCategories": [],
+  "openArt": {
+    "model": "auto",
+    "resolution": "1k"
+  },
+  "brand": {
+    "colors": [],
+    "font": ""
+  },
+  "magicPrompts": {},
+  "magicEnabled": false,
+  "media": [
+    {
+      "id": "7da7da8c-47ff-4f09-9a20-a723736e5a1b",
+      "path": "videos/red6s.mp4",
+      "kind": "video",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-04T21:10:37.220Z"
+    }
+  ],
+  "schemaVersion": 3,
+  "promptOverrides": {},
+  "suggestedReferences": [],
+  "rev": 2
+}

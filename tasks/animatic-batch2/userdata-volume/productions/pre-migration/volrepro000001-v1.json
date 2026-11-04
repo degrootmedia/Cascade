@@ -1,0 +1,100 @@
+{
+  "meta": {
+    "id": "volrepro000001",
+    "name": "Volume repro",
+    "folder": "D:\\Cascade\\tasks\\animatic-batch2\\seed-volume",
+    "createdAt": "2026-11-04T21:10:33.649Z",
+    "updatedAt": "2026-11-04T21:10:33.649Z",
+    "stepDone": 4,
+    "shotCount": 1
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Scene",
+      "shots": [
+        {
+          "id": "shot1",
+          "number": "0100",
+          "audio": "",
+          "visual": "red",
+          "durationSec": 6,
+          "videoPath": "videos/red6s.mp4"
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "status": {},
+  "assembly": {
+    "fps": 24,
+    "width": 640,
+    "height": 360,
+    "exportDir": "out/assembly"
+  },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "name": "V1"
+      },
+      {
+        "id": "a1",
+        "kind": "audio",
+        "name": "A1"
+      }
+    ],
+    "clips": [
+      {
+        "id": "c1",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 6,
+        "srcRel": "videos/red6s.mp4",
+        "name": "red6s.mp4",
+        "shotId": "shot1"
+      },
+      {
+        "id": "ac1",
+        "trackId": "a1",
+        "sourceKind": "audio",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 8,
+        "srcRel": "audio/tone8s.mp3",
+        "name": "tone8s.mp3"
+      }
+    ]
+  },
+  "outdatedShots": [],
+  "referenceCategories": [],
+  "openArt": {
+    "model": "auto",
+    "resolution": "1k"
+  },
+  "brand": {
+    "colors": [],
+    "font": ""
+  },
+  "magicPrompts": {},
+  "magicEnabled": false,
+  "media": []
+}

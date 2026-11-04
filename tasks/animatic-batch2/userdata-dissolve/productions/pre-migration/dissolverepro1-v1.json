@@ -1,0 +1,113 @@
+{
+  "meta": {
+    "id": "dissolverepro1",
+    "name": "Dissolve Repro",
+    "folder": "D:\\Cascade\\tasks\\animatic-batch2\\seed-dissolve",
+    "createdAt": "2026-11-04T20:57:09.860Z",
+    "updatedAt": "2026-11-04T20:57:09.860Z",
+    "stepDone": 4,
+    "shotCount": 2
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Scene",
+      "shots": [
+        {
+          "id": "shot1",
+          "number": "0100",
+          "audio": "",
+          "visual": "red",
+          "durationSec": 4,
+          "videoPath": "videos/red6s.mp4"
+        },
+        {
+          "id": "shot2",
+          "number": "0200",
+          "audio": "",
+          "visual": "blue",
+          "durationSec": 4,
+          "videoPath": "videos/blue6s.mp4"
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "status": {},
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "name": "V1"
+      }
+    ],
+    "clips": [
+      {
+        "id": "c1",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 0,
+        "sourceInSec": 1,
+        "sourceOutSec": 5,
+        "srcRel": "videos/red6s.mp4",
+        "name": "red6s.mp4",
+        "shotId": "shot1"
+      },
+      {
+        "id": "c2",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 4,
+        "sourceInSec": 1,
+        "sourceOutSec": 5,
+        "srcRel": "videos/blue6s.mp4",
+        "name": "blue6s.mp4",
+        "shotId": "shot2"
+      }
+    ],
+    "transitions": [
+      {
+        "id": "tr1",
+        "type": "dissolve",
+        "outgoingClipId": "c1",
+        "incomingClipId": "c2",
+        "durationSec": 2
+      }
+    ]
+  },
+  "assembly": {
+    "fps": 24,
+    "width": 640,
+    "height": 360,
+    "exportDir": "out/assembly"
+  },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "outdatedShots": [],
+  "referenceCategories": [],
+  "openArt": {
+    "model": "auto",
+    "resolution": "1k"
+  },
+  "brand": {
+    "colors": [],
+    "font": ""
+  },
+  "magicPrompts": {},
+  "magicEnabled": false,
+  "media": []
+}

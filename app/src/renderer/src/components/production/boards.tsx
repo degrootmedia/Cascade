@@ -1141,6 +1141,7 @@ export function EditBoardModal({ shotNumber, models, savedModel, savedResolution
         <button
           className="prod-btn prod-edit-go"
           disabled={!prompt.trim()}
+          title="Edit frame (Ctrl+Enter)"
           onClick={() => submitEdit()}
         >
           Edit frame<GenerationCostSuffix req={editCostReq} />

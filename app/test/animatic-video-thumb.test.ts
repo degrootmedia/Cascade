@@ -4,13 +4,14 @@ import { resolve } from "node:path";
 
 const src = readFileSync(resolve(__dirname, "../src/renderer/src/components/production/animatic.tsx"), "utf8");
 
-describe("animatic video thumbnails", () => {
-  it("builds a still-frame media url", () => {
-    const m = /export function videoStillSrc[\s\S]*?\n\}/.exec(src)![0];
-    expect(m).toContain("#t=");
+describe("timeline preview stills and pooled videos", () => {
+  it("renders a held still directly from its media rel", () => {
+    expect(src).toMatch(/if \(explicitRel\) return <img className="prod-timeline-thumb"/);
+    expect(src).toContain("cascade-media://${prodId}/${encodeURIComponent(explicitRel)}");
   });
-  it("timeline blocks pass the shot's videoPath so a video frame is rendered", () => {
-    expect(src).toContain("videoRel={s.videoPath || undefined}");
-    expect(src).toMatch(/if \(videoRel\) return <video/);
+  it("plays video clips through the mounted pool, not still-frame thumbs", () => {
+    expect(src).toContain("prod-animatic-video");
+    expect(src).not.toContain("videoStillSrc");
+    expect(src).not.toContain("videoRel");
   });
 });

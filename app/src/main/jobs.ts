@@ -27,6 +27,18 @@ const currentJob = new AsyncLocalStorage<JobHandle>();
 
 /** Called the moment a provider accepts a job: stores its task id (and
  *  provider/model) on the running ledger job. No-op outside a ledger job. */
+/** Cooperative controls for the ledger job this async chain runs
+ *  under (Item 9: the MP4 render polls isCancelled between ffmpeg
+ *  passes and reports progress). Capture the returned object BEFORE
+ *  hopping queues — its closures read live ledger state, so it keeps
+ *  working after the AsyncLocalStorage context is gone. Undefined
+ *  outside a ledger job. */
+export function currentJobControls(): { isCancelled: () => boolean; setProgress: (percent: number) => void } | undefined {
+  const h = currentJob.getStore();
+  if (!h) return undefined;
+  return { isCancelled: () => h.isCancelled(), setProgress: (pct) => h.setProgress(pct) };
+}
+
 export function recordProviderTask(taskId: string, provider?: string, model?: string): void {
   const h = currentJob.getStore();
   if (!h) return;
@@ -99,6 +111,8 @@ export interface JobHandle {
   /** Store the provider's task id the moment it accepts the job. */
   setTaskId(taskId: string): void;
   setProgress(percent: number): void;
+  /** True once the user cancelled this job (cooperative checks). */
+  isCancelled(): boolean;
   setProvider(provider: string, model?: string): void;
   succeed(): void;
   fail(error: string): void;
@@ -280,6 +294,7 @@ export function createJobLedger(deps: JobLedgerDeps = {}): JobLedger {
       // The provider accepted the job: from now on it is tracked by this id.
       setTaskId(taskId) { patch(() => { rec.taskId = taskId; if (rec.state === "submitting" || rec.state === "queued") rec.state = "running"; }); },
       setProgress(p) { patch(() => { rec.progress = Math.max(0, Math.min(100, p)); }); },
+      isCancelled() { return jobs.get(rec.id)?.state === "cancelled"; },
       setProvider(provider, model) { patch(() => { rec.provider = provider; if (model) rec.model = model; }); },
       succeed() { if (isActiveJobState(rec.state)) setState(rec, "succeeded"); },
       fail(error: string) { if (isActiveJobState(rec.state)) setState(rec, "failed", error.slice(0, 500)); },

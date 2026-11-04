@@ -60,16 +60,37 @@ function findOnPath(name: string): string | null {
   return null;
 }
 
-/** Spawn ffmpeg; resolve on exit 0, reject with the stderr tail otherwise. */
-export function runFfmpeg(bin: string, argv: string[], emit?: FfmpegEmit): Promise<void> {
+/** Spawn ffmpeg; resolve on exit 0, reject with the stderr tail
+ *  otherwise. `isCancelled` is polled (~200ms): when it flips, the
+ *  child is killed and the promise rejects as cancelled (Item 9). */
+export function runFfmpeg(bin: string, argv: string[], emit?: FfmpegEmit, opts?: { isCancelled?: () => boolean }): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (opts?.isCancelled?.()) {
+      reject(new Error("ffmpeg run cancelled"));
+      return;
+    }
     const child = spawn(bin, argv, { windowsHide: true });
     let stderr = "";
+    let killed = false;
+    const timer = opts?.isCancelled
+      ? setInterval(() => {
+          if (opts.isCancelled?.()) {
+            killed = true;
+            try { child.kill(); } catch { /* already gone */ }
+          }
+        }, 200)
+      : undefined;
+    const done = (): void => { if (timer) clearInterval(timer); };
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.on("error", (err) => reject(new Error(`Failed to run ffmpeg: ${err.message}`)));
+    child.on("error", (err) => { done(); reject(new Error(`Failed to run ffmpeg: ${err.message}`)); });
     child.on("close", (code) => {
+      done();
+      if (killed) {
+        reject(new Error("ffmpeg run cancelled"));
+        return;
+      }
       if (code === 0) {
         resolve();
         return;

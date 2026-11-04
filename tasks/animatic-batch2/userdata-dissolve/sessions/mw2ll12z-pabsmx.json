@@ -1,0 +1,19 @@
+{
+  "id": "mw2ll12z-pabsmx",
+  "title": "New chat",
+  "createdAt": "2026-11-04T20:57:10.331Z",
+  "updatedAt": "2026-11-04T20:57:10.331Z",
+  "workspace": null,
+  "pureChat": true,
+  "followProduction": false,
+  "agentId": null,
+  "history": [],
+  "display": [],
+  "mentionImages": [],
+  "planMode": false,
+  "autonomousMode": false,
+  "allowedTools": [],
+  "allowedToolGroups": [],
+  "verifyCommands": [],
+  "verifyDeclined": false
+}

@@ -1,0 +1,344 @@
+{
+  "meta": {
+    "id": "dissolverepro1",
+    "name": "Dissolve Repro",
+    "folder": "D:\\Cascade\\tasks\\animatic-batch2\\seed-dissolve",
+    "createdAt": "2026-11-04T20:57:09.860Z",
+    "updatedAt": "2026-11-04T20:58:31.210Z",
+    "stepDone": 4,
+    "shotCount": 2
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Scene",
+      "shots": [
+        {
+          "id": "shot1",
+          "number": "0100",
+          "audio": "",
+          "visual": "red",
+          "durationSec": 4,
+          "graphMigrated": true,
+          "graphVideoNodes": [
+            {
+              "id": "vid0",
+              "prompt": "",
+              "gens": [
+                {
+                  "path": "videos/red6s.mp4",
+                  "prompt": "",
+                  "model": "auto",
+                  "at": "",
+                  "mediaId": "949c4446-85ba-48e2-912f-4ef4051db365"
+                }
+              ],
+              "genIndex": 0
+            }
+          ],
+          "graph": {
+            "version": 1,
+            "nodes": [
+              {
+                "id": "composer",
+                "kind": "composer",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "style",
+                "kind": "style",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "brand",
+                "kind": "brand",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "output",
+                "kind": "output",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "imagegen",
+                "kind": "imagegen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videoprompt",
+                "kind": "videoprompt",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videogen",
+                "kind": "videogen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              }
+            ],
+            "edges": [
+              {
+                "id": "e-cmp-img",
+                "from": {
+                  "node": "composer",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "imagegen",
+                  "port": "in-prompt"
+                }
+              },
+              {
+                "id": "e-vp-vid",
+                "from": {
+                  "node": "videoprompt",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "videogen",
+                  "port": "in-prompt"
+                }
+              }
+            ],
+            "migrated": true
+          }
+        },
+        {
+          "id": "shot2",
+          "number": "0200",
+          "audio": "",
+          "visual": "blue",
+          "durationSec": 4,
+          "graphMigrated": true,
+          "graphVideoNodes": [
+            {
+              "id": "vid0",
+              "prompt": "",
+              "gens": [
+                {
+                  "path": "videos/blue6s.mp4",
+                  "prompt": "",
+                  "model": "auto",
+                  "at": "",
+                  "mediaId": "1702f443-439b-4fc5-b0f8-2a8f96f6f548"
+                }
+              ],
+              "genIndex": 0
+            }
+          ],
+          "graph": {
+            "version": 1,
+            "nodes": [
+              {
+                "id": "composer",
+                "kind": "composer",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "style",
+                "kind": "style",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "brand",
+                "kind": "brand",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "output",
+                "kind": "output",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "imagegen",
+                "kind": "imagegen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videoprompt",
+                "kind": "videoprompt",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "videogen",
+                "kind": "videogen",
+                "pos": {
+                  "x": 0,
+                  "y": 0
+                }
+              }
+            ],
+            "edges": [
+              {
+                "id": "e-cmp-img",
+                "from": {
+                  "node": "composer",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "imagegen",
+                  "port": "in-prompt"
+                }
+              },
+              {
+                "id": "e-vp-vid",
+                "from": {
+                  "node": "videoprompt",
+                  "port": "out"
+                },
+                "to": {
+                  "node": "videogen",
+                  "port": "in-prompt"
+                }
+              }
+            ],
+            "migrated": true
+          }
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "status": {
+    "5": "done"
+  },
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "name": "V1"
+      }
+    ],
+    "clips": [
+      {
+        "id": "c1",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 0,
+        "sourceInSec": 1,
+        "sourceOutSec": 5,
+        "srcRel": "videos/red6s.mp4",
+        "name": "red6s.mp4",
+        "shotId": "shot1"
+      },
+      {
+        "id": "c2",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 4,
+        "sourceInSec": 1,
+        "sourceOutSec": 5,
+        "srcRel": "videos/blue6s.mp4",
+        "name": "blue6s.mp4",
+        "shotId": "shot2"
+      }
+    ],
+    "transitions": [
+      {
+        "id": "tr1",
+        "type": "dissolve",
+        "outgoingClipId": "c1",
+        "incomingClipId": "c2",
+        "durationSec": 2
+      }
+    ]
+  },
+  "assembly": {
+    "fps": 24,
+    "width": 1920,
+    "height": 1080,
+    "exportDir": "out/assembly",
+    "assembledAt": "2026-11-04T20:57:20.980Z",
+    "renderPath": "out/assembly/render.mp4",
+    "renderedAt": "2026-11-04T20:57:25.565Z",
+    "totalSec": 8
+  },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "outdatedShots": [],
+  "referenceCategories": [],
+  "openArt": {
+    "model": "auto",
+    "resolution": "1k"
+  },
+  "brand": {
+    "colors": [],
+    "font": ""
+  },
+  "magicPrompts": {},
+  "magicEnabled": false,
+  "media": [
+    {
+      "id": "949c4446-85ba-48e2-912f-4ef4051db365",
+      "path": "videos/red6s.mp4",
+      "kind": "video",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-04T20:57:13.533Z"
+    },
+    {
+      "id": "1702f443-439b-4fc5-b0f8-2a8f96f6f548",
+      "path": "videos/blue6s.mp4",
+      "kind": "video",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-04T20:57:13.534Z"
+    }
+  ],
+  "schemaVersion": 3,
+  "promptOverrides": {},
+  "suggestedReferences": [],
+  "rev": 5
+}

@@ -1864,148 +1864,11 @@ button.primary:hover:not(:disabled) { opacity: 0.9; }
 button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- step 4: animatic ---------- */
-.prod-animatic-panels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  margin-top: 22px;
-}
-@media (max-width: 900px) {
-  .prod-animatic-panels { grid-template-columns: 1fr; }
-}
-.prod-audio { padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); }
-.prod-audio-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.prod-audio-head .prod-label { margin: 0 0 10px; display: block; width: 100%; }
-/* The music prompt (like the VO panel's voice select) sits inline in the
-   same controls row, styled to match the model/voice selects. */
-.prod-music-prompt {
-  flex: 1 1 220px;
-  min-width: 180px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  padding: 7px 9px;
-  font-size: 0.85rem;
-}
-.prod-music-prompt::placeholder { color: var(--text-dim); }
-.prod-music-prompt:focus { outline: none; border-color: var(--accent); }
-.prod-audio-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 100%; }
-.prod-audio-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-.prod-audio-buttons .primary { padding: 8px 18px; }
-.prod-audio-file { display: flex; align-items: center; gap: 10px; flex: 1 1 100%; }
-.prod-music-name {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  color: var(--text-dim);
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.prod-music-player { height: 32px; min-width: 280px; max-width: 360px; flex: 0 1 auto; }
-/* Custom mini preview player (replaces the native <audio controls> chrome). */
-.prod-mini-player {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 1 320px;
-  min-width: 240px;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-raised);
-}
-.prod-mini-play {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  color: var(--on-accent);
-  font-size: 0.55rem;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-}
-.prod-mini-play:disabled { opacity: 0.45; cursor: default; }
-.prod-mini-play:not(:disabled):hover { filter: brightness(1.12); }
-.prod-mini-bar {
-  position: relative;
-  flex: 1 1 auto;
-  height: 6px;
-  min-width: 70px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  cursor: pointer;
-}
-.prod-mini-fill {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 0;
-  background: var(--accent);
-  border-radius: 999px;
-  opacity: 0.85;
-}
-.prod-mini-head {
-  position: absolute;
-  top: 50%;
-  width: 9px;
-  height: 9px;
-  margin: -5px 0 0 -5px;
-  border-radius: 50%;
-  background: var(--text);
-  box-shadow: 0 0 0 1px var(--bg-raised);
-  pointer-events: none;
-}
-.prod-mini-time {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.prod-music-vol { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
-.prod-music-vol input[type="range"] { width: 100px; accent-color: var(--accent); }
-.prod-audio button {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-.prod-audio button:hover:not(:disabled) { border-color: var(--accent); }
-.prod-audio .prod-suggestion-remove { width: 22px; height: 22px; }
-
 .prod-animatic { margin-top: 22px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); }
 .prod-animatic-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .prod-animatic-head .prod-label { margin: 0; }
 .prod-animatic-controls { display: flex; align-items: center; gap: 14px; }
 .prod-animatic-body { display: flex; flex-direction: column; gap: 10px; }
-/* Image strip + VO waveform stacked so the two can be matched by eye. */
-.prod-animatic-strip-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-/* The waveform lives in its own row directly under the image strip. */
-.prod-animatic-wave-row {
-  position: relative;
-  width: 100%;
-  height: 44px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
 .prod-animatic-preview {
   position: relative;
   width: 100%;
@@ -2026,6 +1889,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 0;
   object-fit: contain;
   background: var(--media-bg);
+  /* Above the dissolve under-layer (z-index 1), level with the live
+     video, so an incoming still fades OVER the outgoing clip. */
+  position: relative;
+  z-index: 2;
 }
 .prod-animatic-preview-slate {
   display: flex;
@@ -2055,23 +1922,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
    hidden siblings stay mounted so cutting between clips never reloads. */
 .prod-animatic-video:not(.live) { visibility: hidden; }
 .prod-animatic-video.live { z-index: 2; }
-.prod-animatic-video-remove {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 5;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.6);
-  color: var(--on-overlay);
-  cursor: pointer;
-  line-height: 1;
-  font-size: 0.9rem;
-}
-.prod-animatic-video-remove:hover { border-color: var(--danger); color: var(--danger); }
+.prod-animatic-video.blend-under { visibility: visible; z-index: 1; }
 
 .prod-animatic-transport {
   display: flex;
@@ -2096,14 +1947,6 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .prod-animatic-transport button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .prod-animatic-transport button:hover:not(:disabled) { border-color: var(--accent); }
-.prod-animatic-edittools { display: flex; align-items: center; gap: 6px; padding: 0 4px 6px; }
-.prod-animatic-edittools-label { font-size: 0.82rem; color: var(--text-dim); }
-.prod-animatic-edittools button {
-  background: var(--bg-raised); border: 1px solid var(--border); color: var(--text);
-  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.85rem;
-}
-.prod-animatic-edittools button:hover { border-color: var(--accent); }
-.prod-animatic-edittools button.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .prod-animatic-scrub {
   position: relative;
   flex: 1;
@@ -2170,213 +2013,184 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   justify-content: flex-end;
   gap: 4px;
 }
-.prod-animatic-total-btn {
-  background: transparent;
-  border: 1px dashed transparent;
-  color: var(--text);
-  font-family: inherit;
-  font-size: inherit;
-  padding: 1px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.prod-animatic-total-btn:hover { border-color: var(--border); color: var(--accent); }
-.prod-animatic-total-input {
-  width: 70px;
-  background: var(--bg-raised);
-  border: 1px solid var(--accent);
-  color: var(--text);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  text-align: right;
-  outline: none;
-}
 
-/* Zoomable scroll frame around the strip. At 1x the content fits exactly, so
-   this behaves like the old static strip; past 1x it scrolls horizontally. */
-.prod-animatic-scroll {
-  overflow-x: auto;
-  overflow-y: hidden;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.prod-animatic-scroll::-webkit-scrollbar { height: 9px; }
-.prod-animatic-scroll::-webkit-scrollbar-track { background: transparent; }
-.prod-animatic-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
-.prod-animatic-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
-.prod-animatic-strip {
-  position: relative;
-  height: 96px;
-  background: var(--bg);
-  user-select: none;
-  touch-action: none;
-}
-.prod-animatic-waveform {
-  width: 100%;
-  height: 100%;
-  display: block;
-  opacity: 0.8;
-  pointer-events: none;
-}
-.prod-animatic-block { cursor: grab; z-index: 1; }
-.prod-animatic-block .prod-timeline-thumb { opacity: 0.88; }
-.prod-animatic-playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--accent);
-  pointer-events: none;
-  z-index: 4;
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
-}
-.prod-animatic-playhead::before {
-  content: "";
-  position: absolute;
-  top: -3px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 10px;
-  height: 10px;
-  background: var(--accent);
-  border-radius: 50%;
-}
-.prod-animatic-block { cursor: grab;
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
-  overflow: hidden;
-}
-.prod-animatic-block:last-child { border-right: none; }
-.prod-animatic-block.active { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
-.prod-animatic-block .prod-timeline-thumb {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border: none;
-  border-radius: 0;
-  opacity: 0.85;
-}
-.prod-animatic-block-slate {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: repeating-linear-gradient(45deg, var(--bg-panel), var(--bg-panel) 8px, var(--bg-raised) 8px, var(--bg-raised) 16px);
-  color: var(--text-dim);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.7rem;
-  letter-spacing: 0.15em;
-  text-align: center;
-}
-.prod-animatic-block-slate strong { color: var(--text); font-size: 0.95rem; }
-.prod-animatic-block-num,
-.prod-animatic-block-dur {
-  position: relative;
-  z-index: 2;
-  font-family: ui-monospace, Consolas, monospace;
-}
-.prod-animatic-block-num {
-  position: absolute;
-  top: 4px;
-  left: 6px;
-  font-size: 11px;
-  color: var(--on-overlay);
-  background: rgba(0, 0, 0, 0.55);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-.prod-animatic-block-dur {
-  position: absolute;
-  bottom: 4px;
-  left: 6px;
-  font-size: 11px;
-  color: var(--on-overlay);
-  background: rgba(0, 0, 0, 0.55);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-.prod-animatic-block-handle {
-  position: absolute;
-  top: 0;
-  right: -4px;
-  width: 8px;
-  height: 100%;
-  cursor: ew-resize;
-  background: transparent;
-  z-index: 3;
-}
-.prod-animatic-block-handle:hover { background: var(--accent); opacity: 0.5; }
 /* End-of-video marker: a dashed white line at the clip's true length inside
    its timeline block. Dashed (not the playhead's solid accent) so the two
    never read as the same thing; pointer-events none so seeking still works
    through it. When the block is shorter than the video the marker sits past
    the clipped edge and appears as the block is extended. */
-.prod-animatic-video-end {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.95) 0 5px, transparent 5px 9px);
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.55);
-  pointer-events: none;
-  z-index: 2;
-}
 /* Slipped-clip badge: bottom-right offset readout on blocks playing mid-source
    (Step 4 slip-edit). Click resets to the top; the readout mirrors the live
    gesture while right-dragging. */
-.prod-animatic-slip-badge {
-  position: absolute;
-  bottom: 4px;
-  right: 6px;
-  z-index: 3;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  color: var(--on-overlay);
-  background: rgba(0, 0, 0, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 3px;
-  padding: 1px 4px;
-  cursor: pointer;
-  line-height: 1.4;
+/* Multi-track timeline editor (Animatic Expansion Item 3). Same panel
+   language as the animatic strip: inset lanes, accent selection, mono
+   readouts. */
+.prod-tl-editor { outline: none; margin-top: 14px; }
+.prod-tl-editor:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.prod-tl-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 0 2px 6px;
 }
-.prod-animatic-slip-badge:hover { border-color: var(--accent); }
+.prod-tl-toolbar button, .prod-tl-toolbar select {
+  background: var(--bg-raised); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.85rem;
+}
+.prod-tl-toolbar button:hover:not(:disabled), .prod-tl-toolbar select:hover { border-color: var(--accent); }
+.prod-tl-toolbar button:disabled { opacity: 0.45; cursor: default; }
+.prod-tl-toolbar button.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+/* Section help marker (UI cleanup Item 2): carries former standing
+   instruction paragraphs as a native-tooltip hover target. */
+.cascade-helptip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 6px; flex: none;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--bg-raised); color: var(--text-dim);
+  font-size: 10px; font-weight: 600; line-height: 1;
+  cursor: help; user-select: none; vertical-align: middle;
+}
+.cascade-helptip:hover, .cascade-helptip:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
+.prod-design-head .cascade-helptip { margin-left: 2px; }
+
+.prod-tl-group { display: inline-flex; align-items: center; gap: 6px; }
+.prod-tl-toolbar .prod-tl-icon-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 28px; padding: 0 6px; }
+.prod-tl-icon { display: block; flex: none; }
+.prod-tl-sep { width: 1px; align-self: stretch; background: var(--border); margin: 2px 2px; }
+.prod-tl-tc { margin-left: auto; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-dim); }
+.prod-tl-fit-total { width: 64px; }
+
+.prod-tl-body {
+  display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg);
+}
+.prod-tl-headers { flex: none; position: relative; border-right: 1px solid var(--border); background: var(--bg-panel); }
+.prod-tl-resize {
+  position: absolute; top: 0; right: -3px; width: 7px; height: 100%; z-index: 5;
+  cursor: ew-resize; touch-action: none;
+}
+.prod-tl-resize:hover { background: var(--accent); opacity: 0.35; }
+.prod-tl-ruler-corner { height: 18px; border-bottom: 1px solid var(--border); }
+.prod-tl-header {
+  display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 3px; padding: 4px 6px; overflow: hidden;
+  border-bottom: 1px solid var(--border); box-sizing: border-box;
+}
+.prod-tl-header.locked { opacity: 0.65; }
+.prod-tl-header-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.prod-tl-track-kind {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; flex: none;
+}
+.prod-tl-track-name {
+  flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; color: var(--text);
+  font-size: 0.85rem; padding: 2px 4px; border-radius: 4px;
+}
+.prod-tl-track-name:hover { border-color: var(--border); }
+.prod-tl-track-name:focus { border-color: var(--accent); outline: none; background: var(--bg-raised); }
+.prod-tl-header-btns { display: flex; gap: 4px; flex: none; }
+.prod-tl-header-btns button {
+  background: var(--bg-raised); border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 4px; padding: 1px 6px; cursor: pointer; font-size: 0.75rem;
+}
+.prod-tl-header-btns button:hover { border-color: var(--accent); color: var(--text); }
+.prod-tl-header-btns button.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.prod-tl-scroll { flex: 1; overflow-x: auto; overflow-y: hidden; }
+.prod-tl-scroll::-webkit-scrollbar { height: 9px; }
+.prod-tl-scroll::-webkit-scrollbar-track { background: transparent; }
+.prod-tl-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+.prod-tl-lanes { position: relative; user-select: none; touch-action: none; }
+.prod-tl-ruler {
+  position: relative; height: 18px; border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: var(--text-dim);
+}
+.prod-tl-tick { position: absolute; top: 2px; transform: translateX(3px); white-space: nowrap; pointer-events: none; }
+/* Loop region (In/Out points): accent wash between the markers. */
+.prod-tl-loop-region {
+  position: absolute; top: 0; bottom: 0; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-left: 1px solid var(--accent); border-right: 1px solid var(--accent);
+}
+.prod-tl-loop-pt {
+  position: absolute; top: 1px; transform: translateX(-50%); pointer-events: none;
+  font-size: 9px; font-weight: 700; color: var(--accent);
+}
+.prod-tl-tick::before {
+  content: ""; position: absolute; left: -3px; top: 0; width: 1px; height: 5px; background: var(--text-dim);
+}
+.prod-tl-lane {
+  position: relative; border-bottom: 1px solid var(--border); box-sizing: border-box;
+  background: var(--bg-inset);
+}
+.prod-tl-lane.audio { background: var(--bg); }
+.prod-tl-lane.locked { opacity: 0.6; }
+.prod-tl-clip {
+  position: absolute; top: 3px; bottom: 3px; overflow: hidden; cursor: grab;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+}
+.prod-tl-clip:active { cursor: grabbing; }
+.prod-tl-clip.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+.prod-tl-clip.dimmed { opacity: 0.45; }
+.prod-tl-clip-edge { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 3; }
+.prod-tl-clip-edge.head { left: 0; }
+.prod-tl-clip-edge.tail { right: 0; }
+.prod-tl-clip-edge:hover { background: var(--accent); opacity: 0.55; }
+.prod-tl-clip-label {
+  position: absolute; left: 6px; bottom: 3px; z-index: 2; pointer-events: none;
+  font-size: 11px; color: var(--on-overlay); background: rgba(0, 0, 0, 0.55);
+  padding: 1px 4px; border-radius: 3px; max-width: calc(100% - 12px);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.prod-tl-clip-link { position: absolute; right: 8px; top: 2px; z-index: 2; font-size: 10px; pointer-events: none; }
+.prod-tl-clip-slate {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: repeating-linear-gradient(45deg, var(--bg-panel), var(--bg-panel) 8px, var(--bg-raised) 8px, var(--bg-raised) 16px);
+  color: var(--text-dim); font-family: ui-monospace, Consolas, monospace; font-size: 0.7rem; letter-spacing: 0.15em;
+}
+.prod-tl-clip-still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.prod-tl-filmstrip { position: absolute; inset: 0; display: flex; }
+.prod-tl-filmframe { flex: 1; min-width: 0; height: 100%; object-fit: cover; pointer-events: none; }
+.prod-tl-wave { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0.85; pointer-events: none; }
+.prod-tl-ramp { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 6; }
+.prod-tl-ramp-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: 0.9; }
+.prod-tl-ramp-dot { fill: var(--accent); stroke: var(--bg); stroke-width: 1; vector-effect: non-scaling-stroke; cursor: move; }
+.prod-tl-ramp-dot.active { fill: var(--on-accent); stroke: var(--accent); }
+/* Item 7: per-clip volume line + fade wedges/handles. */
+.prod-tl-vol-line {
+  position: absolute; left: 0; right: 0; height: 7px; margin-top: -3px; z-index: 4;
+  cursor: ns-resize; touch-action: none;
+}
+.prod-tl-vol-line::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 3px; height: 1px;
+  background: var(--on-overlay); opacity: 0.85;
+}
+.prod-tl-vol-line:hover::before { background: var(--accent); height: 2px; top: 2px; }
+.prod-tl-fade { position: absolute; top: 0; bottom: 0; z-index: 1; pointer-events: none; background: rgba(0, 0, 0, 0.45); }
+.prod-tl-fade.in { left: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.prod-tl-fade.out { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+.prod-tl-fade-handle {
+  position: absolute; top: 0; width: 9px; height: 9px; z-index: 4;
+  background: var(--on-overlay); opacity: 0.9; cursor: ew-resize; touch-action: none;
+}
+.prod-tl-fade-handle.in { margin-left: -4px; clip-path: polygon(0 0, 100% 0, 0 100%); }
+.prod-tl-fade-handle.out { margin-right: -4px; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+.prod-tl-fade-handle:hover { background: var(--accent); }
+.prod-tl-track-vol { width: 100%; height: 14px; margin: 0; accent-color: var(--accent); }
+/* Item 8: dissolve blend-window zones on the joining clips. */
+.prod-tl-dissolve-zone {
+  position: absolute; top: 0; bottom: 0; z-index: 3; cursor: pointer;
+  background: repeating-linear-gradient(45deg, transparent, transparent 5px, color-mix(in srgb, var(--accent) 45%, transparent) 5px, color-mix(in srgb, var(--accent) 45%, transparent) 6px);
+}
+.prod-tl-dissolve-zone.in { left: 0; border-right: 1px dashed var(--accent); }
+.prod-tl-dissolve-zone.out { right: 0; border-left: 1px dashed var(--accent); }
+.prod-tl-dissolve-zone:hover { background-color: color-mix(in srgb, var(--danger) 25%, transparent); }
+.prod-tl-playhead {
+  position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+  background: var(--accent); pointer-events: none; z-index: 5;
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.prod-tl-marquee {
+  position: absolute; z-index: 6; pointer-events: none;
+  border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
 /* Per-clip audio mute. Only shown on clips that have a video (their own
    embedded track); VO and music keep their global volume sliders. */
-.prod-animatic-block-mute {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  z-index: 3;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  background: rgba(0, 0, 0, 0.55);
-  color: var(--on-overlay);
-  cursor: pointer;
-  line-height: 1;
-}
-.prod-animatic-block-mute:hover { border-color: var(--accent); }
-.prod-animatic-block-mute.muted {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-}
 .prod-ref {
   position: relative;
   margin: 0;

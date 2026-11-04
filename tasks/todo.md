@@ -5372,3 +5372,259 @@ a real vendor generation round-trip and pixel-level tag-list scrolling
 - Item 3: DONE. GraphVideoNode.downsampleVideoRefs; checkbox on videogen + edit-video nodes only (never Genjutsu; hidden on sequence canvas); main proactive720pSwaps reuses create720pReference + existing swap application; only proven >720p inputs swap; failures stop the submission. Tests: video-retry.test.ts additions (4), video-node-downsample.test.ts (2).
 - Gate: tsc clean; full vitest 1995 passed / 2 skipped; 2 files failed to COLLECT with sandbox EPERM realpath (prompt-focus-switch, tween) and both pass alone (6/6, 48/48) - environmental, no assertion failures.
 
+# Animatic Editor Expansion (spec: Downloads/Animatic Editor Expansion — Implementation Spec)
+
+Plan approved 2026-11-02 (`go`). 14 items / 5 phases in spec order, batch
+`animatic-expansion` (A1–A14 in tasks/batch-state.json, reseeded from
+harness-improvements). Adopted defaults: clip source = media-registry id
+(+ srcRel transport, codebase precedent); spec's six judgment calls as
+written; dissolves centered. Fresh-eyes reviewer gate after Phase 1 (A3).
+
+- [x] A1 Multi-track timeline data model: `Production.timeline` (additive,
+      shotSequences precedent — no schema bump), shared pure module
+      `app/src/shared/ipc/timeline.ts` (model, normalize, validate, resolver,
+      seed from shot projection, track ops), read-repair in productions
+      `normalize()`, renderer-owned merge in `applyRendererState`,
+      `assemblyPlanFromTimeline` proven plan/EDL-identical to the legacy
+      `assemblyPlan` on a pre-change fixture. `assemble()` call site switches
+      at A9 per spec; preview UI switches at A3.
+- [x] A2 Split/trim/slip/roll/slide/ripple + linked clips as pure ops.
+- [x] A3 Timeline UI essentials + undo/redo; reviewer gate PENDING OPERATOR RUN (needs GAB_API_KEY).
+- [x] A4 Constant speed + reverse.
+- [x] A5 Speed-ramp curves + editor.
+- [x] A6 Proxy media (job ledger) + preview rewire — done 2026-11-02. `app/src/main/proxies.ts` + `production:listProxies`/`production:generateProxies` IPC (ledger job kind `proxies`): 720p at `out/proxies/<base>-<sha1(srcRel)8>.mp4`, short GOP, faststart, mtime freshness, per-file failures collected; never in the media registry, never read by assembly/exporters (pinned by test). Preview rewire: `timeline-preview.ts` builds items + `sourceAt` from `resolveTimeline`; `AnimaticTimeline` runs in override mode (gestures inert; playbackRate = finite-difference source rate; reversed pin lockstep); VO/music beds map to timeline role clips in timeline mode, legacy paths untouched. Editor: Proxies button, proxy badge, proxy filmstrips. Tests: proxies 7 + preview 4 + editor badge; full suite 2213 (1 pre-existing `group` failure); build + ui:verify pass.
+- [x] A7 Audio gain/fades/meters/pitch — done 2026-11-02. Model: `fadeInSec`/`fadeOutSec`/`pitchMode` on clips, `volume` on tracks; one `clipGainAt` (linear, timeline seconds) read by preview + render; `setClipAudio`/`setTrackVolume` pure ops (sparse, clamped, linked-aware); split keeps fade-in left / fade-out right; trims re-clamp fades via the ops' finalize pass. Render: segment gain as `volume`/`volume='…':eval=frame` after retiming (span-offset aware), preserve-pitch = atempo (default), natural = asetrate (opt-in only); beds carry afade + track volume into the mix; default args byte-identical. Preview: beds + embedded video audio follow gain curves per-tick; transport meter from decoded bed buffers. Editor: draggable volume line + corner fade handles with wedges on audio/video clips, audio-track volume slider, Pitch: preserved/shifted toggle stating the render mode on sped clips. Verified: 19 new model/render tests (red-first), preview +2, editor gestures, real-FFmpeg E2E (fade-end RMS near silence; 440 Hz kept at 2× preserve vs ~880 Hz natural; durations exact); full suite 2236 (1 pre-existing `group` failure); build + ui:verify pass.
+- [x] A8 Cross-dissolve transitions — done 2026-11-02. `ProductionTimeline.transitions` (dissolve only): centered on the edit point, fed by source handles; `setClipTransition` refuses past `maxDissolveSec` (handles in timeline seconds, sped/reversed aware, neighbor-transition room), removal restores the exact prior timeline. Resolver emits `blendSpans` only when both clips actually show; ops prune/remap on split/trim/delete. Render: plan splits at blend boundaries and merges half-window events into one blend event (windows extended into handles via `clipSourceTimeAtLoose`), rendered as two Pass-A segments + `xfade`/`acrossfade` (`buildXfadeArgs`); EDL writes CMX `D` + frames, JSX adds a true opacity-crossfade layer pair, manifest flags dissolves. Preview: outgoing clip on an under-layer, incoming opacity ramps (video↔video; stills preview as cut). Editor: Dissolve select (clamps to handles, states the max), hatched blend zones on both clips, click to remove. Verified: 16 new tests + preview/editor, real-FFmpeg midpoint frame ≈50/50 both sources with duration unchanged; full suite 2254 (1 pre-existing `group`); build + ui:verify pass.
+- [x] A9 Assembly/render integration (progress/cancel/ledger) — done 2026-11-02. Shipping `assemble()` + `renderAnimatic()` now read `assemblyPlanForProduction` (stored timeline, else seeded in-memory — A1-identical for legacy). One unified render pipeline: probe → normalize (blend-aware) → concat → generalized mix (`plan.audioEvents`: EVERY audible clip with position/trim/speed/pitch/gain/fades via shared `tempoFilters`/`gainFilters`; role beds remain for EDL/JSX). Renders are ledger jobs (`assemblyRender` kind, `render:<prod>` target): progress 0→90 segments / 95 concat / 100, cooperative cancel (`currentJobControls` captured pre-queue; `runFfmpeg` polls and kills mid-flight), output written to `render.tmp.mp4` and renamed only on success — a cancelled render leaves no partial `render.mp4` and the ledger shows `cancelled`. Verified: 8 integration tests (incl. real-ledger cancel), every-feature real-FFmpeg E2E (topmost track, ramp, dissolve midpoint, non-role fade, muted track; frame-budget duration); full suite 2262 (1 pre-existing `group`); build + ui:verify pass.
+- [x] A10 FCPXML export — done 2026-11-02. `app/src/main/fcpxml.ts` reads the timeline model: bottom video track = spine, upper video/audio as lanes (connected clips nested in the covering spine item), constant speeds + ramps as sampled `<timeMap>`s with exact end points, dissolves as spine `<transition>`s, levels/fades as `<adjust-volume>`. `assemble()` writes `Assembly.fcpxml` + `Assembly-fcpxml-report.md` and logs every degradation (off-spine dissolves, natural pitch, links, interpolation, unprobed asset extents). Verified: DOMParser-parsed structure/timing tests; full suite 2267 (1 pre-existing `group`); build + ui:verify pass. Manual FCP/Resolve round-trip pending operator (A14).
+- [x] A11 Premiere XML — done 2026-11-02. `app/src/main/premiere-xml.ts`: xmeml v5 from the timeline model, frame-based clipitems (V1 = bottom), constant speed as time-remap filters (negative = reverse), ramps at exact-duration average speed (stated simplification), centered dissolve transitionitems, audio levels with fade keyframes. `assemble()` writes `Assembly-premiere.xml` + report and logs degradations. Verified: parsed-XML structure/frame tests; full suite 2272 (1 pre-existing `group`); build + ui:verify pass.
+- [x] A12 EDL + ramp baking — done 2026-11-02. `buildTrackEdls` in assembly.ts: one CMX3600 EDL per video track (`Assembly-V1.edl` = bottom), full-timeline record ranges with BL filler, constant speeds as M2 lines (signed fps, negative = reverse with descending source TCs), ramps baked into constant-speed segments split at curve keyframes (segment-average M2; record durations sum exactly, source ranges contiguous), dissolves as centered `D` events. Flattened `Assembly.edl` also gains M2 lines. `assemble()` writes per-track files + `Assembly-edl-report.md` and logs baking/pitch/audio-scope notes. Verified: frame-level baking tests; full suite 2277 (sole pre-existing `group`); build + ui:verify pass.
+- [x] A13 JSX native time remapping — done 2026-11-02. `buildAeScript` emits real `ADBE Time Remapping` keyframes for ramped clips (defaults cleared, values in absolute footage seconds from the shared curve integral; endpoints exact so the last keyframe value = source-out; reversed ramps descend), including dissolve incoming layers. Remapped layers drop the legacy inPoint/stretch-comment handling (offset baked into values); constant speeds keep the existing stretch comment. Verified: keyframe extraction tests; full suite 2280 (sole pre-existing `group`); build + ui:verify pass. Manual AE check pending operator (A14).
+- [x] A14 Torture-test fixture + manual round-trip checklist — done 2026-11-02. Committed every-feature fixture + six golden exports (`app/test/fixtures/torture-*`, regenerate via `TORTURE_WRITE=1`), parsed timing asserts independent of the goldens (edits within a frame, ramp end = source-out, total frames identical everywhere), and a gated golden render spot-checking every edit/feature. Checklist: `docs/animatic-export-roundtrip.md`. The fixture immediately caught a real A4 hang (muted+reversed `areverse` over infinite `anullsrc`) — fixed with a guard test. Final batch gate: tsc clean, full suite 2284 (sole pre-existing `group` failure), all 16 ffmpeg E2E green, build + ui:verify pass. Manual round-trips + Phase 1 reviewer remain operator-side.
+
+## Review (animatic-expansion)
+
+- A1 DONE (2026-11-02). New pure model in `app/src/shared/ipc/timeline.ts`
+  (tracks/clips, normalize, validate, topmost-wins resolver, track ops,
+  `seedTimelineFromProduction`); `Production.timeline` additive field;
+  read-repair in `normalize()`, renderer-owned merge in
+  `applyRendererState`, invariant check in `validateMigratedProduction`;
+  `assemblyPlanFromTimeline` in assembly.ts proven plan- and EDL-identical
+  to legacy `assemblyPlan` on `app/test/fixtures/pre-timeline-production.json`.
+  No schema bump (additive field, shotSequences precedent — plan said bump;
+  the migration-set guard confirms none needed). Tests: `timeline.test.ts`
+  (14, red 14/14 before implementation). Gate: app tsc clean; full vitest
+  2141 passed / 2 failed — both failures pre-existing on clean HEAD
+  (A/B-proven via git stash): lessons-guards `group` node equality
+  (untouched, reported) and the rebase copy-list guard, fixed here by
+  registering `timeline` + the already-unregistered `magicDismissedRefs`
+  as not-job-mutated. No UI change, so no ui:verify. Next: A2 pure edit ops.
+- A2 DONE (2026-11-02). Pure edit ops appended to
+  `app/src/shared/ipc/timeline.ts`: `splitClipAt`/`splitAtPlayhead`,
+  `trimClip` (head/tail, source + neighbor clamps, ripple all/track with
+  spanning-clip pull clamp), `slipClip`, `rollEdit`, `slideClip`
+  (gap-aware neighbor absorption), `moveClipsBy`, `deleteClips`
+  (ripple closes gaps sequentially), `linkClips`/`unlinkClips`/
+  `linkedClipIds`; `TimelineClip.linkId` with singleton pruning in
+  normalize + validate. Linked partners join split/trim/delete/ripple
+  (spec's list); slip/roll/slide/move act on named clips. One call = one
+  fresh timeline = one undo step (history lands A3). Tests:
+  `timeline-ops.test.ts` (27, red 25/25 before implementation; +2
+  adversarial cases after first green). Gate: tsc clean; full vitest
+  2164 passed / 1 failed (the pre-existing `group` guard), 2 files
+  failed to collect under sandbox EPERM and pass alone (54/54). No UI
+  change. Next: A3 timeline UI + undo, then the Phase 1 reviewer gate.
+- A3 DONE (2026-11-02). New `app/src/renderer/src/components/production/timeline-editor.tsx`
+  mounted in Step 4 under the existing preview: track headers (rename on
+  blur, lock, hide/mute, remove), ruler + frame-grid playhead (assembly
+  fps), wheel/button zoom, click/shift-click/marquee selection, gestures
+  previewed by applying the A2 pure ops (move incl. cross-track, edge
+  trim, Alt+edge roll, right-drag slip), snapping to playhead/clip edges
+  with toggle, ripple toggle + scope, S split-at-playhead, Delete,
+  undo/redo snapshot history persisted via `saveField({timeline})`,
+  add-track and add-clip-from-shot, filmstrips sampled across each
+  clip's source range, per-clip waveform canvases from decoded peaks.
+  CSS `prod-tl-*` in styles.css in the animatic panel language. Tests:
+  `timeline-editor.test.ts` (5 jsdom gesture tests). Gate: tsc clean;
+  full vitest 2174 passed / 1 failed (pre-existing `group` guard);
+  `npm run build` clean; `npm run ui:verify` exit 0, no renderer errors
+  (screenshots 2026-11-02T14-43-28-695Z; a fresh profile cannot reach
+  Step 4, so the editor itself is evidenced by the gesture tests).
+  Sequencing notes: Step 4 preview still reads the shot projection —
+  rewiring it onto `resolveTimeline` is recorded as A6's first task;
+  Item 1's "hidden/muted absent from preview" is met today at resolver +
+  render-plan level, not yet in the legacy preview player.
+- REVIEWER GATE (Phase 1): BLOCKED in the agent sandbox — `cd core &&
+  npm run review -- --spec <spec file>` exits "Need GAB_API_KEY and
+  --spec <file>" (no key in environment; attempted 2026-11-02). Run it
+  with the operator's key before starting Phase 2 (A4).
+- A4 DONE (2026-11-02; operator said continue past the pending reviewer
+  gate). Model: `speed?`/`reversed?` on TimelineClip (sparse; strip on
+  stills/blanks), duration DERIVED range/speed via `clipSpeed` (the one
+  read), `clipSourceTimeAt`/`clipSourceWindowAt` shared timing. A2 ops
+  made speed-aware at every source boundary (trim head/tail, roll,
+  slide absorbs, split incl. reversed sub-ranges); `setClipSpeed`
+  clamps at the next clip without ripple, ripples with it. Assembly:
+  AssemblyEvent.speed/reversed, `buildNormalizeArgs` setpts+atempo chain
+  (pitch-preserving; A7 adds the pitch-shift option) + input-bounded
+  reverse/areverse, byte-identical args when unsped (A1 equality intact);
+  EDL NOTE + manifest flags state speed (M2 lands A12), JSX emits
+  Time-Stretch instruction comments (native remap lands A13);
+  `renderTimelineAnimatic` sibling renders the timeline plan (unify at
+  A9). Editor: Speed presets 0.25–4x + Reverse toggle, clip labels show
+  `2×`/`◀`, filmstrips sample in play order, slip gesture converts
+  through speed. Tests: timeline-speed.test.ts (14) +
+  timeline-render-ffmpeg.test.ts (2, real FFmpeg: 2x+0.5x+reversed =
+  10.0s, reversed frames verified blue→red by pixel) + editor speed
+  test. Gate: tsc clean; full vitest 2182 passed / 1 failed
+  (pre-existing `group` guard; one file failed to collect in-run and
+  passes alone). Next: A5 speed-ramp curves.
+- A5 DONE (2026-11-02). `speedCurve` keyframes anchored to clip-local
+  TIMELINE seconds (adopted judgment 1), piecewise-linear, closed-form
+  integral (`speedCurveIntegral`/`rampDurationForRange` quadratic solve)
+  so duration/source-mapping are exact and shared. Ops refactored to
+  duration-based mutation (`setPlayEndForDurationInPlace`,
+  `applyHeadTrimInPlace` with curve shift/crop) — split cuts the curve
+  with boundary interpolation, slip leaves it unchanged, trims crop or
+  extend through extrapolation; this also fixed A4's reversed-clip
+  source-boundary direction in trims/rolls/slides. `setClipSpeedCurve`
+  (refuses non-ripple overflow / clamped pulls), normalize collapses
+  constant curves to `speed`. Render: `rampSetptsPart` piecewise setpts
+  expression inverting the same integral; audio at average tempo
+  (stated); `speedInterp` blend/flow → minterpolate (opt-in, slow).
+  Editor: curve + dots on the clip, dot drags (position+speed),
+  double-click adds a keyframe, Alt+click deletes, Add/Clear ramp,
+  preset sets the active keyframe, interp select, `ramp N.NN×` label,
+  filmstrips sample through `clipSourceTimeAt`. Tests:
+  timeline-ramp.test.ts (12) + ramp E2E in timeline-render-ffmpeg
+  (integral duration 3.117s + frame placement, real FFmpeg) + editor
+  ramp test. Gate: tsc clean; full vitest 2153 passed / 1 failed
+  (pre-existing `group` guard); timeline-editor failed to COLLECT in
+  the full run (rotating sandbox EPERM flake) and passes standalone
+  7/7 in the same code state. Next: A6 proxies (+ preview rewire).
+
+
+---
+
+# UI cleanup batch: icon toolbar + instruction-to-tooltip (2 items)
+
+Presentation only — no editing behavior, data, or shortcuts changed.
+
+## Item 1 — animatic toolbar de-clutter (`timeline-editor.tsx`, styles)
+- [x] 14 action buttons (Undo, Redo, Split, Delete, Reverse, Mute/Unmute
+      clips, Add/Clear ramp, Fit, Proxies, +Video, +Audio, Add clip,
+      Fit to VO, Fit total) are now icon-only (`TlIcon` stroke set,
+      `prod-tl-icon-btn`), each with `aria-label` + a `title` naming the
+      action and its shortcut where one exists (Ctrl+Z, Ctrl+Shift+Z, S,
+      Delete). Zoom −/+ keep their glyphs in the same square style.
+- [x] Four `role=group` clusters with separators: Editing actions
+      (Undo/Redo/Split/Delete/Snap/Ripple/All-tracks/Cut), Speed
+      (Speed/Reverse/Pitch/Mute/Ramp/Sample), Track and clip adding
+      (Proxies/+Video/+Audio/Add-clip-from-shot/Add clip), View and fit
+      (Zoom/Fit/Fit to VO/seconds/Fit total) + playhead timecode.
+- [x] Toggles stay textual with glanceable state: Snap/Ripple keep the
+      accent `active` fill (+ "Snap: on/off" in the tooltip); Pitch keeps
+      its "Pitch: preserved/shifted" text and now lights `active` in the
+      non-default (shifted) state. Value controls (Speed…, Sample, Cut,
+      All tracks, Add clip from shot…, seconds input) keep their text.
+
+## Item 2 — standing instructional text → tooltips (app-wide)
+- [x] New `components/common/HelpTip.tsx`: a focusable "?" marker using
+      the app-wide native `title` tooltip (one style/delay everywhere).
+- [x] Moved, wording preserved: Home tagline → "?" by Production
+      Assistant; Step 1 format line → Pick-script-file tooltip; Visual
+      styles / Brand identity / Character builder intros → DesignSection
+      `help`; Suggested references + Reference images → "?" by their
+      labels; "Cite references with @" → description-editor tooltip;
+      Storyboard intro → "?" by 3 · Storyboard (the dynamic provider
+      status stays visible); Animatic intro → "?" by 4 · Animatic;
+      Timeline line → "?" by the Timeline label (total runtime stays);
+      the under-toolbar hint paragraph → "?" at the toolbar's right end;
+      Assembly intro → "?" by 5 · Assembly; Expenses description → "?"
+      by its heading. RefGen/Edit-frame submit buttons gained their
+      already-bound Ctrl+Enter in their tooltips.
+- [x] Deliberately left visible (information, not standing instruction):
+      counts, totals, statuses, empty states ("No frame — add one…",
+      "Drop references here.", moodboard empty card/shelf note, Frame
+      prompt placeholder), and modal-body explanations (shown only while
+      the modal is open). Moodboard had no standing instruction to move;
+      step-nav descriptions were already tooltips.
+
+## Review
+
+Verified: `timeline-editor.test.ts` 15/15 (queries moved to aria-labels;
+new structure test walks every pre-cleanup action; new hint-text test) +
+`helptip.test.ts` 2/2; full vitest 2278 passed / 1 failed (the same
+pre-existing `group` guard noted above) / 15 skipped; typecheck shows
+only the pre-existing `timeline-preview-component.test.ts` error;
+`npm run build` clean. Before/after captures of every view + toolbar
+close-up + DOM facts diff (25 controls before/after, 4 groups, per-view
+help/hints) and a live split/undo/snap/add-track smoke in the built app:
+`tasks/screenshots/ui-cleanup/` (harness.mjs seeds an isolated profile).
+
+---
+
+# Animatic batch 2: ramps that drive, audio-on-tracks, header panel (3 items)
+
+## Item 1 - speed ramps did nothing
+Root causes (integral model in `timeline.ts` was already correct):
+authored keyframes kept their atSec after the duration re-solved, so
+speeding up stranded later dots past the clip end (invisible), the
+end/start dots sat half-clipped under the trim-edge handles
+(z-index), lengthening drags into a neighbor were silently refused,
+and preview set playbackRate once at cut-in so motion never
+accelerated. Fixes:
+- [x] `fitCurveToClipDuration` in `setClipSpeedCurve`: overshoot
+      keyframes pull to the derived end (re-solve to fixed point), so
+      the last keyframe's speed IS the end speed (100%->200% ends at
+      2x, duration = integral of the stored curve).
+- [x] Editor: dots render clamped inside the clip; ramp SVG z-index
+      above trim edges; drags that would lengthen into a neighbor now
+      clamp the keyframe speed at the fit boundary (bisection) instead
+      of going dead. Same clamp for the Speed-dropdown keyframe set.
+- [x] Preview: per-frame playbackRate follows the ramp derivative +
+      0.4s drift re-pin (video), so preview motion accelerates.
+- [x] Render/exports already consumed the same curve (setpts
+      piecewise); verified end-to-end instead of changed.
+- [x] Tests: ramp fit regression (`timeline-ramp.test.ts`), editor
+      clamp regression, preview `rateAt` ramp test.
+
+## Item 2 - audio lives on tracks only
+- [x] Removed Voiceover/Music panels, the under-preview VO waveform
+      strip + bed meter, MiniAudioPlayer/VolumeSlider, Fit to VO
+      (toolbar + panel), VO/music IPC (6 handlers + API + channels).
+- [x] Preview plays EVERY audio-track clip via per-clip hidden
+      players (`TimelineOverride.audioItems`: sourceAt/rateAt/gainAt
+      per clip); render already mixed all audioEvents from tracks.
+- [x] New `production:importTimelineAudio` (picker -> production
+      `audio/` folder -> probed duration) + editor **Import audio**
+      toolbar button; placement is the shared `addImportedAudioClip`
+      op (playhead slot -> track end -> new track). Waveforms show via
+      the existing audio-clip peaks path.
+- [x] Migration in productions load-normalize: legacy
+      voiceover/music fields seed/sync onto audio tracks (roles kept
+      for EDL/AE reels) and clear ONLY once the clip landed (a
+      zero-length timeline defers instead of orphaning the file).
+      Renderer saves can no longer resurrect the fields.
+- [x] Tests: placement op (4), migration (3), preview audioItems +
+      component players, editor import; legacy-field tests updated.
+
+## Item 3 - track header panel
+- [x] Audio headers stack: name row / full-width volume slider /
+      Lock-Mute-x row (audio row height 40 -> 68px). Slider can no
+      longer be cut off.
+- [x] Whole left panel drag-resizes from its right edge
+      (120-420px), width persisted via `usePersistedNumber`
+      (`cascade.timeline.headerW`).
+- [x] Tests: stack order + resize/persist/restore in editor suite.
+
+## Review
+
+Full vitest 2291 passed / 1 failed (pre-existing `group` guard) /
+15 skipped; typecheck only the pre-existing preview-component error;
+build clean. Live built-app verification (seeded production, real
+media): migration fields->clips, panels/strip gone, end-dot
+100%->200% drag shortens 8s->6.67s with fitted curve, preview rate
+samples 1.00->1.58 rising, Assembly render = 6.67s (matches),
+header drag 172->262px remembered across relaunch. Evidence in
+`tasks/animatic-batch/` (verify.mjs, verify-shots/, facts).

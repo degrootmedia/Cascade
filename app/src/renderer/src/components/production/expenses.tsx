@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { LedgerView } from "../../../../shared/ipc.js";
 import { ExpensesIcon, TokenIcon, TrashIcon } from "../icons.js";
 import { formatGenerationCost } from "./generation-cost.js";
+import { HelpTip } from "../common/HelpTip.js";
 
 function formatPrice(p: number): string {
   return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -91,11 +92,7 @@ export function ExpensesPanel({ productionId }: { productionId: string }) {
 
   return (
     <section className="prod-panel prod-expenses">
-      <h3><ExpensesIcon size={18} className="prod-panel-title-icon" /> Expenses</h3>
-      <p className="hint">
-        This project's AI generations{rate != null ? ` (Higgsfield credits convert at $${rate}/credit)` : ""}, priced against the rules in Settings → Media generation and tallied here.
-        Rows are mirrored to a per-project CSV text file you can open anytime.
-      </p>
+      <h3><ExpensesIcon size={18} className="prod-panel-title-icon" /> Expenses<HelpTip text={`This project's AI generations${rate != null ? ` (Higgsfield credits convert at $${rate}/credit)` : ""}, priced against the rules in Settings → Media generation and tallied here. Rows are mirrored to a per-project CSV text file you can open anytime.`} label="Expenses" /></h3>
 
       <div className="prod-expenses-toolbar">
         <button className="prod-btn" onClick={() => void load()} disabled={busy}>

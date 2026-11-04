@@ -23,6 +23,7 @@ import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
 import { MediaLightbox } from "../common/MediaLightbox.js";
+import { HelpTip } from "../common/HelpTip.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
@@ -336,8 +337,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
   }, [groups, items]);
   return (
     <div className="prod-refs">
-      <label className="prod-label">Reference images</label>
-      <p className="hint">Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto <em>From image</em> to generate a style. Click to select, Ctrl/Cmd-click to add, Shift-click for a range, then drag the selection to reorder or move it.</p>
+      <label className="prod-label">Reference images<HelpTip text="Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto From image to generate a style. Click to select, Ctrl/Cmd-click to add, Shift-click for a range, then drag the selection to reorder or move it." label="Reference images" /></label>
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}><PlusIcon size={14} /> Add category</button>
@@ -973,17 +973,13 @@ export function CharacterBuilderSection({ prodId, characters, usage, models, ref
 
   return (
     <div className="prod-refs">
-      <p className="hint">
-        Build a <strong>character reference</strong>: a character sheet with a full body shot and a
-        face-closeup inset, in a neutral pose and expression under neutral lighting on a plain gray
-        background. Generated sheets attach to the character and carry its look across the storyboard.
-      </p>
       <div className="prod-char-form">
         <label className="prod-label">Character name
           <input className="prod-refgen-name" placeholder="e.g. Captain Mara" value={name} onChange={(e) => { setName(e.target.value); if (characterId && characters.find((c) => c.id === characterId)?.name !== e.target.value) setCharacterId(""); }} />
         </label>
         <div
           className="prod-char-desc-row"
+          title="Cite references with @ — or drag one in from the References panel below. Sheets always generate 16:9."
           onDragOver={(e) => {
             if (!e.dataTransfer.types.includes("application/x-cascade-reference")) return;
             e.preventDefault();
@@ -1008,7 +1004,6 @@ export function CharacterBuilderSection({ prodId, characters, usage, models, ref
             {refining ? "Refining…" : "✨ Refine"}
           </button>
         </div>
-        <p className="hint">Cite references with <code>@</code> — or drag one in from the References panel below. Sheets always generate 16:9.</p>
         <div className="prod-char-view">
           <span className="prod-label">Sheet views</span>
           <div className="prod-char-view-options">
@@ -1286,7 +1281,7 @@ export function RefGenModal({ prodId, models, editModels, categories, references
             : "The generated image is added as a new reference in the chosen category. @ tags reuse other references as inputs; drag a tag to move it. Ctrl+Enter to submit."}
         </p>
         {error && <p className="error-text">{error}</p>}
-        <button className="prod-btn prod-edit-go" disabled={!canSubmit} title={busy ? "Generating… click to queue another" : undefined} onClick={submit}>
+        <button className="prod-btn prod-edit-go" disabled={!canSubmit} title={busy ? "Generating… click to queue another" : mode === "edit" ? "Edit reference (Ctrl+Enter)" : "Generate reference (Ctrl+Enter)"} onClick={submit}>
           {busy ? genButtonLabel({ running: true, pending: gen.pending }, mode === "edit" ? "Edit reference" : "Generate reference") : <>{mode === "edit" ? "Edit reference" : "Generate reference"}<GenerationCostSuffix req={refCostReq} /></>}
         </button>
       </div>

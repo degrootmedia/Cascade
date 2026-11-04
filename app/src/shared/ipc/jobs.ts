@@ -32,6 +32,8 @@ export type JobKind =
   | "referenceImage"
   | "characterSheet"
   | "magicPrompts"
+  | "proxies"
+  | "assemblyRender"
   | "suite";
 
 /** Lifecycle: queued -> submitting -> running -> fetching -> succeeded.
@@ -192,6 +194,8 @@ export function jobForChannel(channel: string, args: unknown[]): { kind: JobKind
     "production:generateReferenceImage": "referenceImage",
     "production:generateCharacterSheet": "characterSheet",
     "production:generateMagicPrompts": "magicPrompts",
+    "production:generateProxies": "proxies",
+    "production:assemblyRender": "assemblyRender",
     "production:regenerateMagicPrompt": "magicPrompts",
     "suite:generate": "suite",
   };
@@ -230,6 +234,10 @@ export function jobTargetKey(kind: JobKind, args: unknown[]): string | null {
       return a1 ? `upscale:${a1}` : null;
     case "suite":
       return `suite:${prod}`;
+    case "proxies":
+      return `proxies:${prod}`;
+    case "assemblyRender":
+      return `render:${prod}`;
     case "referenceImage":
       return `ref:${prod}`;
     case "characterSheet":
@@ -266,6 +274,8 @@ export function jobLabel(kind: JobKind): string {
     referenceImage: "Generating a reference image",
     characterSheet: "Generating a character sheet",
     magicPrompts: "Writing Magic Prompts",
+    proxies: "Generating preview proxies",
+    assemblyRender: "Rendering animatic to MP4",
     suite: "Generating (Image Suite)",
   };
   return labels[kind];

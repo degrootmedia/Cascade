@@ -861,7 +861,11 @@ function usePromptNodeDraft(data: PromptNodeData, publishEveryEdit: boolean) {
   // focus (changing the style dropdown must update Style without resetting the
   // Content caret, and vice-versa). The focused box stays authoritative.
   useEffect(() => {
-    if (emitted.current.has(data.value)) return;
+    // Echo suppression only applies while this node holds focus (caret
+    // protection). Unfocused, a value matching an earlier emission is a
+    // genuine external change back to that text and must resync below.
+    const echoFocusInside = !!rootRef.current && !!document.activeElement && rootRef.current.contains(document.activeElement);
+    if (emitted.current.has(data.value) && echoFocusInside) return;
     const active = document.activeElement as HTMLElement | null;
     const isFocused = !!rootRef.current && !!active && rootRef.current.contains(active);
     if (isFocused) {

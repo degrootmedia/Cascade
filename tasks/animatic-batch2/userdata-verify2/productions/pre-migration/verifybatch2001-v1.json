@@ -1,0 +1,162 @@
+{
+  "meta": {
+    "id": "verifybatch2001",
+    "name": "Batch verify",
+    "folder": "D:\\Cascade\\tasks\\animatic-batch2\\seed-verify2",
+    "createdAt": "2026-11-04T21:37:02.201Z",
+    "updatedAt": "2026-11-04T21:37:02.201Z",
+    "stepDone": 4,
+    "shotCount": 4
+  },
+  "currentStep": 4,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "number": 1,
+      "title": "Scene",
+      "shots": [
+        {
+          "id": "shot1",
+          "number": "0100",
+          "audio": "",
+          "visual": "red",
+          "durationSec": 6,
+          "videoPath": "videos/red6s-silent.mp4"
+        },
+        {
+          "id": "shot2",
+          "number": "0200",
+          "audio": "",
+          "visual": "blue",
+          "durationSec": 6,
+          "videoPath": "videos/blue6s-silent.mp4"
+        },
+        {
+          "id": "shot3",
+          "number": "0300",
+          "audio": "",
+          "visual": "green",
+          "durationSec": 4
+        },
+        {
+          "id": "shot4",
+          "number": "0400",
+          "audio": "",
+          "visual": "yellow",
+          "durationSec": 4
+        }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "status": {},
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "name": "V1"
+      },
+      {
+        "id": "a1",
+        "kind": "audio",
+        "name": "A1"
+      }
+    ],
+    "clips": [
+      {
+        "id": "c1",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 6,
+        "srcRel": "videos/red6s-silent.mp4",
+        "name": "red6s-silent.mp4",
+        "shotId": "shot1"
+      },
+      {
+        "id": "c2",
+        "trackId": "v1",
+        "sourceKind": "video",
+        "timelineStartSec": 6,
+        "sourceInSec": 0,
+        "sourceOutSec": 6,
+        "srcRel": "videos/blue6s-silent.mp4",
+        "name": "blue6s-silent.mp4",
+        "shotId": "shot2"
+      },
+      {
+        "id": "c3",
+        "trackId": "v1",
+        "sourceKind": "still",
+        "timelineStartSec": 12,
+        "holdSec": 4,
+        "srcRel": "stills/green.jpg",
+        "name": "green.jpg",
+        "shotId": "shot3"
+      },
+      {
+        "id": "c4",
+        "trackId": "v1",
+        "sourceKind": "still",
+        "timelineStartSec": 16,
+        "holdSec": 4,
+        "srcRel": "stills/yellow.jpg",
+        "name": "yellow.jpg",
+        "shotId": "shot4"
+      },
+      {
+        "id": "ac1",
+        "trackId": "a1",
+        "sourceKind": "audio",
+        "timelineStartSec": 0,
+        "sourceInSec": 0,
+        "sourceOutSec": 8,
+        "srcRel": "audio/tone8s.mp3",
+        "name": "tone8s.mp3"
+      }
+    ],
+    "transitions": [
+      {
+        "id": "tr1",
+        "type": "dissolve",
+        "outgoingClipId": "c3",
+        "incomingClipId": "c4",
+        "durationSec": 2
+      }
+    ]
+  },
+  "assembly": {
+    "fps": 24,
+    "width": 640,
+    "height": 360,
+    "exportDir": "out/assembly"
+  },
+  "assets": {
+    "scriptMd": "script.md",
+    "boardsDir": "boards",
+    "voiceoverDir": "voiceover",
+    "musicDir": "music",
+    "outDir": "out",
+    "referencesDir": "references",
+    "assemblyDir": "assembly"
+  },
+  "outdatedShots": [],
+  "referenceCategories": [],
+  "openArt": {
+    "model": "auto",
+    "resolution": "1k"
+  },
+  "brand": {
+    "colors": [],
+    "font": ""
+  },
+  "magicPrompts": {},
+  "magicEnabled": false,
+  "media": []
+}

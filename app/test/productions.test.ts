@@ -849,11 +849,18 @@ describe("applyRendererState", () => {
     expect(applyMagicPromptDelta(fresh, { shot1: "stale" }, {})).toEqual({ shot2: "keep" });
   });
 
-  it("clamps volume fields to [0, 1]", () => {
-    const incoming = baseProduction({ voiceoverVolume: 2, musicVolume: -1 } as Production);
+  it("does not copy legacy VO/music fields from renderer state", () => {
+    // Audio lives on timeline tracks now; a stale renderer snapshot
+    // must not resurrect the removed one-VO/one-music fields.
+    const incoming = baseProduction({
+      voiceoverPath: "voiceover/x.mp3", voiceoverVolume: 2,
+      musicPath: "music/y.mp3", musicVolume: -1,
+    } as Production);
     const merged = applyRendererState(baseProduction(), incoming);
-    expect(merged.voiceoverVolume).toBe(1);
-    expect(merged.musicVolume).toBe(0);
+    expect(merged.voiceoverPath).toBeUndefined();
+    expect(merged.voiceoverVolume).toBeUndefined();
+    expect(merged.musicPath).toBeUndefined();
+    expect(merged.musicVolume).toBeUndefined();
   });
 
   it("renames the production when the renderer sends a new name", () => {
@@ -1004,6 +1011,89 @@ describe("waveformColor read repair", () => {
     const loaded = loadProduction("wave-color")!;
     expect(loaded.references?.find((r) => r.id === "r1")?.waveformColor).toBe("teal");
     expect(loaded.references?.find((r) => r.id === "r2")?.waveformColor).toBeUndefined();
+  });
+});
+
+describe("legacy VO/music migration (audio lives on tracks)", () => {
+  it("turns imported voiceover/music into audio-track clips and clears the fields on load", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "vo-migration", folder: path.join(dataDir, "assets") },
+      scenes: [
+        {
+          number: 1, title: "S",
+          shots: [{ id: "s1", number: "0100", audio: "line", visual: "v", durationSec: 5 }],
+        },
+      ],
+      voiceoverPath: "voiceover/vo.mp3",
+      voiceoverVolume: 0.7,
+      musicPath: "music/theme.mp3",
+      musicVolume: 0.3,
+      timeline: {
+        version: 1,
+        tracks: [{ id: "v1", kind: "video", name: "V1" }],
+        clips: [
+          { id: "c1", trackId: "v1", sourceKind: "video", srcRel: "clips/one.mp4", sourceInSec: 0, sourceOutSec: 5, timelineStartSec: 0 },
+        ],
+      },
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("vo-migration")!;
+    // Legacy fields are gone...
+    expect(loaded.voiceoverPath).toBeUndefined();
+    expect(loaded.musicPath).toBeUndefined();
+    expect(loaded.voiceoverVolume).toBeUndefined();
+    expect(loaded.musicVolume).toBeUndefined();
+    // ...and the audio lives on as ordinary audio-track clips.
+    const audio = (loaded.timeline?.clips ?? []).filter((c) => c.sourceKind === "audio");
+    expect(audio.map((c) => c.srcRel).sort()).toEqual(["music/theme.mp3", "voiceover/vo.mp3"]);
+    const vo = audio.find((c) => c.srcRel === "voiceover/vo.mp3")!;
+    expect(vo.volume).toBeCloseTo(0.7, 9);
+    expect(vo.timelineStartSec).toBe(0);
+    const mu = audio.find((c) => c.srcRel === "music/theme.mp3")!;
+    expect(mu.volume).toBeCloseTo(0.3, 9);
+    // The video clip is untouched, and a second load does not duplicate.
+    expect(loaded.timeline?.clips.find((c) => c.id === "c1")).toBeTruthy();
+    saveProduction(loaded);
+    const again = loadProduction("vo-migration")!;
+    expect((again.timeline?.clips ?? []).filter((c) => c.sourceKind === "audio")).toHaveLength(2);
+  });
+
+  it("defers (never drops) the migration while the timeline has no duration", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "vo-migration-deferred", folder: path.join(dataDir, "assets") },
+      voiceoverPath: "voiceover/vo.mp3",
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("vo-migration-deferred")!;
+    // No shots -> zero-length seed -> field kept, nothing orphaned.
+    expect(loaded.voiceoverPath).toBe("voiceover/vo.mp3");
+    // Once content exists, the next load lands it on a track.
+    const withShot = {
+      ...loaded,
+      scenes: [{ number: 1, title: "S", shots: [{ id: "s1", number: "0100", audio: "l", visual: "v", durationSec: 4 }] }],
+    } as unknown as ProductionFile;
+    saveProduction(withShot);
+    const migrated = loadProduction("vo-migration-deferred")!;
+    expect(migrated.voiceoverPath).toBeUndefined();
+    expect(migrated.timeline?.clips.some((c) => c.srcRel === "voiceover/vo.mp3" && c.sourceKind === "audio")).toBe(true);
+  });
+
+  it("seeds a timeline with the bed clips when the production has none yet", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "vo-migration-seed", folder: path.join(dataDir, "assets") },
+      scenes: [
+        {
+          number: 1, title: "S",
+          shots: [{ id: "s1", number: "0100", audio: "line", visual: "v", durationSec: 5 }],
+        },
+      ],
+      voiceoverPath: "voiceover/vo.mp3",
+    });
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("vo-migration-seed")!;
+    expect(loaded.voiceoverPath).toBeUndefined();
+    const vo = loaded.timeline?.clips.find((c) => c.srcRel === "voiceover/vo.mp3");
+    expect(vo?.sourceKind).toBe("audio");
   });
 });
 
@@ -1324,6 +1414,10 @@ describe("importProduction", () => {
     expect((p.references ?? []).map((r) => r.imagePath).sort()).toEqual(["references/Mara.png", "references/Old Map.jpg"]);
     expect(p.styles).toHaveLength(1);
     expect(p.styles[0].imagePath).toBe("styles/style-abc.png");
+    // This folder has no shots, so the recovered VO/music cannot land
+    // on a (zero-length) timeline yet: the legacy fields survive the
+    // import load and migrate to track clips once content exists
+    // (covered by the migration suite above). Nothing is lost.
     expect(p.voiceoverPath).toBe("voiceover/narration.mp3");
     expect(p.musicPath).toBe("music/theme.mp3");
   });

@@ -1,35 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { dataUrlToBytes } from "../../../../shared/prompt-grammar.js";
-import { applyShotSequences, type Production, type ProductionShot, type Retry720pAction, type SequenceTimelineItem, type ShotSequence } from "../../../../shared/ipc.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type Retry720pAction, type SequenceTimelineItem } from "../../../../shared/ipc.js";
 import { PlayButtonIcon, StopButtonIcon } from "../icons.js";
 import { GenerationMenu, useGenerationMenu } from "../generation-menu.js";
 import { usePersistedCollapsed } from "./persisted-state.js";
 import { mediaRev } from "./media-rev.js";
 import { batchedBoardThumb } from "./board-thumbs.js";
-import { snapDurationToVideoEnd } from "./animatic-snap.js";
-import {
-  clampSlipOffsetSec,
-  effectiveVideoEndSec,
-  slipOffsetFromDx,
-  videoTimeForPlayback,
-} from "./animatic-slip.js";
-import { edgeDragUpdates, type AnimaticEditMode } from "./animatic-edit.js";
+import { blendUnderShouldSeek, loopWrapAt, type TimelineLoopRegion, type TimelineOverride } from "./timeline-preview.js";
 
-/** Animatic timeline: max simultaneously-mounted pooled preview <video>s. */
+/** Timeline preview: max simultaneously-mounted pooled preview <video>s. */
 export const VIDEO_POOL_MAX = 12;
-/** Animatic timeline: max wheel-zoom multiplier over the fit-to-width scale. */
-export const ANIMATIC_MAX_ZOOM = 24;
-
-/** True video lengths probed from `<video preload="metadata">`, keyed by
- *  `${prodId}:${videoPath}`. Module-level so a duration probed once survives
- *  re-renders and timeline rebuilds; bounded like the thumbnail cache. Unknown
- *  or failed probes simply stay absent (no marker, no snap). */
-const videoDurationCache = new Map<string, number>();
-function cacheVideoDuration(key: string, sec: number) {
-  if (!Number.isFinite(sec) || sec <= 0) return;
-  if (videoDurationCache.size > 200) videoDurationCache.clear();
-  videoDurationCache.set(key, sec);
-}
 
 export const STEPS: { n: 1 | 2 | 3 | 4 | 5; title: string; desc: string }[] = [
   { n: 1, title: "Script", desc: "PDF / DOCX / Google Doc → two-column shot breakdown" },
@@ -48,18 +27,14 @@ export interface LogLine {
   action?: Retry720pAction;
 }
 
-/** Media URL whose `#t=` fragment makes the <video> element show a still frame. */
-export function videoStillSrc(prodId: string, rel: string): string {
-  return `cascade-media://${prodId}/${encodeURIComponent(rel)}#t=0.1`;
-}
 
 const animaticThumbCache = new Map<string, string>();
-function AnimaticThumb({ prodId, shotId, artwork, explicitRel, videoRel, title }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string; /** Shot's video clip: the thumbnail is a still frame decoded from it. */ videoRel?: string; /** Hover text override (timeline blocks pass the block's status line so the full-bleed artwork doesn't bury it). */ title?: string }) {
+function AnimaticThumb({ prodId, shotId, artwork, explicitRel, title }: { prodId: string; shotId: string; artwork?: string; explicitRel?: string; /** Hover text override. */ title?: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     // A sequence's held still renders directly (see the return below) — no
     // board-thumbnail fetch for it.
-    if (explicitRel || videoRel) return;
+    if (explicitRel) return;
     let live = true;
     const key = `${prodId}:${shotId}:${artwork ?? ""}`;
     const cached = animaticThumbCache.get(key);
@@ -78,396 +53,65 @@ function AnimaticThumb({ prodId, shotId, artwork, explicitRel, videoRel, title }
       }).catch(() => {});
     }
     return () => { live = false; };
-  }, [prodId, shotId, artwork, explicitRel, videoRel]);
-  if (videoRel) return <video className="prod-timeline-thumb" src={videoStillSrc(prodId, videoRel)} preload="metadata" muted playsInline disablePictureInPicture tabIndex={-1} title={title ?? "Still frame from this shot's video"} />;
+  }, [prodId, shotId, artwork, explicitRel]);
   if (explicitRel) return <img className="prod-timeline-thumb" src={`cascade-media://${prodId}/${encodeURIComponent(explicitRel)}`} alt="Held still" title={title ?? "The sequence output's held still"} />;
   if (!src) return <span className="prod-timeline-thumb blank" title="No frame yet — generate one in Storyboard" />;
   return <img className="prod-timeline-thumb" src={src} alt="Shot frame" title={title ?? "Primary frame for this shot"} />;
 }
 
-/** Flatten scenes to a single ordered shot list with a global timeline cursor. */
-function flatShots(scenes: Production["scenes"]): ProductionShot[] {
-  return scenes.flatMap((s) => s.shots);
-}
 
-/** Convert a data URL into an ArrayBuffer for AudioContext decoding. The VO
- *  / music IPCs prefer streamable cascade-media:// URLs, but legacy builds
- *  fall back to data URLs — decode those without a fetch (and in chunks so
- *  multi-MB base64 never hits a single-string limit). */
-function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer | null {
-  const bytes = dataUrlToBytes(dataUrl);
-  return bytes ? (bytes.buffer as ArrayBuffer) : null;
-}
+/** Real-time playback preview (monitor + transport). Plays the
+ *  resolved timeline: picture items from the video pool, audio from
+ *  one hidden <audio> per audio-track clip, all synced to the shared
+ *  playhead owned by the Step 4 section. */
 
-async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
-  if (url.startsWith("data:")) {
-    const ab = dataUrlToArrayBuffer(url);
-    if (!ab || !ab.byteLength) throw new Error("empty data URL");
-    return ab;
-  }
-  const resp = await fetch(url);
-  const ab = await resp.arrayBuffer();
-  if (!ab.byteLength) throw new Error("empty");
-  return ab;
-}
-
-/** Compact design-language preview player for the VO / Music import rows.
- *  Replaces the native `<audio controls>` (whose Chromium chrome clashes with
- *  the dark theme): play/pause + click-to-seek progress bar + elapsed/total.
- *  Reports the loaded duration via `onDurationKnown` (used by the VO row to
- *  feed the Fit-to-VO math). */
-/** Mutable audio-element ref (React 18's RefObject.current is readonly, but
- *  MiniAudioPlayer / VolumeSlider need to write `.current`). */
-type AudioElRef = { current: HTMLAudioElement | null };
-
-
-export function MiniAudioPlayer({ src, onDurationKnown, audioRef }: {
-  src: string | null;
-  onDurationKnown?: (sec: number) => void;
-  /** Optional external ref — lets a sibling volume slider set the audio
-   *  element's volume live while dragging. */
-  audioRef?: AudioElRef;
-}) {
-  const internalRef = useRef<HTMLAudioElement | null>(null) as AudioElRef;
-  const barRef = useRef<HTMLDivElement | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [current, setCurrent] = useState(0);
-  const [duration, setDuration] = useState(0);
-
-  useEffect(() => {
-    // Reset the transport when the clip changes (re-import / replace).
-    setPlaying(false);
-    setCurrent(0);
-    setDuration(0);
-  }, [src]);
-
-  const toggle = () => {
-    const el = internalRef.current;
-    if (!el || !src) return;
-    if (el.paused) void el.play().catch(() => {});
-    else el.pause();
-  };
-
-  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
-    const el = internalRef.current;
-    const bar = barRef.current;
-    if (!el || !bar || !Number.isFinite(el.duration) || el.duration <= 0) return;
-    const r = bar.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-    el.currentTime = ratio * el.duration;
-    setCurrent(el.currentTime);
-  };
-
-  const pct = duration > 0 ? (current / duration) * 100 : 0;
-
-  return (
-    <div className="prod-mini-player">
-      <button
-        className="prod-mini-play"
-        onClick={toggle}
-        title={playing ? "Pause preview" : "Play preview"}
-        disabled={!src}
-        aria-label={playing ? "Pause preview" : "Play preview"}
-      >
-{playing ? "❚❚" : <PlayButtonIcon size={12} />}
-      </button>
-      <div className="prod-mini-bar" ref={barRef} onClick={seek} title="Click to seek">
-        <div className="prod-mini-fill" style={{ width: `${pct}%` }} />
-        <div className="prod-mini-head" style={{ left: `${pct}%` }} />
-      </div>
-      <span className="prod-mini-time">
-        {formatRuntime(current)} / {duration > 0 ? formatRuntime(duration) : "–:––"}
-      </span>
-      <audio
-        ref={(el) => {
-          internalRef.current = el;
-          if (audioRef) audioRef.current = el;
-        }}
-        src={src ?? undefined}
-        preload="metadata"
-        onLoadedMetadata={(e) => {
-          const d = e.currentTarget.duration;
-          if (Number.isFinite(d) && d > 0) { setDuration(d); onDurationKnown?.(d); }
-        }}
-        onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => { setPlaying(false); setCurrent(0); }}
-      />
-    </div>
-  );
-}
-
-/** Volume slider that stays responsive during a drag: the thumb moves and the
- *  audio element's volume updates immediately (local state + direct ref write),
- *  but the expensive production save only happens when the user lets go. The
- *  old onChange→saveField-per-tick path was noticeably sluggish. */
-export function VolumeSlider({ value, onCommit, audioRef, title }: {
-  value: number;
-  onCommit: (v: number) => void;
-  /** Optional audio element to adjust live while dragging. */
-  audioRef?: AudioElRef;
-  title?: string;
-}) {
-  const [live, setLive] = useState(value);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => { setLive(value); }, [value]);
-  useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
-
-  const apply = (v: number) => {
-    setLive(v);
-    if (audioRef?.current) audioRef.current.volume = v;
-    // Safety net: persist shortly after the last change even if a pointerup
-    // is missed (e.g. release outside the input).
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => onCommit(v), 250);
-  };
-
-  const commitNow = () => {
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    onCommit(live);
-  };
-
-  return (
-    <label className="prod-music-vol" title={title}>
-      Vol
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={live}
-        onChange={(e) => apply(Number(e.target.value))}
-        onPointerUp={commitNow}
-        onKeyUp={commitNow}
-        onBlur={commitNow}
-      />
-    </label>
-  );
-}
-
-/** Real-time playback preview + draggable cut points. The voiceover clip
- *  (one file for the whole production) drives the timeline total when it
- *  exists; otherwise the total is the sum of per-shot durations. Each block
- *  is a shot, width is proportional to durationSec, and dragging the right
- *  edge sets that shot's duration. The playhead can be drag-scrubbed; the
- *  preview pane's height can be dragged from its bottom border. Both VO and
- *  music are decoded to AudioBuffers and mixed via GainNodes so the sliders
- *  affect live playback. The voiceover waveform is drawn on a canvas behind
- *  the semi-transparent shot blocks. */
-
-export function AnimaticTimeline({
-  prodId, scenes, sequences, references, voUrl, voDuration, onVoDurationKnown, musicUrl, musicVolume, voiceoverVolume,
-  onUpdateDurations, onUpdateSequenceDuration, onUpdateVideoOffsets, onUpdateSequenceVideoOffset,
-  onFitToVo, onUpdateTotal, onRemoveVideo, onToggleMute, onToggleSequenceMute, onSaveAsReference,
+export function TimelinePreview({
+  prodId, timelineOverride,
+  playheadSec: playhead, onPlayheadChange: setPlayhead, playing, onPlayingChange: setPlaying, onSaveAsReference, loopRegion,
 }: {
   prodId: string;
-  scenes: Production["scenes"];
-  /** Enabled shot sequences collapse their span into one block (Spec 06). */
-  sequences?: ShotSequence[];
-  /** References a sequence's output node can be bound to. */
-  references?: Production["references"];
-  voUrl: string | null;
-  voDuration: number | null;
-  onVoDurationKnown: (sec: number) => void;
-  musicUrl: string | null;
-  musicVolume: number;
-  voiceoverVolume: number;
-  onUpdateDurations: (updates: { shotId: string; durationSec: number }[]) => void;
-  /** Set a shot sequence's own timeline window (roll edit on its block). */
-  onUpdateSequenceDuration?: (sequenceId: string, durationSec: number) => void;
-  /** Slip a shot block's clip (right-drag): the window stays put while the
-   *  source frame it opens on shifts. Committed once per gesture, on release. */
-  onUpdateVideoOffsets: (updates: { shotId: string; videoOffsetSec: number }[]) => void;
-  /** Slip a shot sequence's clip (same gesture on its block). */
-  onUpdateSequenceVideoOffset?: (sequenceId: string, videoOffsetSec: number) => void;
-  onFitToVo: () => void;
-  onUpdateTotal: (sec: number) => void;
-  /** Remove a shot's generated video (the preview falls back to the still). */
-  onRemoveVideo: (shotId: string) => void;
-  /** Toggle whether a shot's own embedded audio plays in the preview. */
-  onToggleMute: (shotId: string) => void;
-  /** Mute a shot sequence's clip in the preview. */
-  onToggleSequenceMute?: (sequenceId: string) => void;
-  /** Copy the previewed shot's generated clip/frame into the production as a
-   *  new reference (right-click the preview). */
+  /** Preview items resolved from Production.timeline (proxy-preferred) —
+   *  the ONLY timeline this preview plays. Editing lives in the
+   *  TimelineEditor below; this component is the monitor + transport. */
+  timelineOverride: TimelineOverride;
+  /** Shared playhead in seconds, owned by the Step 4 section so the
+   *  editor below follows playback and its scrubs seek this preview. */
+  playheadSec: number;
+  onPlayheadChange: (sec: number) => void;
+  playing: boolean;
+  onPlayingChange: (playing: boolean) => void;
+  /** Copy the previewed shot's generated clip/frame into the production
+   *  as a new reference (right-click the preview). */
   onSaveAsReference?: (shotId: string, rel: string) => void;
+  /** Loop In/Out region from the editor below: with Loop on, the
+   *  transport wraps from Out back to In instead of playing past. */
+  loopRegion?: TimelineLoopRegion;
 }) {
-  // Timeline items: a shot each, with every enabled sequence's contiguous span
-  // collapsed into one block (the projection's slate fallback covers a
-  // sequence that hasn't rendered its clip yet).
-  const shots: SequenceTimelineItem[] = applyShotSequences(flatShots(scenes), sequences ?? [], references);
+  // Preview items resolved from the production timeline: one block per
+  // resolved span, topmost visible video winning (the render's rule).
+  const shots: SequenceTimelineItem[] = timelineOverride.items;
   const sumDur = shots.reduce((n, s) => n + s.durationSec, 0) || 0.1;
-  // Total is always the sum of shot durations — the user can edit it freely
-  // (and "Fit to VO" rescales the shots to match the voiceover). The VO's
-  // own length is overlaid on the strip as a waveform at its true scale.
   const total = sumDur;
-  const [playing, setPlaying] = useState(false);
   const [animaticMuted, setAnimaticMuted] = useState(false);
-  const [playhead, setPlayhead] = useState(0);
-  const [editingTotal, setEditingTotal] = useState(false);
-  const [totalDraft, setTotalDraft] = useState("");
-  const stripRef = useRef<HTMLDivElement>(null);
+
   const scrubRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [previewHeight, setPreviewHeight] = useState(440);
   const genMenu = useGenerationMenu();
 
-  // ---- Zoomable strip + per-shot video pool (state) ----------------------
-  // The strip scales from a "fit" baseline (whole runtime at 1x). Wheel-zooming
-  // pins the playhead to its current screen X; the wrapper scrolls horizontally
-  // once the content outgrows it. The preview pane keeps one <video> element
-  // MOUNTED PER SHOT (LRU-capped): cutting between clips toggles visibility
-  // instead of swapping src, which is what removes the black reload flash.
-  const [zoom, setZoom] = useState(1);
-  const [stripW, setStripW] = useState(0);
-  const scrollWrapRef = useRef<HTMLDivElement>(null);
-  const pendingScrollRef = useRef<number | null>(null);
-  // Mirrors of render-time values read by stable closures (wheel handler).
+  // ---- Per-shot video pool (state) ------------------------------------
+  // The preview pane keeps one <video> element MOUNTED PER SHOT
+  // (LRU-capped): cutting between clips toggles visibility instead of
+  // swapping src, which is what removes the black reload flash.
   const playheadRef = useRef(0);
-  const ppsRef = useRef(0);
-  const zoomRef = useRef(1);
   // Pooled video elements + LRU bookkeeping, keyed by shot id.
   const videoElsRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const poolLruRef = useRef<Map<string, number>>(new Map());
   const poolTickRef = useRef(0);
   const [mountedVideos, setMountedVideos] = useState<string[]>([]);
 
-  // ---- Video-end markers (state) --------------------------------------
-  // True clip lengths for the end-of-video markers, keyed by videoPath (the
-  // same file can back more than one block). Probed with metadata-only
-  // <video> elements — no playback, no main-process changes — so a missing
-  // or undecodable file just means no marker for that block.
-  const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
-  const videoDurationsRef = useRef<Record<string, number>>({});
-  useEffect(() => { videoDurationsRef.current = videoDurations; }, [videoDurations]);
-  // Stable probe list: unique videoPaths currently on the strip.
-  const videoProbeKey = useMemo(() => {
-    const rels = new Set<string>();
-    for (const s of shots) if (s.videoPath) rels.add(s.videoPath);
-    return [...rels].sort().join("|");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shots.map((s) => s.videoPath ?? "").join("|")]);
-  useEffect(() => {
-    if (!videoProbeKey) return;
-    const rels = videoProbeKey.split("|").filter(Boolean);
-    let cancelled = false;
-    const pending: HTMLVideoElement[] = [];
-    for (const rel of rels) {
-      const cacheKey = `${prodId}:${rel}`;
-      if (videoDurationCache.has(cacheKey) || videoDurationsRef.current[rel] != null) continue;
-      const v = document.createElement("video");
-      v.preload = "metadata";
-      v.muted = true;
-      (v as unknown as { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
-      pending.push(v);
-      v.onloadedmetadata = () => {
-        const sec = v.duration;
-        try { v.removeAttribute("src"); v.load(); } catch {}
-        if (cancelled) return;
-        if (!Number.isFinite(sec) || sec <= 0) return;
-        cacheVideoDuration(cacheKey, sec);
-        setVideoDurations((prev) => (prev[rel] != null ? prev : { ...prev, [rel]: sec }));
-      };
-      v.onerror = () => {
-        try { v.removeAttribute("src"); v.load(); } catch {}
-      };
-      v.src = `cascade-media://${prodId}/${encodeURIComponent(rel)}`;
-    }
-    return () => {
-      cancelled = true;
-      for (const v of pending) {
-        v.onloadedmetadata = null;
-        v.onerror = null;
-        try { v.removeAttribute("src"); v.load(); } catch {}
-      }
-    };
-    // prodId + the flattened probe list drive re-probes; shots themselves
-    // change identity every render (projection rebuild), so they stay out.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prodId, videoProbeKey]);
 
-  /** Parse a user-entered total: "1:30", "0:42", "90", "1m30s", "45s". */
-  function parseTotalInput(s: string): number | null {
-    const t = s.trim();
-    if (!t) return null;
-    if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
-    let m = t.match(/^(\d+)m(\d+(?:\.\d+)?)?s?$/);
-    if (m) return Number(m[1]) * 60 + (m[2] ? Number(m[2]) : 0);
-    m = t.match(/^(\d+(?:\.\d+)?)s$/);
-    if (m) return Number(m[1]);
-    m = t.match(/^(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);
-    if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
-    m = t.match(/^(\d+):(\d{1,2}(?:\.\d+)?)$/);
-    if (m) return Number(m[1]) * 60 + Number(m[2]);
-    return null;
-  }
-
-  function startEditTotal() {
-    setTotalDraft(formatRuntime(total));
-    setEditingTotal(true);
-  }
-
-  function commitTotal() {
-    const next = parseTotalInput(totalDraft);
-    if (next != null && next > 0) onUpdateTotal(next);
-    setEditingTotal(false);
-  }
-
-  // Decode VO and music once into AudioBuffers (cached for playback + waveform).
-  // The decoded duration is the primary source for the waveform, but the
-  // <audio> element's metadata is the source of truth for playback length.
-  // If decode fails (e.g. codec supported by <audio> but not by
-  // AudioContext), we must NOT clobber a valid duration already reported
-  // by onLoadedMetadata — otherwise the UI sticks at 0:00 even though the
-  // file plays.
-  const [voBuffer, setVoBuffer] = useState<AudioBuffer | null>(null);
-  const [musicBuffer, setMusicBuffer] = useState<AudioBuffer | null>(null);
-  useEffect(() => {
-    if (!voUrl) { setVoBuffer(null); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const ab = await fetchArrayBuffer(voUrl);
-        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-        const buf = await ctx.decodeAudioData(ab.slice(0));
-        await ctx.close().catch(() => {});
-        if (cancelled) return;
-        setVoBuffer(buf);
-        onVoDurationKnown(buf.duration);
-      } catch (e) {
-        if (!cancelled) {
-          setVoBuffer(null);
-          // Do NOT call onVoDurationKnown(0) here — the hidden <audio>
-          // element's onLoadedMetadata will provide the real duration even
-          // when AudioContext can't decode this file (e.g. some mp3s).
-          console.warn("VO AudioContext decode failed, falling back to <audio> metadata:", e);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voUrl]);
-
-  useEffect(() => {
-    if (!musicUrl) { setMusicBuffer(null); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const ab = await fetchArrayBuffer(musicUrl);
-        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-        const buf = await ctx.decodeAudioData(ab.slice(0));
-        await ctx.close().catch(() => {});
-        if (cancelled) return;
-        setMusicBuffer(buf);
-      } catch {
-        if (!cancelled) setMusicBuffer(null);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [musicUrl]);
 
   /** Cumulative start time of each shot in seconds. */
   const starts = useMemo(() => {
@@ -487,111 +131,85 @@ export function AnimaticTimeline({
     return shots.length - 1;
   }, [playhead, shots, starts]);
 
-  // Timeline playback uses hidden <audio> elements (more reliable codec support
-  // than AudioContext decoding). Both are mixed via volume props so sliders take
-  // effect live; the visual playhead follows wall-clock time synced to the
-  // audio currentTime when possible.
-  const voAudioRef = useRef<HTMLAudioElement | null>(null);
-  const musicAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Audio-track playback: one hidden <audio> per audio clip in the
+  // override, synced to the shared playhead like the video pool.
+  const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const stopFlagRef = useRef(0);
+  // The rAF tick reads the loop region through a ref so toggling
+  // Loop or moving I/O mid-playback takes effect immediately.
+  const loopRegionRef = useRef(loopRegion);
+  loopRegionRef.current = loopRegion;
   const rafRef = useRef<number | null>(null);
   const startedAtRef = useRef(0);
   const startedHeadRef = useRef(0);
-
-  // Keep hidden players in sync with slider volumes and src changes.
-  useEffect(() => { if (voAudioRef.current) voAudioRef.current.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, voiceoverVolume)); }, [voiceoverVolume, voUrl, animaticMuted]);
-  useEffect(() => { if (musicAudioRef.current) musicAudioRef.current.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, musicVolume)); }, [musicVolume, musicUrl, animaticMuted]);
-  useEffect(() => {
-    if (voAudioRef.current) voAudioRef.current.src = voUrl ?? "";
-    if (voAudioRef.current && !voUrl) { try { voAudioRef.current.pause(); } catch {} }
-  }, [voUrl]);
-  useEffect(() => {
-    if (musicAudioRef.current) musicAudioRef.current.src = musicUrl ?? "";
-    if (musicAudioRef.current) musicAudioRef.current.loop = true;
-    if (musicAudioRef.current && !musicUrl) { try { musicAudioRef.current.pause(); } catch {} }
-  }, [musicUrl]);
+  const audioItems = timelineOverride.audioItems;
+  const pauseAllAudio = useCallback(() => {
+    for (const el of audioElsRef.current.values()) { try { el.pause(); } catch {} }
+  }, []);
 
   const stop = useCallback(() => {
     stopFlagRef.current++;
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
-    try { voAudioRef.current?.pause(); } catch {}
-    try { musicAudioRef.current?.pause(); } catch {}
+    pauseAllAudio();
     setPlaying(false);
-  }, []);
+  }, [pauseAllAudio]);
+
+  // Playhead/playing are owned by the parent section: when it pauses us
+  // from outside (an editor scrub, a production switch), halt the local
+  // transport too. Idempotent with stop() above.
+  useEffect(() => {
+    if (playing) return;
+    stopFlagRef.current++;
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    pauseAllAudio();
+  }, [playing, pauseAllAudio]);
 
   const play = useCallback(async () => {
     if (playing) { stop(); return; }
     const flag = ++stopFlagRef.current;
-    const voEl = voAudioRef.current;
-    const muEl = musicAudioRef.current;
     const head = playhead;
     startedHeadRef.current = head;
     startedAtRef.current = performance.now() / 1000;
-    // Wait until each element can play. Only force a load when it hasn't
-    // loaded yet; the seek below is applied AFTER this settles so a deferred
-    // load() can't reset currentTime back to 0 (which would restart playback
-    // from the top regardless of the playhead).
-    const waitUntilReady = (el: HTMLAudioElement | null): Promise<void> => {
-      if (!el || el.readyState >= 2) return Promise.resolve();
-      return new Promise((resolve) => {
-        const done = () => resolve();
-        el.addEventListener("canplay", done, { once: true });
-        el.addEventListener("error", done, { once: true });
-        window.setTimeout(done, 3000);
-        el.load();
-      });
-    };
-    await Promise.all([waitUntilReady(voEl), waitUntilReady(muEl)]);
-    // Seek both players to the playhead (music loops by its own length).
+    // Start every audio clip active at the playhead (the per-frame
+    // sync effect keeps them aligned and starts later ones).
     const toPlay: Promise<void>[] = [];
-    if (voEl && voUrl) {
-      const elDur = Number.isFinite(voEl.duration) && voEl.duration > 0 ? voEl.duration : 0;
-      const voDur = voBuffer ? voBuffer.duration : elDur; // 0 = unknown length
-      const pastEnd = voDur > 0 && head >= voDur;
-      if (!pastEnd) {
-        // Known duration: clamp to the playhead; unknown: best-effort seek and play anyway.
-        try { voEl.currentTime = voDur > 0 ? Math.max(0, Math.min(head, voDur)) : Math.max(0, head); } catch {}
-        voEl.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, voiceoverVolume));
-        toPlay.push(voEl.play().catch(() => {}));
-      } else {
-        // Playhead is past the end of the voiceover — keep it silent and let
-        // the wall clock run the visuals (music may still be looping).
-        try { voEl.pause(); } catch {}
-      }
+    for (const item of audioItems) {
+      const el = audioElsRef.current.get(item.id);
+      if (!el) continue;
+      const local = head - item.startSec;
+      if (local < 0 || local >= item.durationSec) continue;
+      const rate = item.rateAt(local);
+      if (rate < 0) continue; // reversed audio previews silent (render is exact)
+      try { el.currentTime = item.sourceAt(local); } catch {}
+      try { el.playbackRate = Math.max(0.1, Math.min(4, rate || 1)); } catch {}
+      el.volume = animaticMuted || item.muted ? 0 : Math.max(0, Math.min(1, item.gainAt(local)));
+      toPlay.push(el.play().catch(() => {}));
     }
-    if (muEl && musicUrl) {
-      try {
-        const d = muEl.duration;
-        muEl.currentTime = Number.isFinite(d) && d > 0 ? head % d : head;
-      } catch { try { muEl.currentTime = head; } catch {} }
-      muEl.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, musicVolume));
-      muEl.loop = true;
-      toPlay.push(muEl.play().catch(() => {}));
-    }
-    // Even with no audio, we still run the visual clock.
     await Promise.all(toPlay);
-    // Re-anchor wall clock after play() resolves (play may be async).
+    // Re-anchor the wall clock after play() settles (it may be async).
     startedAtRef.current = performance.now() / 1000;
     setPlaying(true);
     const tick = () => {
       if (flag !== stopFlagRef.current) return;
-      // Prefer audio clock when VO is playing for sample-accurate sync.
-      let head: number;
-      if (voEl && !voEl.paused && voEl.currentTime > 0 && voBuffer && voEl.currentTime < voBuffer.duration) {
-        head = startedHeadRef.current + (voEl.currentTime - Math.min(startedHeadRef.current, voBuffer.duration));
-        // Fallback to wall clock if audio time stalls
-        const wallHead = startedHeadRef.current + (performance.now() / 1000 - startedAtRef.current);
-        if (Math.abs(head - wallHead) > 0.5) head = wallHead;
-      } else {
-        head = startedHeadRef.current + (performance.now() / 1000 - startedAtRef.current);
+      const h = startedHeadRef.current + (performance.now() / 1000 - startedAtRef.current);
+      // Loop region: wrap Out -> In and keep playing (re-anchoring
+      // the wall clock so the drift-corrected media re-syncs).
+      const wrap = loopRegionRef.current ? loopWrapAt(loopRegionRef.current, h) : null;
+      if (wrap != null) {
+        startedHeadRef.current = wrap;
+        startedAtRef.current = performance.now() / 1000;
+        setPlayhead(wrap);
+        rafRef.current = requestAnimationFrame(tick);
+        return;
       }
-      if (head >= total) { stop(); setPlayhead(0); return; }
-      setPlayhead(head);
+      if (h >= total) { stop(); setPlayhead(0); return; }
+      setPlayhead(h);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [playing, playhead, voUrl, musicUrl, voBuffer, total, stop, voiceoverVolume, musicVolume, animaticMuted]);
+  }, [playing, playhead, audioItems, animaticMuted, total, stop]);
 
   useEffect(() => () => stop(), [stop]);
 
@@ -624,120 +242,39 @@ export function AnimaticTimeline({
 
   // ---- Zoomable strip + per-shot video pool (behavior) -------------------
 
-  /** Pixels per second at the current zoom (fit scale × zoom). */
-  const fitPps = stripW > 0 ? stripW / total : 0;
-  const pps = fitPps * zoom;
-  const contentW = Math.max(stripW, Math.ceil(total * pps));
   const activeId = activeIdx >= 0 && shots[activeIdx] ? shots[activeIdx].id : null;
   /** Playhead's local time within the shot it sits in. */
   const offsetInShot = activeIdx >= 0 ? Math.max(0, playhead - (starts[activeIdx] ?? 0)) : 0;
 
-  // ---- Slip-edit (transient gesture state) ------------------------------
-  // A right-drag on a video block shifts the source window without moving the
-  // window itself. `slip` overlays the persisted offset mid-gesture (marker,
-  // badge, and preview all read through it) and commits once on release, so
-  // a drag costs one production save instead of one per pointermove.
-  const [slip, setSlip] = useState<{ itemId: string; offset: number } | null>(null);
-  /** Edge-drag tool: roll (trade time with the next block, total fixed) or
-   *  ripple (only this block changes; everything after it shifts). */
-  const [editMode, setEditMode] = useState<AnimaticEditMode>(() => {
-    try { return window.localStorage.getItem("cascade.animatic.editMode") === "ripple" ? "ripple" : "roll"; } catch { return "roll"; }
-  });
-  const pickEditMode = (mode: AnimaticEditMode) => {
-    setEditMode(mode);
-    try { window.localStorage.setItem("cascade.animatic.editMode", mode); } catch { /* session-only then */ }
-  };
-  const slipRef = useRef<{
-    itemId: string;
-    idx: number;
-    startX: number;
-    startOffset: number;
-    pxPerSec: number;
-    videoRel: string;
-    windowSec: number;
-    offset: number;
-  } | null>(null);
-  /** Persisted slip offset for an item, with the live gesture overlaid. */
-  const effectiveOffsetOf = useCallback((item: SequenceTimelineItem) => (
-    slip && slip.itemId === item.id ? slip.offset : item.videoOffsetSec ?? 0
-  ), [slip]);
   /** Source timestamp for the playhead inside the active block's window. */
   const activeItem = activeIdx >= 0 ? shots[activeIdx] : null;
-  const activeOffsetSec = activeItem ? effectiveOffsetOf(activeItem) : 0;
-  const activeVideoLenSec = activeItem?.videoPath
-    ? (videoDurations[activeItem.videoPath] ?? videoDurationCache.get(`${prodId}:${activeItem.videoPath}`))
-    : undefined;
-  const activeVideoTime = videoTimeForPlayback(activeOffsetSec, offsetInShot, activeVideoLenSec);
+  const overrideSourceAt = activeItem ? timelineOverride?.sourceAt.get(activeItem.id) : undefined;
+  /** Outgoing side of a dissolve covering the active item (Item 8). */
+  const activeBlend = activeItem ? timelineOverride?.blendFrom.get(activeItem.id) : undefined;
+  /** The NEXT item's dissolve, preloaded (hidden, seeked to its first
+   *  frame) so the under-layer is already decoded when the blend
+   *  starts — mounting it at the blend's first frame left it black
+   *  while loading, which read as a dip to black. */
+  const nextItem = activeIdx >= 0 ? shots[activeIdx + 1] : undefined;
+  const nextBlend = !activeBlend && nextItem ? timelineOverride?.blendFrom.get(nextItem.id) : undefined;
+  const underBlend = activeBlend ?? nextBlend;
+  const blendRate = activeBlend
+    ? (activeBlend.sourceAt(offsetInShot + 0.05) - activeBlend.sourceAt(offsetInShot)) / 0.05
+    : 1;
+  const blendVideoRef = useRef<HTMLVideoElement | null>(null);
+  const activeVideoTime = overrideSourceAt ? overrideSourceAt(offsetInShot) : offsetInShot;
+  /** Instantaneous preview rate from the override mapping (negative when
+   *  the clip plays in reverse — browsers can't play backwards, so the
+   *  frame-pin effect steps it instead of free-running). */
+  const overrideRate = overrideSourceAt
+    ? (overrideSourceAt(offsetInShot + 0.05) - overrideSourceAt(offsetInShot)) / 0.05
+    : 1;
 
   playheadRef.current = playhead;
-  ppsRef.current = pps;
-  zoomRef.current = zoom;
 
-  // Zoom is a per-session view of this production; refit when switching.
-  useEffect(() => { setZoom(1); }, [prodId]);
 
-  // Track the scroll viewport's width so blocks stay pixel-accurate.
-  useEffect(() => {
-    const el = scrollWrapRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => setStripW(el.clientWidth));
-    ro.observe(el);
-    setStripW(el.clientWidth);
-    return () => ro.disconnect();
-  }, []);
 
-  // A wheel-zoom computes the scroll position that pins the playhead to its
-  // current screen X; apply it AFTER React lays out the resized content.
-  useLayoutEffect(() => {
-    const wrap = scrollWrapRef.current;
-    if (!wrap || pendingScrollRef.current == null) return;
-    wrap.scrollLeft = pendingScrollRef.current;
-    pendingScrollRef.current = null;
-  }, [zoom, pps]);
 
-  // Wheel zoom anchored on the playhead. This listener must be native
-  // (non-passive) — React's delegated wheel handler cannot preventDefault,
-  // so the page would scroll while zooming without it.
-  useEffect(() => {
-    const wrap = scrollWrapRef.current;
-    if (!wrap) return;
-    const onWheel = (e: WheelEvent) => {
-      // Horizontal deltas pan natively; zoom only on vertical wheels/pinch.
-      if (!e.deltaY || e.deltaX) return;
-      e.preventDefault();
-      const viewport = wrap.clientWidth;
-      if (viewport <= 0 || total <= 0) return;
-      const fit = viewport / total;
-      const cur = zoomRef.current;
-      const next = Math.max(1, Math.min(ANIMATIC_MAX_ZOOM, cur * Math.exp(-e.deltaY * 0.0016)));
-      if (next === cur) return;
-      const headT = Math.min(Math.max(playheadRef.current, 0), total);
-      // Keep the playhead under its current screen position across the rescale.
-      const headScreenX = headT * fit * cur - wrap.scrollLeft;
-      const maxScroll = Math.max(0, total * fit * next - viewport);
-      pendingScrollRef.current = Math.max(0, Math.min(maxScroll, headT * fit * next - headScreenX));
-      zoomRef.current = next;
-      setZoom(next);
-    };
-    wrap.addEventListener("wheel", onWheel, { passive: false });
-    return () => wrap.removeEventListener("wheel", onWheel);
-  }, [total]);
-
-  // Keep the playhead visible: auto-follow during playback (centered), and
-  // reveal it right after a manual seek when the strip has been zoomed in.
-  // Skipped while the user is drag-scrubbing so the strip never slides under
-  // a stationary cursor.
-  useEffect(() => {
-    if (headDragRef.current) return;
-    const wrap = scrollWrapRef.current;
-    if (!wrap || pps <= 0 || stripW <= 0) return;
-    const maxScroll = Math.max(0, contentW - stripW);
-    const x = playhead * pps;
-    const left = wrap.scrollLeft;
-    if (x < left + 8 || x > left + stripW - 8) {
-      wrap.scrollLeft = Math.max(0, Math.min(maxScroll, x - stripW / 2));
-    }
-  }, [playhead, playing, pps, stripW, contentW]);
 
   // Mount <video> elements for the active shot and its neighbours ahead of
   // time so approaching cuts never reload; evict least-recently-active ones
@@ -774,7 +311,8 @@ export function AnimaticTimeline({
       if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0)
         v.currentTime = Math.min(activeVideoTime, v.duration);
     } catch {}
-    if (playing) void v.play().catch(() => {});
+    try { v.playbackRate = timelineOverride ? Math.max(0.1, Math.min(4, Math.abs(overrideRate) || 1)) : 1; } catch {}
+    if (playing && !(timelineOverride && overrideRate < 0)) void v.play().catch(() => {});
     else { try { v.pause(); } catch {} }
     // activeVideoTime intentionally omitted: mid-playback offsets advance
     // every frame while the video free-runs against the wall clock between
@@ -782,9 +320,114 @@ export function AnimaticTimeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, activeIdx, activeId]);
 
+  // Embedded clip audio follows the override gain curve (volume ×
+  // fades × track, Item 7) as the playhead moves — preview plays the
+  // same gain math the render encodes.
+  useEffect(() => {
+    if (!timelineOverride || !activeId) return;
+    const v = videoElsRef.current.get(activeId);
+    if (!v) return;
+    const g = timelineOverride.gainAt.get(activeId);
+    try { v.volume = animaticMuted ? 0 : Math.max(0, Math.min(1, g ? g(offsetInShot) : 1)); } catch {}
+  }, [playhead, activeId, timelineOverride, animaticMuted, offsetInShot]);
+
+  // Ramp-following preview rate: the pool-transport effect sets the rate
+  // once at cut-in (enough for constant speeds), but a speed RAMP's rate
+  // changes continuously — follow the override derivative as the
+  // playhead advances and re-pin on drift, so preview motion actually
+  // accelerates/decelerates through the curve (approximate; the render
+  // is exact). Forward playback only; reverse is frame-pinned above.
+  useEffect(() => {
+    if (!playing || !timelineOverride || !activeId || overrideRate < 0) return;
+    const v = videoElsRef.current.get(activeId);
+    if (!v) return;
+    try { v.playbackRate = Math.max(0.1, Math.min(4, Math.abs(overrideRate) || 1)); } catch {}
+    try {
+      if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0
+        && Math.abs(v.currentTime - activeVideoTime) > 0.4) {
+        v.currentTime = Math.min(Math.max(0, activeVideoTime), v.duration);
+      }
+    } catch {}
+  }, [playhead, playing, activeId, timelineOverride, overrideRate, activeVideoTime]);
+
+  // Audio-track sync: each mounted <audio> follows the shared
+  // playhead - playing inside its window at the clip's rate and gain,
+  // paused outside it; drift beyond 0.4s re-pins (ramps included).
+  useEffect(() => {
+    for (const item of audioItems) {
+      const el = audioElsRef.current.get(item.id);
+      if (!el) continue;
+      const local = playhead - item.startSec;
+      const inWindow = local >= 0 && local < item.durationSec;
+      const rate = inWindow ? item.rateAt(local) : 1;
+      if (!inWindow || !playing || rate < 0) {
+        if (!el.paused) { try { el.pause(); } catch {} }
+        continue;
+      }
+      el.volume = animaticMuted || item.muted ? 0 : Math.max(0, Math.min(1, item.gainAt(local)));
+      try { el.playbackRate = Math.max(0.1, Math.min(4, rate || 1)); } catch {}
+      try {
+        const want = item.sourceAt(local);
+        if (el.readyState >= 1 && Number.isFinite(el.duration) && el.duration > 0 && Math.abs(el.currentTime - want) > 0.4) {
+          el.currentTime = Math.min(Math.max(0, want), el.duration);
+        }
+      } catch {}
+      if (el.paused) void el.play().catch(() => {});
+    }
+  }, [playhead, playing, audioItems, animaticMuted]);
+
+  // Dissolve preview (Item 8): the outgoing clip plays on a dedicated
+  // under-layer while the incoming (active) video fades in over it —
+  // opacity follows blend progress; both sides use the same loose
+  // source mapping and gain curves as the render.
+  useEffect(() => {
+    const blendOpacity = activeBlend ? String(Math.min(1, Math.max(0, offsetInShot / Math.max(0.0001, activeItem?.durationSec ?? 1)))) : "";
+    videoElsRef.current.forEach((el, id) => {
+      try { el.style.opacity = activeBlend && id === activeId ? blendOpacity : ""; } catch {}
+    });
+    // Incoming STILL: fade the monitor thumb the same way.
+    try {
+      const thumb = previewRef.current?.querySelector(".prod-timeline-thumb") as HTMLElement | null;
+      if (thumb) thumb.style.opacity = blendOpacity;
+    } catch {}
+    const bv = blendVideoRef.current;
+    if (!bv) return;
+    if (!activeBlend) {
+      // Preload the upcoming blend's under-layer: park it on the
+      // blend's first frame (paused) so activation starts decoded.
+      if (nextBlend?.videoPath) {
+        try {
+          if (bv.readyState >= 1 && Number.isFinite(bv.duration) && bv.duration > 0) {
+            const want = Math.min(Math.max(0, nextBlend.sourceAt(0)), bv.duration);
+            if (Math.abs(bv.currentTime - want) > 0.1) bv.currentTime = want;
+          }
+        } catch {}
+        try { bv.pause(); } catch {}
+      }
+      return;
+    }
+    if (!activeBlend.videoPath) return; // still under-layer: no transport
+    try {
+      if (bv.readyState >= 1 && Number.isFinite(bv.duration) && bv.duration > 0) {
+        // Pin the frame when paused/scrubbing; while playing, seek
+        // only on real drift. Seeking every frame starved the
+        // decoder (readyState stuck at HAVE_METADATA) so the
+        // under-layer painted BLACK and the dissolve dipped to
+        // black instead of crossfading.
+        const want = Math.min(Math.max(0, activeBlend.sourceAt(offsetInShot)), bv.duration);
+        if (blendUnderShouldSeek(playing, bv.currentTime, want)) bv.currentTime = want;
+      }
+    } catch {}
+    try { bv.volume = animaticMuted || activeBlend.muted ? 0 : Math.max(0, Math.min(1, activeBlend.gainAt(offsetInShot))); } catch {}
+    try { bv.playbackRate = Math.max(0.1, Math.min(4, Math.abs(blendRate) || 1)); } catch {}
+    if (playing && blendRate >= 0) void bv.play().catch(() => {});
+    else { try { bv.pause(); } catch {} }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playhead, activeId, playing, activeBlend, nextBlend, animaticMuted, offsetInShot]);
+
   // Paused / scrubbing: pin the active clip to the frame under the playhead.
   useEffect(() => {
-    if (playing || !activeId) return;
+    if ((playing && !(timelineOverride && overrideRate < 0)) || !activeId) return;
     const v = videoElsRef.current.get(activeId);
     if (!v) return;
     try {
@@ -793,260 +436,9 @@ export function AnimaticTimeline({
     } catch {}
   }, [playhead, playing, activeIdx, activeId, activeVideoTime]);
 
-  // ---- Waveform ----------------------------------------------------------
-  // The canvas covers the visible window only: time t maps to x = t*pps −
-  // scrollLeft. Peaks are downsampled once per decode into fixed ~6ms buckets
-  // so a zoom-follow playback loop can redraw every frame without rescanning
-  // raw PCM; redraws themselves stay event-driven.
-
-  const voPeaks = useMemo(() => {
-    if (!voBuffer || !total) return null;
-    const ch = voBuffer.getChannelData(0);
-    // Cap the bucket count: enough resolution to stay smooth at max zoom,
-    // small enough that the one-time scan is instant.
-    const targetBuckets = Math.min(32768, Math.max(64, Math.ceil(total * 640)));
-    const per = Math.max(1, Math.floor(ch.length / targetBuckets));
-    const n = Math.ceil(ch.length / per);
-    const mins = new Float32Array(n);
-    const maxs = new Float32Array(n);
-    for (let b = 0; b < n; b++) {
-      let lo = 1, hi = -1;
-      const s0 = b * per;
-      const s1 = Math.min(ch.length, s0 + per);
-      for (let j = s0; j < s1; j++) {
-        const v = ch[j];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-      mins[b] = lo;
-      maxs[b] = hi;
-    }
-    return { mins, maxs, bucketSec: per / voBuffer.sampleRate };
-  }, [voBuffer]);
-
-  const drawWaveform = useCallback(() => {
-    const cvs = canvasRef.current;
-    if (!cvs) return;
-    const ctx = cvs.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = cvs.clientWidth, h = cvs.clientHeight;
-    if (w <= 0 || h <= 0) return;
-    cvs.width = Math.max(1, Math.floor(w * dpr));
-    cvs.height = Math.max(1, Math.floor(h * dpr));
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (!voPeaks || total <= 0 || pps <= 0 || voPeaks.bucketSec <= 0) return;
-    const scrollLeft = scrollWrapRef.current?.scrollLeft ?? 0;
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#4f8ef7";
-    // Columns of ~2 CSS px across the visible window only.
-    const cols = Math.max(1, Math.floor(w / 2));
-    const secondsPerCol = 2 / pps;
-    const tStart = scrollLeft / pps;
-    const { mins, maxs, bucketSec } = voPeaks;
-    const voSecs = voBuffer?.duration ?? 0;
-    for (let i = 0; i < cols; i++) {
-      const t0 = tStart + i * secondsPerCol;
-      if (t0 >= total || t0 >= voSecs) break;
-      let b0 = Math.floor(t0 / bucketSec);
-      let b1 = Math.floor((t0 + secondsPerCol) / bucketSec);
-      b0 = Math.max(0, Math.min(mins.length - 1, b0));
-      b1 = Math.max(b0, Math.min(mins.length - 1, b1));
-      let min = 1, max = -1;
-      for (let b = b0; b <= b1; b++) {
-        if (mins[b] < min) min = mins[b];
-        if (maxs[b] > max) max = maxs[b];
-      }
-      const x = (i / cols) * w;
-      const y1 = ((1 - max) / 2) * h;
-      const y2 = ((1 - min) / 2) * h;
-      const barH = Math.max(1, y2 - y1);
-      if (barH < 1.5) ctx.fillRect(x, (h - barH) / 2, Math.max(1, w / cols - 0.5), barH);
-      else ctx.fillRect(x, y1, Math.max(1, w / cols - 0.5), barH);
-    }
-  }, [voPeaks, voBuffer, total, pps]);
-
-  useEffect(() => { drawWaveform(); }, [drawWaveform, previewHeight, shots.length]);
-  useEffect(() => {
-    const el = canvasRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => drawWaveform());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [drawWaveform]);
-  // Also redraw after fonts/style settle
-  useEffect(() => {
-    const id = window.setTimeout(drawWaveform, 100);
-    return () => window.clearTimeout(id);
-  }, [drawWaveform]);
-  // Redraw as the strip scrolls under the waveform row (rAF-throttled).
-  useEffect(() => {
-    const wrap = scrollWrapRef.current;
-    if (!wrap) return;
-    let queued = false;
-    let queuedRaf = 0;
-    const schedule = () => {
-      if (queued) return;
-      queued = true;
-      queuedRaf = window.requestAnimationFrame(() => { queued = false; drawWaveform(); });
-    };
-    wrap.addEventListener("scroll", schedule, { passive: true });
-    return () => {
-      wrap.removeEventListener("scroll", schedule);
-      window.cancelAnimationFrame(queuedRaf);
-    };
-  }, [drawWaveform]);
-  // Page zoom (Ctrl+/-/0) rescales content without resizing the waveform's CSS
-  // box, so the ResizeObserver never fires; devicePixelRatio also updates late.
-  // Redraw on zoom notification and window resize, with retries to catch the
-  // late dpr change.
-  useEffect(() => {
-    let timers: number[] = [];
-    const schedule = () => {
-      for (const t of timers) window.clearTimeout(t);
-      timers = [0, 150, 600].map((d) => window.setTimeout(drawWaveform, d));
-    };
-    window.addEventListener("resize", schedule);
-    const offZoom = window.cascade.onZoomChanged(schedule);
-    return () => {
-      for (const t of timers) window.clearTimeout(t);
-      window.removeEventListener("resize", schedule);
-      offZoom();
-    };
-  }, [drawWaveform]);
-
   // ---- Interactions -----------------------------------------------------
 
-  /** Drag a block's right edge to set its duration, per the active edit
-   *  tool: roll trades time with the following shot (total stays put);
-   *  ripple changes only this shot, shifting everything after it. */
-  const dragRef = useRef<{
-    index: number;
-    startX: number;
-    startDur: number;
-    pxPerSec: number;
-    mode: AnimaticEditMode;
-    items: { id: string; durationSec: number }[];
-  } | null>(null);
-  const onHandleDown = (e: React.PointerEvent, shotId: string) => {
-    if (e.button !== 0 || pps <= 0) return;
-    const idx = shots.findIndex((s) => s.id === shotId);
-    if (idx < 0) return;
-    // Alt temporarily flips the toolbar tool for this one drag.
-    const mode: AnimaticEditMode = e.altKey ? (editMode === "roll" ? "ripple" : "roll") : editMode;
-    dragRef.current = {
-      index: idx,
-      startX: e.clientX,
-      startDur: shots[idx].durationSec ?? 3,
-      pxPerSec: pps,
-      mode,
-      items: shots.map((s) => ({ id: s.id, durationSec: s.durationSec ?? 3 })),
-    };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    stop();
-    e.preventDefault();
-    e.stopPropagation();
-  };
-  const onHandleMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const dx = e.clientX - d.startX;
-    let next = Math.max(0.5, Math.min(20, d.startDur + dx / d.pxPerSec));
-    // Snap the dragged edge to the clip's own video end when close. The
-    // marker stays freely overshootable - this only eases landing on it.
-    // A slipped clip snaps to its remaining source (length minus offset).
-    const dragged = shots[d.index];
-    const draggedRel = dragged?.videoPath;
-    const draggedVideoSec = draggedRel
-      ? (videoDurationsRef.current[draggedRel] ?? videoDurationCache.get(`${prodId}:${draggedRel}`))
-      : undefined;
-    const draggedEnd = effectiveVideoEndSec(draggedVideoSec, dragged?.videoOffsetSec);
-    if (draggedEnd != null) next = snapDurationToVideoEnd(next, draggedEnd, d.pxPerSec);
-    const updates = edgeDragUpdates(d.items, d.index, next, d.mode);
-    const rounded = updates.map((u) => ({ ...u, durationSec: Math.round(u.durationSec * 10) / 10 }));
-    // Edge edits cross item kinds: a sequence block trades/shifts time with
-    // the next item whether that's a shot or another sequence.
-    const shotUpdates: { shotId: string; durationSec: number }[] = [];
-    for (const u of rounded) {
-      const item = shots.find((q) => q.id === u.id);
-      if (item?.kind === "sequence" && item.sequenceId) onUpdateSequenceDuration?.(item.sequenceId, u.durationSec);
-      else shotUpdates.push({ shotId: u.id, durationSec: u.durationSec });
-    }
-    if (shotUpdates.length) onUpdateDurations(shotUpdates);
-  };
-  const onHandleUp = (e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    dragRef.current = null;
-  };
 
-  /** Slip a video block with the right mouse button: the block's window stays
-   *  put while the source frame it opens on shifts (content follows the
-   *  cursor — drag left to start further into the source). Commits once on
-   *  release; a no-op drag (offset unchanged) saves nothing. */
-  const onSlipDown = (e: React.PointerEvent, item: SequenceTimelineItem) => {
-    if (e.button !== 2 || !item.videoPath || pps <= 0) return;
-    if ((e.target as HTMLElement).closest(".prod-animatic-block-handle, .prod-animatic-block-mute, .prod-animatic-slip-badge")) return;
-    const idx = shots.findIndex((s) => s.id === item.id);
-    if (idx < 0) return;
-    slipRef.current = {
-      itemId: item.id,
-      idx,
-      startX: e.clientX,
-      startOffset: item.videoOffsetSec ?? 0,
-      pxPerSec: pps,
-      videoRel: item.videoPath,
-      windowSec: item.durationSec ?? 3,
-      offset: item.videoOffsetSec ?? 0,
-    };
-    setSlip({ itemId: item.id, offset: item.videoOffsetSec ?? 0 });
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    stop();
-    e.preventDefault();
-    e.stopPropagation();
-  };
-  const onSlipMove = (e: React.PointerEvent) => {
-    const sl = slipRef.current;
-    if (!sl || e.buttons === 0) return;
-    const raw = slipOffsetFromDx(sl.startOffset, e.clientX - sl.startX, sl.pxPerSec);
-    const len = videoDurationsRef.current[sl.videoRel] ?? videoDurationCache.get(`${prodId}:${sl.videoRel}`);
-    const offset = clampSlipOffsetSec(raw, len, sl.windowSec);
-    sl.offset = offset;
-    setSlip({ itemId: sl.itemId, offset });
-    // Live preview: pin the slipped clip to the frame under the playhead.
-    const start = starts[sl.idx] ?? 0;
-    const local = Math.max(0, Math.min(sl.windowSec, playhead - start));
-    const v = videoElsRef.current.get(sl.itemId);
-    if (v) {
-      try {
-        if (v.readyState >= 1 && Number.isFinite(v.duration) && v.duration > 0)
-          v.currentTime = Math.min(videoTimeForPlayback(offset, local, len), v.duration);
-      } catch {}
-    }
-  };
-  const endSlip = (commit: boolean) => {
-    const sl = slipRef.current;
-    slipRef.current = null;
-    setSlip(null);
-    if (!sl || !commit) return;
-    const rounded = Math.round(sl.offset * 10) / 10;
-    if (rounded === Math.round(sl.startOffset * 10) / 10) return; // no-op drag
-    const item = shots.find((q) => q.id === sl.itemId);
-    if (item?.kind === "sequence" && item.sequenceId) {
-      onUpdateSequenceVideoOffset?.(item.sequenceId, rounded);
-    } else {
-      onUpdateVideoOffsets([{ shotId: sl.itemId, videoOffsetSec: rounded }]);
-    }
-  };
-  /** Reset a slipped block to play from the top (the slip badge). */
-  const onSlipReset = (e: React.MouseEvent, item: SequenceTimelineItem) => {
-    e.stopPropagation();
-    if (item.kind === "sequence" && item.sequenceId) {
-      onUpdateSequenceVideoOffset?.(item.sequenceId, 0);
-    } else {
-      onUpdateVideoOffsets([{ shotId: item.id, videoOffsetSec: 0 }]);
-    }
-  };
 
   /** Drag the preview's bottom border to resize. */
   const resizeRef = useRef<{ startY: number; startH: number } | null>(null);
@@ -1067,29 +459,18 @@ export function AnimaticTimeline({
     resizeRef.current = null;
   };
 
-  /** Seek by pointer position. `ref` is the element whose rect defines the
-   *  coordinate system: the zoomed strip is the scrolled content itself, so
-   *  its bounding rect already accounts for scrollLeft and px map directly
-   *  via the current scale — while the narrower transport scrubber stays a
-   *  fixed full-range overview. */
+  /** Seek by pointer position on the transport scrubber (full-range). */
   const seekFromEvent = (ref: React.RefObject<HTMLElement>, clientX: number) => {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    if (ref === stripRef) {
-      if (pps <= 0) return;
-      const next = (clientX - r.left) / pps;
-      setPlayhead(Math.max(0, Math.min(total, next)));
-      return;
-    }
+    if (!(r.width > 0)) return;
     const x = clientX - r.left;
-    const next = Math.max(0, Math.min(total, (x / r.width) * total));
-    setPlayhead(next);
+    setPlayhead(Math.max(0, Math.min(total, (x / r.width) * total)));
   };
   const headDragRef = useRef<{ ref: React.RefObject<HTMLElement> } | null>(null);
   const onSeekDown = (ref: React.RefObject<HTMLElement>) => (e: React.PointerEvent) => {
-    // Left button only: right-drags on blocks slip the clip (onSlipDown) and
-    // must never move the playhead.
+    // Left button only.
     if (e.button !== 0) return;
     headDragRef.current = { ref };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -1109,7 +490,7 @@ export function AnimaticTimeline({
   };
 
   if (!shots.length) {
-    return <p className="hint">Add shots in Step 1 to start building the timeline.</p>;
+    return <p className="hint">Nothing on the timeline yet - add clips in the timeline editor below.</p>;
   }
 
   const activeShot = activeIdx >= 0 ? shots[activeIdx] : null;
@@ -1136,6 +517,25 @@ export function AnimaticTimeline({
             media — no black flash between clips. The wall clock drives which
             clip shows; a video longer than its shot is cut at the boundary and
             a shorter one loops. */}
+        {underBlend?.videoPath && (
+          <video
+            key={`blend:${underBlend.videoPath}`}
+            ref={blendVideoRef}
+            className={"prod-animatic-video" + (activeBlend ? " blend-under" : "")}
+            src={`cascade-media://${prodId}/${encodeURIComponent(underBlend.videoPath)}`}
+            muted={!!underBlend.muted}
+            preload="auto"
+            playsInline
+          />
+        )}
+        {underBlend?.stillPath && (
+          <img
+            key={`blend:${underBlend.stillPath}`}
+            className={"prod-animatic-video" + (activeBlend ? " blend-under" : "")}
+            src={`cascade-media://${prodId}/${encodeURIComponent(underBlend.stillPath)}`}
+            alt=""
+          />
+        )}
         {mountedVideos.map((vidId) => {
           const s = shots.find((q) => q.id === vidId);
           if (!s?.videoPath) return null;
@@ -1158,20 +558,12 @@ export function AnimaticTimeline({
                 const v = videoElsRef.current.get(vidId);
                 if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
                 try { v.currentTime = Math.min(activeVideoTime, v.duration); } catch {}
-                if (playing) void v.play().catch(() => {});
+                try { v.playbackRate = timelineOverride ? Math.max(0.1, Math.min(4, Math.abs(overrideRate) || 1)) : 1; } catch {}
+                if (playing && !(timelineOverride && overrideRate < 0)) void v.play().catch(() => {});
               }}
             />
           );
         })}
-        {activeShot && activeShot.videoPath && activeShot.kind !== "sequence" && (
-          <button
-            className="prod-animatic-video-remove"
-            title="Remove this shot's video (back to a still frame)"
-            onClick={(e) => { e.stopPropagation(); onRemoveVideo(activeShot.id); }}
-          >
-            A-
-          </button>
-        )}
         {activeShot && !activeShot.videoPath && activeThumb ? (
           <AnimaticThumb
             prodId={prodId}
@@ -1219,196 +611,31 @@ export function AnimaticTimeline({
           <div className="prod-animatic-scrub-fill" style={{ width: `${headX}%` }} />
           <div className="prod-animatic-scrub-head" style={{ left: `${headX}%` }} />
         </div>
+
         <span className="prod-animatic-time">
-          {formatRuntime(playhead)} / {editingTotal ? (
-            <input
-              className="prod-animatic-total-input"
-              autoFocus
-              value={totalDraft}
-              onChange={(e) => setTotalDraft(e.target.value)}
-              onBlur={commitTotal}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); commitTotal(); }
-                if (e.key === "Escape") { e.preventDefault(); setEditingTotal(false); }
-              }}
-              onFocus={(e) => e.currentTarget.select()}
-              title="hh:mm:ss, mm:ss, or seconds"
-            />
-          ) : (
-            <button
-              className="prod-animatic-total-btn"
-              onClick={startEditTotal}
-              title="Click to set the total runtime"
-            >
-              {formatRuntime(total)}
-            </button>
-          )}
+          {formatRuntime(playhead)} / {formatRuntime(total)}
         </span>
-        {voDuration && Math.abs(voDuration - sumDur) > 0.1 && (
-          <button
-            className="prod-btn"
-            onClick={onFitToVo}
-            title="Rescale every shot's length so the total matches the voiceover"
-          >
-            Fit to VO
-          </button>
-        )}
       </div>
 
-      <div className="prod-animatic-edittools" role="group" aria-label="Timeline edit tool">
-        <span className="prod-animatic-edittools-label">Edge drag:</span>
-        <button
-          className={editMode === "roll" ? "active" : ""}
-          onClick={() => pickEditMode("roll")}
-          aria-pressed={editMode === "roll"}
-          title="Roll: dragging a block edge trades time with the next block - total runtime stays fixed (Alt-drag flips for one drag)"
-        >Roll</button>
-        <button
-          className={editMode === "ripple" ? "active" : ""}
-          onClick={() => pickEditMode("ripple")}
-          aria-pressed={editMode === "ripple"}
-          title="Ripple: dragging a block edge changes only that block - every following block shifts (Alt-drag flips for one drag)"
-        >Ripple</button>
-      </div>
 
-      <div className="prod-animatic-strip-wrap">
-        {/* Horizontal scroll frame: the wheel-zoomed strip lives inside. The
-            transport scrubber above stays a fixed full-range overview. */}
-        <div className="prod-animatic-scroll" ref={scrollWrapRef}>
-          <div
-            className="prod-animatic-strip"
-            ref={stripRef}
-            style={{ width: `${contentW}px`, minWidth: "100%" }}
-            onPointerDown={onSeekDown(stripRef)}
-            onPointerMove={onSeekMove}
-            onPointerUp={onSeekUp}
-            onPointerCancel={onSeekUp}
-            title="Click or drag to seek · Mouse wheel zooms around the playhead"
-          >
-            {shots.map((s, i) => {
-              const dur = s.durationSec ?? 3;
-              // True clip length for the end-of-video marker (undefined until
-              // the metadata probe resolves; absent when there is no video).
-              // A slipped clip's marker sits at its remaining source length.
-              const videoSec = s.videoPath
-                ? (videoDurations[s.videoPath] ?? videoDurationCache.get(`${prodId}:${s.videoPath}`))
-                : undefined;
-              const effOffset = slip && slip.itemId === s.id ? slip.offset : s.videoOffsetSec ?? 0;
-              const remainSec = effectiveVideoEndSec(videoSec, effOffset);
-              const showVideoEnd = pps > 0 && remainSec != null;
-              // Only invite the slip drag when it can do something: an
-              // already-slipped clip can always slip back, an unprobed one
-              // gets the benefit of the doubt, and a measured source needs
-              // room past the window — otherwise say why the drag won't move.
-              const slipRoom = videoSec != null && Number.isFinite(videoSec) && videoSec > 0 ? videoSec - dur : null;
-              const canSlip = effOffset > 0 || slipRoom == null || slipRoom > 0.05;
-              const blockTitle = s.videoPath
-                ? `${s.number} · ${dur.toFixed(1)}s`
-                  + (showVideoEnd ? ` · video ends ${(remainSec as number).toFixed(1)}s` : "")
-                  + (effOffset > 0 ? ` · slipped +${effOffset.toFixed(1)}s` : "")
-                  + (canSlip ? " · right-drag to slip" : " · video fits the block — no room to slip")
-                : `${s.number} · ${dur.toFixed(1)}s`;
-              return (
-                <div
-                  key={s.id}
-                  className={"prod-animatic-block" + (i === activeIdx ? " active" : "") + (s.videoPath ? " has-video" : "") + (effOffset > 0 ? " slipped" : "")}
-                  style={{ left: `${starts[i] * pps}px`, width: `${dur * pps}px` }}
-                  title={blockTitle}
-                  onPointerDown={(e) => onSlipDown(e, s)}
-                  onPointerMove={onSlipMove}
-                  onPointerUp={() => endSlip(true)}
-                  onPointerCancel={() => endSlip(false)}
-                  onContextMenu={(e) => { if (s.videoPath) e.preventDefault(); }}
-                >
-                  {showVideoEnd && (
-                    <div
-                      className="prod-animatic-video-end"
-                      style={{ left: `${(remainSec as number) * pps}px` }}
-                      title={`Video ends at ${(remainSec as number).toFixed(1)}s — drag the clip edge to snap`}
-                    />
-                  )}
-                  {effOffset > 0 && (
-                    <button
-                      className="prod-animatic-slip-badge"
-                      title={`Slipped +${effOffset.toFixed(1)}s into the source — click to play from the top again`}
-                      aria-label={`Slipped ${effOffset.toFixed(1)} seconds into the source. Activate to reset.`}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => onSlipReset(e, s)}
-                    >
-                      +{effOffset.toFixed(1)}s
-                    </button>
-                  )}
-                  {s.artwork
-                    ? (
-                      <AnimaticThumb
-                        prodId={prodId}
-                        shotId={s.shotIds[0] ?? s.id}
-                        artwork={s.artwork}
-                        explicitRel={s.kind === "sequence" && !s.videoPath ? s.artwork : undefined} videoRel={s.videoPath || undefined}
-                        title={blockTitle}
-                      />
-                    )
-                    : <div className="prod-animatic-block-slate">SLATE<br /><strong>{s.number}</strong></div>}
-                  {s.videoPath && (
-                    <button
-                      className={"prod-animatic-block-mute" + (s.muted ? " muted" : "")}
-                      title={s.muted ? "Unmute this clip's audio" : "Mute this clip's audio"}
-                      aria-label={s.muted ? "Unmute this clip's audio" : "Mute this clip's audio"}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (s.kind === "sequence" && s.sequenceId) onToggleSequenceMute?.(s.sequenceId);
-                        else onToggleMute(s.id);
-                      }}
-                    >
-                      <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
-                        <path d="M2 6h3l4-3.5v11L5 10H2z" fill="currentColor" />
-                        {s.muted ? (
-                          <path d="M10.7 5.7l4 4M14.7 5.7l-4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" fill="none" />
-                        ) : (
-                          <>
-                            <path d="M10.8 5.8a3.1 3.1 0 010 4.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" fill="none" />
-                            <path d="M12.9 3.9a5.9 5.9 0 010 8.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" fill="none" />
-                          </>
-                        )}
-                      </svg>
-                    </button>
-                  )}
-                  <span className="prod-animatic-block-num">{s.number}</span>
-                  <span className="prod-animatic-block-dur">{dur.toFixed(1)}s</span>
-                  <div
-                    className="prod-animatic-block-handle"
-                    onPointerDown={(e) => onHandleDown(e, s.id)}
-                    onPointerMove={onHandleMove}
-                    onPointerUp={onHandleUp}
-                    onPointerCancel={onHandleUp}
-                    title={editMode === "roll" ? "Drag to roll this edit point (trades time with the next clip; Alt-drag ripples)" : "Drag to ripple-trim this clip (following clips shift; Alt-drag rolls)"}
-                  />
-                </div>
-              );
-            })}
-            <div className="prod-animatic-playhead" style={{ left: `${playhead * pps}px` }} />
-          </div>
-        </div>
-        {voUrl && (
-          <div className="prod-animatic-wave-row" aria-label="Voiceover waveform">
-            <canvas ref={canvasRef} className="prod-animatic-waveform" />
-          </div>
-        )}
-      </div>
-
-      {/* Hidden playback elements — the animatic transport plays these; they
-          have no visible chrome (the volume sliders live next to the import
-          buttons, the waveform lives under the image strip). */}
-      <audio ref={voAudioRef} src={voUrl ?? ""} preload="auto" hidden onLoadedMetadata={(e) => {
-        const duration = e.currentTarget.duration;
-        if (Number.isFinite(duration) && duration > 0) onVoDurationKnown(duration);
-      }} />
-      <audio ref={musicAudioRef} src={musicUrl ?? ""} preload="auto" loop hidden />
+      {/* Hidden audio-track players - one per audio clip, synced to
+          the shared playhead by the transport. */}
+      {audioItems.map((item) => (
+        <audio
+          key={item.id}
+          ref={(el) => {
+            if (el) audioElsRef.current.set(item.id, el);
+            else audioElsRef.current.delete(item.id);
+          }}
+          src={cascadeMedia(prodId, item.rel)}
+          preload="auto"
+          hidden
+        />
+      ))}
       <GenerationMenu
         menu={genMenu.menu}
         onClose={genMenu.close}
-        onSaveAsReference={onSaveAsReference && activeShot ? (rel) => onSaveAsReference(activeShot.id, rel) : undefined}
+        onSaveAsReference={onSaveAsReference && activeShot ? (rel) => onSaveAsReference(activeShot.shotIds[0] ?? activeShot.id, rel) : undefined}
       />
     </div>
   );

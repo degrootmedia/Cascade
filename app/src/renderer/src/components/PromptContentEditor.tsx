@@ -539,7 +539,12 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     const focusTag = pendingFocusTag.current;
     pendingFocusTag.current = null;
     const hasPendingDrag = pendingCaret.current !== null;
-    if (!hasPendingDrag && emitted.current.has(text)) {
+    // Echo suppression protects the caret, so it only applies while the box
+    // holds focus. Unfocused, a text matching something emitted earlier is
+    // a genuine navigation back to it (re-selecting a history entry whose
+    // prompt was typed here) and must rebuild like any external change.
+    const echoFocused = document.activeElement === el || el.contains(document.activeElement);
+    if (!hasPendingDrag && echoFocused && emitted.current.has(text)) {
       if (focusTag) placeCaretAfterTag(el, text, focusTag);
       return;
     }
@@ -566,7 +571,7 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     pendingCaret.current = null;
     // A genuine external rewrite (not one of our own echoes, not a drag we
     // initiated) is a new document — start its undo history fresh.
-    if (!hasPendingDrag && !emitted.current.has(text)) {
+    if (!hasPendingDrag && (!emitted.current.has(text) || !focusedHere)) {
       undoStack.current = [];
       redoStack.current = [];
       lastPush.current = { kind: "", time: 0 };

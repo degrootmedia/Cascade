@@ -52,6 +52,7 @@ import type {
   ProductionShot,
   ProductionStyle,
   ProductionAssembly,
+  ProxyGenerationResult,
   Production,
   CharacterSheet,
   CharacterSheetBuilder,
@@ -107,6 +108,7 @@ export * from "./ipc/todos.js";
 export * from "./ipc/window.js";
 export * from "./ipc/camera-grid.js";
 export * from "./ipc/shot-sequence.js";
+export * from "./ipc/timeline.js";
 export * from "./voice.js";
 
 
@@ -874,23 +876,9 @@ export interface CascadeApi {
   createReference720p(productionId: string, refId: string): Promise<{ production: Production; ref: CustomRef }>;
   /** Step 4: one LLM call assigning durationSec + transition to every shot. */
   planAnimatic(productionId: string): Promise<Production>;
-  /** Step 4: open a native picker, copy the chosen audio file into voiceoverDir, and set voiceoverPath. */
-  importVoiceover(productionId: string): Promise<Production | null>;
-  /** Step 4: read the production's voiceover clip as a data URL. */
-  voiceoverFile(productionId: string): Promise<string | null>;
-  /** Step 4: streamable `cascade-media://` URL for the voiceover clip (no
-   *  base64 / data-URL length limits; supports range requests). */
-  voiceoverUrl(productionId: string): Promise<string | null>;
-  /** Step 4: remove the voiceover file and clear voiceoverPath. */
-  removeVoiceover(productionId: string): Promise<Production>;
-  /** Step 4: open a native picker, copy the chosen music file into the production's musicDir, and set musicPath. */
-  importMusic(productionId: string): Promise<Production | null>;
-  /** Step 4: read the imported music file as a data URL (for the inline player / animatic mixing). */
-  musicFile(productionId: string): Promise<string | null>;
-  /** Step 4: streamable `cascade-media://` URL for the music track. */
-  musicUrl(productionId: string): Promise<string | null>;
-  /** Step 4: remove the imported music file and clear musicPath. */
-  removeMusic(productionId: string): Promise<Production>;
+  /** Step 4: pick an audio file, copy it into the production's audio/
+   *  folder, and return its path + probed duration for timeline placement. */
+  importTimelineAudio(productionId: string): Promise<{ rel: string; name: string; durationSec: number | null } | null>;
   /**
    * Step 3/4: generate a video clip for one shot, using its current frame
    * (full resolution) plus any @[name] references as visual references.
@@ -1100,6 +1088,18 @@ export interface CascadeApi {
    * production.
    */
   assemblyRender(productionId: string): Promise<Production>;
+  /**
+   * Animatic proxies: ready proxy per timeline video source
+   * (source rel → proxy rel). Missing/stale entries are absent —
+   * preview falls back to the original, so editing never waits.
+   */
+  listProxies(productionId: string): Promise<Record<string, string>>;
+  /**
+   * Generate 720p fast-decode proxies for the timeline's video sources
+   * (or the given subset) as a recorded background job. Proxies are
+   * preview-only: render and export always read the originals.
+   */
+  generateProxies(productionId: string, srcRels?: string[]): Promise<ProxyGenerationResult>;
   /** Step 5: open the export folder in the OS file manager. */
   assemblyOpenFolder(productionId: string): Promise<void>;
   /** Immediately copy any production file into the assembly export folder. */

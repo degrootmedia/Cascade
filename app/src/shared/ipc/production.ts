@@ -19,6 +19,7 @@ import type {
   UpscaleData,
 } from "./graph.js";
 import type { ShotSequence } from "./shot-sequence.js";
+import type { ProductionTimeline } from "./timeline.js";
 import type { MediaEntry } from "../media-registry.js";
 
 export interface ProductionMeta {
@@ -554,6 +555,18 @@ export interface CharacterSheetGenOptions {
 /** Step 5 assembly configuration + last-run bookkeeping.
  *  `fps`/`width`/`height` describe the exported timeline and the MP4 render;
  *  `exportDir` is workspace-relative (defaults to `<outDir>/assembly`). */
+/** Result of a proxy-generation pass (Animatic Expansion Item 6). */
+export interface ProxyGenerationResult {
+  /** Proxies newly encoded this pass. */
+  generated: number;
+  /** Sources whose proxy was already up to date. */
+  fresh: number;
+  /** Source rel paths that failed to encode (originals still preview). */
+  failed: string[];
+  /** Ready proxies after the pass: source rel → proxy rel. */
+  proxies: Record<string, string>;
+}
+
 export interface ProductionAssembly {
   fps: number;
   width: number;
@@ -772,13 +785,15 @@ export interface Production {
   referenceCategories?: ReferenceCategory[];
   /** Step 3 OpenArt generation preferences. */
   openArt?: OpenArtBoardConfig;
-  /** Step 4: workspace-relative path to the single voiceover clip for the whole production. */
+  /** @deprecated Legacy one-voiceover model. Audio lives on timeline
+   *  audio tracks now; main's load migration turns this into a track
+   *  clip and clears the field. Kept so older documents still parse. */
   voiceoverPath?: string;
-  /** Step 4: voiceover playback volume (0..1). Defaults to 1 when voiceoverPath is set. */
+  /** @deprecated Legacy voiceover volume; migrated onto the bed clip. */
   voiceoverVolume?: number;
-  /** Step 4: workspace-relative path to an imported background music track. */
+  /** @deprecated Legacy background-music slot; migrated to a track clip like voiceoverPath. */
   musicPath?: string;
-  /** Step 4: music playback volume (0..1). Defaults to 0.5 when musicPath is set. */
+  /** @deprecated Legacy music volume; migrated onto the bed clip. */
   musicVolume?: number;
   /**
    * Global brand look applied to every frame: up to 5 palette swatches plus an
@@ -831,6 +846,16 @@ export interface Production {
    * generation history (see `applyRendererState`).
    */
   shotSequences?: ShotSequence[];
+  /**
+   * The multi-track animatic timeline (Animatic Editor Expansion): tracks
+   * and non-destructive clips referencing media-registry entries. Optional/
+   * additive — absent on documents that predate it, in which case readers
+   * derive the equivalent single-track timeline from the shot projection
+   * (`seedTimelineFromProduction`) until a timeline-native edit persists
+   * one. Renderer-owned via ordinary saves (the moodboard deal); repaired
+   * on read by `normalizeTimeline`.
+   */
+  timeline?: ProductionTimeline;
   /**
    * The media registry (architecture hardening, brief recommendation 1):
    * one stable identity per generated/adopted/imported media file — its

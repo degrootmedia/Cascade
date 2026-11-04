@@ -114,3 +114,19 @@ store tests. Each entry below: what happened, what to do instead, how you can te
   stale record at entry" and OR it into the clear-notify gate. Check all
   transports/kinds that share the pattern (found in image + video, MCP +
   both CLIs; fixed 2026-10-27 with sink-level regression tests).
+
+- FFmpeg filters that buffer to EOF (`areverse`, `reverse` on audio,
+  loudnorm analysis, etc.) must never sit downstream of an infinite
+  lavfi source (`anullsrc`): a muted+reversed clip hung the render
+  forever because the silent-track chain inherited `areverse`.
+  Rule: whenever a filter chain is built conditionally, check each
+  EOF-dependent filter against EVERY input source variant (real file
+  vs lavfi silence). Found by the A14 torture fixture (2026-11-02);
+  guard test in timeline-audio.test.ts.
+
+- Windows PowerShell 5.1 reads BOM-less .ps1 scripts as cp1252: any
+  non-ASCII literal (em dash, ≈, ×) inside surgery-script replacement
+  text lands in the target file as mojibake. Rule: keep PowerShell
+  line-surgery replacement text pure ASCII (or splice chunks written
+  by the file tools). Caught by the lessons-guards encoding test
+  during the old-animatic-strip removal (2026-11-03).

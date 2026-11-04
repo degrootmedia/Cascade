@@ -1,0 +1,15 @@
+{
+  "A1 legacy fields cleared": "PASS",
+  "A2 VO+music landed as audio clips": "PASS",
+  "A3 volumes carried": "PASS",
+  "A4 panels + wave strip + meter gone": "PASS",
+  "A5 Import audio button present, Fit to VO gone": "PASS",
+  "C1 slider above buttons & inside panel": "PASS",
+  "B1 clip shortened by 1->2 ramp": "PASS",
+  "B2 curve spans clip & ends ~2x": "PASS",
+  "B3 preview rate rises through the ramp": "PASS",
+  "B4 render produced render.mp4": "PASS",
+  "B5 render duration matches ramped preview (~6.7s)": "PASS",
+  "C2 drag widens header panel": "PASS",
+  "C3 width remembered after relaunch": "PASS"
+}

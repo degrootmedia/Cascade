@@ -1,0 +1,19 @@
+{
+  "id": "mw2m29al-8e61mq",
+  "title": "New chat",
+  "createdAt": "2026-11-04T21:10:34.125Z",
+  "updatedAt": "2026-11-04T21:10:34.125Z",
+  "workspace": null,
+  "pureChat": true,
+  "followProduction": false,
+  "agentId": null,
+  "history": [],
+  "display": [],
+  "mentionImages": [],
+  "planMode": false,
+  "autonomousMode": false,
+  "allowedTools": [],
+  "allowedToolGroups": [],
+  "verifyCommands": [],
+  "verifyDeclined": false
+}

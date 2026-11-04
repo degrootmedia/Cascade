@@ -1,0 +1,19 @@
+TITLE: Torture Fixture V1 (V1)
+FCM: NON-DROP FRAME
+
+001  SHOT0100  V     C        00:00:01:00 00:00:05:00 00:00:00:00 00:00:04:00
+* FROM CLIP NAME: media/red.mp4
+002  SHOT0200  V     D    024 00:00:02:00 00:00:06:00 00:00:04:00 00:00:06:00
+M2   SHOT0200  048.0  00:00:02:00
+* FROM CLIP NAME: media/green.mp4
+003  SHOT0300  V     C        00:00:00:00 00:00:04:00 00:00:06:00 00:00:08:00
+M2   SHOT0300  048.0  00:00:00:00
+* FROM CLIP NAME: media/rb.mp4
+* NOTE: Cascade speed-ramp segment 1/2 (average 2.00x; baked for EDL)
+004  SHOT0300  V     C        00:00:04:00 00:00:06:00 00:00:08:00 00:00:09:03
+M2   SHOT0300  043.0  00:00:04:00
+* FROM CLIP NAME: media/rb.mp4
+* NOTE: Cascade speed-ramp segment 2/2 (average 1.79x; baked for EDL)
+005  SHOT0400  V     C        00:00:04:00 00:00:00:00 00:00:09:03 00:00:13:03
+M2   SHOT0400  -024.0  00:00:04:00
+* FROM CLIP NAME: media/bw.mp4

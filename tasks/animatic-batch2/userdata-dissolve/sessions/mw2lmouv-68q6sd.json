@@ -1,0 +1,19 @@
+{
+  "id": "mw2lmouv-68q6sd",
+  "title": "New chat",
+  "createdAt": "2026-11-04T20:58:27.799Z",
+  "updatedAt": "2026-11-04T20:58:27.799Z",
+  "workspace": null,
+  "pureChat": true,
+  "followProduction": false,
+  "agentId": null,
+  "history": [],
+  "display": [],
+  "mentionImages": [],
+  "planMode": false,
+  "autonomousMode": false,
+  "allowedTools": [],
+  "allowedToolGroups": [],
+  "verifyCommands": [],
+  "verifyDeclined": false
+}

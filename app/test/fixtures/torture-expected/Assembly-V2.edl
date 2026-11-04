@@ -1,0 +1,10 @@
+TITLE: Torture Fixture V2 (V2)
+FCM: NON-DROP FRAME
+
+001  BL        V     C        00:00:00:00 00:00:00:00 00:00:00:00 00:00:01:00
+* FROM CLIP NAME: BLACK
+002  SHOT0500  V     C        00:00:00:00 00:00:00:00 00:00:01:00 00:00:03:00
+* FROM CLIP NAME: media/board.jpg
+* NOTE: STILL (freeze) in Cascade
+003  BL        V     C        00:00:00:00 00:00:00:00 00:00:03:00 00:00:13:03
+* FROM CLIP NAME: BLACK

@@ -83,7 +83,13 @@ export function TriplePrompt({ value, includeBrand, className, sideRows, resizab
   // focused must update the Style textarea without resetting the tag
   // positions in Content, and vice-versa).
   useEffect(() => {
-    if (emitted.current.has(value)) return;
+    // Echo suppression exists to protect the caret, so it only applies
+    // while focus is inside this prompt. Unfocused, a value matching
+    // something emitted earlier is a genuine navigation back to that text
+    // (e.g. re-selecting a suite history entry whose prompt was typed in
+    // this panel) and must re-decompose like any other external change.
+    const focusInside = !!containerRef.current && !!document.activeElement && containerRef.current.contains(document.activeElement);
+    if (emitted.current.has(value) && focusInside) return;
     const incoming = parsePromptBoxes(value);
     if (deferExternalWhileFocused) {
       const active = document.activeElement as HTMLElement | null;

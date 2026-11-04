@@ -26,7 +26,7 @@ import { McpManager } from "./mcp.js";
 import { assetPathInFolder } from "./pipeline.js";
 import { resolveProductionFile, classifyCopyImageSource, type CopyImageTarget } from "./media-menu.js";import { recordBoardEdit, selectBoardFrame, rebaseGenIndex, mergeJobShotNodes, buildEditGenPrompt, getEditNode, newEditNode, chainSourceForEdit, editNodeSelection, recordGraphUpscaleGen, shotVideoDir, shotVideoRelPath, writeShotVideo, resolveOutputRef, applyRefToOutput, refreshRefCopyFromFile, setShotSelectedOutput, syncShotGraphOutput, getVideoNode, mediaFiles } from "./pipeline.js";
 import { findGeneration } from "../shared/generations.js";
-import { createJobLedger, recordProviderTask, resumeRecoveredJobs, runWithJobLedger } from "./jobs.js";
+import { createJobLedger, currentJobControls, recordProviderTask, resumeRecoveredJobs, runWithJobLedger } from "./jobs.js";
 import { capabilitiesFor, providerFromModel } from "./providers/capabilities.js";
 import { externalEditorLabel } from "../shared/editor-label.js";
 import { MEDIA_MENU_LABELS } from "../shared/menu-labels.js";
@@ -40,6 +40,7 @@ import { applyRefSwapsToIds, applyRefSwapsToPrompt, mergeRefSwaps, proactive720p
 import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan, sendAssetToAssembly } from "./assembly.js";
+import { generateProxies, listReadyProxies, timelineVideoSources } from "./proxies.js";
 import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
@@ -5628,13 +5629,15 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     })
   );
 
-  // Step 4: native voiceover picker. Copies the chosen file into
-  // voiceoverDir and stores the relative path on the production.
-  handle("production:importVoiceover", async (_e, id: string) => {
+  // Step 4: pick an audio file for the timeline. Copies it into the
+  // production's audio/ folder and returns its relative path + probed
+  // duration; the renderer places it as an ordinary audio-track clip
+  // (all audio lives on tracks — no separate VO/music slots).
+  handle("production:importTimelineAudio", async (_e, id: string) => {
     const p = productions.loadProduction(id);
     if (!p) return null;
     const res = await dialog.showOpenDialog(win!, {
-      title: "Choose a voiceover clip",
+      title: "Choose an audio file",
       properties: ["openFile"],
       filters: [
         { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac"] },
@@ -5647,107 +5650,20 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     if (!["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) {
       throw new Error(`Unsupported audio format: .${ext}`);
     }
-    fs.mkdirSync(assetPath(p, p.assets.voiceoverDir), { recursive: true });
-    // Preserve the original filename (unlike the generated clip, which uses a
-    // stable voiceover.mp3 name). Renaming imports is surprising — keep the
-    // user's file as-is inside the voiceover folder.
-    let rel = `${p.assets.voiceoverDir}/${path.basename(src)}`;
-    if (fs.existsSync(assetPath(p, rel)) && p.voiceoverPath !== rel) {
+    const dir = "audio";
+    fs.mkdirSync(assetPath(p, dir), { recursive: true });
+    let rel = `${dir}/${path.basename(src)}`;
+    if (fs.existsSync(assetPath(p, rel))) {
       const parsed = path.parse(path.basename(src));
       let i = 2;
-      while (fs.existsSync(assetPath(p, `${p.assets.voiceoverDir}/${parsed.name} (${i})${parsed.ext}`))) i++;
-      rel = `${p.assets.voiceoverDir}/${parsed.name} (${i})${parsed.ext}`;
-    }
-    // Replace: archive the previous clip before it gets replaced. Unconditional
-    // because the new file may land on the same path as the current clip
-    // (e.g. re-importing a file whose name matches the generated voiceover.mp3).
-    if (p.voiceoverPath) {
-      archiveAsset(p, p.voiceoverPath);
+      while (fs.existsSync(assetPath(p, `${dir}/${parsed.name} (${i})${parsed.ext}`))) i++;
+      rel = `${dir}/${parsed.name} (${i})${parsed.ext}`;
     }
     fs.copyFileSync(src, assetPath(p, rel));
-    p.voiceoverPath = rel;
-    if (typeof p.voiceoverVolume !== "number") p.voiceoverVolume = 1;
-    productions.saveProduction(p);
-    productionEmit(id, `Imported voiceover → ${rel}.`);
-    return p;
-  });
-
-  // Step 4: read the production's voiceover clip as a data URL (used by the
-  // inline <audio>, the waveform, and the AudioContext playback source).
-  handle("production:voiceoverFile", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p?.voiceoverPath) return null;
-    try {
-      const buf = fs.readFileSync(assetPath(p, p.voiceoverPath));
-      const ext = (path.extname(p.voiceoverPath).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
-      const mime = ext === "wav" ? "audio/wav" : ext === "m4a" || ext === "aac" ? "audio/mp4" : ext === "ogg" ? "audio/ogg" : ext === "flac" ? "audio/flac" : "audio/mpeg";
-      return `data:${mime};base64,${buf.toString("base64")}`;
-    } catch {
-      return null;
-    }
-  });
-
-  // Step 4: streamable protocol URL for the voiceover clip. The renderer
-  // prefers this over the base64 data URL — it bypasses data-URL length
-  // limits and lets <audio>/AudioContext fetch real bytes with range support.
-  handle("production:voiceoverUrl", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p?.voiceoverPath) return null;
-    return `cascade-media://${p.meta.id}/${encodeURIComponent(p.voiceoverPath)}`;
-  });
-
-  // Step 4: remove the imported/generated voiceover (archive the file + clear path).
-  handle("production:removeVoiceover", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    if (p.voiceoverPath) {
-      archiveAsset(p, p.voiceoverPath);
-      p.voiceoverPath = undefined;
-      productions.saveProduction(p);
-      productionEmit(id, "Removed voiceover (kept in archive).");
-    }
-    return p;
-  });
-
-  // Step 4: native music picker. Copies the chosen file into the production's
-  // musicDir and stores the relative path on the production.
-  handle("production:importMusic", async (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) return null;
-    const res = await dialog.showOpenDialog(win!, {
-      title: "Choose a music track",
-      properties: ["openFile"],
-      filters: [
-        { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac"] },
-        { name: "All files", extensions: ["*"] },
-      ],
-    });
-    if (res.canceled || !res.filePaths[0]) return null;
-    const src = res.filePaths[0];
-    const ext = (path.extname(src).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
-    if (!["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) {
-      throw new Error(`Unsupported audio format: .${ext}`);
-    }
-    fs.mkdirSync(assetPath(p, p.assets.musicDir), { recursive: true });
-    // Preserve the original filename — don't rename imported music.
-    let rel = `${p.assets.musicDir}/${path.basename(src)}`;
-    if (fs.existsSync(assetPath(p, rel)) && p.musicPath !== rel) {
-      const parsed = path.parse(path.basename(src));
-      let i = 2;
-      while (fs.existsSync(assetPath(p, `${p.assets.musicDir}/${parsed.name} (${i})${parsed.ext}`))) i++;
-      rel = `${p.assets.musicDir}/${parsed.name} (${i})${parsed.ext}`;
-    }
-    // Replace: archive the previous track before it gets replaced (also covers
-    // an import landing on the current clip's path).
-    if (p.musicPath) {
-      archiveAsset(p, p.musicPath);
-    }
-    fs.copyFileSync(src, assetPath(p, rel));
-    p.musicPath = rel;
-    if (typeof p.musicVolume !== "number") p.musicVolume = 0.5;
-    productions.saveProduction(p);
-    productionEmit(id, `Imported music → ${rel}.`);
-    return p;
+    const ffBin = await resolveFfmpeg();
+    const probed = ffBin ? await probeMedia(ffBin, assetPath(p, rel)).catch(() => null) : null;
+    productionEmit(id, `Imported audio -> ${rel}.`);
+    return { rel, name: path.basename(src), durationSec: probed?.durationSec ?? null };
   });
 
   // Step 3 node graph: save a dropped video/audio file into the production's
@@ -6306,40 +6222,6 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return p;
   });
 
-  // Step 4: read the imported music file as a data URL (for the inline
-  // player and the animatic AudioContext source).
-  handle("production:musicFile", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p?.musicPath) return null;
-    try {
-      const buf = fs.readFileSync(assetPath(p, p.musicPath));
-      const ext = (path.extname(p.musicPath).slice(1).toLowerCase() || "mp3").replace("mpeg", "mp3");
-      const mime = ext === "wav" ? "audio/wav" : ext === "m4a" || ext === "aac" ? "audio/mp4" : ext === "ogg" ? "audio/ogg" : ext === "flac" ? "audio/flac" : "audio/mpeg";
-      return `data:${mime};base64,${buf.toString("base64")}`;
-    } catch {
-      return null;
-    }
-  });
-
-  handle("production:musicUrl", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p?.musicPath) return null;
-    return `cascade-media://${p.meta.id}/${encodeURIComponent(p.musicPath)}`;
-  });
-
-  // Step 4: remove the imported music (archive the file + clears musicPath).
-  handle("production:removeMusic", (_e, id: string) => {
-    const p = productions.loadProduction(id);
-    if (!p) throw new Error("Production not found.");
-    if (p.musicPath) {
-      archiveAsset(p, p.musicPath);
-      p.musicPath = undefined;
-      productions.saveProduction(p);
-      productionEmit(id, "Removed music (kept in archive).");
-    }
-    return p;
-  });
-
   // Step 5: gather all full-res frames + clips + audio into the export folder
   // and write the EDL / After Effects script / manifest. Fast (no render);
   // marks the Assembly step done.
@@ -6359,6 +6241,9 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // Step 5: render the assembled timeline to render.mp4 via the 3-pass ffmpeg
   // pipeline. Requires an ffmpeg binary (bundled ffmpeg-static, else PATH).
   handle("production:assemblyRender", (_e, id: string) => {
+    // Capture the ledger job's cooperative controls before the queue
+    // hop (closures read live ledger state; ALS context may not).
+    const jobControls = currentJobControls();
     return runProductionJob(id, "Render animatic to MP4", async (p, emit) => {
       const bin = await resolveFfmpeg();
       if (!bin) {
@@ -6368,13 +6253,24 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       p.status[5] = "running";
       try {
-        const renderRel = await renderAnimatic(p, undefined, emit, { bin, runFfmpeg, probe: probeMedia });
+        const renderRel = await renderAnimatic(p, undefined, emit, {
+          bin,
+          runFfmpeg,
+          probe: probeMedia,
+          isCancelled: jobControls ? () => jobControls.isCancelled() : undefined,
+          onProgress: jobControls ? (pct) => jobControls.setProgress(pct) : undefined,
+        });
         p.assembly ??= { fps: 24, width: 1920, height: 1080, exportDir: `${p.assets.outDir}/${p.assets.assemblyDir}` };
         p.assembly.renderPath = renderRel;
         p.assembly.renderedAt = new Date().toISOString();
         p.status[5] = "done";
       } catch (e) {
-        p.status[5] = "error";
+        if (jobControls?.isCancelled()) {
+          delete p.status[5];
+          emit("Render cancelled — no partial file was kept.");
+        } else {
+          p.status[5] = "error";
+        }
         throw e;
       }
     });
@@ -6403,6 +6299,40 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   });
 
   // Step 5: open the export folder in the OS file manager.
+  // Animatic proxies (Item 6): list ready proxies; generate the rest as a
+  // ledger job (the channel is in jobForChannel, so the wrapper records
+  // it). Preview-only media — nothing here touches the production doc.
+  handle("production:listProxies", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    return listReadyProxies(p);
+  });
+
+  handle("production:generateProxies", async (_e, id: string, srcRels?: string[]) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const bin = await resolveFfmpeg();
+    if (!bin) {
+      throw new Error("No ffmpeg available. Install ffmpeg on your system (or bundle ffmpeg-static) to generate preview proxies.");
+    }
+    const rels = Array.isArray(srcRels) && srcRels.length
+      ? [...new Set(srcRels.filter((r) => typeof r === "string" && r))]
+      : timelineVideoSources(p.timeline);
+    productionEmit(id, `Generating preview proxies for ${rels.length} source(s).`);
+    const result = await generateProxies(
+      p,
+      rels,
+      (args) => runFfmpeg(bin, args),
+      (m) => productionEmit(id, m)
+    );
+    productionEmit(
+      id,
+      `Proxies ready: ${result.generated} generated, ${result.fresh} already fresh${result.failed.length ? `, ${result.failed.length} failed (originals still preview)` : ""}.`,
+      result.failed.length ? "error" : "done"
+    );
+    return result;
+  });
+
   handle("production:assemblyOpenFolder", (_e, id: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");

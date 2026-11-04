@@ -13,7 +13,7 @@ from "../shared/ipc.js";
 import { mergeGraphLayoutPatch } from "../shared/graph/layout.js";
 import { pickGraphShotPatch } from "../shared/graph/shot-patch.js";
 export { mergeGraphLayoutPatch };
-import { sanitizeGenParams, normalizeShotSequences, isVideoEditFamilyMode, SEQUENCE_ACCENT_COLORS } from "../shared/ipc.js";
+import { sanitizeGenParams, normalizeShotSequences, normalizeTimeline, validateTimeline, isVideoEditFamilyMode, SEQUENCE_ACCENT_COLORS, seedTimelineFromProduction, syncTimelineBeds } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
 parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
@@ -150,6 +150,46 @@ function normalize(p: ProductionFile): ProductionFile {
     ]);
     const liveRefIds = new Set((p.references ?? []).map((r) => r.id));
     p.shotSequences = normalizeShotSequences(p.shotSequences, liveIds, liveRefIds);
+  }
+  // The multi-track timeline is read-repaired like shot sequences: corrupt
+  // tracks/clips drop and overlaps resolve deterministically, so a bad
+  // file can never hand the editor an impossible model. Absent stays
+  // absent (additive — pre-timeline documents derive theirs on demand).
+  if (p.timeline !== undefined) {
+    const repaired = normalizeTimeline(p.timeline);
+    if (repaired) p.timeline = repaired;
+    else delete (p as { timeline?: unknown }).timeline;
+  }
+  // Legacy VO/music migration (audio lives on tracks): files imported
+  // through the old one-voiceover/one-music model become ordinary
+  // audio-track clips (seeded/synced beds), then the legacy fields
+  // clear so nothing reads them again. Runs once per production —
+  // afterwards the fields are absent. Bed clips keep their role so
+  // exports keep their VO/music reels.
+  if (p.voiceoverPath || p.musicPath) {
+    const hadTimeline = !!p.timeline;
+    const tl0 = p.timeline ?? seedTimelineFromProduction(p, () => randomUUID());
+    const tl1 = syncTimelineBeds(tl0, p, () => randomUUID());
+    const repaired = normalizeTimeline(tl1);
+    const candidate = repaired ?? p.timeline;
+    // Clear each legacy field only once its clip actually landed on a
+    // track: a zero-length timeline (no shots yet) cannot hold a bed
+    // clip, and clearing then would orphan the file reference. The
+    // field simply migrates on a later load once content exists - and
+    // an absent timeline stays absent (no empty seed gets baked in).
+    const landed = (rel?: string): boolean =>
+      !!rel && (candidate?.clips.some((c) => c.srcRel === rel) ?? false);
+    const voLanded = landed(p.voiceoverPath);
+    const muLanded = landed(p.musicPath);
+    if ((hadTimeline || voLanded || muLanded) && repaired) p.timeline = repaired;
+    if (voLanded) {
+      delete (p as { voiceoverPath?: unknown }).voiceoverPath;
+      delete (p as { voiceoverVolume?: unknown }).voiceoverVolume;
+    }
+    if (muLanded) {
+      delete (p as { musicPath?: unknown }).musicPath;
+      delete (p as { musicVolume?: unknown }).musicVolume;
+    }
   }
   // The media registry is read-repaired: dedupe by path, drop terminal
   // `deleted` entries. (The present/missing disk sweep runs in
@@ -337,6 +377,14 @@ export function backfillGenerationMediaIds(p: Production): void {
 }
 
 export function validateMigratedProduction(p: Production): void {
+  // A persisted timeline must satisfy the model's invariants before it may
+  // replace the original document (same bar as the shot graphs below).
+  if (p.timeline) {
+    const timelineErrs = validateTimeline(p.timeline);
+    if (timelineErrs.length) {
+      throw new Error(`Migration validation failed for timeline: ${timelineErrs[0]}`);
+    }
+  }
   const seenShots = new Set<string>();
   const allShots = [...(p.scenes ?? []).flatMap((s) => s.shots ?? []), ...(p.outdatedShots ?? [])];
   {
@@ -839,18 +887,7 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
     const params = sanitizeGenParams(p.openArt.params);
     if (params) fresh.openArt.params = params;
   }
-  if (typeof p.voiceoverPath === "string" || p.voiceoverPath === null) {
-    fresh.voiceoverPath = typeof p.voiceoverPath === "string" && p.voiceoverPath ? p.voiceoverPath : undefined;
-  }
-  if (typeof p.voiceoverVolume === "number" && Number.isFinite(p.voiceoverVolume)) {
-    fresh.voiceoverVolume = Math.max(0, Math.min(1, p.voiceoverVolume));
-  }
-  if (typeof p.musicPath === "string" || p.musicPath === null) {
-    fresh.musicPath = typeof p.musicPath === "string" && p.musicPath ? p.musicPath : undefined;
-  }
-  if (typeof p.musicVolume === "number" && Number.isFinite(p.musicVolume)) {
-    fresh.musicVolume = Math.max(0, Math.min(1, p.musicVolume));
-  }
+
   fresh.status = p.status ?? {};
   if (typeof p.scriptSource === "string") fresh.scriptSource = p.scriptSource;
   if (p.assembly) {
@@ -896,6 +933,16 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   // shot's video nodes get, one level up. Absent stays absent (additive).
   if (p.shotSequences !== undefined || fresh.shotSequences !== undefined) {
     fresh.shotSequences = mergeShotSequences(fresh.shotSequences, Array.isArray(p.shotSequences) ? p.shotSequences : undefined);
+  }
+  // The multi-track timeline is renderer-owned (the timeline UI edits it
+  // through ordinary saves, like the moodboard). Main stores it after the
+  // shared read repair, so a corrupt snapshot clears to absent instead of
+  // persisting an impossible model; an absent snapshot field leaves the
+  // fresh document's timeline alone.
+  if (p.timeline !== undefined) {
+    const repaired = normalizeTimeline(p.timeline);
+    if (repaired) fresh.timeline = repaired;
+    else delete (fresh as { timeline?: unknown }).timeline;
   }
   return fresh;
 }

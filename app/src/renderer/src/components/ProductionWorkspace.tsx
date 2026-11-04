@@ -4,13 +4,14 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, applyShotSequences, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, seedTimelineFromProduction, reconcileTimelineShotMedia, type ProductionTimeline, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { applySavedRevision, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-usage.js";
 import { ShotTable } from "./ShotTable.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
+import { HelpTip } from "./common/HelpTip.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 import { importableImageDataUrl } from "./production/image-downsample.js";
 import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
@@ -18,7 +19,9 @@ import { nextNumberedRefName } from "../../../shared/ref-names.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
 import { filterTweenModels } from "./TweenTimelineModal.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
-import { AnimaticTimeline, cascadeMedia, MiniAudioPlayer, ProdLog, VolumeSlider, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
+import { TimelinePreview, cascadeMedia, ProdLog, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
+import { TimelineEditor } from "./production/timeline-editor.js";
+import { buildTimelineOverride, EMPTY_LOOP_REGION, timelineTotalSec, type TimelineLoopRegion, type TimelineOverride } from "./production/timeline-preview.js";
 import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { MagicCastReview } from "./production/magic-cast-review.js";
@@ -45,7 +48,7 @@ import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
-import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wiredPromptTarget } from "../../../shared/graph/render.js";
+import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wiredPromptTarget, stripSharedSections, reconcileRefTags } from "../../../shared/graph/render.js";
 import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
@@ -119,9 +122,11 @@ function isPromptTextarea(el: unknown): boolean {
 /** Collapsible Step 2 panel — one per Design section (Visual styles / Brand
  * identity / References) so each reads as its own block. Collapse state is
  * persisted per production so it survives step switches and app restarts. */
-function DesignSection({ title, prodId, children }: {
+function DesignSection({ title, prodId, help, children }: {
   title: string;
   prodId: string;
+  /** Section guidance shown from the "?" marker by the heading (Item 2). */
+  help?: string;
   children: ReactNode;
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.design.${title}`);
@@ -131,6 +136,7 @@ function DesignSection({ title, prodId, children }: {
       <button className="prod-design-head" onClick={() => setCollapsed(!collapsed)} aria-expanded={open}>
         <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
         <span className="prod-design-title">{title}</span>
+        {help && <HelpTip text={help} label={title} />}
       </button>
       {open && <div className="prod-design-body">{children}</div>}
     </div>
@@ -150,6 +156,59 @@ function ErrorNotice({ message, onClear }: { message: string; onClear: () => voi
   );
 }
 
+
+/** Step 4 timeline surface: the preview monitor above, the multi-track
+ *  editor below, one shared playhead between them. Owns the playback
+ *  state so per-frame playhead updates re-render only this section. */
+function TimelineSection({
+  prodId, production, timelineOverride,
+  proxyBySrc, onTimelineChange, onGenerateProxies, onImportAudio, onSaveAsReference,
+}: {
+  prodId: string;
+  production: Production;
+  timelineOverride: TimelineOverride;
+  proxyBySrc: Readonly<Record<string, string>>;
+  onTimelineChange: (timeline: ProductionTimeline) => void;
+  onGenerateProxies: (srcRels?: string[]) => Promise<void>;
+  onImportAudio: () => Promise<{ rel: string; name: string; durationSec: number | null } | null>;
+  onSaveAsReference: (shotId: string, rel: string) => void;
+}) {
+  const [playheadSec, setPlayheadSec] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  // Loop In/Out region: marked in the editor (I/O keys + Loop
+  // toggle), honored by the preview transport above.
+  const [loopRegion, setLoopRegion] = useState<TimelineLoopRegion>(EMPTY_LOOP_REGION);
+  const seek = useCallback((sec: number) => {
+    setPlaying(false);
+    setPlayheadSec(sec);
+  }, []);
+  return (
+    <>
+      <TimelinePreview
+        prodId={prodId}
+        timelineOverride={timelineOverride}
+        playheadSec={playheadSec}
+        onPlayheadChange={setPlayheadSec}
+        playing={playing}
+        onPlayingChange={setPlaying}
+        onSaveAsReference={onSaveAsReference}
+        loopRegion={loopRegion}
+      />
+      <TimelineEditor
+        prodId={prodId}
+        production={production}
+        onTimelineChange={onTimelineChange}
+        proxyBySrc={proxyBySrc}
+        onGenerateProxies={onGenerateProxies}
+        onImportAudio={onImportAudio}
+        playheadSec={playheadSec}
+        onSeek={seek}
+        loopRegion={loopRegion}
+        onLoopRegionChange={setLoopRegion}
+      />
+    </>
+  );
+}
 
 export function ProductionWorkspace({ onOpenSettings, detached = null, onDetachedTitle }: {
   onOpenSettings?: () => void;
@@ -303,14 +362,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Active media provider id — tracked so model lists refetch when the
    *  provider is switched in Settings while the workspace is open. */
   const [mediaProviderId, setMediaProviderId] = useState<MediaProviderId>("openart");
-  const [voUrl, setVoUrl] = useState<string | null>(null);
-  const [voDuration, setVoDuration] = useState<number | null>(null);
-  const [musicUrl, setMusicUrl] = useState<string | null>(null);
-  const [audioBust, setAudioBust] = useState(0);
+
   // Live volume targets for the inline preview players (so the sliders can
   // adjust playback volume during the drag, not just after release).
-  const voPreviewRef = useRef<HTMLAudioElement | null>(null);
-  const musicPreviewRef = useRef<HTMLAudioElement | null>(null);
+
   // step 3: per-frame AI edit (modal open on this shot id); edits run in the
   // background so more can be queued while others generate.
   const [editShotId, setEditShotId] = useState<string | null>(null);
@@ -797,51 +852,45 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return () => { live = false; };
   }, [prod?.meta.id, prod?.currentStep, mediaProviderId]);
 
-  // Step 4: fetch the imported music file as a streamable cascade-media:// URL
-  // (served from disk by main — no base64 / data-URL size limits). Falls back
-  // to the legacy data-URL IPC for older builds.
+  // Animatic proxies (Item 6): ready proxy per source, refreshed on
+  // production switch and after a generation pass. Preview prefers
+  // proxies; render/export never read them.
+  const [proxyBySrc, setProxyBySrc] = useState<Record<string, string>>({});
+  const refreshProxies = useCallback(async (id: string) => {
+    try { setProxyBySrc(await window.cascade.listProxies(id)); } catch { setProxyBySrc({}); }
+  }, []);
   useEffect(() => {
-    if (prod?.currentStep !== 4) return;
-    if (!prod?.musicPath) { setMusicUrl(null); return; }
-    let live = true;
-    const maybeUrl = (window.cascade as unknown as { musicUrl?: (id: string) => Promise<string | null> }).musicUrl;
-    (async () => {
-      if (maybeUrl) {
-        try {
-          const u = await maybeUrl(prod.meta.id);
-          if (live) { setMusicUrl(u); return; }
-        } catch {}
-      }
-      const d = await window.cascade.musicFile(prod.meta.id).catch(() => null);
-      if (live) setMusicUrl(d);
-    })();
-    return () => { live = false; };
-  }, [prod?.meta.id, prod?.currentStep, prod?.musicPath, audioBust]);
+    if (prod?.meta.id) void refreshProxies(prod.meta.id);
+  }, [prod?.meta.id, refreshProxies]);
+  // The production timeline is the ONLY timeline from here on: a
+  // production that predates it is seeded from the shot projection and
+  // persisted on first Step 4 open. Until that save lands, the same seed
+  // is derived locally so preview and editor agree from the first frame.
+  const effectiveTimeline = useMemo(
+    () => prod?.timeline ?? (prod ? seedTimelineFromProduction(prod, uid) : undefined),
+    [prod]
+  );
+  const timelineOverride = useMemo(() => {
+    if (!prod || !effectiveTimeline) return undefined;
+    const shotNumbers = new Map<string, string>();
+    for (const sc of prod.scenes) for (const sh of sc.shots) shotNumbers.set(sh.id, sh.number);
+    return buildTimelineOverride(effectiveTimeline, prod.media, proxyBySrc, shotNumbers);
+  }, [prod, effectiveTimeline, proxyBySrc]);
 
-  // Step 4: fetch the voiceover clip as a streamable cascade-media:// URL.
+  // Step 4 owns timeline upkeep: persist the seed and follow
+  // regenerated shot media. (Legacy VO/music fields migrated to
+  // track clips at load in main; nothing syncs beds here anymore.)
   useEffect(() => {
-    if (prod?.currentStep !== 4) return;
-    if (!prod?.voiceoverPath) { setVoUrl(null); setVoDuration(null); return; }
-    let live = true;
-    const maybeUrl = (window.cascade as unknown as { voiceoverUrl?: (id: string) => Promise<string | null> }).voiceoverUrl;
-    (async () => {
-      if (maybeUrl) {
-        try {
-          const u = await maybeUrl(prod.meta.id);
-          if (live) { setVoUrl(u); return; }
-        } catch {}
-      }
-      const d = await window.cascade.voiceoverFile(prod.meta.id).catch(() => null);
-      if (live) setVoUrl(d);
-    })();
-    return () => { live = false; };
-  }, [prod?.meta.id, prod?.currentStep, prod?.voiceoverPath, audioBust]);
-
-  // The URLs are streamable cascade-media:// (or blob:) URLs served from disk,
-  // so <audio> and AudioContext can load them directly — no blob conversion
-  // needed at this boundary.
-  const voObjectUrl = voUrl;
-  const musicObjectUrl = musicUrl;
+    if (!prod || prod.currentStep !== 4) return;
+    if (!prod.timeline) {
+      saveField({ timeline: seedTimelineFromProduction(prod, uid) });
+      return;
+    }
+    const next = reconcileTimelineShotMedia(prod.timeline, prod);
+    if (next !== prod.timeline) saveField({ timeline: next });
+    // saveField identity churns per render; prod state is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prod]);
 
   // Re-fetch the focused shot's effective prompt whenever the data it derives
   // from changes (manual override, style, references, characters/products,
@@ -2254,105 +2303,35 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 4: pick a local audio file to use as the voiceover. */
-  async function importVo() {
-    if (!prod) return;
+  /** Step 4: pick an audio file for the timeline (the editor's
+   *  Import audio button). Main copies + probes; the editor places
+   *  the clip on an audio track. */
+  async function importTimelineAudioFile(): Promise<{ rel: string; name: string; durationSec: number | null } | null> {
+    if (!prod) return null;
     setErr(null);
     try {
-      const next = await window.cascade.importVoiceover(prod.meta.id);
-      if (next) { setProd(next); setVoUrl(null); setVoDuration(null); setAudioBust((n) => n + 1); }
-      void refreshList();
+      return await window.cascade.importTimelineAudio(prod.meta.id);
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
+      return null;
     }
   }
 
-  /** Step 4: clear the voiceover (file + shot.voiceoverPath). */
-  async function removeVo() {
-    if (!prod) return;
-    setErr(null);
-    try {
-      const next = await window.cascade.removeVoiceover(prod.meta.id);
-      setProd(next);
-      setVoUrl(null); setVoDuration(null); setAudioBust((n) => n + 1);
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    }
-  }
-
-  /** Step 4: open the native picker to import a music track. */
-  async function importMusic() {
-    if (!prod) return;
-    setErr(null);
-    try {
-      const next = await window.cascade.importMusic(prod.meta.id);
-      if (next) { setProd(next); setMusicUrl(null); setAudioBust((n) => n + 1); }
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    }
-  }
-
-  /** Step 4: clear the imported music track. */
-  async function removeMusic() {
-    if (!prod) return;
-    setErr(null);
-    try {
-      const next = await window.cascade.removeMusic(prod.meta.id);
-      setProd(next);
-      setMusicUrl(null); setAudioBust((n) => n + 1);
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    }
-  }
-
-  function setMusicVolume(v: number) {
-    if (!prod) return;
-    saveField({ musicVolume: Math.max(0, Math.min(1, v)) });
-  }
-
-  function setVoiceoverVolume(v: number) {
-    if (!prod) return;
-    saveField({ voiceoverVolume: Math.max(0, Math.min(1, v)) });
-  }
-
-  /** Step 4: rescale every shot's durationSec so the total matches `targetSec`.
-   *  Used after a VO is added/imported, and by the "Fit to VO" button. */
-  function fitShotsToTotal(targetSec: number) {
-    if (!prod) return;
-    const shots = prod.scenes.flatMap((s) => s.shots);
-    if (!shots.length) return;
-    // The runtime includes enabled shot sequences' windows (a sequence with an
-    // explicit duration owns its window; one without follows its members), so
-    // the projection — not the raw shot sum — is what "fit" has to match.
-    const items = applyShotSequences(shots, prod.shotSequences ?? [], prod.references);
-    const currentTotal = items.reduce((n, it) => n + it.durationSec, 0);
-    const scaleSequences = (scale: number) =>
-      (prod.shotSequences ?? []).map((seq) =>
-        typeof seq.durationSec === "number" && Number.isFinite(seq.durationSec) && seq.durationSec > 0
-          ? { ...seq, durationSec: Math.max(0.5, seq.durationSec * scale) }
-          : seq
-      );
-    if (currentTotal <= 0) {
-      // All zeros — distribute evenly.
-      const each = Math.max(0.5, targetSec / shots.length);
-      saveField({
-        scenes: prod.scenes.map((sc) => ({ ...sc, shots: sc.shots.map((s) => ({ ...s, durationSec: each })) })),
-        shotSequences: scaleSequences(1),
-      });
-      return;
-    }
-    if (!Number.isFinite(targetSec) || targetSec <= 0) return;
-    const scale = targetSec / currentTotal;
-    saveField({
-      scenes: prod.scenes.map((sc) => ({
-        ...sc,
-        shots: sc.shots.map((s) => ({ ...s, durationSec: Math.max(0.5, (s.durationSec ?? 3) * scale) })),
-      })),
-      shotSequences: scaleSequences(scale),
-    });
+  /** Re-render a shot's composer prompt after a style-selection change.
+   *  The content currently on display (the Magic Prompt text while Magic is
+   *  on) is preserved as-is — only the Style paragraph is re-derived from
+   *  the new selection. Re-deriving content from the stored original
+   *  (`renderShotPrompt` reads `shot.prompt`) would silently swap the magic
+   *  text back to the original on every style change, and a later
+   *  blur-commit would overwrite the stored magic entry with it. Falls back
+   *  to the stored-prompt render when nothing is on display for the shot. */
+  function rerenderComposerForStyle(base: Production, shot: ProductionShot): string {
+    const displayed = promptCacheRef.current[shot.id]?.trim();
+    const magic = base.magicEnabled ? base.magicPrompts?.[shot.id]?.trim() : undefined;
+    const source = displayed || magic;
+    if (!source) return renderShotPrompt(base, shot, "composer");
+    const content = stripSharedSections(source);
+    return reconcileRefTags(base, shot, "composer", renderPromptText(content, promptRefsFor(base, shot, "composer")));
   }
 
   /** Step 3: pick one shot's render style (stores the style's stable id and
@@ -2374,7 +2353,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setProd(next);
     // Re-derive the focused prompt from the new selection (content-only cache).
     if (promptShotId === shotId) {
-      const rerendered = renderShotPrompt(next, next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId)!, "composer");
+      const rerendered = rerenderComposerForStyle(next, next.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId)!);
       promptCacheRef.current[shotId] = rerendered;
       setPromptForShot(shotId, rerendered);
     }
@@ -2410,7 +2389,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     // Refresh the shared live prompt (the modal reads it as its composer value).
     const nextShot = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
     if (nextShot) {
-      const rerendered = renderShotPrompt(prod, { ...nextShot, ...patch }, "composer");
+      const rerendered = rerenderComposerForStyle(prod, { ...nextShot, ...patch });
       promptCacheRef.current[shotId] = rerendered;
       if (promptShotId === shotId || graphShotId === shotId) setPromptForShot(shotId, rerendered);
     }
@@ -3588,18 +3567,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 4: remove a shot's generated video (the timeline falls back to the still). */
-  async function removeShotVideo(shotId: string) {
-    if (!prod) return;
-    setErr(null);
-    try {
-      const next = await window.cascade.removeVideo(prod.meta.id, shotId);
-      setProd(next);
-      void refreshList();
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-    }
-  }
 
   /** Step 3: promote a browsed history frame back to primary for one shot.
    *  The current frame swaps into the history (nothing is deleted). Routes
@@ -3618,56 +3585,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 4: apply several duration changes in one save. Used by the animatic
-   *  roll edit, where dragging one edit point trades time with the following
-   *  shot so later edit points stay exactly where they are. */
-  function updateDurations(updates: { shotId: string; durationSec: number }[]) {
-    if (!prod) return;
-    const byId = new Map(updates.map((u) => [u.shotId, u.durationSec]));
-    saveField({
-      scenes: prod.scenes.map((sc) => ({
-        ...sc,
-        shots: sc.shots.map((s) => (byId.has(s.id) ? { ...s, durationSec: byId.get(s.id)! } : s)),
-      })),
-    });
-  }
-
-  /** Step 4: set a shot sequence's own timeline window (roll edit on its block). */
-  function updateSequenceDuration(sequenceId: string, durationSec: number) {
-    saveSequenceField(sequenceId, { durationSec: Math.max(0.5, Math.round(durationSec * 10) / 10) });
-  }
-
-  /** Step 4: slip a shot block's clip (right-drag) — the window stays put
-   *  while the source frame it opens on shifts. Zero clears back to the top
-   *  (stored as absent, like other additive fields). */
-  function updateVideoOffsets(updates: { shotId: string; videoOffsetSec: number }[]) {
-    if (!prod) return;
-    const byId = new Map(updates.map((u) => [u.shotId, u.videoOffsetSec]));
-    saveField({
-      scenes: prod.scenes.map((sc) => ({
-        ...sc,
-        shots: sc.shots.map((s) => {
-          if (!byId.has(s.id)) return s;
-          const rounded = Math.round((byId.get(s.id) ?? 0) * 10) / 10;
-          return { ...s, videoOffsetSec: rounded > 0 ? rounded : undefined };
-        }),
-      })),
-    });
-  }
-
-  /** Step 4: slip a shot sequence's clip (same gesture on its block). */
-  function updateSequenceVideoOffset(sequenceId: string, videoOffsetSec: number) {
-    const rounded = Math.round(videoOffsetSec * 10) / 10;
-    saveSequenceField(sequenceId, { videoOffsetSec: rounded > 0 ? rounded : undefined });
-  }
-
-  /** Step 4: mute/unmute a shot sequence's clip in the preview. */
-  function toggleSequenceMute(sequenceId: string) {
-    const current = prodRef.current;
-    const seq = (current?.shotSequences ?? []).find((s) => s.id === sequenceId);
-    if (!seq) return;
-    saveSequenceField(sequenceId, { muted: !seq.muted });
-  }
 
   function reorderShot(shotId: string, beforeShotId: string | null) {
     if (!prod || shotId === beforeShotId) return;
@@ -3970,18 +3887,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     if (!current) return;
     apply(window.cascade.deleteSequenceTake(current.meta.id, sequenceId, rel));
   }
-  /** Step 4: toggle whether a clip's own embedded audio plays in the animatic
-   *  preview (speaker button on its timeline block). Affects only the shot's
-   *  video track — the production-wide VO and music keep their sliders. */
-  function toggleShotMuted(shotId: string) {
-    if (!prod) return;
-    saveField({
-      scenes: prod.scenes.map((sc) => ({
-        ...sc,
-        shots: sc.shots.map((s) => (s.id === shotId ? { ...s, muted: !s.muted } : s)),
-      })),
-    });
-  }
 
   const imageModels = mediaModels.filter(isImageModel);
   const videoModels = mediaModels.filter(isVideoModel);
@@ -4140,8 +4045,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return (
       <div className="prod-welcome">
         <div className="prod-welcome-inner">
-          <h2>Production Assistant</h2>
-          <p className="prod-sub">Turn a script into a designed, numbered shot list — then boards, animatic, and render.</p>
+          <h2>Production Assistant<HelpTip text="Turn a script into a designed, numbered shot list — then boards, animatic, and render." label="Production Assistant" /></h2>
           <div className="prod-create">
             <label>New production</label>
             <input
@@ -4192,8 +4096,6 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const boardsDone = prod.scenes.flatMap((s) => s.shots).filter((s) => resolveShotDisplay(s).path || s.graphImageGens?.length).length;
   /** Shots with a video job still unclaimed (rendering or undownloaded). */
   const pendingVideoCount = prod.scenes.flatMap((s) => s.shots).filter((s) => s.pendingVideoGen).length;
-  const anyTimed = prod.scenes.some((s) => s.shots.some((sh) => sh.durationSec != null));
-  const totalRuntime = applyShotSequences(prod.scenes.flatMap((s) => s.shots), prod.shotSequences ?? [], prod.references).reduce((n, item) => n + item.durationSec, 0);
   // Brand swatches actually shown: trailing empty slots (saved by an older
   // version's pad-to-5 bug) are hidden but stay addressable for edits.
   const brandColors = (() => {
@@ -4336,10 +4238,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
           <section className="prod-panel">
             <h3>1 · Script ingestion</h3>
             <div className="prod-ingest">
-              <button disabled={busy} onClick={async () => { const f = await window.cascade.pickScriptFile(); if (f) setSource(f); }}>
+              <button disabled={busy} title="Pick a script file — PDF · DOCX · TXT · MD (legacy .doc must be re-saved as .docx)" onClick={async () => { const f = await window.cascade.pickScriptFile(); if (f) setSource(f); }}>
                 Pick script file…
               </button>
-              <span className="hint">PDF · DOCX · TXT · MD — legacy .doc must be re-saved as .docx</span>
               <div className="prod-ingest-url">
                 <input
                   value={gdocUrl}
@@ -4373,11 +4274,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
 
-            <DesignSection title="Visual styles" prodId={prod.meta.id}>
-              <p className="hint">
-                Add up to {MAX_STYLES} distinct <strong>named</strong> styles one at a time, then assign each shot a
-                style in <em> Storyboard</em>. Style <strong>1</strong> is the default look for every frame.
-              </p>
+            <DesignSection title="Visual styles" prodId={prod.meta.id} help={`Add up to ${MAX_STYLES} distinct named styles one at a time, then assign each shot a style in Storyboard. Style 1 is the default look for every frame.`}>
               {(prod.styles ?? []).length > 0 && (
                 <div className="prod-styles">
                   {(prod.styles ?? []).map((s, i) => (
@@ -4590,11 +4487,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               </div>
             </DesignSection>
 
-            <DesignSection title="Brand identity" prodId={prod.meta.id}>
-              <p className="hint">
-                A palette (up to 5 swatches) and optional font appended to <strong>every</strong> style's prompt,
-                so the brand look stays consistent across all frames.
-              </p>
+            <DesignSection title="Brand identity" prodId={prod.meta.id} help="A palette (up to 5 swatches) and optional font appended to every style's prompt, so the brand look stays consistent across all frames.">
               <div className="prod-brand-swatches">
                 {brandColors.map((c, i) => (
                   <BrandSwatchRow
@@ -4620,7 +4513,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               </label>
             </DesignSection>
 
-            <DesignSection title="Character builder" prodId={prod.meta.id}>
+            <DesignSection title="Character builder" prodId={prod.meta.id} help="Build a character reference: a character sheet with a full body shot and a face-closeup inset, in a neutral pose and expression under neutral lighting on a plain gray background. Generated sheets attach to the character and carry its look across the storyboard.">
               <CharacterBuilderSection
                 prodId={prod.meta.id}
                 characters={prod.characters}
@@ -4636,8 +4529,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             <DesignSection title="References" prodId={prod.meta.id}>
               {(prod.suggestedReferences ?? []).length > 0 && (
                 <section className="prod-suggestions">
-                  <label className="prod-label">Suggested references</label>
-                  <p className="hint">Characters and props found in the script. Add them manually and place them in any category.</p>
+                  <label className="prod-label">Suggested references<HelpTip text="Characters and props found in the script. Add them manually and place them in any category." label="Suggested references" /></label>
                   <div className="prod-suggestion-list">
                     {(prod.suggestedReferences ?? []).map((s) => (
                       <div key={s.id} className="prod-suggestion">
@@ -4697,7 +4589,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         {prod.currentStep === 3 && (
           <section className="prod-panel prod-storyboard-panel">
             <div className="prod-storyboard-head">
-              <h3>3 · Storyboard</h3>
+              <h3>3 · Storyboard<HelpTip text={`One frame per shot — the master style and character keys from Step 2 are baked into every prompt. Frames are saved to ${prod.assets.boardsDir}/ in the production folder.`} label="Storyboard" /></h3>
               <div className="prod-magic-controls">
                 <button
                   className={"prod-btn prod-magic-btn" + (prod.magicEnabled ? " active" : "")}
@@ -4729,14 +4621,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 )}
               </div>
             </div>
-            <p className="hint">
-              One frame per shot — the master style and character keys from Step 2 are baked into every prompt.
-              Frames are saved to <code>{prod.assets.boardsDir}/</code> in the production folder.
-              {mediaOk === true && ` In-app generation uses the connected ${mediaProviderName}${mediaProviderId.endsWith("-cli") ? " CLI" : " MCP server"}.`}
-              {mediaOk === false && (
-                <> {mediaProviderName}{mediaProviderId.endsWith("-cli") ? " CLI isn't set up" : " MCP isn't connected"}, so use <strong>Export prompts</strong> to generate frames externally.</>
-              )}
-            </p>
+            {(mediaOk === true || mediaOk === false) && (
+              <p className="hint">
+                {mediaOk === true && `In-app generation uses the connected ${mediaProviderName}${mediaProviderId.endsWith("-cli") ? " CLI" : " MCP server"}.`}
+                {mediaOk === false && (
+                  <>{mediaProviderName}{mediaProviderId.endsWith("-cli") ? " CLI isn't set up" : " MCP isn't connected"}, so use <strong>Export prompts</strong> to generate frames externally.</>
+                )}
+              </p>
+            )}
             {castReviewOpen && prod.magicBible && (
               <MagicCastReview
                 prod={prod}
@@ -5172,119 +5064,35 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
         {prod.currentStep === 4 && (
           <section className="prod-panel prod-storyboard-panel">
-            <h3>4 · Animatic</h3>
-            <p className="hint">
-              Import one voiceover clip for the whole production, optionally add a music track, then
-              drag the cut points on the timeline to set the length of each clip. The plan is written to <code>{prod.assets.outDir}/animatic.md</code>.
-            </p>
+            <h3>4 · Animatic<HelpTip text={`Edit the multi-track timeline under the preview. All audio — voiceover, music, sound effects — lives as clips on audio tracks; use Import audio in the editor toolbar to add files. Shot timings from the earlier steps only seed the timeline — preview, render, and exports all read the timeline itself. The plan is written to ${prod.assets.outDir}/animatic.md.`} label="Animatic" /></h3>
 
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
 
             {shotCount > 0 && (
               <>
-                <div className="prod-animatic-panels">
-                  <section className="prod-audio">
-                    <header className="prod-audio-head">
-                      <label className="prod-label">Voiceover</label>
-                      <div className="prod-audio-controls">
-                        {prod.voiceoverPath && (voObjectUrl || voUrl) ? (
-                          <div className="prod-audio-file">
-                            <MiniAudioPlayer src={voObjectUrl ?? voUrl} onDurationKnown={setVoDuration} audioRef={voPreviewRef} />
-                            <span className="prod-music-name" title={prod.voiceoverPath}>
-                              {prod.voiceoverPath.split("/").pop()}
-                              {voDuration != null ? ` · ${formatRuntime(voDuration)}` : ""}
-                            </span>
-                            <VolumeSlider
-                              value={prod.voiceoverVolume ?? 1}
-                              onCommit={setVoiceoverVolume}
-                              audioRef={voPreviewRef}
-                              title="Voiceover volume"
-                            />
-                            <button
-                              onClick={() => fitShotsToTotal(voDuration ?? totalRuntime)}
-                              title="Rescale every shot's length so the total matches the voiceover"
-                            >
-                              Fit to VO
-                            </button>
-                            <button
-                              onClick={() => void importVo()}
-                              title="Pick a local audio file to replace the voiceover"
-                            >
-                              Replace…
-                            </button>
-                            <button className="prod-suggestion-remove" title="Remove the voiceover" onClick={() => void removeVo()}><TrashIcon size={12} /></button>
-                          </div>
-                        ) : (
-                          <div className="prod-audio-file">
-                            <button onClick={() => void importVo()} title="Pick a local audio file to use as the voiceover">
-                              Import…
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </header>
-                  </section>
-
-                  <section className="prod-audio">
-                    <header className="prod-audio-head">
-                      <label className="prod-label">Music</label>
-                      <div className="prod-audio-controls">
-                        {prod.musicPath && (musicObjectUrl || musicUrl) ? (
-                          <div className="prod-audio-file">
-                            <MiniAudioPlayer src={musicObjectUrl ?? musicUrl} audioRef={musicPreviewRef} />
-                            <span className="prod-music-name" title={prod.musicPath}>
-                              {prod.musicPath.split("/").pop()}
-                            </span>
-                            <VolumeSlider
-                              value={prod.musicVolume ?? 0.5}
-                              onCommit={setMusicVolume}
-                              audioRef={musicPreviewRef}
-                              title="Background music volume"
-                            />
-                            <button onClick={() => void importMusic()}>Replace…</button>
-                            <button className="prod-suggestion-remove" title="Remove the music track" onClick={() => void removeMusic()}><TrashIcon size={12} /></button>
-                          </div>
-                        ) : (
-                          <div className="prod-audio-file">
-                            <button onClick={() => void importMusic()} title="Pick an mp3/wav/m4a/ogg/flac to play under the animatic">
-                              Import music…
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </header>
-                  </section>
-                </div>
-
                 <section className="prod-animatic">
                   <header className="prod-animatic-head">
-                    <label className="prod-label">Timeline</label>
+                    <label className="prod-label">Timeline<HelpTip text="The preview plays this timeline; the editor below shares its playhead." label="Timeline" /></label>
                     <div className="prod-animatic-controls">
-                      {anyTimed && <span className="hint">Total runtime ≈ {formatRuntime(totalRuntime)}</span>}
+                      {effectiveTimeline && <span className="hint">Total runtime ≈ {formatRuntime(timelineTotalSec(effectiveTimeline))}</span>}
                     </div>
                   </header>
-                  <AnimaticTimeline
-                    prodId={prod.meta.id}
-                    scenes={prod.scenes}
-                    sequences={prod.shotSequences ?? []}
-                    references={prod.references}
-                    voUrl={voObjectUrl ?? voUrl}
-                    voDuration={voDuration}
-                    onVoDurationKnown={setVoDuration}
-                    musicUrl={musicObjectUrl ?? musicUrl}
-                    musicVolume={prod.musicVolume ?? 0.5}
-                    voiceoverVolume={prod.voiceoverVolume ?? 1}
-                    onUpdateDurations={(updates) => updateDurations(updates)}
-                    onUpdateSequenceDuration={updateSequenceDuration}
-                    onUpdateVideoOffsets={(updates) => updateVideoOffsets(updates)}
-                    onUpdateSequenceVideoOffset={updateSequenceVideoOffset}
-                    onFitToVo={() => fitShotsToTotal(voDuration ?? totalRuntime)}
-                    onUpdateTotal={(sec) => fitShotsToTotal(sec)}
-                    onRemoveVideo={(shotId) => void removeShotVideo(shotId)}
-                    onToggleMute={toggleShotMuted}
-                    onToggleSequenceMute={toggleSequenceMute}
-                    onSaveAsReference={(shotId, rel) => saveAsReference(shotId, rel)}
-                  />
+                  {timelineOverride && (
+                    <TimelineSection
+                      key={prod.meta.id}
+                      prodId={prod.meta.id}
+                      production={prod}
+                      timelineOverride={timelineOverride}
+                      onImportAudio={importTimelineAudioFile}
+                      proxyBySrc={proxyBySrc}
+                      onTimelineChange={(timeline) => saveField({ timeline })}
+                      onGenerateProxies={async (rels) => {
+                        await window.cascade.generateProxies(prod.meta.id, rels);
+                        await refreshProxies(prod.meta.id);
+                      }}
+                      onSaveAsReference={(shotId, rel) => saveAsReference(shotId, rel)}
+                    />
+                  )}
                 </section>
 
                 {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Production, ProductionAssembly } from "../../../../shared/ipc.js";
 import { cascadeMedia, formatRuntime, ProdLog, type LogLine } from "./animatic.js";
+import { HelpTip } from "../common/HelpTip.js";
 
 const RESOLUTIONS = [
   { label: "1080p", width: 1920, height: 1080 },
@@ -57,11 +58,7 @@ export function AssemblyPanel({
 
   return (
     <section className="prod-panel prod-assembly">
-      <h3>5 · Assembly</h3>
-      <p className="hint">
-        Build the export package — media, CMX3600 EDL, After Effects rebuild script, and manifest — then
-        render the final MP4 from the timed animatic.
-      </p>
+      <h3>5 · Assembly<HelpTip text="Build the export package — media, CMX3600 EDL, After Effects rebuild script, and manifest — then render the final MP4 from the timed animatic." label="Assembly" /></h3>
 
       <div className="prod-assembly-layout">
         {renderPath && (

@@ -1,0 +1,11 @@
+TITLE: Animatic Verify
+FCM: NON-DROP FRAME
+
+001  SHOT0100  V     C        00:00:00:00 00:00:08:00 00:00:00:00 00:00:06:16
+M2   SHOT0100  028.8  00:00:00:00
+* FROM CLIP NAME: clips/0100.mp4
+* NOTE: Cascade speed ramp, average 1.20x - EDL carries the cut only; retime downstream
+002  VOICE     A     C        00:00:00:00 00:00:06:01 00:00:00:00 00:00:16:00
+* FROM CLIP NAME: audio/voiceover.mp3
+003  MUSIC     A     C        00:00:00:00 00:00:06:01 00:00:00:00 00:00:16:00
+* FROM CLIP NAME: audio/music.mp3

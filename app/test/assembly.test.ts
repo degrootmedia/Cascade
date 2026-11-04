@@ -507,6 +507,14 @@ describe("assemble", () => {
     expect(fs.existsSync(path.join(exportAbs, "Assembly.edl"))).toBe(true);
     expect(fs.existsSync(path.join(exportAbs, "Assembly.jsx"))).toBe(true);
     expect(fs.existsSync(path.join(exportAbs, "MANIFEST.md"))).toBe(true);
+    expect(fs.existsSync(path.join(exportAbs, "Assembly.fcpxml"))).toBe(true);
+    expect(fs.existsSync(path.join(exportAbs, "Assembly-fcpxml-report.md"))).toBe(true);
+    expect(result.fcpxmlRel).toBe("out/assembly/Assembly.fcpxml");
+    expect(fs.existsSync(path.join(exportAbs, "Assembly-premiere.xml"))).toBe(true);
+    expect(fs.existsSync(path.join(exportAbs, "Assembly-premiere-report.md"))).toBe(true);
+    expect(fs.existsSync(path.join(exportAbs, "Assembly-V1.edl"))).toBe(true);
+    expect(fs.existsSync(path.join(exportAbs, "Assembly-edl-report.md"))).toBe(true);
+    expect(result.edlTrackRels).toEqual(["out/assembly/Assembly-V1.edl"]);
     expect(result.copied).toBeGreaterThanOrEqual(5);
     expect(p.assembly?.assembledAt).toBeTruthy();
     expect(p.assembly?.totalSec).toBeCloseTo(9.5);
@@ -533,6 +541,7 @@ describe("renderAnimatic", () => {
     const calls: string[][] = [];
     const runFfmpeg = vi.fn(async (_bin: string, argv: string[]) => {
       calls.push(argv);
+      fs.writeFileSync(argv[argv.length - 1], "x"); // the mix tmp must exist to be renamed into place
     });
     const probe = vi.fn(async () => ({ durationSec: 3, hasAudio: false }));
     const tempDir = path.join(fixtureRoot, "segments");
@@ -552,7 +561,9 @@ describe("renderAnimatic", () => {
     const mixFilter = calls[4][calls[4].indexOf("-filter_complex") + 1];
     expect(mixFilter).toContain("amix");
     // final output path
-    expect(calls[4][calls[4].length - 1]).toBe(path.join(prodFolder, "out/assembly/render.mp4"));
+    // (final output: mix writes a temp file renamed into place — Item 9)
+    expect(calls[4][calls[4].length - 1]).toBe(path.join(tempDir, "render.tmp.mp4"));
+    expect(fs.existsSync(path.join(prodFolder, "out/assembly/render.mp4"))).toBe(true);
     // temp segments cleaned up
     expect(fs.existsSync(tempDir)).toBe(false);
   });

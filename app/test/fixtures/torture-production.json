@@ -1,0 +1,60 @@
+{
+  "meta": { "id": "torture", "name": "Torture Fixture", "folder": "/torture", "createdAt": "", "updatedAt": "", "stepDone": 5, "shotCount": 5 },
+  "currentStep": 5,
+  "visualStyle": "",
+  "styles": [],
+  "scenes": [
+    {
+      "id": "sc1",
+      "number": "01",
+      "heading": "TORTURE - EVERY FEATURE",
+      "shots": [
+        { "id": "s1", "number": "0100", "audio": "", "visual": "Red base clip (trimmed 1s head).", "durationSec": 4 },
+        { "id": "s2", "number": "0200", "audio": "", "visual": "Green slipped 2x clip, linked detached audio.", "durationSec": 2 },
+        { "id": "s3", "number": "0300", "audio": "", "visual": "Red-to-blue speed ramp 2x to 0.5x.", "durationSec": 4 },
+        { "id": "s4", "number": "0400", "audio": "", "visual": "Black-to-white clip played reversed.", "durationSec": 4 },
+        { "id": "s5", "number": "0500", "audio": "", "visual": "Yellow board still on the top track.", "durationSec": 2 }
+      ]
+    }
+  ],
+  "characters": [],
+  "products": [],
+  "references": [],
+  "shotSequences": [],
+  "media": [
+    { "id": "m-red", "path": "media/red.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-green", "path": "media/green.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-rb", "path": "media/rb.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-bw", "path": "media/bw.mp4", "kind": "video", "origin": "generated", "state": "present" },
+    { "id": "m-board", "path": "media/board.jpg", "kind": "image", "origin": "generated", "state": "present" },
+    { "id": "m-vo", "path": "media/vo.wav", "kind": "audio", "origin": "import", "state": "present" },
+    { "id": "m-sfx", "path": "media/sfx.wav", "kind": "audio", "origin": "import", "state": "present" },
+    { "id": "m-tone", "path": "media/tone880.wav", "kind": "audio", "origin": "import", "state": "present" }
+  ],
+  "status": {},
+  "assembly": { "fps": 24, "width": 320, "height": 180, "exportDir": "out/assembly" },
+  "assets": { "scriptMd": "script.md", "boardsDir": "boards", "voiceoverDir": "voiceover", "musicDir": "music", "outDir": "out", "referencesDir": "references", "assemblyDir": "assembly" },
+  "timeline": {
+    "version": 1,
+    "tracks": [
+      { "id": "v2", "kind": "video", "name": "V2" },
+      { "id": "v1", "kind": "video", "name": "V1" },
+      { "id": "a1", "kind": "audio", "name": "Voiceover" },
+      { "id": "a2", "kind": "audio", "name": "Muted FX", "muted": true }
+    ],
+    "clips": [
+      { "id": "c1", "trackId": "v1", "sourceKind": "video", "mediaId": "m-red", "shotId": "s1", "sourceInSec": 1, "sourceOutSec": 5, "timelineStartSec": 0, "muted": true },
+      { "id": "c2", "trackId": "v1", "sourceKind": "video", "mediaId": "m-green", "shotId": "s2", "sourceInSec": 2, "sourceOutSec": 6, "timelineStartSec": 4, "speed": 2, "linkId": "L1", "muted": true },
+      { "id": "c3", "trackId": "v1", "sourceKind": "video", "mediaId": "m-rb", "shotId": "s3", "sourceInSec": 0, "sourceOutSec": 6, "timelineStartSec": 6, "muted": true, "speedCurve": [{ "atSec": 0, "speed": 2 }, { "atSec": 2, "speed": 2 }, { "atSec": 6, "speed": 0.5 }] },
+      { "id": "c4", "trackId": "v1", "sourceKind": "video", "mediaId": "m-bw", "shotId": "s4", "sourceInSec": 0, "sourceOutSec": 4, "timelineStartSec": 9.116963119775494, "reversed": true, "muted": true },
+      { "id": "top1", "trackId": "v2", "sourceKind": "still", "mediaId": "m-board", "shotId": "s5", "holdSec": 2, "timelineStartSec": 1 },
+      { "id": "vo", "trackId": "a1", "sourceKind": "audio", "mediaId": "m-vo", "sourceInSec": 0, "sourceOutSec": 13, "timelineStartSec": 0, "role": "voiceover", "volume": 0.8, "fadeOutSec": 2 },
+      { "id": "c2a", "trackId": "a1", "sourceKind": "audio", "mediaId": "m-sfx", "sourceInSec": 2, "sourceOutSec": 6, "timelineStartSec": 4, "speed": 2, "linkId": "L1", "volume": 0.7, "fadeInSec": 0.5 },
+      { "id": "mut", "trackId": "a2", "sourceKind": "audio", "mediaId": "m-tone", "sourceInSec": 0, "sourceOutSec": 6, "timelineStartSec": 0 }
+    ],
+    "transitions": [
+      { "id": "d1", "type": "dissolve", "outgoingClipId": "c1", "incomingClipId": "c2", "durationSec": 1 }
+    ]
+  },
+  "schemaVersion": 7
+}

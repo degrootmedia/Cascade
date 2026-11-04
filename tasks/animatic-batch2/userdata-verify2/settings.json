@@ -1,0 +1,43 @@
+{
+  "provider": "gab",
+  "encryptedApiKeys": {},
+  "models": {},
+  "helpers": {},
+  "workspace": null,
+  "followProduction": false,
+  "autonomousByDefault": false,
+  "maxIterations": 250,
+  "verifyCommandsByWorkspace": {},
+  "activeProductionId": "verifybatch2001",
+  "recentWorkspaces": [],
+  "recentProductions": [
+    "D:\\Cascade\\tasks\\animatic-batch2\\seed-verify2"
+  ],
+  "mcpOnDemand": [
+    "openart"
+  ],
+  "mediaProvider": "openart",
+  "higgsfieldCliBinary": null,
+  "openartCliBinary": null,
+  "higgsfieldCreditUsd": null,
+  "accent": "#4f8ef7",
+  "theme": "dark",
+  "externalEditor": null,
+  "audioEditor": null,
+  "hiddenMediaModels": [],
+  "modelKindOverrides": {},
+  "mediaDefaults": {},
+  "mediaModelOrder": [],
+  "modelOptionExposure": {},
+  "modelSurfaces": {},
+  "modelParamDefaults": {},
+  "promptTemplates": {},
+  "whisperCliBinary": null,
+  "voiceEnabled": false,
+  "whisperModel": "base.en",
+  "screenCaptureEnabled": true,
+  "sandboxMode": "none",
+  "devMode": false,
+  "submissionDryRun": false,
+  "windowState": null
+}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+<resources>
+<format id="r1" name="FFVideoFormat180p24" frameDuration="100/2400s" width="320" height="180" colorSpace="1-1-1 (Rec. 709)"/>
+<asset id="r2" name="red.mp4" uid="m-red" src="file:///torture/media/red.mp4" start="0s" duration="16800/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r3" name="green.mp4" uid="m-green" src="file:///torture/media/green.mp4" start="0s" duration="19200/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r4" name="rb.mp4" uid="m-rb" src="file:///torture/media/rb.mp4" start="0s" duration="19200/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r5" name="bw.mp4" uid="m-bw" src="file:///torture/media/bw.mp4" start="0s" duration="4800/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r6" name="board.jpg" uid="m-board" src="file:///torture/media/board.jpg" start="0s" duration="200/2400s" hasVideo="1" format="r1"/>
+<asset id="r7" name="vo.wav" uid="m-vo" src="file:///torture/media/vo.wav" start="0s" duration="36000/2400s" hasAudio="1" format="r1"/>
+<asset id="r8" name="sfx.wav" uid="m-sfx" src="file:///torture/media/sfx.wav" start="0s" duration="19200/2400s" hasAudio="1" format="r1"/>
+<asset id="r9" name="tone880.wav" uid="m-tone" src="file:///torture/media/tone880.wav" start="0s" duration="19200/2400s" hasAudio="1" format="r1"/>
+</resources>
+<library><event name="Torture Fixture"><project name="Torture Fixture">
+<sequence format="r1" duration="31500/2400s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+<spine><asset-clip ref="r2" name="red.mp4" offset="0s" start="2400/2400s" duration="9600/2400s"><adjust-volume amount="-96dB"></adjust-volume><asset-clip ref="r6" name="board.jpg" lane="1" offset="2400/2400s" duration="4800/2400s"></asset-clip><asset-clip ref="r7" name="vo.wav" lane="-1" offset="0s" start="0s" duration="31200/2400s"><adjust-volume amount="-1.9dB"><param name="amount"><fadeOut type="linear" duration="4800/2400s"/></param></adjust-volume></asset-clip><asset-clip ref="r9" name="tone880.wav" lane="-2" offset="0s" start="0s" duration="14400/2400s" enabled="0"></asset-clip></asset-clip><transition name="Cross Dissolve" duration="2400/2400s"/><asset-clip ref="r3" name="green.mp4" offset="9600/2400s" start="4800/2400s" duration="4800/2400s"><timeMap><timept time="0s" value="0s"/><timept time="2400/2400s" value="4800/2400s"/><timept time="4800/2400s" value="9600/2400s"/></timeMap><adjust-volume amount="-96dB"></adjust-volume><asset-clip ref="r8" name="sfx.wav" lane="-1" offset="9600/2400s" start="4800/2400s" duration="4800/2400s"><timeMap><timept time="0s" value="0s"/><timept time="2400/2400s" value="4800/2400s"/><timept time="4800/2400s" value="9600/2400s"/></timeMap><adjust-volume amount="-3.1dB"><param name="amount"><fadeIn type="linear" duration="1200/2400s"/></param></adjust-volume></asset-clip></asset-clip><asset-clip ref="r4" name="rb.mp4" offset="14400/2400s" start="0s" duration="7500/2400s"><timeMap><timept time="0s" value="0s"/><timept time="2400/2400s" value="4800/2400s"/><timept time="4800/2400s" value="9600/2400s"/><timept time="6100/2400s" value="12100/2400s"/><timept time="7500/2400s" value="14400/2400s"/></timeMap><adjust-volume amount="-96dB"></adjust-volume></asset-clip><asset-clip ref="r5" name="bw.mp4" offset="21900/2400s" start="0s" duration="9600/2400s"><timeMap><timept time="0s" value="0s"/><timept time="4800/2400s" value="4800/2400s"/><timept time="9600/2400s" value="9600/2400s"/></timeMap><adjust-volume amount="-96dB"></adjust-volume></asset-clip></spine>
+</sequence></project></event></library></fcpxml>

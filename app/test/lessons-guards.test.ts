@@ -108,6 +108,10 @@ describe("lesson: rebaseProduction copy list (2026-09-03)", () => {
     // Undecided when this guard was added; not written by runProductionJob
     // handlers today. Revisit if a job starts mutating one of them.
     "storyboardPdf", "moodboard", "shotSequences", "media", "assets", "schemaVersion", "rev",
+    // Renderer-owned through ordinary saves (applyRendererState); jobs
+    // never write them. magicDismissedRefs predates its registration here;
+    // timeline landed with Animatic Expansion Item 1.
+    "magicDismissedRefs", "timeline",
   ]);
   it("every top-level Production field is copied by rebase or explicitly exempt", () => {
     const iface = read(path.join(APP, "src/shared/ipc/production.ts"));

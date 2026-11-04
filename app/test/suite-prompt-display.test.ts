@@ -112,6 +112,64 @@ describe("ImageSuite prompt display (Item 1)", () => {
     expect(contentText()).toBe(captured!.prompt);
   });
 
+  it("shows each recent generation's own prompt when clicking through, including prompts typed in this panel (Notion Bugs #4)", async () => {
+    const prodId = `p-display-${++prodSeq}`;
+    const e1 = entry("e1", "prompt one");
+    const e2 = entry("e2", "prompt two");
+    (globalThis as any).window.cascade = {
+      loadSuiteSession: async () => sessionWith("", [e2, e1]),
+      saveSuiteSession: async (_id: string, s: SuiteSession) => s,
+      modelOptions: async () => null,
+      generateSuiteImage: () => new Promise<SuiteEntry>(() => {}),
+    };
+    const prod = { meta: { id: prodId, name: "T" }, styles: [], references: [], characters: [], products: [] } as any;
+    await act(async () => {
+      root!.render(createElement(ImageSuite, {
+        prod,
+        onProdChange: () => {},
+        models: [{ id: "openart:x", displayName: "X", description: "", imageInput: true, videoInput: false, cost: null }],
+        providerName: "OpenArt",
+        providerAvailable: true,
+        seed: null,
+        onSeedConsumed: () => {},
+      }));
+    });
+    await flush();
+
+    const editor = () => document.querySelector(".prompt-content-editor") as HTMLElement;
+    const contentText = () => editor()?.textContent ?? "";
+    // Type both entry prompts in this panel (as happens when the user
+    // generates them here), so the editor has emitted both texts.
+    const typeText = async (t: string) => {
+      await act(async () => {
+        const el = editor();
+        el.focus();
+        el.textContent = t;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await flush();
+    };
+    await typeText("prompt one");
+    expect(contentText()).toBe("prompt one");
+    await typeText("prompt two");
+    expect(contentText()).toBe("prompt two");
+
+    const clickEntry = async (prompt: string) => {
+      const row = Array.from(document.querySelectorAll(".suite-rail-label")).find((b) => b.textContent?.includes(prompt)) as HTMLButtonElement;
+      expect(row).toBeTruthy();
+      await act(async () => { editor().blur(); row.click(); });
+      await flush();
+    };
+    await clickEntry("prompt one");
+    expect(document.querySelector(".suite-canvas-figure figcaption")?.textContent).toBe("prompt one");
+    expect(contentText()).toBe("prompt one");
+    await clickEntry("prompt two");
+    expect(document.querySelector(".suite-canvas-figure figcaption")?.textContent).toBe("prompt two");
+    expect(contentText()).toBe("prompt two");
+    await clickEntry("prompt one");
+    expect(contentText()).toBe("prompt one");
+  });
+
   it("never submits a Style paragraph in edit mode, even from a restored styled draft (Item 2)", async () => {
     const prodId = `p-display-${++prodSeq}`;
     let captured: SuiteGenerateRequest | null = null;

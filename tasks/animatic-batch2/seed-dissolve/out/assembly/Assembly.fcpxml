@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+<resources>
+<format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+<asset id="r2" name="red6s.mp4" uid="videos/red6s.mp4" src="file:///D:/Cascade/tasks/animatic-batch2/seed-dissolve/videos/red6s.mp4" start="0s" duration="16800/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r3" name="blue6s.mp4" uid="videos/blue6s.mp4" src="file:///D:/Cascade/tasks/animatic-batch2/seed-dissolve/videos/blue6s.mp4" start="0s" duration="16800/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+</resources>
+<library><event name="Dissolve Repro"><project name="Dissolve Repro">
+<sequence format="r1" duration="19200/2400s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+<spine><asset-clip ref="r2" name="red6s.mp4" offset="0s" start="2400/2400s" duration="9600/2400s"></asset-clip><transition name="Cross Dissolve" duration="4800/2400s"/><asset-clip ref="r3" name="blue6s.mp4" offset="9600/2400s" start="2400/2400s" duration="9600/2400s"></asset-clip></spine>
+</sequence></project></event></library></fcpxml>

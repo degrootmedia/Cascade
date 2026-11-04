@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+<resources>
+<format id="r1" name="FFVideoFormat1080p24" frameDuration="100/2400s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+<asset id="r2" name="red6s-silent.mp4" uid="videos/red6s-silent.mp4" src="file:///D:/Cascade/tasks/animatic-batch2/seed-verify2/videos/red6s-silent.mp4" start="0s" duration="19200/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r3" name="blue6s-silent.mp4" uid="videos/blue6s-silent.mp4" src="file:///D:/Cascade/tasks/animatic-batch2/seed-verify2/videos/blue6s-silent.mp4" start="0s" duration="19200/2400s" hasVideo="1" hasAudio="1" format="r1"/>
+<asset id="r4" name="green.jpg" uid="stills/green.jpg" src="file:///D:/Cascade/tasks/animatic-batch2/seed-verify2/stills/green.jpg" start="0s" duration="200/2400s" hasVideo="1" format="r1"/>
+<asset id="r5" name="yellow.jpg" uid="stills/yellow.jpg" src="file:///D:/Cascade/tasks/animatic-batch2/seed-verify2/stills/yellow.jpg" start="0s" duration="200/2400s" hasVideo="1" format="r1"/>
+<asset id="r6" name="tone8s.mp3" uid="audio/tone8s.mp3" src="file:///D:/Cascade/tasks/animatic-batch2/seed-verify2/audio/tone8s.mp3" start="0s" duration="24000/2400s" hasAudio="1" format="r1"/>
+</resources>
+<library><event name="Batch verify"><project name="Batch verify">
+<sequence format="r1" duration="48000/2400s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+<spine><asset-clip ref="r2" name="red6s-silent.mp4" offset="0s" start="0s" duration="14400/2400s"><asset-clip ref="r6" name="tone8s.mp3" lane="-1" offset="0s" start="0s" duration="19200/2400s"><adjust-volume amount="-6.0dB"></adjust-volume></asset-clip></asset-clip><asset-clip ref="r3" name="blue6s-silent.mp4" offset="14400/2400s" start="0s" duration="14400/2400s"></asset-clip><asset-clip ref="r4" name="green.jpg" offset="28800/2400s" duration="9600/2400s"></asset-clip><transition name="Cross Dissolve" duration="4800/2400s"/><asset-clip ref="r5" name="yellow.jpg" offset="38400/2400s" duration="9600/2400s"></asset-clip></spine>
+</sequence></project></event></library></fcpxml>

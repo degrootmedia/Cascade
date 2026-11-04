@@ -1,0 +1,29 @@
+TITLE: Torture Fixture
+FCM: NON-DROP FRAME
+
+001  SHOT0100  V     C        00:00:01:00 00:00:02:00 00:00:00:00 00:00:01:00
+* FROM CLIP NAME: clips/0100.mp4
+002  SHOT0500  V     C        00:00:00:00 00:00:00:00 00:00:01:00 00:00:03:00
+* FROM CLIP NAME: shots/0500.jpg
+003  SHOT0100  V     C        00:00:04:00 00:00:04:12 00:00:03:00 00:00:03:12
+* FROM CLIP NAME: clips/0100.mp4
+004  SHOT0100  V     C        00:00:04:12 00:00:05:00 00:00:03:12 00:00:04:00
+* FROM CLIP NAME: clips/0100.mp4
+005  SHOT0200  V     D    024 00:00:02:00 00:00:03:00 00:00:04:00 00:00:04:12
+* FROM CLIP NAME: clips/0200.mp4
+* NOTE: Cascade cross-dissolve (centered)
+006  SHOT0200  V     C        00:00:03:00 00:00:06:00 00:00:04:12 00:00:06:00
+M2   SHOT0200  048.0  00:00:03:00
+* FROM CLIP NAME: clips/0200.mp4
+* NOTE: Cascade speed 2.00x - see the M2 line
+007  SHOT0300  V     C        00:00:00:00 00:00:06:00 00:00:06:00 00:00:09:03
+M2   SHOT0300  046.2  00:00:00:00
+* FROM CLIP NAME: clips/0300.mp4
+* NOTE: Cascade speed ramp, average 1.92x - EDL carries the cut only; retime downstream
+008  SHOT0400  V     C        00:00:00:00 00:00:04:00 00:00:09:03 00:00:13:03
+M2   SHOT0400  -024.0  00:00:00:00
+* FROM CLIP NAME: clips/0400.mp4
+* NOTE: Cascade speed 1.00x reversed - see the M2 line
+009  VOICE     A     C        00:00:00:00 00:00:13:03 00:00:00:00 00:00:13:03
+* FROM CLIP NAME: audio/voiceover.wav
+* NOTE: voiceover duration unverified

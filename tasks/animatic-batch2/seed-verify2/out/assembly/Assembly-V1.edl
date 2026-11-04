@@ -1,0 +1,13 @@
+TITLE: Batch verify V1 (V1)
+FCM: NON-DROP FRAME
+
+001  SHOT0100  V     C        00:00:00:00 00:00:06:00 00:00:00:00 00:00:06:00
+* FROM CLIP NAME: videos/red6s-silent.mp4
+002  SHOT0200  V     C        00:00:00:00 00:00:06:00 00:00:06:00 00:00:12:00
+* FROM CLIP NAME: videos/blue6s-silent.mp4
+003  SHOT0300  V     C        00:00:00:00 00:00:00:00 00:00:12:00 00:00:16:00
+* FROM CLIP NAME: stills/green.jpg
+* NOTE: STILL (freeze) in Cascade
+004  SHOT0400  V     D    048 00:00:00:00 00:00:00:00 00:00:16:00 00:00:20:00
+* FROM CLIP NAME: stills/yellow.jpg
+* NOTE: STILL (freeze) in Cascade

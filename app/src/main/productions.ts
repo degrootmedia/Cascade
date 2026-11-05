@@ -876,6 +876,12 @@ export function applyRendererState(fresh: ProductionFile, incoming: Production):
   fresh.references = Array.isArray(p.references) ? p.references : [];
   fresh.suggestedReferences = Array.isArray(p.suggestedReferences) ? p.suggestedReferences : [];
   fresh.referenceCategories = Array.isArray(p.referenceCategories) ? p.referenceCategories : [];
+  // The Uncategorized group's tile size rides ordinary saves like a real
+  // category's `tileSize` (renderer-owned; clamped to the slider's 80–320
+  // range). An absent snapshot field leaves the fresh value alone.
+  if (typeof p.uncategorizedTileSize === "number" && Number.isFinite(p.uncategorizedTileSize)) {
+    fresh.uncategorizedTileSize = Math.min(320, Math.max(80, Math.round(p.uncategorizedTileSize)));
+  }
   if (p.openArt && typeof p.openArt.model === "string" && typeof p.openArt.resolution === "string") {
     fresh.openArt = { model: p.openArt.model, resolution: p.openArt.resolution };
     if (typeof p.openArt.quality === "string" && p.openArt.quality.trim()) {

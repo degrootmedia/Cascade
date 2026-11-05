@@ -69,6 +69,31 @@ describe("applyRendererState", () => {
     expect(merged.scriptSource).toBe("C:/script.md");
   });
 
+  it("preserves each reference category's tileSize through the merge (Item 3 slider survives reload)", () => {
+    const fresh = baseProduction();
+    const incoming = baseProduction({
+      referenceCategories: [
+        { id: "c1", name: "Heroes", tileSize: 240 },
+        { id: "c2", name: "Sets" },
+      ],
+    });
+    const merged = applyRendererState(fresh, incoming);
+    expect(merged.referenceCategories).toEqual([
+      { id: "c1", name: "Heroes", tileSize: 240 },
+      { id: "c2", name: "Sets" },
+    ]);
+  });
+
+  it("preserves the Uncategorized tile size through the merge, clamped to the slider range", () => {
+    const merged = applyRendererState(baseProduction(), baseProduction({ uncategorizedTileSize: 200 }));
+    expect(merged.uncategorizedTileSize).toBe(200);
+    const clamped = applyRendererState(baseProduction(), baseProduction({ uncategorizedTileSize: 9999 }));
+    expect(clamped.uncategorizedTileSize).toBe(320);
+    // An absent snapshot field leaves the fresh document's value alone.
+    const kept = applyRendererState(baseProduction({ uncategorizedTileSize: 160 }), baseProduction());
+    expect(kept.uncategorizedTileSize).toBe(160);
+  });
+
   it("keeps the main-owned outdated panels over a stale renderer snapshot", () => {
     const live: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "v" };
     const old: ProductionShot = {

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { DragEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent } from "react";
 import type { CharacterSheet, CharacterSheetGenOptions, CharacterSheetView, CliModelSchema, CustomRef, GenParams, ImageGenAspectRatio, OpenArtModelChoice, Production, ProductionShot, ReferenceCategory, ReferenceImageGenOptions } from "../../../../shared/ipc.js";
 import { DEFAULT_ASPECT_RATIO, isImageModel, resolveAspectRatio } from "../../../../shared/ipc.js";
 import { addRefTag, refTagNames, stripRefTags } from "../../../../shared/prompt-grammar.js";
@@ -23,7 +23,6 @@ import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
 import { MediaLightbox } from "../common/MediaLightbox.js";
-import { HelpTip } from "../common/HelpTip.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
@@ -105,6 +104,90 @@ export function reorderRefGroup<T extends { id: string }>(refs: T[], draggedIds:
   if (insert < 0) return refs;
   if (after) insert += 1;
   return [...rest.slice(0, insert), ...moved, ...rest.slice(insert)];
+}
+
+/** How long the "+ card" click waits for the vision auto-draft before
+ *  falling back to manual entry — a hung provider must never block it. */
+export const DESCRIBE_DRAFT_TIMEOUT_MS = 30_000;
+
+/** Injected seams for the "+ card" flow (`runDescribeCardFlow`), so the click
+ *  behavior is unit-testable without mounting the whole workspace. */
+export interface DescribeCardDeps {
+  /** Vision auto-draft: resolves the drafted one-liner ("" when none). */
+  describe: () => Promise<string>;
+  /** Open the card editor prefilled with `initial`; null = cancelled. */
+  ask: (initial: string) => Promise<string | null>;
+  /** Persist the confirmed card (already trimmed/capped; "" clears it). */
+  save: (clean: string) => void;
+  /** Drives the tile button's disabled "Drafting…" state. */
+  onDraftingChange?: (drafting: boolean) => void;
+  /** Auto-draft timeout; defaults to `DESCRIBE_DRAFT_TIMEOUT_MS`. */
+  timeoutMs?: number;
+}
+
+/**
+ * The reference-tile "+ card" click, end to end. A click always lands in the
+ * editor: with no card yet and an image present, the vision auto-draft runs
+ * first (Drafting state on, bounded by a timeout) and its line pre-fills the
+ * editor for review — the draft is NEVER saved without being shown. A failed,
+ * empty, or timed-out draft opens the editor empty for manual entry, and
+ * references with no image (or a card already) go straight there. Only
+ * confirming the editor saves; cancelling writes nothing.
+ */
+export async function runDescribeCardFlow(
+  ref: Pick<CustomRef, "visualSummary" | "artwork" | "imagePath">,
+  deps: DescribeCardDeps,
+): Promise<void> {
+  let initial = ref.visualSummary ?? "";
+  if (!initial && (ref.artwork || ref.imagePath)) {
+    deps.onDraftingChange?.(true);
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Reference description timed out.")), deps.timeoutMs ?? DESCRIBE_DRAFT_TIMEOUT_MS);
+      });
+      try {
+        initial = (await Promise.race([deps.describe(), timeout])) ?? "";
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    } catch {
+      initial = "";
+    } finally {
+      deps.onDraftingChange?.(false);
+    }
+  }
+  const text = await deps.ask(initial);
+  if (text === null) return;
+  deps.save(text.trim().slice(0, 300));
+}
+
+/** Write a confirmed card onto its reference ("" clears it). Pure — the
+ *  workspace feeds the result through its normal field save. */
+/** Reference tile size bounds + default (px) for a category's "Reference
+ *  size" slider: the value feeds the grid's `--ref-tile-min` minimum track
+ *  width, and tile media height follows proportionally in CSS. */
+export const REF_TILE_MIN = 80;
+export const REF_TILE_MAX = 320;
+export const REF_TILE_DEFAULT = 140;
+
+/** A category's effective tile size: its stored `tileSize` clamped to the
+ *  slider range, or the 140px default when unset (older projects). */
+export function refTileSize(category: Pick<ReferenceCategory, "tileSize">): number {
+  const raw = category.tileSize;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return REF_TILE_DEFAULT;
+  return Math.min(REF_TILE_MAX, Math.max(REF_TILE_MIN, Math.round(raw)));
+}
+
+/** Write a slider-chosen size onto its category (clamped). Pure — the
+ *  workspace feeds the result through its normal field save. */
+export function applyCategoryTileSize(categories: ReferenceCategory[], categoryId: string, size: number): ReferenceCategory[] {
+  const clamped = refTileSize({ tileSize: size });
+  return categories.map((c) => (c.id === categoryId ? { ...c, tileSize: clamped } : c));
+}
+
+export function applyRefCard(refs: CustomRef[], refId: string, clean: string): CustomRef[] {
+  return refs.map((r) => (r.id === refId ? { ...r, visualSummary: clean || undefined } : r));
 }
 
 /** Grid of named reference slots: pick a name (populated from the script) and
@@ -234,13 +317,22 @@ function CustomRefSection({ items, onAdd, onAttach, onRemoveImage, onRemove, onU
   );
 }
 
-export function ReferenceCategorySection({ prodId, categories, items, usage, onAddCategory, onRenameCategory, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
+export function ReferenceCategorySection({ prodId, categories, items, usage, describingRefId, uncategorizedTileSize, onAddCategory, onSetCategoryTileSize, onRenameCategory, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onMove, onReorder, onGenerate, onEditRef, onRescan, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   categories: ReferenceCategory[];
   items: CustomRef[];
   /** Per-reference usage (see `referenceUsage`): drives the in-use badge. */
   usage?: Map<string, ReferenceUsage>;
+  /** Reference whose vision card draft is in flight (its tile button shows
+   *  the disabled "Drafting…" state); null/absent when idle. */
+  describingRefId?: string | null;
   onAddCategory: (name: string) => void;
+  /** Stored tile size (px) for the synthesized Uncategorized group, which
+   *  has no category record to carry its own `tileSize`. */
+  uncategorizedTileSize?: number;
+  /** Persist a category header slider's tile size (`tileSize`, px). The
+   *  Uncategorized group reports under the empty id (""). */
+  onSetCategoryTileSize?: (id: string, size: number) => void;
   onRenameCategory: (id: string, name: string) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
   /** A video/audio file dropped on a category (media reference import). */
@@ -324,7 +416,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
   const add = useCallback(() => { if (name.trim()) { onAddReference(name, categoryId || undefined); setName(""); } }, [name, categoryId, onAddReference]);
   // Perf 1.5: stable group list per categories identity; per-category item
   // slices are memoized below so a rename keystroke doesn't rebuild them.
-  const groups = useMemo(() => [{ id: "", name: "Uncategorized" }, ...categories], [categories]);
+  const groups = useMemo(() => [{ id: "", name: "Uncategorized", tileSize: uncategorizedTileSize }, ...categories], [categories, uncategorizedTileSize]);
   const itemsByCategory = useMemo(() => {
     const map = new Map<string, CustomRef[]>();
     for (const g of groups) map.set(g.id, []);
@@ -337,7 +429,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
   }, [groups, items]);
   return (
     <div className="prod-refs">
-      <label className="prod-label">Reference images<HelpTip text="Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto From image to generate a style. Click to select, Ctrl/Cmd-click to add, Shift-click for a range, then drag the selection to reorder or move it." label="Reference images" /></label>
+      <label className="prod-label">Reference images</label>
       <div className="prod-category-new">
         <input className="prod-ref-new-name" value={categoryName} placeholder="New category name" onChange={(e) => setCategoryName(e.target.value)} />
         <button className="prod-btn" disabled={!categoryName.trim()} onClick={() => { onAddCategory(categoryName); setCategoryName(""); }}><PlusIcon size={14} /> Add category</button>
@@ -347,7 +439,7 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
       </div>
 <div className="prod-category-list">
         {groups.map((category) => (
-          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} selectedIds={selectedIds} onSelect={select} onAddReference={onAddReference} onAddMediaFile={onAddMediaFile} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
+          <CategoryPanel key={category.id || "uncategorized"} prodId={prodId} category={category} items={itemsByCategory.get(category.id) ?? []} usage={usage} describingRefId={describingRefId} selectedIds={selectedIds} onSelect={select} onSetCategoryTileSize={onSetCategoryTileSize} onAddReference={onAddReference} onAddMediaFile={onAddMediaFile} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onRenameCategory={onRenameCategory} onMove={onMove} onReorder={onReorder} onGenerate={onGenerate} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
         ))}
       </div>
       {selectedIds.size > 0 && (
@@ -372,13 +464,17 @@ export function ReferenceCategorySection({ prodId, categories, items, usage, onA
  *  Perf 1.5: memoized with a data-only comparator — the parent passes fresh
  *  inline callbacks every render, so function identity is ignored and only
  *  prodId + category fields + per-item data decide re-render. */
-const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, selectedIds, onSelect, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
+const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usage, describingRefId, selectedIds, onSelect, onSetCategoryTileSize, onAddReference, onAddMediaFile, onAttach, onRemove, onRename, onRenameCategory, onMove, onReorder, onGenerate, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe }: {
   prodId: string;
   category: ReferenceCategory;
   items: CustomRef[];
   usage?: Map<string, ReferenceUsage>;
+  /** Reference whose vision card draft is in flight; see the section prop. */
+  describingRefId?: string | null;
   selectedIds: Set<string>;
   onSelect: (id: string, mode: "single" | "toggle" | "range", order: string[]) => void;
+  /** Persist this category's header-slider tile size (`tileSize`, px). */
+  onSetCategoryTileSize?: (id: string, size: number) => void;
   onAddReference: (name: string, categoryId?: string, artwork?: string) => void;
   onAddMediaFile?: (file: File, categoryId?: string) => void;
   onAttach: (id: string) => void;
@@ -397,6 +493,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
 }) {
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
+  const tileSize = refTileSize(category);
   // The panel's item order is the axis a Shift range selects along.
   const order = useMemo(() => items.map((r) => r.id), [items]);
   const handleSelect = useCallback((id: string, mode: "single" | "toggle" | "range") => onSelect(id, mode, order), [onSelect, order]);
@@ -419,13 +516,21 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
           <span className={"prod-caret" + (open ? " open" : "")}>▸</span>
         </button>
         <input className="prod-category-name" value={category.name} disabled={!category.id} onChange={(e) => onRenameCategory(category.id, e.target.value)} />
-        <span className="hint">({items.length})</span>
-        <button className="prod-ref-gen-btn" title={`Generate a new reference image into "${category.name}"`} onClick={() => onGenerate(category.id || undefined)}>✨</button>
+        <div className="prod-category-tools">
+          <span className="hint prod-category-count">({items.length})</span>
+          {onSetCategoryTileSize && (
+            <label className="prod-category-size">
+              <span>Size</span>
+              <input type="range" min={REF_TILE_MIN} max={REF_TILE_MAX} step={4} value={tileSize} aria-label="Reference size" title="Reference size" onChange={(e) => onSetCategoryTileSize(category.id, Number(e.target.value))} />
+            </label>
+          )}
+          <button className="prod-ref-gen-btn" title={`Generate a new reference image into "${category.name}"`} onClick={() => onGenerate(category.id || undefined)}>✨</button>
+        </div>
       </div>
       {open && (
-        <div className="prod-ref-grid">
+        <div className="prod-ref-grid" style={{ "--ref-tile-min": `${tileSize}px` } as CSSProperties}>
           {items.map((r) => (
-            <RefFigure key={r.id} prodId={prodId} refItem={r} inUseTitle={inUseTitleFor(usage, r.id)} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
+            <RefFigure key={r.id} prodId={prodId} refItem={r} describing={describingRefId === r.id} inUseTitle={inUseTitleFor(usage, r.id)} categoryName={category.name} categoryKind={category.kind} selected={selectedIds.has(r.id)} selectedIds={selectedIds} onSelect={handleSelect} onAttach={onAttach} onRemove={onRemove} onRename={onRename} onReorder={onReorder} onEditRef={onEditRef} onVideoStillSaved={onVideoStillSaved} onSetPurpose={onSetPurpose} onDescribe={onDescribe} />
           ))}
           {!items.length && <span className="hint">Drop references here.</span>}
         </div>
@@ -437,14 +542,18 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
 /** Data-only equality for a category panel: function identities are ignored
  *  (the parent recreates them per render); only visible data matters. */
 function areCategoryPanelsEqual(
-  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
-  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; selectedIds: Set<string> },
+  prev: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; describingRefId?: string | null; selectedIds: Set<string> },
+  next: { prodId: string; category: ReferenceCategory; items: CustomRef[]; usage?: Map<string, ReferenceUsage>; describingRefId?: string | null; selectedIds: Set<string> },
 ): boolean {
   if (prev.prodId !== next.prodId) return false;
   if (prev.category.id !== next.category.id || prev.category.name !== next.category.name) return false;
+  // The size slider + grid track repaint live while the slider moves.
+  if (refTileSize(prev.category) !== refTileSize(next.category)) return false;
   // Selection is a fresh Set on every change, so identity covers any tile
   // entering/leaving the selection (the panel must repaint its highlights).
   if (prev.selectedIds !== next.selectedIds) return false;
+  // The Drafting button state repaints when the in-flight draft changes.
+  if ((prev.describingRefId ?? null) !== (next.describingRefId ?? null)) return false;
   if (!areRefItemListsEqual(prev.items, next.items)) return false;
   // The in-use badge repaints when any tile's usage verdict changes.
   for (const item of next.items) {
@@ -503,9 +612,12 @@ function dropSideFor(e: DragEvent<HTMLElement>): "before" | "after" {
  *  bounds off-screen layout cost without a virtualization dependency, and
  *  video refs lazy-mount (poster glyph until hover/expand) so N videos don't
  *  open N media elements + metadata loads. */
-export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge, inUseTitle }: {
+export const RefFigure = memo(function RefFigure({ prodId, refItem, describing = false, categoryName, categoryKind, selected = false, selectedIds, onSelect, onAttach, onRemove, onRename, onReorder, onEditRef, onVideoStillSaved, onSetPurpose, onDescribe, variant = "row", thumbEdge, inUseTitle }: {
   prodId: string;
   refItem: CustomRef;
+  /** The vision card draft is in flight for this tile: the card button shows
+   *  a disabled "Drafting…" state so the click never looks dead. */
+  describing?: boolean;
   categoryName?: string;
   categoryKind?: string;
   onSetPurpose?: (id: string, purpose: CustomRef["purpose"]) => void;
@@ -731,7 +843,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
             <option value="inspiration">Inspiration</option>
           </select>
           {!r.purpose && <span className="prod-ref-purpose-inferred">auto</span>}
-          {onDescribe && <button className="prod-ref-describe" title={r.visualSummary ? `Shows: ${r.visualSummary} — click to edit` : "Add a one-line 'what this shows' card (helps Magic cast it correctly)"} onClick={() => onDescribe(r)}>{r.visualSummary ? "✎ card" : "+ card"}</button>}
+          {onDescribe && <button className="prod-ref-describe" disabled={describing} aria-busy={describing || undefined} title={describing ? "Drafting the card from the image…" : r.visualSummary ? `Shows: ${r.visualSummary} — click to edit` : "Add a one-line 'what this shows' card (helps Magic cast it correctly)"} onClick={() => onDescribe(r)}>{describing ? "Drafting…" : r.visualSummary ? "✎ card" : "+ card"}</button>}
         </div>
       )}
       {zoom && (
@@ -755,6 +867,7 @@ export const RefFigure = memo(function RefFigure({ prodId, refItem, categoryName
   prev.thumbEdge === next.thumbEdge &&
   prev.inUseTitle === next.inUseTitle &&
   prev.selected === next.selected &&
+  !!prev.describing === !!next.describing &&
   prev.selectedIds === next.selectedIds &&
   prev.onSelect === next.onSelect &&
   prev.categoryName === next.categoryName &&

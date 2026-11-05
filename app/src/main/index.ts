@@ -5849,7 +5849,10 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const apiKey = settings.getApiKey();
     if (!apiKey) throw new Error("Add your API key in Settings first.");
     await describeReference(p, refId, apiKey, settings.getModel(), (m, l) => productionEmit(id, m, l), settings.getBaseUrl());
-    productions.saveProduction(p);
+    // Draft-only: the returned snapshot carries the drafted card in memory,
+    // but it is deliberately NOT persisted — the renderer shows it in the
+    // card editor first and saves through the normal field save only when
+    // the user confirms, so a draft is never written silently.
     return p;
   });
 

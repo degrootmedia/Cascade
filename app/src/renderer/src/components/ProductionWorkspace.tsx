@@ -22,7 +22,7 @@ import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
 import { TimelinePreview, cascadeMedia, ProdLog, type LogLine, formatRuntime, STEPS } from "./production/animatic.js";
 import { TimelineEditor } from "./production/timeline-editor.js";
 import { buildTimelineOverride, EMPTY_LOOP_REGION, timelineTotalSec, type TimelineLoopRegion, type TimelineOverride } from "./production/timeline-preview.js";
-import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName } from "./production/references.js";
+import { ReferenceCategorySection, RefGenModal, CharacterBuilderSection, allPromptRefs, referenceNamesById, promptRefsForShot, shotStyleSelectValue, reorderRefGroup, uniqueRefName, runDescribeCardFlow, applyRefCard, applyCategoryTileSize, refTileSize } from "./production/references.js";
 import { PromptSidePanel } from "./production/prompt-panel.js";
 import { MagicCastReview } from "./production/magic-cast-review.js";
 import { magicCastReviewCount, type MagicCastNeed } from "../../../shared/magic-refs.js";
@@ -266,6 +266,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   const [nameDraft, setNameDraft] = useState("");
   // step 2: per-style refinement (tracks which style card is refining)
   const [refiningStyleId, setRefiningStyleId] = useState<string | null>(null);
+  /** Reference tile whose "+ card" vision draft is in flight (Drafting state). */
+  const [describingRefId, setDescribingRefId] = useState<string | null>(null);
   // step 2: generating a style from an imported/pasted image (spinner on buttons)
   const [styleImgBusy, setStyleImgBusy] = useState(false);
   const [stylePresets, setStylePresets] = useState<{ name: string; prompt: string; file: string }[]>([]);
@@ -300,6 +302,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   useEffect(() => genQueue.subscribe(bumpGenQueue), []);
   // step 3: board generation
   const [frameZoom, setFrameZoom] = useState(250);
+  // step 2: Design panel column width — the bottom "Panel width" slider,
+  // modeled on Step 3's Frame size bar (UI-only, like frameZoom).
+  const [designPanelWidth, setDesignPanelWidth] = useState(1100);
+  // step 1: Script panel uniform zoom (%) — the bottom "Script zoom" slider,
+  // same fixed bar as Steps 2/3 (UI-only, like frameZoom).
+  const [scriptZoom, setScriptZoom] = useState(100);
   const [boardsBusy, setBoardsBusy] = useState(false);
   // Step 3: whether the Audio/Visual direction boxes render under each frame.
   const [showBoardText, setShowBoardText] = useState(true);
@@ -1549,6 +1557,22 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     saveField({ referenceCategories: (prod.referenceCategories ?? []).map((c) => c.id === id ? { ...c, name: name.trim() } : c) });
   }
 
+  /** Persist a category's "Reference size" slider value (same saveField path
+   *  as renames). Reads prodRef — not the render-scope prod — so a
+   *  memoized panel's long-lived callback never writes a stale category
+   *  list back during a drag. */
+  function setCategoryTileSize(id: string, size: number) {
+    const current = prodRef.current;
+    if (!current) return;
+    // The Uncategorized group ("") has no category record: its size lives
+    // on the production itself (`uncategorizedTileSize`).
+    if (!id) {
+      saveField({ uncategorizedTileSize: refTileSize({ tileSize: size }) });
+      return;
+    }
+    saveField({ referenceCategories: applyCategoryTileSize(current.referenceCategories ?? [], id, size) });
+  }
+
   function setRefPurpose(id: string, purpose: CustomRef["purpose"]) {
     if (!prod) return;
     saveField({ references: (prod.references ?? []).map((r) => (r.id === id ? { ...r, purpose, styleOnly: purpose === "style" ? true : undefined } : r)) });
@@ -1557,31 +1581,30 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   /** Edit a reference's one-line "what this shows" card (Magic binding aid).
    *  Empty input clears it; when empty, offer a vision auto-draft first. */
   function describeRef(ref: CustomRef) {
-    if (!prod) return;
-    void (async () => {
-      let initial = ref.visualSummary ?? "";
-      if (!initial && (ref.artwork || ref.imagePath)) {
-        try {
-          const drafted = await window.cascade.describeReference(prod.meta.id, ref.id);
-          applySnapshot(drafted); void refreshList();
-          const fresh = (drafted.references ?? []).find((r) => r.id === ref.id);
-          initial = fresh?.visualSummary ?? "";
-          if (initial) return;
-        } catch { /* fall through to manual entry */ }
-      }
-      const text = await askName({
+    if (!prod || describingRefId === ref.id) return;
+    const prodId = prod.meta.id;
+    void runDescribeCardFlow(ref, {
+      // The IPC returns a draft-only snapshot (main does not persist it):
+      // read the drafted line out of it, but never apply it as saved state —
+      // the card is only written when the user confirms the editor below.
+      describe: async () => {
+        const drafted = await window.cascade.describeReference(prodId, ref.id);
+        return (drafted.references ?? []).find((r) => r.id === ref.id)?.visualSummary ?? "";
+      },
+      ask: (initial) => askName({
         title: `What does “${ref.name}” show?`,
         label: "One line Magic uses to cast this reference correctly (not prompt direction). Clear it to remove.",
         initial,
         confirmLabel: "Save card",
         validate: () => null,
-      });
-      if (text === null) return;
-      const latest = prodRef.current;
-      if (!latest) return;
-      const clean = text.trim().slice(0, 300);
-      saveField({ references: (latest.references ?? []).map((r) => (r.id === ref.id ? { ...r, visualSummary: clean || undefined } : r)) });
-    })();
+      }),
+      save: (clean) => {
+        const latest = prodRef.current;
+        if (!latest) return;
+        saveField({ references: applyRefCard(latest.references ?? [], ref.id, clean) });
+      },
+      onDraftingChange: (drafting) => setDescribingRefId(drafting ? ref.id : null),
+    });
   }
 
   function moveReference(ids: string[], categoryId?: string) {
@@ -4235,7 +4258,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ) : (
           <>
         {prod.currentStep === 1 && (
-          <section className="prod-panel">
+          <>
+          <section className="prod-panel prod-script-panel" style={{ "--script-zoom": `${scriptZoom / 100}` } as React.CSSProperties}>
             <h3>1 · Script ingestion</h3>
             <div className="prod-ingest">
               <button disabled={busy} title="Pick a script file — PDF · DOCX · TXT · MD (legacy .doc must be re-saved as .docx)" onClick={async () => { const f = await window.cascade.pickScriptFile(); if (f) setSource(f); }}>
@@ -4266,10 +4290,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             <ShotTable prod={prod} onMutation={apply} onToggleDisabled={toggleShotDisabled} />
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
           </section>
+          <label className="prod-frame-zoom">Script zoom <input type="range" min={80} max={180} step={5} value={scriptZoom} aria-label="Script zoom" onChange={(e) => setScriptZoom(Number(e.target.value))} /></label>
+          </>
         )}
 
         {prod.currentStep === 2 && (
-          <section className="prod-panel">
+          <section className="prod-panel prod-design-panel" style={{ "--design-panel-width": `${designPanelWidth}px` } as React.CSSProperties}>
             <h3>2 · Design</h3>
 
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
@@ -4526,7 +4552,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               />
             </DesignSection>
 
-            <DesignSection title="References" prodId={prod.meta.id}>
+            <DesignSection title="References" prodId={prod.meta.id} help="Create categories for your references, then drag images between them. Paste an image (Ctrl+V) to create a reference — drag a reference onto From image to generate a style. Click to select, Ctrl/Cmd-click to add, Shift-click for a range, then drag the selection to reorder or move it.">
               {(prod.suggestedReferences ?? []).length > 0 && (
                 <section className="prod-suggestions">
                   <label className="prod-label">Suggested references<HelpTip text="Characters and props found in the script. Add them manually and place them in any category." label="Suggested references" /></label>
@@ -4550,6 +4576,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 usage={refUsage}
                 onAddCategory={addCategory}
                 onRenameCategory={renameCategory}
+                onSetCategoryTileSize={setCategoryTileSize}
+                uncategorizedTileSize={prod.uncategorizedTileSize}
                 onAddReference={addRef}
                 onAddMediaFile={(file, categoryId) => void addDroppedMediaReference(file, categoryId)}
                 onAttach={(id) => void attachRefArtwork(id)}
@@ -4562,6 +4590,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 onRescan={rescanRefFolder}
                 onSetPurpose={setRefPurpose}
                 onDescribe={describeRef}
+                describingRefId={describingRefId}
                 onVideoStillSaved={(next) => { applySnapshot(next); void refreshList(); }}
               />
             </DesignSection>
@@ -4583,6 +4612,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             )}
 
             {visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
+            <label className="prod-frame-zoom">Panel width <input type="range" min={720} max={3200} step={20} value={designPanelWidth} aria-label="Panel width" onChange={(e) => setDesignPanelWidth(Number(e.target.value))} /></label>
           </section>
         )}
 
@@ -4888,7 +4918,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
               )}
               </div>
             )}
-            {shotCount > 0 && <label className="prod-frame-zoom">Frame size <input type="range" min={180} max={440} step={10} value={frameZoom} onChange={(e) => setFrameZoom(Number(e.target.value))} /><span>{frameZoom}px</span></label>}
+            {shotCount > 0 && <label className="prod-frame-zoom">Frame size <input type="range" min={180} max={440} step={10} value={frameZoom} onChange={(e) => setFrameZoom(Number(e.target.value))} /></label>}
             {shotCount === 0 && visibleLog.length > 0 && <ProdLog lines={visibleLog} onRetry720p={(action) => void retryWith720p(action)} />}
             {graphShotId && (() => {
               const gs = prod.scenes.flatMap((sc) => sc.shots).find((s) => s.id === graphShotId);

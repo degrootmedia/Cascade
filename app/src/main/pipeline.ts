@@ -574,6 +574,9 @@ export async function stylePromptFromImage(
  * production. Throws when the reference has no readable image or the
  * model returns nothing usable (the UI falls back to manual entry).
  */
+/** Vision-draft a reference's one-line card into `p` (in memory only). The
+ *  caller must not persist the result until the user has reviewed the draft
+ *  in the card editor — see the `production:describeReference` handler. */
 export async function describeReference(
   p: Production,
   refId: string,

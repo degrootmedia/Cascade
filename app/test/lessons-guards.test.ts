@@ -111,7 +111,7 @@ describe("lesson: rebaseProduction copy list (2026-09-03)", () => {
     // Renderer-owned through ordinary saves (applyRendererState); jobs
     // never write them. magicDismissedRefs predates its registration here;
     // timeline landed with Animatic Expansion Item 1.
-    "magicDismissedRefs", "timeline",
+    "magicDismissedRefs", "timeline", "uncategorizedTileSize",
   ]);
   it("every top-level Production field is copied by rebase or explicitly exempt", () => {
     const iface = read(path.join(APP, "src/shared/ipc/production.ts"));

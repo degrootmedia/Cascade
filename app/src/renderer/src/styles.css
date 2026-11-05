@@ -403,6 +403,13 @@ body {
 .prod-body { flex: 1; min-height: 0; overflow-y: auto; }
 .prod-panel { padding: 20px 24px 40px; max-width: 1100px; margin: 0 auto; }
 .prod-storyboard-panel { max-width: none; }
+/* Design keeps the centered panel column; the bottom "Panel width" slider
+   (the same fixed bar as Storyboard's Frame size) drives its width via
+   --design-panel-width, defaulting to the classic fixed 1100px. */
+.prod-design-panel { max-width: var(--design-panel-width, 1100px); margin: 0 auto; }
+/* Script step: the bottom "Script zoom" slider scales the whole panel
+   uniformly (layout size and text together) via --script-zoom. */
+.prod-script-panel { zoom: var(--script-zoom, 1); }
 .prod-panel h3 { margin: 0 0 14px; }
 .prod-panel h3 .cascade-icon { vertical-align: -3px; margin-right: 4px; }
 .prod-ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -803,7 +810,7 @@ body {
 
 /* ---------- design references (Step 2) ---------- */
 .prod-refs { margin-top: 22px; }
-.prod-ref-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
+.prod-ref-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--ref-tile-min, 140px), 1fr)); gap: 12px; margin: 8px 0; }
 .prod-suggestions { margin-top: 22px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); }
 .prod-suggestion-list { display: flex; flex-direction: column; gap: 6px; }
 .prod-suggestion { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; background: var(--bg-raised); border-radius: 7px; }
@@ -851,6 +858,16 @@ body {
 .prod-category-toggle:hover { background: var(--bg-raised); color: var(--accent); }
 .prod-category-name { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text); padding: 4px 6px; font-size: .9rem; font-weight: 600; }
 .prod-category-name:not(:disabled):hover, .prod-category-name:not(:disabled):focus { border-color: var(--border); outline: none; background: var(--bg-raised); }
+/* Per-category "Reference size" slider in the category header — sets the
+   grid's --ref-tile-min for that category only. */
+.prod-category-size { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 24px; font-size: 0.72rem; line-height: 1; color: var(--text-dim); }
+.prod-category-size input[type="range"] { width: 110px; margin: 0; accent-color: var(--accent); }
+/* Right-edge header cluster — reference count, size slider, and the
+   generate button share one centered row so they line up across panels. */
+.prod-category-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-left: auto; }
+.prod-category-count { min-width: 2.25em; text-align: right; line-height: 1; font-variant-numeric: tabular-nums; }
+/* The generic .hint top margin would push the count 3px below the cluster's center line. */
+.prod-category-tools .prod-category-count { margin: 0; }
 /* AI-generate button in a category header — creates a reference in that category. */
 .prod-ref-gen-btn {
   display: flex;
@@ -1054,7 +1071,6 @@ body {
 .prod-storyboard-log { grid-column: 1; min-width: 0; }
 .prod-frame-zoom { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--bg-panel) 96%, transparent); color: var(--text-dim); font-size: .78rem; }
 .prod-frame-zoom input { width: 180px; accent-color: var(--accent); }
-.prod-frame-zoom span { width: 42px; text-align: right; }
 /* Outdated panels: the trailing, read-only section of the Step 3 storyboard. */
 .prod-outdated { margin: 26px 0 8px; padding-top: 18px; border-top: 1px dashed var(--border); }
 .prod-outdated-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -1666,7 +1682,7 @@ body {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 /* Scoped under .prod-ref-lightbox and explicit width/height:auto so the card's
-   thumbnail rules (.prod-ref img { width:100%; height:110px }) can never leak
+   thumbnail rules (.prod-ref > img) can never leak
    in and shrink the enlarged image back to thumbnail size. */
 .prod-ref-lightbox .prod-ref-lightbox-card img:not(.cascade-icon) {
   width: auto;
@@ -1769,7 +1785,7 @@ body {
 
 /* ---------- design references (Step 2) + custom references ---------- */
 .prod-refs { margin-top: 22px; }
-.prod-ref-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
+.prod-ref-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--ref-tile-min, 140px), 1fr)); gap: 12px; margin: 8px 0; }
 .prod-ref-name { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Editable name/description on custom reference cards (Step 2). */
 .prod-ref-edit-name {
@@ -1817,7 +1833,10 @@ figure.prod-ref figcaption { white-space: normal; overflow: visible; text-overfl
 }
 .prod-ref-blank {
   width: 100%;
-  height: 110px;
+  /* Same proportional media box as the row tile's image/video (140:110);
+     the node variant's flex rule overrides this height on the canvas. */
+  aspect-ratio: 14 / 11;
+  height: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2232,7 +2251,10 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-ref {
   position: relative;
   margin: 0;
-  width: 140px;
+  /* Row tiles take their width from the responsive grid track (--ref-tile-min
+     sets the minimum); min-width: 0 lets a tile shrink below its content. */
+  width: auto;
+  min-width: 0;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2270,13 +2292,17 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   background: color-mix(in srgb, var(--bg) 72%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
 }
-.prod-ref > img { width: 100%; height: 110px; object-fit: cover; display: block; }
-.prod-ref-video { width: 100%; height: 110px; object-fit: cover; display: block; background: var(--media-bg); }
+.prod-ref > img { width: 100%; object-fit: cover; display: block; }
+/* Row-tile media scales with the tile width, keeping the old 140:110 ratio
+   (the node/canvas variant flex-fills its tile instead — see .prod-ref-node). */
+.prod-ref:not(.prod-ref-node) > img { aspect-ratio: 14 / 11; height: auto; }
+.prod-ref-video { width: 100%; object-fit: cover; display: block; background: var(--media-bg); }
+.prod-ref:not(.prod-ref-node) > .prod-ref-video { aspect-ratio: 14 / 11; height: auto; }
 /* Row tiles reuse the canvas poster block when a clip can't play; the row
    figure isn't flex, so the poster needs the tile media height explicitly. */
-.prod-ref:not(.prod-ref-node) > .prod-ref-video-thumb { height: 110px; }
+.prod-ref:not(.prod-ref-node) > .prod-ref-video-thumb { aspect-ratio: 14 / 11; height: auto; }
 /* Audio references: the shared waveform tile at the row media height. */
-.prod-ref:not(.prod-ref-node) > .prod-ref-audio { height: 110px; }
+.prod-ref:not(.prod-ref-node) > .prod-ref-audio { aspect-ratio: 14 / 11; height: auto; }
 .prod-ref-audio > .prod-graph-audio { width: 100%; height: 100%; border: none; border-radius: 0; }
 .prod-ref figcaption {
   padding: 6px 8px;
@@ -5163,6 +5189,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-ref-purpose { flex: 1; min-width: 0; font-size: 11px; padding: 2px 4px; }
 .prod-ref-purpose-inferred { font-size: 10px; color: var(--text-dim); }
 .prod-ref-describe { font-size: 11px; padding: 2px 6px; white-space: nowrap; }
+.prod-ref-describe:disabled { opacity: 0.55; cursor: wait; }
 /* Cast & Sets review modal */
 .prod-cast-modal { width: min(860px, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
 .prod-cast-list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 10px 0; padding-right: 4px; }

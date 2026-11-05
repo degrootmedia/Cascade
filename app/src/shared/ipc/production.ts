@@ -396,6 +396,10 @@ export interface ReferenceCategory {
   name: string;
   /** "style" refs are style-tagged: prompt context only, never uploaded. */
   kind?: "content" | "style";
+  /** Design-step reference tile size for this category: the grid's minimum
+   *  tile width in px (the header "Reference size" slider). Absent — the
+   *  shape in older projects — renders at the 140px default. */
+  tileSize?: number;
 }
 
 /** User-chosen name/category from the save-reference popup. Both optional:
@@ -783,6 +787,10 @@ export interface Production {
   suggestedReferences?: SuggestedReference[];
   /** User-created groups for manual reference images. */
   referenceCategories?: ReferenceCategory[];
+  /** Tile size (px) for the synthesized Uncategorized group, which has no
+   *  category record of its own to carry `tileSize`. Same slider semantics
+   *  as `ReferenceCategory.tileSize`; absent renders at the 140px default. */
+  uncategorizedTileSize?: number;
   /** Step 3 OpenArt generation preferences. */
   openArt?: OpenArtBoardConfig;
   /** @deprecated Legacy one-voiceover model. Audio lives on timeline

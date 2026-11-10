@@ -7,6 +7,7 @@
  * (LEGACY-PROJECTION); generation, history, and prompts-export are untouched.
  */
 import { Fragment, memo, useCallback, useContext, createContext, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { clipboardText } from "../clipboard.js";
 import {
   applyNodeChanges,
   Background,
@@ -92,7 +93,7 @@ import { brandClauseText } from "../../../shared/look.js";
 import { GenerationMenu, useGenerationMenu } from "./generation-menu.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 import { GraphHistoryModal, type GraphHistoryItem, type GraphHistoryTarget } from "./graph/history-modal.js";
-import { EditIcon, EditVideoIcon, EyeIcon, EyeOffIcon, FilmStripIcon, GenjutsuMotionIcon, GenjutsuSwapIcon, InbetweenIcon, MagicIcon, MagnifyIcon, RegenerateIcon } from "./icons.js";
+import { CameraGridIcon, EditIcon, EditVideoIcon, EyeIcon, EyeOffIcon, FilmStripIcon, GenjutsuMotionIcon, GenjutsuSwapIcon, InbetweenIcon, MagicIcon, MagnifyIcon, RegenerateIcon, UpscaleIcon } from "./icons.js";
 
 /** True when two prompt texts cite different reference tags (added,
  *  removed, or reordered) — the edits whose wires must follow at once. */
@@ -6173,9 +6174,9 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // on a generic clipboard file name. Text pastes are untouched.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      // Never hijack a paste aimed at a text field (the save popup included).
+      // A paste carrying text into a text field stays the field's; an image-only paste registers even from one (it could never land there).
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) && (clipboardText(e.clipboardData) || !t.closest?.(".prod-graph-overlay"))) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files: File[] = [];
@@ -6847,7 +6848,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                     e.dataTransfer.effectAllowed = "copy";
                   }}
                 >
-                  <svg viewBox="0 0 16 16" width="14" height="14" className="prod-graph-tools-icon" aria-hidden="true"><path fill="currentColor" d="M1 1h6v6H1V1zm8 0h6v6H9V1zM1 9h6v6H1V9zm8 0h6v6H9V9z" /></svg>
+                  <CameraGridIcon size={14} className="prod-graph-tools-icon" />
                   <span className="prod-graph-tools-label">Camera grid</span>
                 </div>
               )}
@@ -6863,7 +6864,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
                     e.dataTransfer.effectAllowed = "copy";
                   }}
                 >
-                  <svg viewBox="0 0 16 16" width="14" height="14" className="prod-graph-tools-icon" aria-hidden="true"><path fill="currentColor" d="M8 1l4 4h-3v5H7V5H4l4-4zm-5 12h10v2H3v-2z" /></svg>
+                  <UpscaleIcon size={14} className="prod-graph-tools-icon" />
                   <span className="prod-graph-tools-label">Upscale</span>
                 </div>
               )}

@@ -5628,3 +5628,21 @@ media): migration fields->clips, panels/strip gone, end-dot
 samples 1.00->1.58 rising, Assembly render = 6.67s (matches),
 header drag 172->262px remembered across relaunch. Evidence in
 `tasks/animatic-batch/` (verify.mjs, verify-shots/, facts).
+
+---
+
+# Assembly page: placeholder slate holds layout before first render (Item 1, 2026-11-09)
+
+- [x] `AssemblyPanel` always occupies the video grid slot: a blank
+      `prod-assembly-placeholder` slate (same `prod-assembly-render` sizing
+      class + aspect-ratio from stored render dims, else the selected
+      resolution) renders until a `renderPath` exists; the player carries
+      the same aspect-ratio, so the config card never shifts when the MP4
+      lands. Raised by Chuck 2026-11-05.
+- [x] Test: `app/test/assembly-panel.test.ts` (placeholder present/slot/size
+      before render; replaced by the player after).
+- [x] Verify: focused test + tsc clean; full suite 2416 passed / 1 failed
+      (pre-existing `group` guard) / 15 skipped; build clean. Live built-app
+      probe (seeded production, two launches): placeholder 518x291.375 at
+      (224,206), card at (758,206); after adding a render the video box was
+      identical and the card did not move.

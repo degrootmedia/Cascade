@@ -55,14 +55,22 @@ export function AssemblyPanel({
   const asm = prod.assembly;
   const renderPath = asm?.renderPath;
   const exportDir = asm?.exportDir ?? `${prod.assets.outDir}/${prod.assets.assemblyDir}`;
+  // The player holds the first layout column from the start: before a render
+  // exists a blank slate occupies the exact slot/size (stored render dims,
+  // else the selected resolution), so the card never shifts when it lands.
+  const frameStyle = {
+    aspectRatio: `${asm?.width ?? RESOLUTIONS[resIndex].width} / ${asm?.height ?? RESOLUTIONS[resIndex].height}`,
+  };
 
   return (
     <section className="prod-panel prod-assembly">
       <h3>5 · Assembly<HelpTip text="Build the export package — media, CMX3600 EDL, After Effects rebuild script, and manifest — then render the final MP4 from the timed animatic." label="Assembly" /></h3>
 
       <div className="prod-assembly-layout">
-        {renderPath && (
-          <video className="prod-assembly-render" src={cascadeMedia(prod.meta.id, renderPath)} controls />
+        {renderPath ? (
+          <video className="prod-assembly-render" style={frameStyle} src={cascadeMedia(prod.meta.id, renderPath)} controls />
+        ) : (
+          <div className="prod-assembly-render prod-assembly-placeholder" style={frameStyle} aria-hidden="true" />
         )}
 
         <section className="prod-assembly-card">

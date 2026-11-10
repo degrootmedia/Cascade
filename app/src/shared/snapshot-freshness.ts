@@ -16,6 +16,16 @@ export function isFresh(incomingRev: number, currentRev: number): boolean {
   return incomingRev >= currentRev;
 }
 
+
+/** True when a snapshot belongs to the production currently open. A finished
+ *  generation resolves with its project of origin; if the user has since
+ *  opened (or closed to) a different production, applying it would jump the
+ *  workspace back. The rev guard cannot catch this: each production file
+ *  carries its own rev, so a foreign rev routinely passes `isFresh`. */
+export function isForCurrentProduction(incomingId: string, currentId: string | null | undefined): boolean {
+  return !!currentId && incomingId === currentId;
+}
+
 /** Normalize a possibly-missing rev to a comparable number. */
 export function revOf(prod: { rev?: unknown }): number {
   return typeof prod.rev === "number" && Number.isFinite(prod.rev) ? prod.rev : 0;

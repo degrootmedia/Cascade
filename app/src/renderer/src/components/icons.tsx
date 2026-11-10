@@ -33,6 +33,8 @@ import trashUrl from "../assets/icons/trash.svg";
 import videoEditingUrl from "../assets/icons/video-editing.svg";
 import genjutsuMotionUrl from "../assets/icons/genjutsu-motion.svg";
 import genjutsuSwapUrl from "../assets/icons/genjutsu-swap.svg";
+import cameraGridUrl from "../assets/icons/camera-grid.svg";
+import upscaleUrl from "../assets/icons/upscale.svg";
 import xUrl from "../assets/icons/X.svg";
 import mAttachFileUrl from "../assets/icons/minimal/attach-file.svg";
 import mDragHandleUrl from "../assets/icons/minimal/drag-handle.svg";
@@ -58,6 +60,8 @@ import mTrashUrl from "../assets/icons/minimal/trash.svg";
 import mVideoEditingUrl from "../assets/icons/minimal/video-editing.svg";
 import mGenjutsuMotionUrl from "../assets/icons/minimal/genjutsu-motion.svg";
 import mGenjutsuSwapUrl from "../assets/icons/minimal/genjutsu-swap.svg";
+import mCameraGridUrl from "../assets/icons/minimal/camera-grid.svg";
+import mUpscaleUrl from "../assets/icons/minimal/upscale.svg";
 import mXUrl from "../assets/icons/minimal/X.svg";
 
 interface IconProps {
@@ -161,3 +165,7 @@ export const AttachFileIcon = (p: IconProps) => <Icon colorful={attachFileUrl} m
 export const ImageIcon = (p: IconProps) => <Icon colorful={imageUrl} minimal={mImageUrl} {...p} />;
 /** Magic wand/sparkle — AI magic / refine prompts. */
 export const MagicIcon = (p: IconProps) => <Icon colorful={magicUrl} minimal={mMagicUrl} {...p} />;
+/** Four-panel grid — the camera-grid node. */
+export const CameraGridIcon = (p: IconProps) => <Icon colorful={cameraGridUrl} minimal={mCameraGridUrl} {...p} />;
+/** Up arrow over a tray — the upscale node. */
+export const UpscaleIcon = (p: IconProps) => <Icon colorful={upscaleUrl} minimal={mUpscaleUrl} {...p} />;

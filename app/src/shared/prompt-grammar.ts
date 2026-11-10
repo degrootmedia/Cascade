@@ -99,6 +99,18 @@ export function enforceSourceTag(text: string, connected: boolean): string {
   return rest ? `${tag}\n\n${rest}` : tag;
 }
 
+/** The submitted wording an edit prompt's `@[source]` tag becomes. Edit
+ *  submissions upload the source first, so it is reference image 1; other
+ *  references cite their own submitted positions from 2 on. */
+export const SOURCE_TAG_WORDING = "reference image 1";
+
+/** Replace every `@[source]` (case-insensitive, like every tag helper) with
+ *  `SOURCE_TAG_WORDING`, inline where the user put it. For edit submissions
+ *  only — plain generation prompts keep their tags for reference resolution. */
+export function replaceSourceTag(text: string): string {
+  return text.replace(refTagPattern(SOURCE_TAG_NAME), () => SOURCE_TAG_WORDING);
+}
+
 /** Strip every `@[Name]` tag (used to compare the non-tag text of two prompts). */
 export function stripRefTags(text: string): string {
   return text.replace(/@\[[^\]]+\]/g, "");

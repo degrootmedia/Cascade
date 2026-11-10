@@ -121,6 +121,7 @@ export const productionChannels = {
   "production:assemblySend": { method: "assemblySend", kind: "invoke" },
   "production:setGenerationSelect": { method: "setGenerationSelect", kind: "invoke" },
   "production:exportStoryboardPdf": { method: "exportStoryboardPdf", kind: "invoke" },
+  "production:exportStyleFramePdf": { method: "exportStyleFramePdf", kind: "invoke" },
   "production:pickStoryboardLogo": { method: "pickStoryboardLogo", kind: "invoke" },
   "production:clearStoryboardLogo": { method: "clearStoryboardLogo", kind: "invoke" },
   "production:storyboardLogoImage": { method: "storyboardLogoImage", kind: "invoke" },

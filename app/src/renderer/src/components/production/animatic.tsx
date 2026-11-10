@@ -213,31 +213,56 @@ export function TimelinePreview({
 
   useEffect(() => () => stop(), [stop]);
 
-  // Spacebar toggles playback (ignored while typing in inputs/textareas/selects).
+  // Spacebar toggles playback wherever focus sits in the animatic room
+  // (a clicked button, select, slider, ...). Only a text field keeps
+  // Space as typing. The keyup half is guarded too: a focused button
+  // fires its click on Space *release*, so an unguarded keyup would
+  // re-trigger that control right after the keydown toggle.
   const playRef = useRef(play);
   useEffect(() => { playRef.current = play; }, [play]);
   const shotsLenRef = useRef(shots.length);
   useEffect(() => { shotsLenRef.current = shots.length; }, [shots.length]);
   useEffect(() => {
-    const isEditable = (el: Element | null) => {
+    const NON_TEXT_INPUT = new Set(["button", "submit", "reset", "checkbox", "radio", "range", "file", "color", "image", "hidden"]);
+    const isTextField = (el: Element | null) => {
       if (!el) return false;
-      const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
       if ((el as HTMLElement).isContentEditable) return true;
+      const tag = el.tagName;
+      if (tag === "TEXTAREA") return true;
+      if (tag === "INPUT") return !NON_TEXT_INPUT.has(((el as HTMLInputElement).type || "text").toLowerCase());
       return false;
     };
+    const isSpace = (e: KeyboardEvent) => e.code === "Space" || e.key === " " || e.key === "Spacebar";
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== "Space" && e.key !== " " && e.key !== "Spacebar") return;
-      if (e.repeat) return;
+      if (!isSpace(e)) return;
+      if (e.repeat) { e.preventDefault(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as Element | null;
-      if (isEditable(target)) return;
+      if (isTextField(target)) return;
+      // Claim Space for every non-text target before any other gate:
+      // even with nothing to play (empty or audio-only timeline, so
+      // the preview shows its empty state while the editor below is
+      // live), Space must not fall through and re-trigger the
+      // focused control on release.
+      e.preventDefault();
       if (!shotsLenRef.current) return;
       e.preventDefault();
       void playRef.current();
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!isSpace(e)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isTextField(e.target as Element | null)) return;
+      e.preventDefault();
+      if (!shotsLenRef.current) return;
+      e.preventDefault();
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, []);
 
   // ---- Zoomable strip + per-shot video pool (behavior) -------------------

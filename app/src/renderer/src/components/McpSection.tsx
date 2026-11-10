@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { confirmDestructive } from "./ConfirmDialog.js";
-import type { McpStatusIpc } from "../../../shared/ipc.js";
+import type { McpStatusIpc, MediaProviderId } from "../../../shared/ipc.js";
 import {
   argsToLines,
   cleanMcpServer,
@@ -24,7 +24,6 @@ import {
 import { useSettings } from "./settings/context.js";
 import { SettingField } from "./settings/SettingField.js";
 import { AutoTextarea } from "./AutoTextarea.js";
-import { TRANSPORT_CHANGED, readTransportMode, type ProviderTransportMode } from "./media-transport.js";
 
 const PLACEHOLDER = `{
   "mcpServers": {
@@ -106,8 +105,31 @@ function cleanIpcError(e: unknown): string {
   return String(e).replace(/^Error: Error invoking remote method '[^']+': /, "");
 }
 
+/** The connected-state label for a media-backed server: the transport
+ *  being up is not the whole truth — say whether models actually loaded.
+ *  Exported for tests. */
+export function connectedLabel(status: McpStatusIpc): string {
+  const tools = `${status.toolCount} tool${status.toolCount === 1 ? "" : "s"}`;
+  const d = status.discovery;
+  if (!d) return tools;
+  if (d.state === "loading" || d.state === "idle") return "Connected · loading models…";
+  if (d.modelCount > 0) {
+    return d.stale
+      ? `Connected · ${d.modelCount} models (may be out of date)`
+      : `Connected · ${d.modelCount} models`;
+  }
+  return "Connected — no models loaded";
+}
+
+/** Whether the row should offer "Retry" (discovery failed / empty with no
+ *  models on offer) rather than a plain "Refresh models". */
+export function discoveryNeedsRetry(status: McpStatusIpc | undefined): boolean {
+  const d = status?.discovery;
+  return !!d && d.modelCount === 0 && (d.state === "error" || d.state === "empty");
+}
+
 function statusLabel(server: McpServerConfig, status: McpStatusIpc | undefined): string {
-  if (status?.status === "connected") return `${status.toolCount} tool${status.toolCount === 1 ? "" : "s"}`;
+  if (status?.status === "connected") return connectedLabel(status);
   if (status?.status === "error") return status.error ?? "Connection failed";
   if (status?.status === "disabled" || server.disabled) return "Disabled";
   return "Not connected";
@@ -126,8 +148,6 @@ export function McpSection() {
   const [rawDirty, setRawDirty] = useState(false);
   const [draft, setDraft] = useState<McpDraft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  /** MCP-specific block: hidden while the CLI transport is selected. */
-  const [transport, setTransport] = useState<ProviderTransportMode>(() => readTransportMode());
 
   useEffect(() => {
     let alive = true;
@@ -147,14 +167,22 @@ export function McpSection() {
     void window.cascade.getMcpStatus().then((next) => {
       if (alive) setStatuses(next);
     });
+    // Model discovery finishes asynchronously after a (re)connect; when
+    // main broadcasts it, re-read statuses so the row moves from
+    // "loading models…" to the truth without reopening Settings.
+    const offModels = typeof window.cascade.onModelsChanged === "function"
+      ? window.cascade.onModelsChanged(() => {
+          void window.cascade.getMcpStatus().then((next) => {
+            if (alive) setStatuses(next);
+          });
+        })
+      : undefined;
     void window.cascade.getMcpOnDemand().then((next) => {
       if (alive) setOnDemand(next);
     });
-    const onTransport = () => setTransport(readTransportMode());
-    window.addEventListener(TRANSPORT_CHANGED, onTransport);
     return () => {
       alive = false;
-      window.removeEventListener(TRANSPORT_CHANGED, onTransport);
+      offModels?.();
     };
   }, []);
 
@@ -211,6 +239,22 @@ export function McpSection() {
     await commit(removeMcpServer(file, name));
   }
 
+  /** Force model re-discovery for one media-backed server, then re-read
+   *  the statuses so the row shows the fresh truth. The server name is the
+   *  provider id for every server main attaches discovery state to. */
+  async function refreshModels(name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await window.cascade.refreshModelProbe(name as MediaProviderId);
+      setStatuses(await window.cascade.getMcpStatus());
+    } catch (e) {
+      setError(cleanIpcError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reconnect() {
     setBusy(true);
     setError(null);
@@ -263,7 +307,6 @@ export function McpSection() {
     return () => registerSaver("mcp", null);
   }, [pending, setDirty, registerSaver]);
 
-  if (transport === "cli") return null;
 
   const entries = mcpServerEntries(file);
 
@@ -300,7 +343,7 @@ export function McpSection() {
               ? server.url
               : [server.command, ...(server.args ?? [])].filter(Boolean).join(" ");
           return (
-            <div key={name} className={`mcp-server ${state}`}>
+            <div key={name} className={`mcp-server ${state}${discoveryNeedsRetry(status) ? " no-models" : ""}`}>
               <div className="mcp-server-head">
                 <span className="mcp-dot" />
                 <span className="mcp-server-name" title={name}>
@@ -322,6 +365,21 @@ export function McpSection() {
               {detail && <div className="mcp-server-detail">{detail}</div>}
               {status?.status === "connected" && (
                 <div className="mcp-server-foot">
+                  {status.discovery && (
+                    <>
+                      <button
+                        className="link"
+                        disabled={busy}
+                        title={status.discovery.error ?? "Re-run model discovery against this server"}
+                        onClick={() => void refreshModels(name)}
+                      >
+                        {discoveryNeedsRetry(status) ? "Retry" : "Refresh models"}
+                      </button>
+                      {status.discovery.error && status.discovery.modelCount === 0 && (
+                        <span className="hint mcp-discovery-error">{status.discovery.error}</span>
+                      )}
+                    </>
+                  )}
                   <label
                     className="mcp-on-demand"
                     title="Attach this server's tools only when you ask for them by name (keeps requests lean)"

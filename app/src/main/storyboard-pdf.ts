@@ -4,7 +4,9 @@
  * Deep module with a small surface. The pure layout helpers (paginatePanels,
  * wrapText, fitLines, detectImageKind, footerText, storyboardPdfFileName) hold
  * the real logic and are unit-tested in app/test/storyboard-pdf.test.ts.
- * `buildStoryboardPdf()` renders landscape pages (1 or 3 panels per page)
+ * `buildStoryboardPdf()` renders landscape pages (1 or 3 panels per page);
+ * `buildStyleFramePdf()` renders the style-frame deck for a panel
+ * selection (one frame image per page, no text). Both render
  * through pdf-lib; `loadPanelImage()` / `loadLogoImage()` resolve board art
  * through an injected `readFile` seam so tests never touch disk.
  *
@@ -149,6 +151,36 @@ export function loadPanelImage(p: Production, shot: ProductionShot, readFile: Re
   return tryReadImage(readFile, p, stillRel);
 }
 
+/** One style-frame deck page: a shot's frame image, nothing else. */
+export interface StyleFramePdfPanel {
+  number: string;
+  image: StoryboardPdfImage;
+}
+
+/**
+ * Resolve the style-frame panels for a selection of shot ids. Shots are
+ * taken in storyboard order (the order of `shotsInOrder`) regardless of
+ * click order, duplicate ids collapse, unknown ids drop out, and selected
+ * shots with no embeddable frame are skipped and counted in `skipped`.
+ */
+export function styleFramePanelsFor(
+  p: Production,
+  shotsInOrder: ProductionShot[],
+  selectedIds: string[],
+  readFile: ReadFileFn
+): { panels: StyleFramePdfPanel[]; skipped: number } {
+  const wanted = new Set(selectedIds);
+  const panels: StyleFramePdfPanel[] = [];
+  let skipped = 0;
+  for (const shot of shotsInOrder) {
+    if (!wanted.has(shot.id)) continue;
+    const image = loadPanelImage(p, shot, readFile);
+    if (image) panels.push({ number: shot.number, image });
+    else skipped++;
+  }
+  return { panels, skipped };
+}
+
 /** Resolve the stored production logo (`storyboardPdf.logoRel`), if any. */
 export function loadLogoImage(p: Production, readFile: ReadFileFn): StoryboardPdfImage | null {
   const rel = p.storyboardPdf?.logoRel;
@@ -168,13 +200,22 @@ export function footerText(productionName: string, version: string): string {
   return `${name} — Storyboard ${sanitizeVersion(version)}`;
 }
 
-/** Default save name: "<name>-storyboard-<version>.pdf", filename-safe. */
-export function storyboardPdfFileName(productionName: string, version: string): string {
-  const base = ((productionName ?? "").trim() || "untitled-production")
+/** Filename-safe production-name base shared by both PDF save names. */
+function pdfBaseName(productionName: string): string {
+  return ((productionName ?? "").trim() || "untitled-production")
     .replace(/[\\/:*?"<>|]/g, "")
     .replace(/\s+/g, "-")
     .slice(0, 80) || "untitled-production";
-  return `${base}-storyboard-${sanitizeVersion(version)}.pdf`;
+}
+
+/** Default save name: "<name>-storyboard-<version>.pdf", filename-safe. */
+export function storyboardPdfFileName(productionName: string, version: string): string {
+  return `${pdfBaseName(productionName)}-storyboard-${sanitizeVersion(version)}.pdf`;
+}
+
+/** Default save name for the style-frame deck: "<name>-style-frames.pdf". */
+export function styleFramePdfFileName(productionName: string): string {
+  return `${pdfBaseName(productionName)}-style-frames.pdf`;
 }
 
 /** Chunk panels into pages (1 or 3 per page). */
@@ -238,6 +279,19 @@ export function coverImageRect(
   const dw = imgW * scale;
   const dh = imgH * scale;
   return { x: frameX + (frameW - dw) / 2, y: frameY + (frameH - dh) / 2, width: dw, height: dh };
+}
+
+/** Contain placement: the whole image fits inside the box, centered, never cropped. */
+export function containRect(
+  boxW: number,
+  boxH: number,
+  imgW: number,
+  imgH: number
+): { x: number; y: number; width: number; height: number } {
+  const scale = Math.min(boxW / imgW, boxH / imgH);
+  const dw = imgW * scale;
+  const dh = imgH * scale;
+  return { x: (boxW - dw) / 2, y: (boxH - dh) / 2, width: dw, height: dh };
 }
 
 interface Fonts {
@@ -477,6 +531,38 @@ export async function buildStoryboardPdf(
       await drawSinglePanelPage(doc, page, fonts, groups[i][0], pageW, pageH, toJpeg);
     }
     drawFooter(page, fonts, pageW, opts, i, groups.length, logo);
+  }
+  return doc.save();
+}
+
+export interface StyleFramePdfOptions {
+  productionName: string;
+  /** Override the PNG→JPEG transcoder (tests); defaults to nativeImage. */
+  toJpeg?: ToJpegFn;
+}
+
+/**
+ * Render the style-frame deck: one frame image per landscape A4 page,
+ * fitted to the page without cropping, no text or footer — the same result
+ * as combining the selected frame images into a PDF by hand, in the order
+ * the panels are given (the caller resolves storyboard order).
+ */
+export async function buildStyleFramePdf(
+  panels: StyleFramePdfPanel[],
+  opts: StyleFramePdfOptions
+): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  doc.setTitle(`${(opts.productionName || "Untitled production").trim()} — Style frames`);
+  doc.setProducer("Cascade");
+  const [pageW, pageH] = STORYBOARD_PAGE_SIZE;
+  const toJpeg = opts.toJpeg ?? pngBytesToJpeg;
+  if (!panels.length) doc.addPage(STORYBOARD_PAGE_SIZE);
+  for (const panel of panels) {
+    const page = doc.addPage(STORYBOARD_PAGE_SIZE);
+    const embeddable = compressForPdf(panel.image, toJpeg);
+    const embedded = embeddable.kind === "png" ? await doc.embedPng(embeddable.bytes) : await doc.embedJpg(embeddable.bytes);
+    const placed = containRect(pageW, pageH, embedded.width, embedded.height);
+    page.drawImage(embedded, { x: placed.x, y: placed.y, width: placed.width, height: placed.height });
   }
   return doc.save();
 }

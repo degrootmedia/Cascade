@@ -111,7 +111,7 @@ const VIEW: SettingsView = {
   externalEditor: null, audioEditor: null,
 };
 
-function installCascade() {
+function installCascade(mcpConfigText = "") {
   writes.length = 0;
   gWin.cascade = {
     getSettings: async () => VIEW,
@@ -121,9 +121,11 @@ function installCascade() {
     getHiggsfieldCliStatus: async () => null,
     getOpenArtCliBinary: async () => null,
     getOpenArtCliStatus: async () => null,
-    getMcpConfig: async () => "",
+    getMcpConfig: async () => mcpConfigText,
     getMcpStatus: async () => [],
     getMcpOnDemand: async () => [],
+    getAppendNoMusicToVideoPrompts: async () => true,
+    setAppendNoMusicToVideoPrompts: async (v: boolean) => { writes.push(["setAppendNoMusicToVideoPrompts", v]); },
     getDevMode: async () => false,
     getSubmissionDryRun: async () => false,
     getMaxIterations: async () => 250,
@@ -154,8 +156,8 @@ function installCascade() {
   };
 }
 
-async function mount(hash: string) {
-  installCascade();
+async function mount(hash: string, mcpConfigText = "") {
+  installCascade(mcpConfigText);
   gWin.location.hash = hash;
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -251,6 +253,31 @@ describe("settings deep link", () => {
     document.body.removeChild(container);
   });
 
+  it("Media & Storage no-music toggle loads ON and persists both ways", async () => {
+    const { container, root } = await mount("#settings/media-storage");
+    expect(activeTabId(container)).toBe("media-storage");
+    const panel = container.querySelector("#settings-panel-media-storage") as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(panel.textContent).toContain("Append no-music instruction to video prompts");
+    const label = Array.from(panel.querySelectorAll("label")).find((l) =>
+      l.textContent?.includes("Append no-music instruction to video prompts")
+    ) as HTMLLabelElement;
+    const box = label.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(box).not.toBeNull();
+    // Saved value (mock: true, the product default) loads checked.
+    expect(box.checked).toBe(true);
+    await act(async () => { box.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(box.checked).toBe(false);
+    expect(writes).toContainEqual(["setAppendNoMusicToVideoPrompts", false]);
+    await act(async () => { box.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(box.checked).toBe(true);
+    expect(writes).toContainEqual(["setAppendNoMusicToVideoPrompts", true]);
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(container);
+  });
+
   it("CLI Tools Check status shows a checking state and renders the result", async () => {
     const { container, root } = await mount("#settings/cli-tools");
     expect(activeTabId(container)).toBe("cli-tools");
@@ -281,5 +308,41 @@ describe("settings deep link", () => {
 
     await act(async () => { root.unmount(); });
     document.body.removeChild(container);
+  });
+});
+
+describe("settings MCP section", () => {
+  it("shows the saved Blender MCP entry even when the media transport is CLI", async () => {
+    const realDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const store: Record<string, string> = { "cascade.providerTransportMode": "cli" };
+    Object.defineProperty(globalThis, "localStorage", {
+      value: {
+        getItem: (k: string) => (k in store ? store[k] : null),
+        setItem: (k: string, v: string) => { store[k] = v; },
+        removeItem: (k: string) => { delete store[k]; },
+      },
+      configurable: true,
+    });
+    try {
+      const saved = JSON.stringify({
+        mcpServers: {
+          Blender: { command: "C:\\Users\\degro\\.local\\bin\\uvx.exe", args: ["mcp-for-blender"] },
+        },
+      });
+      const { container, root } = await mount("#settings/mcp", saved);
+      expect(activeTabId(container)).toBe("mcp");
+      const panel = container.querySelector("#settings-panel-mcp") as HTMLElement;
+      expect(panel).not.toBeNull();
+      expect(panel.hidden).toBe(false);
+      expect(panel.textContent).toContain("Blender");
+      expect(panel.textContent).toContain("uvx.exe");
+      expect(panel.textContent).toContain("mcp-for-blender");
+      expect(panel.textContent).not.toContain("No servers yet");
+      await act(async () => { root.unmount(); });
+      document.body.removeChild(container);
+    } finally {
+      if (realDescriptor) Object.defineProperty(globalThis, "localStorage", realDescriptor);
+      else delete (globalThis as Record<string, unknown>).localStorage;
+    }
   });
 });

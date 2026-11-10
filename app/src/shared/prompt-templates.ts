@@ -138,9 +138,11 @@ export const STYLE_FRAME_TEMPLATE =
   `Emphasise palette, lighting, materials and surface treatment, and overall finish. ` +
   `No text, no logos, no named characters, no scene-specific action.`
 
-/** The built-in edit-image framing. `{{source}}` is the source-frame token. */
+/** The built-in edit-image framing: no framing at all — the user's prompt is
+ *  submitted as written (with `@[source]` already resolved to plain words).
+ *  A user override may still wrap it; `{{source}}` is the source-frame token. */
 export const EDIT_IMAGE_TEMPLATE =
-  "Edit this reference image ({{source}}). Keep its composition unless asked otherwise.\n\nEdit instructions: {{instructions}}";
+  "{{instructions}}";
 
 /** The built-in character-sheet framing. */
 export const CHARACTER_SHEET_TEMPLATE =

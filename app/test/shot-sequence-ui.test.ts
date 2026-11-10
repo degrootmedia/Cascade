@@ -37,6 +37,7 @@ const ZERO = { left: 0, top: 0, right: 0, bottom: 0 };
 let disk: Record<string, unknown> | null = null;
 const savedProds: Array<Record<string, unknown>> = [];
 const deletedSequenceIds: string[] = [];
+const styleFrameExportCalls: Array<{ productionId: string; shotIds: string[] }> = [];
 
 function freshProd(): Record<string, unknown> {
   return {
@@ -105,6 +106,10 @@ function cascadeMock(): Record<string, unknown> {
     generateMagicPrompts: stub, setMagicEnabled: stub, ingestScript: stub, createProduction: stub,
     removeProduction: stub, pickProductionFolder: stub, pickScriptFile: stub,
     reorderShot: stub, promoteBoardHistory: stub, recheckBoard: stub, removeVideo: stub,
+    exportStyleFramePdf: async (productionId: string, opts: { shotIds: string[] }) => {
+      styleFrameExportCalls.push({ productionId, shotIds: [...opts.shotIds] });
+      return { filePath: "C:/test/out/Test-production-style-frames.pdf", exported: opts.shotIds.length, skipped: 0 };
+    },
   };
 }
 
@@ -130,6 +135,20 @@ async function clickFrame(host: HTMLElement, shotId: string, shift = false): Pro
   });
 }
 
+async function ctrlClickFrame(host: HTMLElement, shotId: string): Promise<void> {
+  const card = host.querySelector(`[data-shot-id="${shotId}"]`) as HTMLElement;
+  const frame = card.querySelector(".prod-board-frame") as HTMLElement;
+  await act(async () => {
+    frame.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+function styleFrameButton(host: HTMLElement): HTMLButtonElement {
+  return [...host.querySelectorAll(".prod-boards-actions button")]
+    .find((b) => (b.textContent ?? "").includes("Export selected frames")) as HTMLButtonElement;
+}
+
 function cards(host: HTMLElement, cls: string): string[] {
   return Array.from(host.querySelectorAll(`.prod-board.${cls}`)).map((c) => c.getAttribute("data-shot-id") ?? "?");
 }
@@ -146,6 +165,7 @@ describe("shot sequence storyboard flow", () => {
     disk = freshProd();
     savedProds.length = 0;
     deletedSequenceIds.length = 0;
+    styleFrameExportCalls.length = 0;
     (globalThis as Record<string, unknown>).confirm = () => true;
     (globalThis.window as unknown as Record<string, unknown>).confirm = () => true;
     (globalThis.window as unknown as Record<string, unknown>).cascade = cascadeMock();
@@ -295,5 +315,35 @@ describe("shot sequence storyboard flow", () => {
     expect(cards(host, "in-range")).toHaveLength(0);
     expect(cards(host, "selected")).toEqual(["s4"]);
     expect(host.querySelector(".seq-create-strip")).toBeNull();
+  });
+
+  it("ctrl-click toggles individual panels without moving the prompt focus", async () => {
+    await clickFrame(host, "s1");
+    await ctrlClickFrame(host, "s3");
+    // Both panels are in the selection; the prompt panel stays on s1.
+    expect(cards(host, "in-range").sort()).toEqual(["s1", "s3"]);
+    expect(cards(host, "selected")).toEqual(["s1"]);
+    // A gappy (non-contiguous) selection cannot become a shot sequence.
+    expect(host.querySelector(".seq-create-strip")).toBeNull();
+
+    // Ctrl-clicking a selected panel again removes just that panel.
+    await ctrlClickFrame(host, "s3");
+    expect(cards(host, "in-range")).toEqual([]);
+    expect(cards(host, "selected")).toEqual(["s1"]);
+  });
+
+  it("export selected frames sends the selection in storyboard order", async () => {
+    expect(styleFrameButton(host)).toBeTruthy();
+    expect(styleFrameButton(host).disabled).toBe(true);
+
+    // Build the selection out of order: s3 first, then toggle s1 in.
+    await clickFrame(host, "s3");
+    await ctrlClickFrame(host, "s1");
+    const btn = styleFrameButton(host);
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toContain("(2)");
+
+    await act(async () => { btn.click(); await new Promise((r) => setTimeout(r, 0)); });
+    expect(styleFrameExportCalls).toEqual([{ productionId: "p1", shotIds: ["s1", "s3"] }]);
   });
 });

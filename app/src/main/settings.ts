@@ -141,6 +141,12 @@ interface SettingsFile {
    * the backend is on PATH; otherwise the user is told and nothing is faked.
    */
   sandboxMode: SandboxMode;
+  /**
+   * Append the no-music instruction to every video generation prompt at
+   * submission time (see shared/no-music.ts). ON by default; the stored
+   * project prompt is never modified. Video prompts only.
+   */
+  appendNoMusicToVideoPrompts: boolean;
   /** Dev Mode: when true, every generation submission is logged. */
   devMode: boolean;
   /** Credit-free dry run: build + log the real request, throw before vendor call. */
@@ -202,6 +208,7 @@ const DEFAULTS: SettingsFile = {
   whisperModel: "base.en",
   screenCaptureEnabled: true,
   sandboxMode: "none",
+  appendNoMusicToVideoPrompts: true,
   devMode: false,
   submissionDryRun: false,
   windowState: null,
@@ -833,6 +840,16 @@ export function setPromptTemplates(overrides: Record<string, string>): void {
     }
   }
   load().promptTemplates = clean;
+  save();
+}
+
+/** Append the no-music instruction to video prompts at submit time (default ON). */
+export function getAppendNoMusicToVideoPrompts(): boolean {
+  return load().appendNoMusicToVideoPrompts !== false;
+}
+
+export function setAppendNoMusicToVideoPrompts(on: boolean): void {
+  load().appendNoMusicToVideoPrompts = on === true;
   save();
 }
 

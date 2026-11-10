@@ -17,6 +17,7 @@ import { openArtCreationResultUrls, openArtCreationStatus } from "../src/main/pr
 import { VIDEO_REF_MAX_HEIGHT, ref720pName } from "../src/main/video-ref.js";
 import { resolvePromptRefs } from "../src/main/providers/refs.js";
 import type { PendingImageGen, PendingVideoGen, Production, ProductionShot } from "../src/shared/ipc.js";
+import { isImageModel, isVideoModel } from "../src/shared/ipc.js";
 
 const { dataDir } = vi.hoisted(() => {
   const base = process.env.TEMP ?? process.env.TMPDIR ?? "/tmp";
@@ -202,6 +203,116 @@ describe("OpenArtClient.listModelChoices", () => {
     const choices = await new OpenArtClient(mcp).listModelChoices();
     expect(choices.find((c) => c.id === "mystery-img")).toMatchObject({ imageInput: true, videoInput: false });
     expect(choices.find((c) => c.id === "mystery-vid")).toMatchObject({ imageInput: false, videoInput: true });
+  });
+});
+
+describe("OpenArtClient discovery resilience", () => {
+  const LIST = JSON.stringify([
+    { model: "img-a", displayName: "Img A", modes: { image: [{ mode: "text2image" }] } },
+    { model: "vid-b", displayName: "Vid B", modes: { video: [{ mode: "text2video" }] } },
+  ]);
+
+  it("retries a transient discovery failure instead of giving up after one attempt", async () => {
+    let calls = 0;
+    const mcp = fakeMcp({
+      openart_model_list: () => {
+        calls++;
+        if (calls < 3) throw new Error("MCP server \"openart\" is not connected");
+        return LIST;
+      },
+    });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0, 0] });
+    const choices = await client.listModelChoices();
+    expect(choices.map((c) => c.id)).toEqual(["img-a", "vid-b"]);
+    expect(calls).toBe(3);
+  });
+
+  it("keeps the last good list when a later discovery returns empty", async () => {
+    let reply = LIST;
+    const mcp = fakeMcp({ openart_model_list: () => reply });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0, 0] });
+    expect(await client.listModelChoices()).toHaveLength(2);
+    reply = JSON.stringify({ balance: 7, models: [] });
+    client.refreshProbes();
+    const choices = await client.listModelChoices();
+    expect(choices.map((c) => c.id)).toEqual(["img-a", "vid-b"]);
+  });
+
+  it("keeps the last good list when a later discovery fails outright", async () => {
+    let down = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => {
+        if (down) throw new Error("timeout: openart.openart_model_list (120s)");
+        return LIST;
+      },
+    });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0, 0] });
+    expect(await client.listModelChoices()).toHaveLength(2);
+    down = true;
+    client.refreshProbes();
+    const choices = await client.listModelChoices();
+    expect(choices.map((c) => c.id)).toEqual(["img-a", "vid-b"]);
+  });
+
+  it("reports a truthful discovery state across failure → success", async () => {
+    let down = true;
+    const mcp = fakeMcp({
+      openart_model_list: () => {
+        if (down) throw new Error("MCP server \"openart\" is not connected");
+        return LIST;
+      },
+    });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0] });
+    await expect(client.listModelChoices()).rejects.toThrow(/not connected/);
+    expect(client.modelDiscovery()).toMatchObject({ state: "error", modelCount: 0, stale: false });
+    down = false;
+    client.refreshProbes();
+    await client.listModelChoices();
+    expect(client.modelDiscovery()).toMatchObject({ state: "ok", modelCount: 2, stale: false });
+  });
+
+  it("an empty discovery with no last good reports the empty state and throws", async () => {
+    const mcp = fakeMcp({ openart_model_list: () => JSON.stringify({ balance: 3, models: [] }) });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0] });
+    await expect(client.listModelChoices()).rejects.toThrow(/no models/);
+    expect(client.modelDiscovery()).toMatchObject({ state: "empty", modelCount: 0, stale: false });
+  });
+
+  it("a recovered discovery populates both picker pools (the list every surface reads)", async () => {
+    // Both UI surfaces read listModelChoices: the tool pickers filter it
+    // with isImageModel/isVideoModel, the Model Customizer lists it whole.
+    let down = true;
+    const mcp = fakeMcp({
+      openart_model_list: () => {
+        if (down) throw new Error("MCP server \"openart\" is not connected");
+        return LIST;
+      },
+    });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0] });
+    await expect(client.listModelChoices()).rejects.toThrow();
+    down = false;
+    client.refreshProbes();
+    const choices = await client.listModelChoices();
+    expect(choices.filter(isImageModel).map((c) => c.id)).toEqual(["img-a"]);
+    expect(choices.filter(isVideoModel).map((c) => c.id)).toEqual(["vid-b"]);
+    // The customizer surface: the unfiltered list itself is non-empty.
+    expect(choices.length).toBe(2);
+  });
+
+  it("marks the kept last-good list stale after a failed refresh", async () => {
+    let down = false;
+    const mcp = fakeMcp({
+      openart_model_list: () => {
+        if (down) throw new Error("boom");
+        return LIST;
+      },
+    });
+    const client = new OpenArtClient(mcp, undefined, { retryDelaysMs: [0] });
+    await client.listModelChoices();
+    down = true;
+    client.refreshProbes();
+    await client.listModelChoices();
+    expect(client.modelDiscovery()).toMatchObject({ state: "error", modelCount: 2, stale: true });
   });
 });
 

@@ -29,6 +29,7 @@ import type {
   PendingVideoGen,
   Production,
   ProductionEvent,
+  ModelDiscoveryState,
   ProductionShot,
   VideoGenOptions,
   VideoModelOptions,
@@ -171,6 +172,11 @@ export interface MediaProvider {
   /** Drop cached catalog/option probes so the next probe refetches from the
    *  vendor (dev Model Customizer "Refresh"). Fire-and-forget. */
   refreshProbes?(): void;
+
+  /** The truth about this vendor's last model discovery (separate from
+   *  transport availability), for truthful Settings status. Optional —
+   *  vendors that don't track discovery omit it. */
+  modelDiscovery?(): ModelDiscoveryState;
 }
 
 /** The dependencies every provider is constructed with (the seam). */
@@ -181,6 +187,7 @@ export interface ProviderDeps {
 
 // Re-exported so vendor modules and tests share one vocabulary.
 export type {
+  ModelDiscoveryState,
   CliModelSchema,
   ImageGenAspectRatio,
   ImageModelOptions,

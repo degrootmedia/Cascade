@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { enforceSourceTag } from "../src/shared/prompt-grammar.js";
+import { enforceSourceTag, replaceSourceTag } from "../src/shared/prompt-grammar.js";
 
 describe("pinned @[source] tag", () => {
   it("adds it first when a source is connected", () => {
@@ -21,6 +21,10 @@ describe("pinned @[source] tag", () => {
     expect(src).toContain("enforceSourceInContent(cur, !!n.source)");
     expect(src).toContain("for (const n of allVideoNodes)");
     expect(src).toContain("isVideoEditFamilyMode(n.mode) ? editVideoApplierKey(n.id) : videoApplierKey(n.id)");
+  });
+  it("is replaced inline by 'reference image 1' at edit submission", () => {
+    expect(replaceSourceTag("Edit @[source]. Keep @[Hero].")).toBe("Edit reference image 1. Keep @[Hero].");
+    expect(replaceSourceTag("no tag here")).toBe("no tag here");
   });
   it("removes it when disconnected", () => {
     expect(enforceSourceTag("@[source]\n\nmake it red", false)).toBe("make it red");

@@ -218,6 +218,35 @@ describe("CTRL+Click routes to Frame Output", () => {
     host.remove();
   });
 
+  it("a pasted image registers on the first attempt even with a text field focused", async () => {
+    // Regression (Nov 5, 2026): the paste listener bailed whenever the paste
+    // target was a text field, so an image-only Ctrl+V (a screenshot) did
+    // nothing until the user clicked empty canvas and tried again.
+    const hero = { id: "r1", name: "Hero", artwork: "references/hero.png" };
+    const { host, root } = renderModal(baseShot({ graphOutputSource: undefined }), () => {}, () => {}, {
+      onPasteFiles: async () => [hero],
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // The modal's prompt fields are contentEditable editors (jsdom does not
+    // implement isContentEditable), so stand in a real textarea inside the
+    // modal overlay: the paste listener is window-level and only e.target
+    // decides the guard.
+    const field = document.createElement("textarea");
+    host.querySelector(".prod-graph-overlay")!.appendChild(field);
+    const ev = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "clipboardData", {
+      value: {
+        items: [{ kind: "file", type: "image/png", getAsFile: () => new File([], "x.png", { type: "image/png" }) }],
+        files: [],
+        getData: () => "",
+      },
+    });
+    await act(async () => { field.dispatchEvent(ev); await new Promise((r) => setTimeout(r, 0)); });
+    expect(host.querySelector('.react-flow__node[data-id="ref:r1"]'), "pasted ref node on canvas").toBeTruthy();
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
   it("Brand node renders only when the brand identity is non-blank", async () => {
     const blank = renderModal(baseShot(), () => {});
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });

@@ -28,6 +28,7 @@ import {
   refTagNames,
   refTagPattern,
   removeRefTag,
+  replaceSourceTag,
   renameRefTag,
   stripBrandParagraph,
   stripReferenceClause,
@@ -3672,12 +3673,15 @@ export function recordGraphEditGen(shot: ProductionShot, nodeId: string, rel: st
   node.genIndex = 0;
 }
 
-/** The edit-image prompt framing shared by the classic edit dialog and the
- *  node-graph edit node: the source image occupies token 0, so `@[name]` tags
- *  resolve from token 1. One builder so the two entries can't drift. The
+/** The edit-image prompt shared by every image-edit entry (classic dialog,
+ *  node-graph edit node, suite, reference edit): no header is added — the
+ *  user's text stands alone, with every `@[source]` replaced inline by
+ *  "reference image 1" (callers upload the source first, token 0, so
+ *  `@[name]` tags
+ *  resolve from token 1). One builder so the entries can't drift. The
  *  framing text is the `editImage` prompt template (user-editable). */
 export function buildEditGenPrompt(editText: string, template: string = EDIT_IMAGE_TEMPLATE): string {
-  return renderPromptTemplate(template, { source: refToken(0), instructions: editText.slice(0, 1200) });
+  return renderPromptTemplate(template, { source: refToken(0), instructions: replaceSourceTag(editText).slice(0, 1200) });
 }
 
 /** Auto-wire an edit node's source pipe from the shot's current frame. The

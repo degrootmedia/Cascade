@@ -69,6 +69,8 @@ import type {
   StoryboardPdfSettings,
   StoryboardPdfExportOptions,
   StoryboardPdfExportResult,
+  StyleFramePdfExportOptions,
+  StyleFramePdfExportResult,
   ProductionEvent,
   Retry720pAction,
   ReferencesExternalUpdate,
@@ -76,6 +78,7 @@ import type {
 import type {
   MediaProviderId,
   MediaProviderInfo,
+  ModelDiscoveryState,
   HiggsfieldCliStatus,
   OpenArtCliStatus,
   ModelSurface,
@@ -288,6 +291,9 @@ export interface UndoResultIpc {
 }
 
 export interface McpStatusIpc {
+  /** Model-discovery truth for media-backed servers (OpenArt): the
+   *  transport can be "connected" while no models are loaded. */
+  discovery?: ModelDiscoveryState;
   name: string;
   status: "connected" | "error" | "disabled";
   toolCount: number;
@@ -431,6 +437,10 @@ export interface CascadeApi {
    *  Edited in the dev Model Customizer; saving re-prices history. */
   getHiggsfieldCreditRate(): Promise<number | null>;
   setHiggsfieldCreditRate(v: number | null): Promise<number | null>;
+  /** Append the no-music instruction to every video generation prompt at
+   *  submission time (video only; stored prompts untouched). Default ON. */
+  getAppendNoMusicToVideoPrompts(): Promise<boolean>;
+  setAppendNoMusicToVideoPrompts(v: boolean): Promise<void>;
   /** Dev Mode: verbose human-readable submission logging. */
   getDevMode(): Promise<boolean>;
   setDevMode(v: boolean): Promise<void>;
@@ -1122,6 +1132,13 @@ export interface CascadeApi {
    * updated production.
    */
   exportStoryboardPdf(productionId: string, opts: StoryboardPdfExportOptions): Promise<StoryboardPdfExportResult>;
+  /**
+   * Step 3: render ONLY the selected shots as a style-frame deck — one
+   * frame image per landscape PDF page, in storyboard order, via a Save
+   * dialog. Selected shots with no frame are skipped (counted in the
+   * result); an export where none has a frame fails instead of writing.
+   */
+  exportStyleFramePdf(productionId: string, opts: StyleFramePdfExportOptions): Promise<StyleFramePdfExportResult>;
   /** Step 3: pick a logo image (PNG/JPG) — copied into the production folder
    *  and printed in the lower-right corner of every storyboard-PDF page.
    *  Resolves to the updated production, or null when the user cancels. */

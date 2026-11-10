@@ -34,6 +34,8 @@ export const settingsChannels = {
   "settings:setMediaModelOrder": { method: "setMediaModelOrder", kind: "invoke" },
   "settings:getPromptTemplates": { method: "getPromptTemplates", kind: "invoke" },
   "settings:setPromptTemplates": { method: "setPromptTemplates", kind: "invoke" },
+  "settings:getAppendNoMusicToVideoPrompts": { method: "getAppendNoMusicToVideoPrompts", kind: "invoke" },
+  "settings:setAppendNoMusicToVideoPrompts": { method: "setAppendNoMusicToVideoPrompts", kind: "invoke" },
   "settings:getDevMode": { method: "getDevMode", kind: "invoke" },
   "settings:setDevMode": { method: "setDevMode", kind: "invoke" },
   "settings:getMaxIterations": { method: "getMaxIterations", kind: "invoke" },

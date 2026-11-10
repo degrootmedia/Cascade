@@ -130,3 +130,8 @@ store tests. Each entry below: what happened, what to do instead, how you can te
   line-surgery replacement text pure ASCII (or splice chunks written
   by the file tools). Caught by the lessons-guards encoding test
   during the old-animatic-strip removal (2026-11-03).
+
+## "Connected" is a transport claim, not a discovery claim
+- Happened: OpenArt MCP showed connected while every picker was empty — the host-side MCP result text was sliced at 50k, cutting the >50k model-list JSON mid-document so discovery parsed to zero (2026-11-10).
+- Do: never cap machine-parsed host replies at conversational sizes; treat an empty catalog parse as a failure (retry + keep last good), and surface discovery state next to connection state so "connected but model-less" is visible where users look.
+- Tell: server healthy, tools listed, but a downstream list is empty everywhere at once — probe the raw reply length before trusting the parser. Guard: `app/test/mcp-discovery.test.ts`.

@@ -4,9 +4,10 @@
  * later steps show their planned surface and keep persisted state (style).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { clipboardText } from "../clipboard.js";
 import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, seedTimelineFromProduction, reconcileTimelineShotMedia, type ProductionTimeline, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
-import { applySavedRevision, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
+import { applySavedRevision, isForCurrentProduction, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
 import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-usage.js";
 import { ShotTable } from "./ShotTable.js";
@@ -52,6 +53,7 @@ import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wired
 import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
 import { setBrandEdge, setStyleEdge } from "../../../shared/graph/connect.js";
 import { resolveSelectedOutput, resolveShotDisplay } from "../../../shared/selected-output.js";
+import { isContiguousSelection, nextBoardSelection, orderedSelection, type BoardSelectMode } from "../../../shared/board-selection.js";
 import { QueuePanel } from "./production/QueuePanel.js";
 import { useQueueButton } from "./production/useQueueButton.js";
 import { jobOpensNodeView } from "./production/queue-format.js";
@@ -414,31 +416,44 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setFocusedPrompt(text);
   }
 
-  // Shot-sequence range selection (UI-only, never persisted): plain click
+  // Storyboard multi-selection (UI-only, never persisted): plain click
   // re-anchors, Shift-click extends the range over the flattened storyboard
-  // order, Esc clears it. The focused shot (`promptShotId`) stays on the
-  // anchor so the prompt panel doesn't jump while a range is being built —
-  // the references panel's `select` pattern, over scene order.
+  // order, Ctrl/Cmd-click toggles individual panels, Esc clears it. A
+  // contiguous selection can become a shot sequence; any selection can be
+  // exported as a style-frame PDF. The focused shot (`promptShotId`) stays
+  // put while a selection is being built so the prompt panel doesn't jump.
+  // The transitions live in the pure `board-selection` helper.
   const [seqSelection, setSeqSelection] = useState<Set<string>>(() => new Set());
   const seqAnchorRef = useRef<string | null>(null);
   /** The board grid the sequence bar layer measures card rects against. */
   const boardsGridRef = useRef<HTMLDivElement | null>(null);
-  const selectFrame = useCallback((id: string, mode: "single" | "range") => {
+  const selectFrame = useCallback((id: string, mode: BoardSelectMode) => {
     const order = (prodRef.current?.scenes ?? []).flatMap((sc) => sc.shots.map((s) => s.id));
     setSeqSelection((prev) => {
-      if (mode === "range" && seqAnchorRef.current) {
-        const from = order.indexOf(seqAnchorRef.current);
-        const to = order.indexOf(id);
-        if (from >= 0 && to >= 0) {
-          const next = new Set(prev);
-          for (let i = Math.min(from, to); i <= Math.max(from, to); i++) next.add(order[i]);
-          return next;
-        }
-      }
-      seqAnchorRef.current = id;
-      return new Set([id]);
+      const next = nextBoardSelection(order, prev, seqAnchorRef.current, id, mode);
+      seqAnchorRef.current = next.anchor;
+      return next.selection;
     });
   }, []);
+  // Step 3: export the selected panels as a style-frame PDF (one frame per
+  // page, storyboard order). The Save dialog + a log line report the
+  // result; a selection with no framed panel surfaces as an error notice.
+  const [styleFramePdfBusy, setStyleFramePdfBusy] = useState(false);
+  async function exportStyleFrames() {
+    const current = prodRef.current;
+    if (!current || styleFramePdfBusy) return;
+    const shotIds = orderedSelection(current.scenes.flatMap((sc) => sc.shots.map((s) => s.id)), seqSelection);
+    if (!shotIds.length) return;
+    setStyleFramePdfBusy(true);
+    setErr(null);
+    try {
+      await window.cascade.exportStyleFramePdf(current.meta.id, { shotIds });
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      setStyleFramePdfBusy(false);
+    }
+  }
   const clearSeqSelection = useCallback(() => {
     seqAnchorRef.current = null;
     setSeqSelection((prev) => (prev.size ? new Set() : prev));
@@ -524,7 +539,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     video: (id: string) => void;
     textChange: (id: string, patch: { audio: string; visual: string }) => void;
     promptFocus: (id: string, prompt: string) => void;
-    frameSelect: (id: string, mode: "single" | "range") => void;
+    frameSelect: (id: string, mode: BoardSelectMode) => void;
     dropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => void;
     dropFiles: (id: string, files: FileList | File[]) => void;
     promoteHistory: (id: string, framePath: string) => void;
@@ -621,7 +636,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     onVideo: (id: string) => boardHandlerRef.current.video(id),
     onTextChange: (id: string, patch: { audio: string; visual: string }) => boardHandlerRef.current.textChange(id, patch),
     onPromptFocus: (id: string, prompt: string) => boardHandlerRef.current.promptFocus(id, prompt),
-    onFrameSelect: (id: string, mode: "single" | "range") => boardHandlerRef.current.frameSelect(id, mode),
+    onFrameSelect: (id: string, mode: BoardSelectMode) => boardHandlerRef.current.frameSelect(id, mode),
     onDropFrame: (id: string, source: { prodId: string; shotId: string; number: number }) => boardHandlerRef.current.dropFrame(id, source),
     onDropFiles: (id: string, files: FileList | File[]) => boardHandlerRef.current.dropFiles(id, files),
     onPromoteHistory: (id: string, framePath: string) => boardHandlerRef.current.promoteHistory(id, framePath),
@@ -643,7 +658,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // ---- Shot-sequence storyboard chrome (accent bars + create strip) ----
   // While a range is being built the strip owns the slot space (the bars step
   // aside, so the two never overlap); once created/cleared the bars return.
-  const showCreateStrip = seqSelection.size >= 2;
+  // Only an unbroken run can become a sequence; a ctrl-clicked (gappy)
+  // selection keeps the normal sequence bars and feeds the PDF export.
+  const showCreateStrip = seqSelection.size >= 2
+    && isContiguousSelection((prod?.scenes ?? []).flatMap((sc) => sc.shots.map((s) => s.id)), seqSelection);
   // Which references are tag-cited or wired into a node anywhere in the
   // production — drives the in-use badge on Design/moodboard tiles.
   const refUsage = useMemo(() => (prod ? referenceUsage(prod) : undefined), [prod]);
@@ -1078,10 +1096,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Guarded whole-snapshot apply: rejects stale IPC snapshots (Fix A) and
+  /** Guarded whole-snapshot apply: rejects snapshots of another production
+   *  (a finished generation must not reopen its project of origin), rejects stale IPC snapshots (Fix A) and
    *  drops dangling focus + dead prompt cache entries (Fix C). Returns true
    *  when the snapshot was applied. */
   const applySnapshot = useCallback((next: Production): boolean => {
+    if (!isForCurrentProduction(next.meta.id, prodRef.current?.meta.id)) return false;
     const rev = revOf(next);
     if (!isFresh(rev, prodRevRef.current)) return false;
     prodRevRef.current = rev;
@@ -1959,9 +1979,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     const onPaste = (e: ClipboardEvent) => {
       // If the node graph modal is open, let it handle paste (creates a ref via its own handler).
       if (document.querySelector(".prod-graph-overlay")) return;
-      // Never hijack a paste aimed at a text field (the save popup included).
+      // A paste carrying text into a text field stays the field's; an image-only paste registers even from one (it could never land there).
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) && (clipboardText(e.clipboardData) || !t.closest?.(".prod-workspace"))) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files: File[] = [];
@@ -2073,7 +2093,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setBoardsBusy(true); setErr(null);
     try {
       const next = await window.cascade.generateBoards(prod.meta.id, { maxShots: 200 });
-      setProd(next);
+      applySnapshot(next);
       bustAll();
       void refreshList();
     } catch (e) {
@@ -2095,7 +2115,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setRegenIds((prev) => new Set([...prev, ...batch]));
     try {
       const next = await window.cascade.regenerateBoards(prod.meta.id, batch);
-      setProd(next);
+      applySnapshot(next);
       bustMany(batch);
       void refreshList();
     } catch (e) {
@@ -3002,7 +3022,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ...(Number(durationSec) > 0 ? { durationSec: Number(durationSec) } : {}),
         ...(tweenParams && Object.keys(tweenParams).length ? { params: tweenParams } : {}),
       });
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
@@ -3123,7 +3143,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       const imageTarget = cur ? wiredPromptTarget(cur, "imagegen", "composer") : "composer";
       const framePrompt = cur && imageTarget !== "composer" ? renderShotPrompt(prod, cur, imageTarget) : liveFocusedPrompt;
       const next = await window.cascade.generateFrameNode(prod.meta.id, shotId, { prompt: framePrompt, model, resolution, ...(frameParams && Object.keys(frameParams).length ? { params: frameParams } : {}) });
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
@@ -3172,7 +3192,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ? renderPromptText(videoContent.trim() ? videoContent : getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, videoTarget))
         : getPromptTemplate("videoMotion");
       const next = await window.cascade.generateVideoNode(prod.meta.id, shotId, { nodeId, prompt: videoPrompt, model, resolution, durationSec, sourcePath, refIds: node?.refIds ?? [], ...(refSwaps?.length ? { refSwaps } : {}), ...(videoParams && Object.keys(videoParams).length ? { params: videoParams } : {}) });
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
@@ -3191,7 +3211,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     setErr(null);
     try {
       const next = await window.cascade.upgradeDraftVideo(prod.meta.id, shotId, nodeId, rel);
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
   }
@@ -3244,7 +3264,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ...(refSwaps?.length ? { refSwaps } : {}),
         ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}),
       });
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
@@ -3268,7 +3288,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       // is always current (no baked copy from connect time).
       const editPrompt = cur ? renderShotPrompt(prod, cur, wiredPromptTarget(cur, `editgen:${nodeId}`, { editprompt: nodeId })) : (node?.prompt ?? "");
       const next = await window.cascade.generateEditNode(prod.meta.id, shotId, { nodeId, prompt: editPrompt, model, resolution, ...(editParams && Object.keys(editParams).length ? { params: editParams } : {}) });
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
     } catch (e) { setErr(String(e).replace(/^Error:\s*/, "")); }
     finally {
@@ -3514,7 +3534,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         params && Object.keys(params).length ? params : undefined,
         resolution || undefined
       );
-      setProd(next);
+      applySnapshot(next);
       bustOne(shotId);
       void refreshList();
     } catch (e) {
@@ -3540,7 +3560,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         ? renderPromptText(opts.prompt ?? cur.graphVideoPrompt ?? getPromptTemplate("videoMotion"), promptRefsFor(prod, cur, "videoprompt"))
         : opts.prompt;
       const next = await window.cascade.generateVideo(prod.meta.id, shotId, { ...opts, prompt });
-      setProd(next);
+      applySnapshot(next);
       void refreshList();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -4758,6 +4778,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => setPdfOpen(true)} title="Export the storyboard (frames + Audio/Visual) to a landscape PDF">
                   Export storyboard PDF
                 </button>
+                <button disabled={boardsBusy || importBusy || styleFramePdfBusy || !seqSelection.size} onClick={() => void exportStyleFrames()} title="Export only the selected panels as a style-frame deck (one frame per page, storyboard order). Select panels with Shift+click (range) or Ctrl+click (add/remove)">
+                  {styleFramePdfBusy ? "Exporting…" : `Export selected frames${seqSelection.size ? ` (${seqSelection.size})` : ""}`}
+                </button>
                 <span className="prod-boards-sep" />
                 <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
                   Refresh Storyboard Images
@@ -4822,7 +4845,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                     showScript={showBoardText}
                     onPromptFocus={boardActions.onPromptFocus}
                     onFrameSelect={boardActions.onFrameSelect}
-                    inRange={seqSelection.size >= 2 && seqSelection.has(shot.id)}
+                    inRange={seqSelection.has(shot.id) && (seqSelection.size >= 2 || promptShotId !== shot.id)}
                     seqSlot={seqMemberIds.has(shot.id) || (showCreateStrip && seqSelection.has(shot.id))}
                     selected={promptShotId === shot.id}
                     onDropFrame={boardActions.onDropFrame}

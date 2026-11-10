@@ -909,6 +909,22 @@ export interface StoryboardPdfExportResult {
   production: Production;
 }
 
+/** Options for one style-frame deck export: the selected shots, any order. */
+export interface StyleFramePdfExportOptions {
+  /** Selected shot ids; the export re-orders them into storyboard order. */
+  shotIds: string[];
+}
+
+/** Result of a style-frame deck export (selected panels, one frame per page). */
+export interface StyleFramePdfExportResult {
+  /** Saved path, or null when the Save dialog was cancelled. */
+  filePath: string | null;
+  /** Pages written (selected panels that have a frame). */
+  exported: number;
+  /** Selected panels skipped because they have no frame yet. */
+  skipped: number;
+}
+
 /** Offer attached to a log line after a video generation failed with an
  *  oversize (>720p) video reference attached: one click creates a reusable
  *  `<name>_720p` duplicate reference per ref and retries the submission

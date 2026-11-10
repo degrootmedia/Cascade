@@ -41,7 +41,7 @@ import type { MediaProvider, MediaProviderId } from "./providers/types.js";
 import * as ledger from "./ledger.js";
 import { assemble, renderAnimatic, assemblyPlan, sendAssetToAssembly } from "./assembly.js";
 import { generateProxies, listReadyProxies, timelineVideoSources } from "./proxies.js";
-import { buildStoryboardPdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName } from "./storyboard-pdf.js";
+import { buildStoryboardPdf, buildStyleFramePdf, detectImageKind, loadLogoImage, loadPanelImage, sanitizeVersion, storyboardPdfFileName, styleFramePanelsFor, styleFramePdfFileName } from "./storyboard-pdf.js";
 import { probeMedia, probeVideoSize, resolveFfmpeg, runFfmpeg } from "./ffmpeg.js";
 import { resolveWhisperBinary, ensureWhisperModel, isModelReady, whisperModelPath, pcm16ToWav, transcribeWav } from "./voice.js";
 import type { VoiceStatusIpc, WhisperModel } from "../shared/voice.js";
@@ -61,6 +61,7 @@ import { isTrustedSender } from "./ipc/handle.js";
 import { DetachedCanvasController } from "./detached-window.js";
 import { pathToFileURL } from "node:url";
 import { dataUrlToBytes, parsePromptBoxes, refTagNames, stripReferenceClause, addStyleParagraph } from "../shared/prompt-grammar.js";
+import { appendNoMusicInstruction } from "../shared/no-music.js";
 import type { RefSwap, Retry720pAction } from "../shared/ipc.js";
 import { stripSharedSections } from "../shared/graph/render.js";
 import { extractModelList, getProvider, normalizeModelList } from "../shared/providers.js";
@@ -71,12 +72,15 @@ import { IMAGE_IMPORT_LIMIT_BYTES, OVERSIZE_IMAGE_MESSAGE, OVERSIZE_IMAGE_CONVER
 import { emptySuiteSession, normalizeSuiteSession, type SuiteSession, type SuiteGenerateRequest, type SuiteEntry, type SuiteExportTarget, type SuiteExportResult } from "../shared/ipc.js";
 import type { AgentEventIpc, ApprovalDecisionIpc, VerificationDecisionIpc, VerifyCommandIpc, SandboxModeIpc, Production, ProductionEvent, ReferencesExternalUpdate, ProductionShot, ShotSequence, VideoGenOptions, VideoModelOptions, ImageModelOptions, GenerationCostRequest, GenParams, CliModelSchema, ModelParamExposure, ModelParamDefaultValue, ModelProbeResult, HiggsfieldCliStatus, OpenArtCliStatus, ReferenceImageGenOptions, CustomRef, ReferenceSaveOptions, CharacterSheetGenOptions, CharacterSheetView, CharacterSheetBuilder, LedgerView, ExpensePriceRule, MediaModelLadder, CanvasBusySnapshot, DetachedCanvasContext, CameraGridCutoutRequest, CameraGridCutoutResult, CameraGridGenOptions, CameraGridImportResult, ImageGenAspectRatio, WorkspaceState, ActiveProductionInfo, GraphGenItem, GraphLayoutPatch, JobSnapshot, PendingImageGen, PendingVideoGen, PendingVideoTarget } from "../shared/ipc.js";
 import type { SelectGraphTakeRequest } from "../shared/selected-output.js";
+import type { McpStatusIpc } from "../shared/ipc.js";
 import { resolveShotDisplay, shotStillRel } from "../shared/selected-output.js";
 import { isActiveJobState, jobForChannel, jobLabel } from "../shared/ipc.js";
 import { defaultGenjutsuModelId, genjutsuModeForModelId, isGenjutsuMode } from "../shared/ipc.js";
 
 let win: BrowserWindow | null = null;
 let mcp: McpManager;
+/* Model rediscovery after MCP (re)connects rides McpManager.onReloaded,
+ * wired in registerIpc — see rediscoverMediaModels there. */
 /**
  * Production Assistant tools exposed to the chat agent. Built in `registerIpc`
  * (they wrap the same production handlers the UI calls) and merged into every
@@ -1174,12 +1178,64 @@ function registerIpc() {
   // The active media vendor (OpenArt/Higgsfield/Higgsfield CLI) — a global setting resolved
   // per call, so every generation flow follows a Settings change immediately.
   const media = (): MediaProvider => providers[resolveProviderId(settings.getMediaProvider())];
+  /** Tell EVERY window its model lists are stale (DOM events don't cross
+   *  BrowserWindows, so a detached canvas would otherwise keep serving a
+   *  pre-discovery catalog). */
+  const broadcastModelsChanged = () => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        if (!w.isDestroyed()) w.webContents.send("media:modelsChanged");
+      } catch { /* a destroyed window must not break the broadcast */ }
+    }
+  };
+  /** Force a fresh model discovery for every vendor that tracks it, then
+   *  broadcast so pickers, the customizer, and Settings all re-read. Runs
+   *  after every MCP (re)connect — connection alone must never leave the
+   *  app "connected" with zero models behind it. Failures land in the
+   *  provider's discovery state (Settings shows them), never silently. */
+  const rediscoverMediaModels = () => {
+    for (const id of PROVIDER_IDS) {
+      const p = providers[id];
+      if (!p.modelDiscovery) continue;
+      void (async () => {
+        try {
+          p.refreshProbes?.();
+          await p.listModelChoices();
+        } catch (e) {
+          console.warn(`[media] ${id} model discovery failed: ${String(e)}`);
+        }
+        broadcastModelsChanged();
+      })();
+    }
+  };
+  mcp.onReloaded = rediscoverMediaModels;
+  /** MCP statuses for the renderer, with media-backed servers carrying
+   *  their model-discovery truth alongside the transport state. */
+  const mcpStatusesIpc = (): McpStatusIpc[] =>
+    mcp.getStatuses().map((s) => {
+      if (s.status !== "connected") return s;
+      const provider = (PROVIDER_IDS as readonly string[]).includes(s.name)
+        ? providers[s.name as MediaProviderId]
+        : undefined;
+      const discovery = provider?.modelDiscovery?.();
+      return discovery ? { ...s, discovery } : s;
+    });
   // Per-model routing: an explicit `higgsfield:…` pick rides Higgsfield even
   // when the global is OpenArt (and vice versa via the active fallback), so a
   // saved cross-vendor pick can't silently fall back to the active vendor's
   // first model. "auto"/empty defers to the global.
   const mediaFor = (model?: string): MediaProvider =>
     mediaForModel(providers, resolveProviderId(settings.getMediaProvider()), model);
+  // No-music instruction (Settings → Media & Storage, ON by default):
+  // appended to the SUBMITTED prompt of every video generation below —
+  // classic and node view, every backend (all submits resolve through
+  // MediaProvider here). `clean.prompt` is the per-submit copy, so the
+  // prompt stored on the shot/node/block is never rewritten; the take
+  // history honestly records what was sent, like the 720p ref swaps.
+  // Image submits never call this. The draft-finalize submit sends no
+  // prompt at all and is deliberately excluded.
+  const withNoMusicInstruction = (prompt: string): string =>
+    appendNoMusicInstruction(prompt, settings.getAppendNoMusicToVideoPrompts());
 
   // IPC channels are declared in the shared contract (shared/ipc.ts), which the
   // preload adapter also consumes — so adding a channel means editing one map,
@@ -1667,6 +1723,12 @@ function registerIpc() {
     settings.resetModelParamDefaults();
   });
 
+  handle("settings:getAppendNoMusicToVideoPrompts", () => settings.getAppendNoMusicToVideoPrompts());
+
+  handle("settings:setAppendNoMusicToVideoPrompts", (_e, v: boolean) => {
+    settings.setAppendNoMusicToVideoPrompts(v === true);
+  });
+
   handle("settings:getDevMode", () => settings.getDevMode());
 
   handle("settings:setDevMode", (_e, v: boolean) => {
@@ -2133,7 +2195,15 @@ function registerIpc() {
     return statuses;
   });
 
-  handle("mcp:status", () => mcp.getStatuses());
+  handle("mcp:status", () => {
+    // Settings opened before the startup discovery landed: kick it now so
+    // the status line can move past "connected" to the model truth.
+    for (const id of PROVIDER_IDS) {
+      const p = providers[id];
+      if (p.modelDiscovery?.().state === "idle" && p.isAvailable()) rediscoverMediaModels();
+    }
+    return mcpStatusesIpc();
+  });
 
   handle("mcp:reload", async () => {
     const statuses = await mcp.reload();
@@ -2149,7 +2219,7 @@ function registerIpc() {
   });
 
   handle("media:listProviders", () =>
-    PROVIDER_IDS.map((id) => ({ id, displayName: PROVIDER_META[id].displayName, available: providers[id].isAvailable() }))
+    PROVIDER_IDS.map((id) => ({ id, displayName: PROVIDER_META[id].displayName, available: providers[id].isAvailable(), discovery: providers[id].modelDiscovery?.() }))
   );
 
   handle("media:getProvider", (): MediaProviderId => resolveProviderId(settings.getMediaProvider()));
@@ -3580,6 +3650,38 @@ function registerIpc() {
     return { filePath: res.filePath as string | null, production: p };
   });
 
+  // Step 3: style-frame deck — only the selected shots, one frame image
+  // per landscape page in storyboard order (the storyboard multi-selection:
+  // Shift-click range, Ctrl-click toggle). Selected shots with no frame
+  // are skipped and counted; nothing is remembered on the production.
+  handle("production:exportStyleFramePdf", async (_e, id: string, opts?: { shotIds?: string[] }) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    const shotIds = Array.isArray(opts?.shotIds) ? opts.shotIds.filter((s) => typeof s === "string") : [];
+    if (!shotIds.length) throw new Error("No panels selected — select storyboard panels first (Shift+click for a range, Ctrl+click to add panels).");
+    const shots = p.scenes.flatMap((s) => s.shots);
+    const readFile = (abs: string): Uint8Array | null => {
+      try {
+        return new Uint8Array(fs.readFileSync(abs));
+      } catch {
+        return null;
+      }
+    };
+    const { panels, skipped } = styleFramePanelsFor(p, shots, shotIds, readFile);
+    if (!panels.length) throw new Error("None of the selected panels has a frame yet — generate or import frames first.");
+    const pdfBytes = await buildStyleFramePdf(panels, { productionName: p.meta.name });
+    const res = await dialog.showSaveDialog(win!, {
+      title: "Export style frames PDF",
+      defaultPath: path.join(p.meta.folder, p.assets.outDir, styleFramePdfFileName(p.meta.name)),
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (res.canceled || !res.filePath) return { filePath: null as string | null, exported: panels.length, skipped };
+    fs.mkdirSync(path.dirname(res.filePath), { recursive: true });
+    fs.writeFileSync(res.filePath, Buffer.from(pdfBytes));
+    productionEmit(id, `Style frame PDF exported: ${res.filePath} (${panels.length} frame${panels.length === 1 ? "" : "s"}${skipped ? `, ${skipped} selected without a frame skipped` : ""})`, "done");
+    return { filePath: res.filePath as string | null, exported: panels.length, skipped };
+  });
+
   // Step 3: pick the storyboard-PDF logo (PNG/JPG) — copied into the
   // production folder and printed in the lower-right corner of every page.
   handle("production:pickStoryboardLogo", async (_e, id: string) => {
@@ -4426,6 +4528,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // this submission only (saved prompts/wiring are never rewritten).
       const classicSwaps = resolveRefSwaps(p, opts?.refSwaps);
       if (classicSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, classicSwaps);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       const classicVideoInputs = videoRefsForPromptTags(p, clean.prompt);
       let classicSubmitted = false;
       const classicSink = pendingVideoSink(id, shotId, { kind: "videoPath" });
@@ -4542,6 +4645,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (proactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${proactiveSwaps.length} reference video${proactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
       const nodeSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), proactiveSwaps);
       if (nodeSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, nodeSwaps);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       const effectiveRefIds = applyRefSwapsToIds(opts?.refIds, nodeSwaps);
       const extraRefs = resolveGenRefIds(p, shot, effectiveRefIds);
       const sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
@@ -4670,6 +4774,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       const anchor = shots.find((s) => seq.shotIds.includes(s.id));
       if (!anchor) throw new Error("This sequence has no member shots left to generate against.");
       emit(`${seq.name}: generating a ${clean.durationSec}s video${clean.model !== "auto" ? ` via ${clean.model}` : ""} from ${inputs.length} input${inputs.length === 1 ? "" : "s"}…`);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       const res = await mediaFor(clean.model).generateVideoClip(p, anchor, clean, emit, sourcePath, extraRefs);
       const rel = relocateClipToSequence(p, seq, res.rel);
       recordSequenceVideoGen(seq, nodeId, rel, clean.prompt, clean.model);
@@ -4720,6 +4825,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (!anchor) throw new Error("This sequence has no member shots left to generate against.");
       emit(`${seq.name}: editing the video${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
       const extraRefs = resolveGenRefIds(p, seq.graph ?? anchor, opts?.refIds);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       const res = await provider.generateVideoEdit(p, anchor, clean, emit, sourcePath, extraRefs);
       const rel = relocateClipToSequence(p, seq, res.rel);
       recordSequenceVideoGen(seq, nodeId, rel, clean.prompt, clean.model);
@@ -4774,6 +4880,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       if (editProactiveSwaps.length) emit(`Shot ${shot.number}: downsampling ${editProactiveSwaps.length} reference video${editProactiveSwaps.length === 1 ? "" : "s"} to 720p for this submission…`);
       const editSwaps = mergeRefSwaps(resolveRefSwaps(p, opts?.refSwaps), editProactiveSwaps);
       if (editSwaps.length) clean.prompt = applyRefSwapsToPrompt(clean.prompt, editSwaps);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       let sourcePath = typeof opts?.sourcePath === "string" && opts.sourcePath.trim() ? opts.sourcePath.trim() : undefined;
       if (sourcePath) {
         const byPath = editSwaps.find((s) => s.fromPath === sourcePath);
@@ -5058,6 +5165,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         refsOnly: false,
       };
       emit(`Shot ${shot.number}: in-betweening ${start.name} → ${end.name} (${clean.durationSec}s)${clean.model !== "auto" ? ` via ${clean.model}` : ""}…`);
+      clean.prompt = withNoMusicInstruction(clean.prompt);
       clean.onPending = pendingVideoSink(id, shotId, { kind: "tween", blockId });
       let rel: string;
       try {
@@ -5495,11 +5603,25 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     return (await provider.modelOptions?.(String(modelId ?? ""))) ?? null;
   });
 
-  handle("modelCustomizer:refresh", (_e, providerId?: string) => {
+  handle("modelCustomizer:refresh", async (_e, providerId?: string) => {
     if (providerId) {
       providers[resolveProviderId(providerId)].refreshProbes?.();
     } else {
       for (const pid of PROVIDER_IDS) providers[pid].refreshProbes?.();
+    }
+    // A user-clicked Refresh re-runs discovery itself (not just cache
+    // invalidation), so the status the user reads next is the fresh truth
+    // even when no picker happens to refetch. Failures stay in the
+    // provider's discovery state where Settings shows them.
+    const refreshedIds = providerId ? [resolveProviderId(providerId)] : PROVIDER_IDS;
+    for (const pid of refreshedIds) {
+      const p = providers[pid];
+      if (!p.modelDiscovery) continue;
+      try {
+        await p.listModelChoices();
+      } catch (e) {
+        console.warn(`[media] ${pid} model discovery failed on refresh: ${String(e)}`);
+      }
     }
     // Tell EVERY window to reload its model lists: the renderer's DOM
     // event only reaches the window that clicked Refresh, so a detached

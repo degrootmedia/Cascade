@@ -53,7 +53,7 @@ export function buildSettingsRegistry(): SettingsCategory[] {
           title: "Media & Storage",
           category: "general",
           description: "Generation vendor and on-disk cache.",
-          keywords: ["media", "provider", "vendor", "transport", "mcp", "cli", "thumbnails", "cache", "storage", "openart", "higgsfield", "generation"],
+          keywords: ["media", "provider", "vendor", "transport", "mcp", "cli", "thumbnails", "cache", "storage", "openart", "higgsfield", "generation", "music", "no music", "audio", "diegetic", "video prompt", "score", "soundtrack"],
           owns: [],
           render: () => <MediaStorageSection />,
         },

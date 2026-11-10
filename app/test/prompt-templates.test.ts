@@ -95,6 +95,11 @@ describe("builders honor a template override", () => {
     expect(buildEditGenPrompt("make it night", "Framing {{source}}: {{instructions}}")).toBe("Framing @image1: make it night");
   });
 
+  it("the built-in editImage framing adds no header — the user's prompt stands alone", () => {
+    expect(promptTemplateDefault("editImage")).toBe("{{instructions}}");
+    expect(buildEditGenPrompt("make it night")).toBe("make it night");
+  });
+
   it("styleFramePrompt substitutes {{style}} / {{brand}} and keeps the subject scaffold", () => {
     const custom = styleFramePrompt("Noir ink", "Color palette: #fff.", "Style: {{style}} {{brand}}");
     expect(custom).toBe("Style: Noir ink  Production palette/typeface: Color palette: #fff.");

@@ -17,6 +17,7 @@ import { mediaEntryForId, mediaEntryForPath } from "../../../../shared/media-reg
 import { useExternalEditorLabel } from "../../use-external-editor-label.js";
 import { MEDIA_MENU_LABELS } from "../../../../shared/menu-labels.js";
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
+import type { BoardSelectMode } from "../../../../shared/board-selection.js";
 import { closestResolution, resolutionsForSchema } from "../resolution.js";
 import { promptRefsForShot } from "./references.js";
 import { ReferencePromptEditor } from "./prompt-panel.js";
@@ -65,11 +66,12 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   /** Whether the Audio/Visual direction boxes render under the frame. */
   showScript: boolean;
   onPromptFocus: (shotId: string, prompt: string) => void;
-  /** Frame-click selection: "single" anchors (and clears) the shot-sequence
-   *  range, "range" extends it from the anchor (Shift-click). Plain clicks
-   *  still focus the prompt afterwards; Shift-clicks only select. */
-  onFrameSelect?: (shotId: string, mode: "single" | "range") => void;
-  /** This card sits inside the current shot-sequence range (highlight). */
+  /** Frame-click selection: "single" anchors (and clears) the storyboard
+   *  selection, "range" extends it from the anchor (Shift-click), "toggle"
+   *  adds/removes one panel (Ctrl/Cmd-click). Plain clicks still focus the
+   *  prompt afterwards; modified clicks only select. */
+  onFrameSelect?: (shotId: string, mode: BoardSelectMode) => void;
+  /** This card is part of the current multi-selection (highlight). */
   inRange?: boolean;
   /** Room for the sequence bar under this card (animated bottom slot). */
   seqSlot?: boolean;
@@ -351,12 +353,14 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // The focused shot's prompt is fetched by the parent (ProductionWorkspace's
   // focused-shot effect) only when a card is clicked — see onPromptFocus.
 
-  // Frame clicks drive BOTH focus (the prompt panel follows) and the shot-
-  // sequence range selection. Shift-click extends the range from the anchor
-  // and leaves the prompt panel where it is; a plain click re-anchors.
+  // Frame clicks drive BOTH focus (the prompt panel follows) and the
+  // storyboard multi-selection. Shift-click extends the range from the
+  // anchor, Ctrl/Cmd-click toggles this one panel in or out; both leave
+  // the prompt panel where it is. A plain click re-anchors and focuses.
   function frameClick(e: React.MouseEvent) {
-    if (onFrameSelect) onFrameSelect(shot.id, e.shiftKey ? "range" : "single");
-    if (!e.shiftKey) onPromptFocus(shot.id, "");
+    const mode: BoardSelectMode = e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "single";
+    if (onFrameSelect) onFrameSelect(shot.id, mode);
+    if (mode === "single") onPromptFocus(shot.id, "");
   }
 
   return (

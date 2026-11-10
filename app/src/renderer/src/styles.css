@@ -3624,6 +3624,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .mcp-server-name { color: var(--text); font-weight: 600; min-width: 0; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-server.connected .mcp-dot { background: var(--ok); }
+.mcp-server.connected.no-models .mcp-dot { background: var(--warn); }
 .mcp-server.error .mcp-dot { background: var(--danger); }
 .mcp-badge { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
   border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
@@ -3634,6 +3635,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--text-dim); overflow-wrap: anywhere; }
 .mcp-server-foot { display: flex; justify-content: flex-end; margin-top: 8px; padding-top: 8px;
   border-top: 1px solid var(--border); }
+.mcp-server-foot { align-items: center; gap: 12px; flex-wrap: wrap; }
+.mcp-discovery-error { color: var(--danger); overflow-wrap: anywhere; }
 .settings .mcp-on-demand { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-weight: 400;
   font-size: 0.82rem; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
 .settings .mcp-on-demand:hover { color: var(--text); }
@@ -4665,7 +4668,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   user-select: none;
 }
 .prod-graph-tools-item:active { cursor: grabbing; }
-.prod-graph-tools-icon { color: var(--accent); flex-shrink: 0; }
+.prod-graph-tools-icon { color: var(--icon-tint); flex-shrink: 0; }
 .prod-graph-tools-label { font-size: 0.72rem; color: var(--text); flex: 1; min-width: 0; }
 /* Tool tiles are never ghosted for being on the canvas: multi-instance
    nodes can always be added again, and the count badge shows presence. */

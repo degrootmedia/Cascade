@@ -48,8 +48,8 @@ async function mount(el: ReturnType<typeof createElement>) {
 const iconComponents = Object.entries(icons).filter(([, v]) => typeof v === "function");
 
 describe("icon sets", () => {
-  it("exports the full 25-icon set", () => {
-    expect(iconComponents.length).toBe(25);
+  it("exports the full 27-icon set", () => {
+    expect(iconComponents.length).toBe(27);
   });
 
   it("colorful renders an <img>; switching to minimal swaps it live, no remount", async () => {
@@ -99,7 +99,7 @@ describe("minimal artwork files", () => {
     const colorfulDir = path.resolve(__dirname, "../src/renderer/src/assets/icons");
     const colorfulCount = fs.readdirSync(colorfulDir).filter((f) => f.endsWith(".svg")).length;
     expect(files.length).toBe(colorfulCount);
-    expect(files.length).toBe(25);
+    expect(files.length).toBe(27);
   });
 
   it("each is a single-color 24x24 outline SVG (mask-ready)", () => {

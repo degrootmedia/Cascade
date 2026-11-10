@@ -22,8 +22,10 @@ vi.mock("../src/main/scripting.js", () => ({
 
 import {
   buildStoryboardPdf,
+  buildStyleFramePdf,
   compressForPdf,
   contain16x9,
+  containRect,
   coverImageRect,
   detectImageKind,
   fitLines,
@@ -33,10 +35,13 @@ import {
   paginatePanels,
   sanitizeVersion,
   storyboardPdfFileName,
+  styleFramePanelsFor,
+  styleFramePdfFileName,
   wrapText,
   type ReadFileFn,
   type StoryboardPdfImage,
   type StoryboardPdfPanel,
+  type StyleFramePdfPanel,
   type ToJpegFn,
 } from "../src/main/storyboard-pdf.js";
 
@@ -360,5 +365,93 @@ describe("buildStoryboardPdf", () => {
     } finally {
       await parser.destroy();
     }
+  });
+});
+
+// ---- style frame deck (selected panels only) ------------------------------
+
+function makeStylePanel(i: number): StyleFramePdfPanel {
+  return {
+    number: String(100 + i).padStart(4, "0"),
+    image: { bytes: new Uint8Array(PNG_1X1), kind: "png" },
+  };
+}
+
+describe("containRect", () => {
+  it("fits the whole image inside the page without cropping, centered", () => {
+    for (const [iw, ih] of [[1920, 1080], [100, 400], [400, 100], [50, 50]]) {
+      const r = containRect(841.89, 595.28, iw, ih);
+      expect(r.width / r.height).toBeCloseTo(iw / ih, 10);
+      expect(r.width).toBeLessThanOrEqual(841.89 + 1e-9);
+      expect(r.height).toBeLessThanOrEqual(595.28 + 1e-9);
+      expect(Math.min(r.x, r.y)).toBeCloseTo(0, 6);
+      expect(r.x + r.width / 2).toBeCloseTo(841.89 / 2, 6);
+      expect(r.y + r.height / 2).toBeCloseTo(595.28 / 2, 6);
+    }
+  });
+});
+
+describe("styleFramePdfFileName", () => {
+  it("builds a filename-safe style-frames name", () => {
+    expect(styleFramePdfFileName("My Film")).toBe("My-Film-style-frames.pdf");
+    expect(styleFramePdfFileName("")).toBe("untitled-production-style-frames.pdf");
+  });
+});
+
+describe("styleFramePanelsFor", () => {
+  function framedShot(rel: string, overrides: Partial<ProductionShot> = {}): ProductionShot {
+    fs.mkdirSync(path.dirname(path.join(prodFolder, rel)), { recursive: true });
+    fs.writeFileSync(path.join(prodFolder, rel), FAKE_JPG);
+    return makeShot({ artwork: rel, ...overrides });
+  }
+
+  it("keeps storyboard order regardless of click order and dedupes ids", () => {
+    const s1 = framedShot("boards/0100/a.jpg", { number: "0100" });
+    const s2 = framedShot("boards/0200/a.jpg", { number: "0200" });
+    const s3 = framedShot("boards/0300/a.jpg", { number: "0300" });
+    const p = makeProduction();
+    const { panels, skipped } = styleFramePanelsFor(p, [s1, s2, s3], [s3.id, s1.id, s3.id], readFile);
+    expect(panels.map((x) => x.number)).toEqual(["0100", "0300"]);
+    expect(skipped).toBe(0);
+  });
+
+  it("skips selected shots with no frame and counts them", () => {
+    const s1 = framedShot("boards/0100/a.jpg", { number: "0100" });
+    const s2 = makeShot({ number: "0200" });
+    const p = makeProduction();
+    const { panels, skipped } = styleFramePanelsFor(p, [s1, s2], [s1.id, s2.id, "unknown-id"], readFile);
+    expect(panels.map((x) => x.number)).toEqual(["0100"]);
+    expect(skipped).toBe(1);
+  });
+});
+
+describe("buildStyleFramePdf", () => {
+  it("renders one landscape page per selected panel, images only", async () => {
+    const bytes = await buildStyleFramePdf([makeStylePanel(0), makeStylePanel(1), makeStylePanel(2)], {
+      productionName: "Test Production",
+    });
+    expect(Buffer.from(bytes).subarray(0, 5).toString("ascii")).toBe("%PDF-");
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(3);
+    expect(doc.getTitle()).toContain("Style frames");
+    const { width: w, height: h } = doc.getPage(0).getSize();
+    expect(w).toBeGreaterThan(h);
+    const { PDFParse } = await import("pdf-parse");
+    const parser = new PDFParse({ data: Buffer.from(bytes) });
+    try {
+      const result = (await parser.getText()) as { text?: string };
+      expect(String(result.text ?? "")).not.toContain("Audio:");
+      expect(String(result.text ?? "")).not.toContain("Shot 0100");
+    } finally {
+      await parser.destroy();
+    }
+  });
+
+  it("embeds PNG panels as JPEGs when a transcoder is available", async () => {
+    const toJpeg = vi.fn<ToJpegFn>(() => new Uint8Array(JPEG_1X1));
+    const bytes = await buildStyleFramePdf([makeStylePanel(0)], { productionName: "Test Production", toJpeg });
+    expect(toJpeg).toHaveBeenCalledTimes(1);
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
   });
 });

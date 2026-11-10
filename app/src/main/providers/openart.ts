@@ -51,6 +51,7 @@ import type {
   LedgerGenMeta,
   OpenArtBoardConfig,
   OpenArtModelChoice,
+  ModelDiscoveryState,
   PendingImageGen,
   PendingVideoGen,
   Production,
@@ -92,6 +93,15 @@ const VIDEO_RECHECK_DEADLINE_MS = 60_000;
 /** How long to wait between non-blocking image poll passes when the server
  *  doesn't tell us (`pollAfterSeconds`). */
 const IMAGE_POLL_INTERVAL_MS = 4_000;
+
+/** How long a successful model discovery is served from cache before the
+ *  next list re-asks the server (mirrors the Higgsfield CLI catalog TTL). */
+const MODEL_CATALOG_TTL_MS = 10 * 60_000;
+
+/** Backoff between model-discovery attempts. Discovery runs against a live
+ *  MCP session that may still be warming up (startup, reconnect), so one
+ *  failure is never the final word. */
+const MODEL_DISCOVERY_RETRY_DELAYS_MS: readonly number[] = [600, 1_800];
 
 /** Thrown when an async OpenArt image job outlives the wait cap. The job is
  *  NOT dead — it keeps rendering server-side — so callers can record the
@@ -326,11 +336,25 @@ export class OpenArtClient implements MediaProvider {
     return this.findTool(/^openart_.*generate.*image$/i) !== null;
   }
   private readonly videoOptionsCache = new Map<string, { o: VideoModelOptions | null; at: number }>();
+  /** The last successful model discovery. Kept (and served, marked stale)
+   *  when a later discovery fails or comes back empty, so a transient MCP
+   *  hiccup never drops every picker to zero models. */
+  private lastGoodModels: { choices: OpenArtModelChoice[]; at: number } | null = null;
+  /** Set by refreshProbes: the next list re-discovers even inside the TTL. */
+  private discoveryStale = false;
+  /** In-flight discovery, shared by concurrent callers (one server round
+   *  trip per burst, like the Higgsfield CLI catalog fetch). */
+  private discoveryFetch: Promise<OpenArtModelChoice[]> | null = null;
+  /** The discovery truth Settings shows next to the connection state. */
+  private discovery: ModelDiscoveryState = { state: "idle", modelCount: 0, stale: false };
   private readonly VIDEO_OPTIONS_NULL_TTL_MS = 2 * 60_000;
 
   /** Drop cached video-option probes (dev customizer refresh). */
   refreshProbes(): void {
     this.videoOptionsCache.clear();
+    // A manual refresh also forces model re-discovery on the next list —
+    // the last good list stays on offer until the fresh one lands.
+    this.discoveryStale = true;
   }
 
   /** A recorder (the expenses ledger) that observes every successful
@@ -338,7 +362,9 @@ export class OpenArtClient implements MediaProvider {
    *  at the same seam as the McpManager fake. */
   constructor(
     private readonly mcp: McpManager,
-    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void }
+    private readonly recorder?: { onGeneration: (meta: LedgerGenMeta) => void },
+    /** Discovery tuning (tests shrink the retry backoff to zero). */
+    private readonly discoveryOpts: { retryDelaysMs?: readonly number[]; catalogTtlMs?: number } = {}
   ) {}
 
   /** Fire the generation recorder; a tally write must never break a
@@ -374,8 +400,79 @@ export class OpenArtClient implements MediaProvider {
     return shapeOpenArtModelChoices(raw);
   }
 
+  /** The discovery truth for Settings: connection state alone must never
+   *  claim health while zero models are loaded. */
+  modelDiscovery(): ModelDiscoveryState {
+    return { ...this.discovery };
+  }
+
+  /** The OpenArt model dropdown, resolved from the connected server.
+   *
+   *  Discovery is cached (TTL), retried with backoff, and failure-tolerant:
+   *  a failed or empty discovery keeps serving the last good list (marked
+   *  stale in `modelDiscovery()`) instead of dropping every picker to
+   *  zero, and only a failure with no previous success throws — preserving
+   *  the loud error first-run callers already handle. An empty parse is a
+   *  failure, not an empty catalog (a signed-in catalog is never empty;
+   *  an unparseable reply once read as "no models" everywhere). */
+  private async cachedModelChoices(): Promise<OpenArtModelChoice[]> {
+    const ttl = this.discoveryOpts.catalogTtlMs ?? MODEL_CATALOG_TTL_MS;
+    if (!this.discoveryStale && this.lastGoodModels && Date.now() - this.lastGoodModels.at < ttl) {
+      return this.lastGoodModels.choices;
+    }
+    if (!this.discoveryFetch) {
+      let tracked: Promise<OpenArtModelChoice[]>;
+      tracked = this.discoverModels().finally(() => {
+        if (this.discoveryFetch === tracked) this.discoveryFetch = null;
+      });
+      this.discoveryFetch = tracked;
+    }
+    return this.discoveryFetch;
+  }
+
+  /** One full discovery pass: attempts with backoff until a non-empty
+   *  catalog lands, then the last-good / throw contract above. */
+  private async discoverModels(): Promise<OpenArtModelChoice[]> {
+    const delays = this.discoveryOpts.retryDelaysMs ?? MODEL_DISCOVERY_RETRY_DELAYS_MS;
+    this.discovery = { ...this.discovery, state: "loading" };
+    let lastError: Error | null = null;
+    let lastWasEmpty = false;
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      if (attempt > 0) await sleepMs(delays[attempt - 1]);
+      try {
+        const choices = await this.fetchModelChoicesOnce();
+        if (choices.length) {
+          this.lastGoodModels = { choices, at: Date.now() };
+          this.discoveryStale = false;
+          this.discovery = { state: "ok", modelCount: choices.length, stale: false, updatedAt: Date.now() };
+          return choices;
+        }
+        lastWasEmpty = true;
+        lastError = new Error("OpenArt returned no models — the server is connected, but its model list came back empty.");
+      } catch (e) {
+        lastWasEmpty = false;
+        lastError = e instanceof Error ? e : new Error(String(e));
+      }
+    }
+    const kept = this.lastGoodModels?.choices ?? [];
+    this.discovery = {
+      state: lastWasEmpty ? "empty" : "error",
+      modelCount: kept.length,
+      stale: kept.length > 0,
+      error: lastError ? String(lastError.message ?? lastError).replace(/^Error:\s*/, "") : undefined,
+      updatedAt: Date.now(),
+    };
+    if (kept.length) return kept;
+    throw lastError ?? new Error("OpenArt model discovery failed.");
+  }
+
   /** The OpenArt model dropdown, resolved from the connected server. */
   async listModelChoices(): Promise<OpenArtModelChoice[]> {
+    return this.cachedModelChoices();
+  }
+
+  /** One raw model-list round trip (no cache, no retry). */
+  private async fetchModelChoicesOnce(): Promise<OpenArtModelChoice[]> {
     const raw = await this.mcp.callRaw(SERVER, "openart_model_list", {});
     return this.shapeModelChoices(raw);
   }

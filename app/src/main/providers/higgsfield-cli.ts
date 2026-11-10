@@ -49,6 +49,7 @@ import {
   IMAGE_URL_RX,
   parseJsonLooseArray,
   parseJsonLooseObject,
+  replaceSourceTag,
   VIDEO_URL_RX,
 } from "../../shared/prompt-grammar.js";
 import {
@@ -2212,9 +2213,12 @@ export class HiggsfieldCliProvider implements MediaProvider {
         }
       });
 
-      // Cite only after routing (same rule as generateVideoClip).
+      // Cite only after routing (same rule as generateVideoClip). The
+      // pinned @[source] tag is no reference, so resolve/cite leave it
+      // literal — it stands for the source clip (uploaded first above),
+      // so it becomes "reference image 1" inline at submit below.
       const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
-      if (!(genjutsuMode && !fullPrompt.trim())) args.splice(1, 0, "--prompt", fullPrompt);
+      if (!(genjutsuMode && !fullPrompt.trim())) args.splice(1, 0, "--prompt", replaceSourceTag(fullPrompt));
 
       if (detail && opts.params) {
         emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);

@@ -98,7 +98,29 @@ export function styleFrameOverride(value: string | undefined): string | undefine
 }
 
 /** One generation vendor for the Settings picker. */
+/** The truth about one vendor's model discovery, separate from its
+ *  transport connection: a server can be connected while discovery has
+ *  failed or come back empty, and the UI must say so instead of showing a
+ *  plain "connected" with zero models behind it. */
+export interface ModelDiscoveryState {
+  /** idle = never attempted; loading = attempt in flight; ok = last attempt
+   *  returned models; empty = last attempt returned none; error = last
+   *  attempt threw. */
+  state: "idle" | "loading" | "ok" | "empty" | "error";
+  /** Models currently on offer (the last good list while stale). */
+  modelCount: number;
+  /** True when the offered list is the last good one because the latest
+   *  discovery failed or came back empty — possibly out of date. */
+  stale: boolean;
+  /** The last discovery failure, for the status line's tooltip. */
+  error?: string;
+  /** Epoch ms of the last completed discovery attempt. */
+  updatedAt?: number;
+}
+
 export interface MediaProviderInfo {
+  /** Model-discovery truth, when the vendor tracks it. */
+  discovery?: ModelDiscoveryState;
   id: MediaProviderId;
   displayName: string;
   /** Whether the vendor's generation tools are currently connected. */

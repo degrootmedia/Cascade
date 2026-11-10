@@ -100,6 +100,11 @@ export class McpManager {
   private statuses: McpServerStatus[] = [];
   private tools: Record<string, AgentTool> = {};
 
+  /** Fired after every reload completes (startup, config save, manual
+   *  reconnect). The host wires media model re-discovery here so a
+   *  reconnected server's models come back without an app restart. */
+  onReloaded: (() => void) | null = null;
+
   constructor(private configPath: string) {}
 
   readConfigText(): string {
@@ -220,6 +225,7 @@ export class McpManager {
       config = JSON.parse(this.readConfigText());
     } catch (e) {
       this.statuses.push({ name: "(config)", status: "error", toolCount: 0, error: `invalid JSON: ${e}` });
+      this.onReloaded?.();
       return this.statuses;
     }
 
@@ -235,6 +241,7 @@ export class McpManager {
         this.statuses.push({ name, status: "error", toolCount: 0, error: String(e).slice(0, 300) });
       }
     }
+    this.onReloaded?.();
     return this.statuses;
   }
 
@@ -356,13 +363,21 @@ const EXT_BY_MIME: Record<string, string> = {
   "image/gif": "gif",
 };
 
+/** Host-side result-text safety bound. This text feeds machine parsers
+ *  (model catalogs, form schemas), never the chat model — the model-facing
+ *  path (`processContent`) keeps its own tighter cap. The bound must stay
+ *  far above any legitimate catalog: the live OpenArt model list is a
+ *  several-hundred-KB JSON document, and the old 50k slice cut it mid-JSON
+ *  so discovery parsed to zero models while the server showed "connected". */
+const HOST_RESULT_TEXT_CAP = 16_777_216;
+
 /** Join the text portions of raw MCP result content (for callRaw). */
 function resultContentText(content: unknown): string {
   if (!Array.isArray(content)) return JSON.stringify(content ?? "");
   return (content as McpContentItem[])
     .map((c) => c.text ?? `[${c.type ?? "unknown"}]`)
     .join("\n")
-    .slice(0, 50_000);
+    .slice(0, HOST_RESULT_TEXT_CAP);
 }
 
 /**

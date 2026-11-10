@@ -53,6 +53,7 @@ import {
   upsertCharacterSheetRef,
 } from "../src/main/pipeline.js";
 import { resolveShotDisplay } from "../src/shared/selected-output.js";
+import { citePrompt, resolvePromptRefs } from "../src/main/providers/refs.js";
 
 // ---- fixture ---------------------------------------------------------------
 
@@ -718,12 +719,44 @@ describe("wireEditNodeToCurrentFrame", () => {
 });
 
 describe("buildEditGenPrompt", () => {
-  it("frames the source as token 0 and caps instructions at 1200 chars", () => {
+  it("sends only the user's instructions (no hidden header) and caps them at 1200 chars", () => {
     const prompt = buildEditGenPrompt("make it night");
-    expect(prompt).toContain("@image1");
-    expect(prompt).toContain("make it night");
+    expect(prompt).toBe("make it night");
+    expect(prompt).not.toContain("Edit this reference image");
+    expect(prompt).not.toContain("Keep its composition unless asked otherwise");
+    expect(prompt).not.toContain("Edit instructions:");
     const long = buildEditGenPrompt("x".repeat(2000));
-    expect(long.endsWith("x".repeat(1200))).toBe(true);
+    expect(long).toBe("x".repeat(1200));
+  });
+});
+
+describe("buildEditGenPrompt @[source]", () => {
+  it("replaces every @[source] inline with 'reference image 1'", () => {
+    expect(buildEditGenPrompt("Edit @[source]. Apply a style transfer ONLY.")).toBe(
+      "Edit reference image 1. Apply a style transfer ONLY."
+    );
+    expect(buildEditGenPrompt("@[source] and @[Source]")).toBe("reference image 1 and reference image 1");
+    // References already resolved to @imageN tokens stay untouched.
+    expect(buildEditGenPrompt("like @image2 but edit @[source]")).toBe("like @image2 but edit reference image 1");
+  });
+
+  it("the submitted wire prompt names source and style refs unambiguously (reported style transfer)", () => {
+    const p = makeProduction({
+      characters: [],
+      references: [{ id: "r-03", name: "03", artwork: "data:image/png;base64,QQ==", shotIds: [] }],
+    });
+    // Exactly the handlers' order: cited refs resolve from token 1, the
+    // source is uploaded first, then the provider cites submitted positions.
+    const { resolved, extras } = resolvePromptRefs(
+      p,
+      "Edit @[source]. Apply a style transfer ONLY. New style: @[03] photorealistic tractor trailer cab.",
+      1
+    );
+    const refs = [{ name: "06", dataUrl: "data:image/png;base64,Qg==" }, ...extras];
+    const wire = citePrompt(buildEditGenPrompt(resolved), refs, refs.map((r) => r.dataUrl));
+    expect(wire).toBe(
+      "Edit reference image 1. Apply a style transfer ONLY. New style: 03 (reference image 2) photorealistic tractor trailer cab."
+    );
   });
 });
 

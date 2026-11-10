@@ -278,4 +278,116 @@ describe("TimelinePreview", () => {
     await act(async () => { stopBtn.click(); });
     expect(heads).toContain(0);
   });
+
+  it("Space toggles playback after a button or select was used, without re-triggering it; text fields keep Space", async () => {
+    const override = buildTimelineOverride(timeline, undefined, {}, new Map());
+    function Harness() {
+      const [head, setHead] = useState(0);
+      const [playing, setPlaying] = useState(false);
+      return createElement(TimelinePreview, {
+        prodId: "prod1",
+        timelineOverride: override,
+        playheadSec: head,
+        onPlayheadChange: setHead,
+        playing,
+        onPlayingChange: setPlaying,
+      });
+    }
+    const playStub = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const pauseStub = vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    const prevReady = Object.getOwnPropertyDescriptor(window.HTMLMediaElement.prototype, "readyState");
+    Object.defineProperty(window.HTMLMediaElement.prototype, "readyState", { configurable: true, get: () => 4 });
+    vi.stubGlobal("requestAnimationFrame", ((cb: FrameRequestCallback) => 1) as unknown as typeof window.requestAnimationFrame);
+    vi.stubGlobal("cancelAnimationFrame", (() => {}) as unknown as typeof window.cancelAnimationFrame);
+    const space = (type: string) => new KeyboardEvent(type, { code: "Space", key: " ", bubbles: true, cancelable: true });
+    const playBtnTitle = () => ([...host.querySelectorAll("button")].find((b) => b.title === "Pause playback" || b.title === "Play from playhead") as HTMLButtonElement).title;
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      const muteBtn = [...host.querySelectorAll("button")].find((b) => b.getAttribute("aria-label")?.includes("Mute")) as HTMLButtonElement;
+      expect(muteBtn).toBeTruthy();
+      muteBtn.focus();
+      const kd = space("keydown");
+      await act(async () => { muteBtn.dispatchEvent(kd); await new Promise((r) => setTimeout(r, 20)); });
+      expect(kd.defaultPrevented).toBe(true);
+      expect(playBtnTitle()).toBe("Pause playback");
+      const ku = space("keyup");
+      await act(async () => { muteBtn.dispatchEvent(ku); });
+      // A prevented keyup is the browser contract that keeps the focused
+      // button from firing its click on Space release.
+      expect(ku.defaultPrevented).toBe(true);
+      expect(muteBtn.getAttribute("aria-label")).toContain("Mute animatic");
+      // Typing exception: Space in a text field is text, not transport.
+      const input = document.createElement("input");
+      input.type = "text";
+      document.body.appendChild(input);
+      const kdText = space("keydown");
+      await act(async () => { input.dispatchEvent(kdText); await new Promise((r) => setTimeout(r, 20)); });
+      expect(kdText.defaultPrevented).toBe(false);
+      expect(playBtnTitle()).toBe("Pause playback");
+      input.remove();
+      // A select is a clicked control, not a text field: Space toggles back.
+      const select = document.createElement("select");
+      document.body.appendChild(select);
+      const kdSelect = space("keydown");
+      await act(async () => { select.dispatchEvent(kdSelect); await new Promise((r) => setTimeout(r, 20)); });
+      expect(kdSelect.defaultPrevented).toBe(true);
+      expect(playBtnTitle()).toBe("Play from playhead");
+      select.remove();
+    } finally {
+      playStub.mockRestore();
+      pauseStub.mockRestore();
+      if (prevReady) Object.defineProperty(window.HTMLMediaElement.prototype, "readyState", prevReady);
+    }
+  });
+
+  it("Space never falls through to a focused control when the timeline has no picture items", async () => {
+    const audioOnly: ProductionTimeline = {
+      version: 1,
+      tracks: [{ id: "a1", kind: "audio", name: "A1" }],
+      clips: [
+        { id: "au", trackId: "a1", sourceKind: "audio", srcRel: "audio/vo.mp3", sourceInSec: 0, sourceOutSec: 9, timelineStartSec: 0 },
+      ],
+    };
+    const override = buildTimelineOverride(audioOnly, undefined, {}, new Map());
+    expect(override.items).toHaveLength(0);
+    let playingChanges = 0;
+    function Harness() {
+      const [head, setHead] = useState(0);
+      const [playing, setPlaying] = useState(false);
+      return createElement(TimelinePreview, {
+        prodId: "prod1",
+        timelineOverride: override,
+        playheadSec: head,
+        onPlayheadChange: setHead,
+        playing,
+        onPlayingChange: (p: boolean) => { playingChanges++; setPlaying(p); },
+      });
+    }
+    await act(async () => {
+      root.render(createElement(Harness));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    // The preview shows its empty state, but the editor below (and any
+    // other focused control) is still live: Space must be claimed here,
+    // not fall through and re-trigger the focused control on release.
+    expect(host.querySelector(".hint")?.textContent).toContain("Nothing on the timeline yet");
+    const btn = document.createElement("button");
+    btn.textContent = "Control";
+    host.appendChild(btn);
+    btn.focus();
+    const space = (type: string) => new KeyboardEvent(type, { code: "Space", key: " ", bubbles: true, cancelable: true });
+    const kd = space("keydown");
+    await act(async () => { btn.dispatchEvent(kd); });
+    expect(kd.defaultPrevented).toBe(true);
+    const ku = space("keyup");
+    await act(async () => { btn.dispatchEvent(ku); });
+    // A prevented keyup is the browser contract that keeps the focused
+    // button from firing its click on Space release.
+    expect(ku.defaultPrevented).toBe(true);
+    expect(playingChanges).toBe(0);
+    btn.remove();
+  });
 });

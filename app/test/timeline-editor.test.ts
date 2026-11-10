@@ -773,4 +773,54 @@ describe("TimelineEditor", () => {
     const sel = [...host.querySelectorAll(".prod-tl-clip.selected")].map((el) => el.getAttribute("data-clip-id")).sort();
     expect(sel).toEqual(["c1", "c2", "c3"]);
   });
+  it("dragging horizontally within a video track box-selects and never moves the playhead", async () => {
+    await renderEditor(presetTimeline());
+    const lanes = host.querySelector(".prod-tl-lanes") as HTMLElement;
+    const headLeft = () => parseFloat((host.querySelector(".prod-tl-playhead") as HTMLElement).style.left);
+    expect(headLeft()).toBe(0);
+    // Press in the video lane (below the ruler, clear of the playhead
+    // line) and drag almost purely horizontally to 8s.
+    await act(async () => { pointer(lanes, "pointerdown", { button: 0, buttons: 1, clientX: Math.round(0.5 * pps()), clientY: 40 }); });
+    expect(headLeft()).toBe(0);
+    await act(async () => { pointer(lanes, "pointermove", { button: -1, buttons: 1, clientX: 8 * pps(), clientY: 45 }); });
+    expect(host.querySelector(".prod-tl-marquee")).toBeTruthy();
+    expect(headLeft()).toBe(0);
+    await act(async () => { pointer(lanes, "pointerup", { button: 0, buttons: 0, clientX: 8 * pps(), clientY: 45 }); });
+    expect(headLeft()).toBe(0);
+    const sel = [...host.querySelectorAll(".prod-tl-clip.selected")].map((el) => el.getAttribute("data-clip-id")).sort();
+    expect(sel).toEqual(["c1", "c2"]);
+  });
+
+  it("dragging in a track starting on the playhead line box-selects and never moves the playhead", async () => {
+    await renderEditor(presetTimeline());
+    const lanes = host.querySelector(".prod-tl-lanes") as HTMLElement;
+    const headLeft = () => parseFloat((host.querySelector(".prod-tl-playhead") as HTMLElement).style.left);
+    await seekTo(5);
+    expect(headLeft()).toBeCloseTo(5 * pps(), 1);
+    // Press in the video lane (below the ruler) exactly on the playhead
+    // line: this is still a track drag, so it must box-select only.
+    await act(async () => { pointer(lanes, "pointerdown", { button: 0, buttons: 1, clientX: 5 * pps(), clientY: 40 }); });
+    await act(async () => { pointer(lanes, "pointermove", { button: -1, buttons: 1, clientX: 8 * pps(), clientY: 45 }); });
+    expect(host.querySelector(".prod-tl-marquee")).toBeTruthy();
+    expect(headLeft()).toBeCloseTo(5 * pps(), 1);
+    await act(async () => { pointer(lanes, "pointerup", { button: 0, buttons: 0, clientX: 8 * pps(), clientY: 45 }); });
+    expect(headLeft()).toBeCloseTo(5 * pps(), 1);
+    const sel = [...host.querySelectorAll(".prod-tl-clip.selected")].map((el) => el.getAttribute("data-clip-id")).sort();
+    expect(sel).toEqual(["c2"]);
+  });
+
+  it("dragging horizontally within an audio track box-selects and never moves the playhead", async () => {
+    await renderEditor(presetTimeline());
+    const lanes = host.querySelector(".prod-tl-lanes") as HTMLElement;
+    const headLeft = () => parseFloat((host.querySelector(".prod-tl-playhead") as HTMLElement).style.left);
+    // Audio lane sits below the 18px ruler + 56px video row.
+    await act(async () => { pointer(lanes, "pointerdown", { button: 0, buttons: 1, clientX: Math.round(0.5 * pps()), clientY: 94 }); });
+    await act(async () => { pointer(lanes, "pointermove", { button: -1, buttons: 1, clientX: 8 * pps(), clientY: 99 }); });
+    expect(host.querySelector(".prod-tl-marquee")).toBeTruthy();
+    expect(headLeft()).toBe(0);
+    await act(async () => { pointer(lanes, "pointerup", { button: 0, buttons: 0, clientX: 8 * pps(), clientY: 99 }); });
+    expect(headLeft()).toBe(0);
+    const sel = [...host.querySelectorAll(".prod-tl-clip.selected")].map((el) => el.getAttribute("data-clip-id"));
+    expect(sel).toEqual(["c3"]);
+  });
 });

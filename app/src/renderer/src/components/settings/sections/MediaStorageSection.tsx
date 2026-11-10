@@ -19,10 +19,14 @@ export function MediaStorageSection() {
   const [transport, setTransport] = useState<ProviderTransportMode>(() => readTransportMode());
   const [thumbsBusy, setThumbsBusy] = useState(false);
   const [thumbResult, setThumbResult] = useState<string | null>(null);
+  // ON by default (main's default too) — start checked so the toggle never
+  // flashes off while the saved value loads.
+  const [noMusic, setNoMusic] = useState(true);
 
   useEffect(() => {
     void window.cascade.listMediaProviders().then(setProviders).catch(() => {});
     void window.cascade.getMediaProvider().then(setActive).catch(() => {});
+    void window.cascade.getAppendNoMusicToVideoPrompts().then(setNoMusic).catch(() => {});
     const onTransport = () => setTransport(readTransportMode());
     window.addEventListener(TRANSPORT_CHANGED, onTransport);
     return () => window.removeEventListener(TRANSPORT_CHANGED, onTransport);
@@ -124,6 +128,24 @@ export function MediaStorageSection() {
             <span className="hint">no longer available — pick a connected provider</span>
           </div>
         )}
+      </SettingField>
+
+      <SettingField
+        label="Video audio"
+        help="Adds “No music. Do not add any music or musical score. Audio: diegetic sound only — in-scene sound effects, ambience, and dialogue.” to the end of every video prompt when it is submitted (classic and node view, every vendor). Your saved prompt is never changed, and image prompts are unaffected."
+      >
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={noMusic}
+            onChange={(e) => {
+              const v = e.target.checked;
+              setNoMusic(v);
+              void window.cascade.setAppendNoMusicToVideoPrompts(v).catch((err) => setError(String(err)));
+            }}
+          />
+          Append no-music instruction to video prompts
+        </label>
       </SettingField>
 
       <SettingField

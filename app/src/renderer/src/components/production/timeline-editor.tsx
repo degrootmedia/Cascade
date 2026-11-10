@@ -172,9 +172,10 @@ interface Gesture {
   kfRectH?: number;
   /** For roll from a head edge: the left neighbor whose boundary rolls. */
   rollLeftId?: string;
-  /** Playhead gestures that STARTED on the ruler or on the playhead
-   *  line stay scrubs for the whole drag — they never promote to a
-   *  marquee, however far the cursor roams (Batch Item 5). */
+  /** Playhead gestures that STARTED on the ruler
+   *  stay scrubs for the whole drag — they never promote to a
+   *  marquee, however far the cursor roams (Batch Item 5). A press
+   *  inside a track is always a box select, even on the playhead line. */
   scrubLocked?: boolean;
   startX: number;
   startY: number;
@@ -690,17 +691,17 @@ export function TimelineEditor({
 
   const onLanesPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    // Background press: seek now. Where the press STARTS decides the
-    // whole gesture (Item 5): on the ruler or grabbing the playhead
-    // line it is a scrub until release; only a press on empty track
-    // area may become a marquee when dragged.
+    // Background press: where it STARTS decides the whole gesture.
+    // On the ruler it is a scrub until
+    // release (Item 5). Inside a track it is a box select from the
+    // first pixel -- it never seeks, however the drag travels.
     const rect = lanesRef.current?.getBoundingClientRect();
-    const localX = rect ? e.clientX - rect.left : 0;
+    // Only the vertical start decides: ruler scrubs, tracks box-select.
     const localY = rect ? e.clientY - rect.top : 0;
-    const scrubLocked = localY < RULER_H || Math.abs(localX - playhead * pps) <= 8;
-    gestureRef.current = { kind: "playhead", scrubLocked, startX: e.clientX, startY: e.clientY, orig: timelineRef.current, moved: false };
+    const scrubLocked = localY < RULER_H;
+    gestureRef.current = { kind: scrubLocked ? "playhead" : "marquee", scrubLocked, startX: e.clientX, startY: e.clientY, orig: timelineRef.current, moved: false };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    setPlayhead(q(timeAtClientX(e.clientX)));
+    if (scrubLocked) setPlayhead(q(timeAtClientX(e.clientX)));
     e.preventDefault();
   };
 
@@ -709,12 +710,8 @@ export function TimelineEditor({
     if (!g) return;
     if (Math.abs(e.clientX - g.startX) + Math.abs(e.clientY - g.startY) > 3) g.moved = true;
     if (g.kind === "playhead") {
-      if (!g.scrubLocked && g.moved && Math.abs(e.clientY - g.startY) > 6) {
-        g.kind = "marquee";
-      } else {
-        setPlayhead(q(timeAtClientX(e.clientX)));
-        return;
-      }
+      setPlayhead(q(timeAtClientX(e.clientX)));
+      return;
     }
     if (g.kind === "marquee") {
       const el = lanesRef.current;
@@ -732,7 +729,12 @@ export function TimelineEditor({
     gestureRef.current = null;
     if (!g) return;
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* already released */ }
-    if (g.kind === "marquee" && marquee) {
+    if (g.kind === "marquee") {
+      if (!marquee) {
+        if (!g.moved) setSelected(new Set());
+        setMarquee(null);
+        return;
+      }
       const t0 = Math.min(marquee.x0, marquee.x1) / pps;
       const t1 = Math.max(marquee.x0, marquee.x1) / pps;
       let y = 0;

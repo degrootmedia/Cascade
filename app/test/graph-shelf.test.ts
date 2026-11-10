@@ -474,6 +474,32 @@ describe("node-graph tool panel", () => {
     document.body.removeChild(host);
   });
 
+  it("renders every tool tile icon through the shared icon set (no inline accent SVG)", async () => {
+    const { root, host } = renderModal();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // Camera grid + upscale were inline <svg fill="currentColor"> tiles, so
+    // .prod-graph-tools-icon's accent color painted them while every other
+    // tile's shared Icon renders via --icon-tint (minimal) / <img> (colorful).
+    const tiles = Array.from(host.querySelectorAll<HTMLElement>(".prod-graph-tools-item"));
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) {
+      const label = tile.querySelector(".prod-graph-tools-label")?.textContent;
+      const icon = tile.querySelector(".prod-graph-tools-icon");
+      expect(icon, label).toBeTruthy();
+      expect(icon?.classList.contains("cascade-icon"), label).toBe(true);
+      expect(tile.querySelector("svg.prod-graph-tools-icon"), label).toBeNull();
+    }
+    for (const name of ["Camera grid", "Upscale"]) {
+      const tile = tiles.find((el) => el.textContent?.includes(name))!;
+      expect(tile, name).toBeTruthy();
+      expect(tile.querySelector(".prod-graph-tools-icon.cascade-icon"), name).toBeTruthy();
+    }
+
+    await act(async () => { root.unmount(); });
+    document.body.removeChild(host);
+  });
+
   it("disables the upscale tile with a hint when the provider has no upscale path", async () => {
     const { root, host } = renderModal({ upscaleUnavailable: true });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });

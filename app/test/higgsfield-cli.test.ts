@@ -540,6 +540,53 @@ describe("HiggsfieldCliProvider.videoEditModels / generateVideoEdit", () => {
   });
 });
 
+describe("HiggsfieldCliProvider generateVideoEdit @[source]", () => {
+  it("replaces @[source] in an edit-video prompt and uploads the source first", async () => {
+    const seen: string[][] = [];
+    const jobId = "11111111-aaaa-bbbb-cccc-dddddddddddd";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", video_url: "https://example.invalid/edit.mp4" }])),
+      })
+    );
+    const folder = path.join(dataDir, "prod-edit-source");
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "videos", "source.mp4"), Buffer.from("video-bytes"));
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "T", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([8]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoEdit(
+        prod,
+        shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 0, prompt: "Edit @[source]. Replace the sky." },
+        () => {},
+        "videos/source.mp4",
+        [{ name: "Hero", dataUrl: "data:image/png;base64,SGVsbG8=" }]
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    expect(args[args.indexOf("--prompt") + 1]).toBe("Edit reference image 1. Replace the sky.");
+    expect(args.join(" ")).not.toContain("@[source]");
+    // The source clip's flag precedes every image reference, so it is reference 1.
+    expect(args.indexOf("--video-references")).toBeGreaterThan(-1);
+    expect(args.indexOf("--video-references")).toBeLessThan(args.indexOf("--image-references"));
+  });
+});
+
 describe("HiggsfieldCliProvider Genjutsu (generateVideoEdit)", () => {
   /** Live `model get hf_mult_motion_control` shape (probed 2026-10-27). */
   const genjutsuGet = (jobType: string) =>

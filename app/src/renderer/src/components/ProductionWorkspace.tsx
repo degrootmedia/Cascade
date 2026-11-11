@@ -2346,6 +2346,41 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
+  /** Step 3: repair drift between shot numbers and board folders. The scan
+   *  (read-only) lists every proposed relink from the node graph's wiring,
+   *  every shot with no frames on disk, and any orphaned folders; nothing
+   *  moves until the user confirms, and the repair never deletes files. */
+  async function repairBoardLinks() {
+    if (!prod) return;
+    setErr(null);
+    try {
+      const report = await window.cascade.scanBoardRelinks(prod.meta.id);
+      const parts: string[] = [];
+      for (const r of report.relinks) parts.push(`Shot ${r.number}: rename ${r.foundFolder} → ${r.expectedFolder}`);
+      for (const r of report.pipeRestores) parts.push(`Shot ${r.number}: restore its frame output from the node graph`);
+      for (const m of report.missing) parts.push(`Shot ${m.number}: no frames found anywhere on disk`);
+      for (const c of report.conflicts) parts.push(`Shot ${c.number}: cannot relink — ${c.reason}`);
+      for (const o of report.orphans) parts.push(`Orphaned folder ${o} (no shot owns that number; left untouched)`);
+      if (!report.relinks.length && !report.pipeRestores.length) {
+        setErr(parts.length ? `Repair scan: nothing to relink. ${parts.join(" • ")}` : "Repair scan: shot numbers and board folders already agree.");
+        return;
+      }
+      const ok = await confirmDestructive({
+        title: "Repair storyboard frame links?",
+        body: `${parts.join(" • ")}. Folders are renamed to their shots' current numbers and each frame is re-registered from the node graph. Nothing is deleted.`,
+        confirmLabel: "Repair frames",
+        danger: false,
+      });
+      if (!ok) return;
+      const next = await window.cascade.applyBoardRelinks(prod.meta.id);
+      setProd(next);
+      bustAll();
+      void refreshList();
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }
+
   /** Step 4: pick an audio file for the timeline (the editor's
    *  Import audio button). Main copies + probes; the editor places
    *  the clip on an audio track. */
@@ -4784,6 +4819,9 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 <span className="prod-boards-sep" />
                 <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">
                   Refresh Storyboard Images
+                </button>
+                <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void repairBoardLinks()} title="Scan for shots whose board folders no longer match their numbers and relink them from the node graph (asks first, deletes nothing)">
+                  Repair Frame Links
                 </button>
                 <button disabled={fetchVideosBusy || boardsBusy || importBusy || !shotCount} onClick={() => void fetchPendingVideos()} title="Download every pending video job and apply clips that finished downloading without landing on their shot">
                   {fetchVideosBusy ? "Fetching videos…" : pendingVideoCount > 0 ? `Fetch videos (${pendingVideoCount} pending)` : "Fetch videos"}

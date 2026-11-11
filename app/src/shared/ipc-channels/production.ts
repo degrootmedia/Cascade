@@ -66,6 +66,8 @@ export const productionChannels = {
   "production:boardThumbnail": { method: "boardThumbnail", kind: "invoke" },
   "production:boardThumbnails": { method: "boardThumbnails", kind: "invoke" },
   "production:refreshBoardLinks": { method: "refreshBoardLinks", kind: "invoke" },
+  "production:scanBoardRelinks": { method: "scanBoardRelinks", kind: "invoke" },
+  "production:applyBoardRelinks": { method: "applyBoardRelinks", kind: "invoke" },
   "production:deleteBoardImage": { method: "deleteBoardImage", kind: "invoke" },
   "production:editBoard": { method: "editBoard", kind: "invoke" },
   "production:promoteBoardHistory": { method: "promoteBoardHistory", kind: "invoke" },

@@ -74,6 +74,7 @@ import type {
   ProductionEvent,
   Retry720pAction,
   ReferencesExternalUpdate,
+  BoardRepairReport,
 } from "./ipc/production.js";
 import type {
   MediaProviderId,
@@ -850,6 +851,19 @@ export interface CascadeApi {
    * untouched. Returns the updated production.
    */
   refreshBoardLinks(productionId: string): Promise<Production>;
+  /**
+   * Step 3: scan for drift between shot numbers and board folders (frames
+   * living under a stale `boards/<NNNN>`, lost output pipes, orphaned
+   * folders, truly missing frames). Read-only — returns the report the
+   * user confirms before anything moves.
+   */
+  scanBoardRelinks(productionId: string): Promise<BoardRepairReport>;
+  /**
+   * Step 3: apply the repair — rename each drifted folder to its shot's
+   * current number, rewrite stored paths, and re-register each frame from
+   * the node graph's wiring. Nothing is deleted. Returns the production.
+   */
+  applyBoardRelinks(productionId: string): Promise<Production>;
   deleteBoardImage(productionId: string, shotId: string): Promise<Production>;
   /**
    * Step 3: edit a shot's current frame via an image-input model — the frame

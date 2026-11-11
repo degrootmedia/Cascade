@@ -18,7 +18,7 @@ import * as productions from "./productions.js";
 import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
-import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, applyMagicRefDecision, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
+import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, applyMagicRefDecision, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, deleteShotBoards, scanBoardRelinks, applyBoardRelinks, rehomeJobFilesAfterRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
 import { create720pReference } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
@@ -2719,6 +2719,14 @@ function registerIpc() {
     return p;
   };
 
+  /** Surface orphaned board folders a renumber had to park (a deleted
+   *  shot's leftovers) instead of silently moving user files. */
+  const emitParkedOrphans = (id: string, result: { parkedOrphans: Array<{ from: string; to: string }> }) => {
+    for (const orphan of result.parkedOrphans) {
+      productionEmit(id, `Orphaned board folder ${orphan.from} (no shot owns that number) was moved to ${orphan.to} so the renumber could proceed — no frames were deleted.`, "info");
+    }
+  };
+
   handle("production:insertShot", (_e, id: string, sceneNumber: number, index: number, shotId?: string) =>
     // Serialized per production (Fix B): insert/delete/prompt saves each
     // return whole-Production snapshots, so production order must match
@@ -2734,7 +2742,7 @@ function registerIpc() {
         shotter.insertShotAt(p.scenes, sceneNumber, index, "", "", typeof shotId === "string" && shotId ? shotId : undefined);
         // A front insert (or an exhausted mid-number gap) re-derives the whole
         // 100-grid; relocate board folders so files follow their shots.
-        relocateBoardsForRenumber(p, oldNumbers);
+        emitParkedOrphans(id, relocateBoardsForRenumber(p, oldNumbers));
       })
     )
   );
@@ -2742,6 +2750,11 @@ function registerIpc() {
   handle("production:deleteShot", (_e, id: string, shotId: string, baseRev?: number) =>
     enqueueProduction(id, async () =>
       mutateShots(id, (p) => {
+        // Archive the shot's board folder out of the numbered namespace
+        // first, so deleting a shot never leaves an orphaned boards/<NNNN>
+        // behind for a later reorder to trip over.
+        const doomed = p.scenes.flatMap((sc) => sc.shots).find((s) => s.id === shotId);
+        if (doomed) deleteShotBoards(p, doomed);
         // Idempotent delete: a retry after an uncertain response finds nothing
         // and succeeds without changing the document instead of failing loudly.
         if (shotter.removeShotById(p.scenes, shotId)) {
@@ -2771,14 +2784,14 @@ function registerIpc() {
   handle("production:setShotNumber", (_e, id: string, shotId: string, number: string) =>
     mutateShots(id, (p) => {
       const { oldNumbers } = shotter.setShotNumber(p.scenes, shotId, number);
-      relocateBoardsForRenumber(p, oldNumbers);
+      emitParkedOrphans(id, relocateBoardsForRenumber(p, oldNumbers));
     })
   );
 
   handle("production:reorderShot", (_e, id: string, shotId: string, beforeShotId: string | null, endSceneNumber?: number, baseRev?: number) =>
     mutateShots(id, (p) => {
       const { oldNumbers } = shotter.reorderShot(p.scenes, shotId, beforeShotId, endSceneNumber);
-      relocateBoardsForRenumber(p, oldNumbers);
+      emitParkedOrphans(id, relocateBoardsForRenumber(p, oldNumbers));
     }, baseRev)
   );
 
@@ -2963,6 +2976,11 @@ function registerIpc() {
         shot.graph = freshGraph;
         syncShotGraphOutput(shot);
       }
+      // A reorder that committed mid-job renumbered this shot and relocated
+      // its folder; files THIS job just wrote landed under the stale number
+      // (possibly inside another shot's folder now). Rehome exactly those
+      // files so document numbers and folder names cannot drift apart.
+      if (prev.number !== shot.number) rehomeJobFilesAfterRenumber(fresh, shot, prev.number);
       // (Phase 4: the artwork/videoPath mirrors are no longer re-derived
       // after the re-anchor — every surface resolves the pipe live, so the
       // committed pipe + take selections are the whole truth.)
@@ -4371,6 +4389,35 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // shot's artwork/history/node-graph generation paths can point at files that
   // no longer exist. Repoints every broken path to the newest frame present in
   // that shot's board folder; valid paths are untouched.
+  // Repair a production whose shot numbers and board folders drifted apart:
+  // scan proposes relinks from the node graph's wiring (the canvas truth);
+  // apply — and only apply, on the user's confirmation — renames folders to
+  // their shots' current numbers and re-registers the frames. Serialized
+  // per production like the other structural writes.
+  handle("production:scanBoardRelinks", (_e, id: string) => {
+    const p = productions.loadProduction(id);
+    if (!p) throw new Error("Production not found.");
+    return scanBoardRelinks(p);
+  });
+
+  handle("production:applyBoardRelinks", (_e, id: string) =>
+    enqueueProduction(id, async () => {
+      const p = productions.loadProduction(id);
+      if (!p) throw new Error("Production not found.");
+      const report = scanBoardRelinks(p);
+      const { applied, pipeRestored, failures } = applyBoardRelinks(p, report);
+      if (applied || pipeRestored) productions.saveProduction(p);
+      if (applied) productionEmit(id, `Repair: relinked ${applied} shot folder(s) to their current numbers.`, "done");
+      if (pipeRestored) productionEmit(id, `Repair: restored the frame output on ${pipeRestored} shot(s) from the node graph.`, "done");
+      for (const f of failures) productionEmit(id, `Repair: shot could not be relinked — ${f.reason}`, "error");
+      if (report.missing.length) {
+        productionEmit(id, `Repair: ${report.missing.length} shot(s) have no frames anywhere on disk (${report.missing.map((m) => m.number).join(", ")}).`, "error");
+      }
+      if (!applied && !pipeRestored && !failures.length) productionEmit(id, "Repair: nothing to relink — folders and shots already agree.", "info");
+      return p;
+    })
+  );
+
   handle("production:refreshBoardLinks", (_e, id: string) => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");

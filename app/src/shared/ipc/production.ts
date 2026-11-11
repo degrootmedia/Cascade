@@ -474,6 +474,46 @@ export interface ProductionStyle {
   pendingImageGen?: PendingImageGen;
 }
 
+/** One shot whose frames were found in a differently-numbered board folder
+ *  (the drift the repair fixes): applying renames `foundFolder` to
+ *  `expectedFolder`, rewrites the shot's stored paths, and restores the
+ *  output pipe from the node graph when it was lost. */
+export interface BoardRelinkProposal {
+  shotId: string;
+  /** The shot's current number (the folder it should live in). */
+  number: string;
+  foundFolder: string;
+  expectedFolder: string;
+  /** The on-disk frame that proved the association (pre-rename path). */
+  framePath: string;
+}
+
+/** One shot whose output pipe is missing/stale while the node graph still
+ *  holds its frame — applying rewires the pipe to the owning node, exactly
+ *  what a manual canvas disconnect/reconnect does. No folder move needed. */
+export interface BoardPipeRestore {
+  shotId: string;
+  number: string;
+  kind: "imagegen" | "editgen" | "upscale";
+  nodeId?: string;
+  framePath: string;
+}
+
+/** The repair scan over a production whose shot numbers and board folders
+ *  drifted apart. Nothing is applied (or deleted) until the user confirms. */
+export interface BoardRepairReport {
+  relinks: BoardRelinkProposal[];
+  pipeRestores: BoardPipeRestore[];
+  /** Shots that reference frames, none of which exist anywhere on disk. */
+  missing: Array<{ shotId: string; number: string }>;
+  /** `boards/<NNNN>` folders no shot in the production owns (and no relink
+   *  claims) — surfaced for cleanup, never touched by the repair. */
+  orphans: string[];
+  /** Shots the scan could not safely propose a relink for (e.g. the expected
+   *  folder is already another live shot's). */
+  conflicts: Array<{ shotId: string; number: string; reason: string }>;
+}
+
 /** True when a shot carries anything worth confirming before delete: written
  *  text/prompts or visible media/generations. Blank shots delete immediately;
  *  anything with Audio/Visual direction, a custom prompt, a frame/history, a

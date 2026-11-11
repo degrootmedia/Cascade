@@ -16,7 +16,7 @@ export { mergeGraphLayoutPatch };
 import { sanitizeGenParams, normalizeShotSequences, normalizeTimeline, validateTimeline, isVideoEditFamilyMode, SEQUENCE_ACCENT_COLORS, seedTimelineFromProduction, syncTimelineBeds } from "../shared/ipc.js";
 import { migrateBoardArtworkToJpeg, migrateEditNodes, migrateVideoNodes, migrateEditVideoNodes, migrateGraphGenerations,
 relocateBoardLayout, relocateVideoLayout, migrateReferenceArtwork, syncBoardOutputToPipe, syncTweenBlocks, assetPath, mediaFiles, productionMediaRefs,
-parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR }
+parseScriptMarkdown, parseBoardPromptsMarkdown, refreshBoardLinks, refreshShotVideos, scanBoardImportFolder, importBoards, markBoardsStatus, newRefId, STYLES_DIR, syncShotGraphOutput }
 from "./pipeline.js";
 import * as shotter from "./shotter.js";
 import { normalizeMediaRegistry } from "../shared/media-registry.js";
@@ -778,7 +778,15 @@ export function applyGraphShotPatch(
       (incoming as unknown as Record<string, unknown>)[key] = undefined;
     }
   }
-  return mergeRendererShot(freshShot, incoming);
+  const merged = mergeRendererShot(freshShot, incoming);
+  // A canvas pipe/unpipe rides this command as flat fields; the stored
+  // graph's Frame Output wire must follow in the same write, or the canvas
+  // (which reads the stored graph) and the storyboard (which resolves the
+  // flat pipe) disagree about the shot's frame until a selection command
+  // happens to re-sync them.
+  const pipeKeys = ["graphOutputSource", "graphOutputRefId", "graphOutputEditNodeId", "graphOutputVideoNodeId"];
+  if (pipeKeys.some((k) => k in allowed)) syncShotGraphOutput(merged);
+  return merged;
 }
 
 /**

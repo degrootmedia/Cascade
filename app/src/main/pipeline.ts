@@ -45,7 +45,7 @@ import { buildRefNameIndex, canonicalRefName, nextNumberedRefName, refAliasConfl
 import type { ReferenceSaveOptions } from "../shared/ipc/production.js";
 import { createMediaService, type MediaService } from "./media.js";
 import type { Production, ProductionScene, ProductionShot, GraphGenItem, GraphEditNode, GraphVideoNode, GraphSource, 
-GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence } from "../shared/ipc.js";
+GenParams, TweenBlock, ProductionStyle, CustomRef, UpscaleData, PendingImageGen, ShotSequence, BoardRepairReport, BoardRelinkProposal, BoardPipeRestore } from "../shared/ipc.js";
 import * as shotter from "./shotter.js";
 import { extractVideoStillFrame, videoStillName } from "./video-still.js";
 import { queueVideoFilePostProcess } from "./video-faststart.js";
@@ -83,25 +83,57 @@ function systemMessage(): { role: "system"; content: string } {
   };
 }
 
-function breakdownPrompt(scriptText: string): { role: "user"; content: string } {
+/** Worked example shipped inside the breakdown prompt so smaller models can
+ *  copy the block-pairing behavior instead of inferring it from rules alone. */
+const BREAKDOWN_EXAMPLE = `EXAMPLE — a script in alternating VO/visual blocks, and its correct breakdown:
+
+Script excerpt:
+"VO: Every mile tells a story. The road tests you — your focus, your patience, your rig.
+VISUAL: A semi rolls down a two-lane highway at dawn. The driver's hands stay steady on the wheel as the truck takes a curve.
+VO: That's why every seat we build starts with one question.
+VISUAL: Close on the seat cushion as the driver settles in. The cab rocks gently over a bump; the driver stays level."
+
+Correct breakdown:
+{ "scenes": [ { "title": "Opening", "shots": [
+  { "audio": "Every mile tells a story.", "visual": "A semi rolls down a two-lane highway at dawn." },
+  { "audio": "The road tests you — your focus, your patience, your rig.", "visual": "The driver's hands stay steady on the wheel as the truck takes a curve." },
+  { "audio": "That's why every seat we build starts with one question.", "visual": "Close on the seat cushion as the driver settles in. The cab rocks gently over a bump; the driver stays level." }
+] } ], "characters": [], "products": [] }
+
+Note how the third shot keeps the whole VO sentence and takes both visual beats, because its block has one VO sentence and a two-beat visual — the pairing is resolved inside the block instead of drifting.`;
+
+export function breakdownPrompt(scriptText: string, missingLines: string[] = []): { role: "user"; content: string } {
   return {
     role: "user",
     content:
       "Break this script into an animation shot list.\n\n" +
       "Rules:\n" +
+      "- FIRST, segment by the script's own structure. Split the script into blocks using its scene headings, blank-line paragraph breaks, and any explicit labels (VO:, AUDIO:, VISUAL:, VIDEO:, SFX:). When the script labels its audio and visuals explicitly, those labels are authoritative — follow them exactly and only infer where labels are missing.\n" +
       "- A SCENE is a location/time change or a major beat (use the script's own scene headings when present; otherwise group paragraphs sensibly).\n" +
-      "- A SHOT is the smallest Audio/Visual unit: one piece of dialogue, VO, or SFX in \"audio\", and what the viewer sees in \"visual\".\n" +
+      "- A SHOT is the smallest Audio/Visual unit. Default: one shot per VO sentence (or per dialogue line), paired with the visual that plays under it.\n" +
+      "- PAIR WITHIN BLOCKS, AND RE-SYNC AT EVERY BLOCK BOUNDARY. A visual belongs to the VO block it sits in (the VO immediately before or after it, per the script's layout). Work through a block's VO sentences and visual beats in order, pairing them in sequence. If a block's counts don't match, resolve the mismatch INSIDE that block (merge beats or split a long sentence at a clause boundary) — never let a pairing drift into the next block. One early mismatch must not shift every later pairing.\n" +
+      "- SEMANTIC CHECK: a shot's visual must show what that shot's VO is talking about at that moment. If the next visual in sequence plainly belongs to a different VO line, re-pair within the block before moving on.\n" +
+      "- TIMING SANITY: spoken VO runs about 2.5 words per second. If a visual describes a long multi-action sequence but its block has several VO sentences, spread the visual beats across those sentences in order instead of loading one shot.\n" +
+      "- COVERAGE AND ORDER: use every sentence of the script exactly once, in its original order. Nothing dropped, nothing invented, nothing reordered. A visual passage with no VO becomes a shot with \"\" audio (add (SFX: …) only when the script implies sound). Keep the author's exact wording in \"audio\", including who is speaking when the script names a speaker.\n" +
       "- Keep the author's wording for dialogue; describe the visual concretely (subject, framing, action). If the script gives action description, use it for \"visual\".\n" +
-      "- Never invent dialogue or shots that aren't in the script. A shot with no dialogue gets \"\" audio and (SFX: …) only when the script implies sound.\n" +
+
       "- Do NOT number shots — numbers are assigned by the pipeline.\n" +
       "- List every named CHARACTER that appears (\"key\": a one-line visual descriptor from the script, \"\" if none given).\n" +
-      "- List any named PRODUCTS (branded items, packaging, hero objects) that must look consistent.\n\n" +
+      "- List any named PRODUCTS (branded items, packaging, hero objects) that must look consistent.\n" +
+      "- BEFORE REPLYING, self-check: walk the script top to bottom and confirm every sentence appears exactly once across your \"audio\" and \"visual\" fields, in order, and that each shot's visual matches its audio. Fix any mismatch you find, then reply with the JSON only.\n\n" +
       'Reply with exactly this JSON shape:\n' +
       '{\n  "scenes": [\n    { "title": "Scene heading or short name", "shots": [ { "audio": "…", "visual": "…" } ] }\n  ],\n' +
       '  "characters": [ { "name": "…", "key": "…" } ],\n' +
       '  "products": [ "Product name" ]\n}\n\n' +
+      BREAKDOWN_EXAMPLE +
+      "\n\n" +
       "SCRIPT:\n" +
-      scriptText,
+      scriptText +
+      (missingLines.length
+        ? "\n\nCOVERAGE FIX REQUIRED: A previous attempt at this breakdown DROPPED the following script lines. " +
+          'Your breakdown MUST include every one of them, word for word, in a shot\'s "audio" or "visual", in script order:\n' +
+          missingLines.map((line) => `- ${line}`).join("\n")
+        : ""),
   };
 }
 
@@ -134,6 +166,76 @@ export function normalizeScenes(raw: { scenes: RawScene[] }): ProductionScene[] 
     });
   }
   return scenes;
+}
+
+/** A block label at the start of a line (`VO:`, `VISUAL:`, …) — structure
+ *  markup, not script content, so coverage matching ignores it. */
+const SCRIPT_BLOCK_LABEL = /^\s*(?:VO|V\.O\.|AUDIO|VISUAL|VIDEO|SFX|SOUND)\s*:\s*/i;
+
+/**
+ * Split a source script into its sentences for the coverage check. Block
+ * labels and scene-heading lines (INT./EXT./SCENE n) are dropped, and only
+ * punctuated sentences of 3+ words count — headings, speaker cues, and
+ * fragments would otherwise flood the warning with false positives. The
+ * prompt asks the model for the author's exact wording, so a real sentence
+ * missing from every shot's audio/visual is a dropped line, not a paraphrase
+ * to excuse.
+ */
+export function splitScriptSentences(scriptText: string): string[] {
+  const cleaned = (scriptText ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:INT\.|EXT\.|INT\/EXT\.?|SCENE\s+\d+\b)/i.test(line))
+    .map((line) => line.replace(SCRIPT_BLOCK_LABEL, ""))
+    .join(" ");
+  const sentences: string[] = [];
+  for (const match of cleaned.match(/[^.!?…]+[.!?…]+["'”’")\]]*/g) ?? []) {
+    const sentence = match.replace(/\s+/g, " ").trim().replace(SCRIPT_BLOCK_LABEL, "");
+    if (normalizeForCoverage(sentence).split(" ").filter(Boolean).length >= 3) sentences.push(sentence);
+  }
+  return sentences;
+}
+
+/** Comparison form for coverage: case, punctuation, dashes, curly quotes,
+ *  and apostrophes all normalized away so trivial typographic drift in the
+ *  model's reply never reads as a dropped line. */
+function normalizeForCoverage(text: string): string {
+  return (text ?? "")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export interface BreakdownCoverage {
+  /** Every countable sentence in the source script, in script order. */
+  sentences: string[];
+  /** Sentences (deduped, author's wording) found in no shot's audio/visual. */
+  missing: string[];
+}
+
+/**
+ * Deterministic coverage check (Item 3): every script sentence must appear
+ * in some shot's audio or visual, matched tolerantly via
+ * normalizeForCoverage. All shots are joined into one haystack in order, so
+ * a long sentence split across consecutive shots at a clause boundary still
+ * counts as covered. Warning-only — ingest never blocks on this.
+ */
+export function checkBreakdownCoverage(scriptText: string, scenes: ProductionScene[]): BreakdownCoverage {
+  const sentences = splitScriptSentences(scriptText);
+  const haystack =
+    " " +
+    normalizeForCoverage(scenes.flatMap((s) => s.shots).map((shot) => `${shot.audio} ${shot.visual}`).join(" ")) +
+    " ";
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const sentence of sentences) {
+    const needle = normalizeForCoverage(sentence);
+    if (!needle || seen.has(needle)) continue;
+    seen.add(needle);
+    if (!haystack.includes(` ${needle} `)) missing.push(sentence);
+  }
+  return { sentences, missing };
 }
 
 /** Merge freshly extracted character names with any already on the production
@@ -3081,6 +3183,13 @@ function mapShotMediaPaths(shot: ProductionShot, remap: (rel: string) => string)
   }
 }
 
+/** Orphaned board folders a renumber had to park out of its way: each
+ *  `boards/<NNNN>` whose number belongs to no shot in the production was
+ *  moved — bytes intact — to the number-free archive namespace. */
+export interface RelocateBoardsResult {
+  parkedOrphans: Array<{ from: string; to: string }>;
+}
+
 /**
  * Relocate storyboard board folders/files when shots are renumbered (e.g.
  * drag-reorder). For every shot whose number changed (old→new), move its
@@ -3092,15 +3201,25 @@ function mapShotMediaPaths(shot: ProductionShot, remap: (rel: string) => string)
  * untouched — a reorder must never manufacture new broken links.
  * promptOverrides (keyed by number) follows the shot as well.
  *
+ * A pre-existing boards/<new> folder that belongs to a shot in the
+ * production (and isn't itself moving) still refuses the reorder — those
+ * are another shot's frames. A folder whose number belongs to NO shot is
+ * an orphan (typically a deleted shot's leftovers): it is parked under
+ * boards/outdated/orphan-<NNNN> (reported in the result, never overwritten
+ * or deleted) and the reorder proceeds; orphans the renumber doesn't need
+ * are left exactly where they are.
+ *
  * Every filesystem mutation is journaled; on any failure the journal is
- * rolled back and an error is thrown BEFORE the caller persists, so disk and
- * JSON stay consistent (the reorder surfaces as an error banner instead of
- * silently cross-wiring frames between shots).
+ * rolled back, the in-memory shots/media registry/prompt overrides are
+ * restored to their pre-call state (numbers included), and an error is
+ * thrown BEFORE the caller persists, so disk and JSON stay consistent (the
+ * reorder surfaces as an error banner instead of silently cross-wiring
+ * frames between shots).
  */
 export function relocateBoardsForRenumber(
   p: Production,
   oldNumbers: Map<string, string>
-): void {
+): RelocateBoardsResult {
   const boardsDir = p.assets.boardsDir;
   // Shots that actually changed number.
   const moves: Array<{ shot: ProductionShot; oldNum: string; newNum: string }> = [];
@@ -3110,7 +3229,25 @@ export function relocateBoardsForRenumber(
       if (old && old !== shot.number) moves.push({ shot, oldNum: old, newNum: shot.number });
     }
   }
-  if (!moves.length) return;
+  if (!moves.length) return { parkedOrphans: [] };
+  // Live numbers that are NOT moving: a destination folder with one of
+  // these numbers holds another shot's frames. Any other pre-existing
+  // destination folder is an orphan (no shot owns its number).
+  const movedIds = new Set(moves.map((m) => m.shot.id));
+  const stationaryNumbers = new Set<string>();
+  for (const sc of p.scenes) {
+    for (const shot of sc.shots) {
+      if (!movedIds.has(shot.id)) stationaryNumbers.add(shot.number);
+    }
+  }
+  // Pre-call snapshots for the in-memory half of the rollback: a failure
+  // after paths were patched (phase 4/5) must leave the production object
+  // exactly as it was, not merely unsaved.
+  const shotSnapshots = new Map<string, ProductionShot>();
+  for (const { shot } of moves) shotSnapshots.set(shot.id, structuredClone(shot));
+  const mediaSnapshot = p.media ? structuredClone(p.media) : p.media;
+  const overridesSnapshot = p.promptOverrides ? { ...p.promptOverrides } : p.promptOverrides;
+  const parkedOrphans: Array<{ from: string; to: string }> = [];
 
   const existsRel = (rel: string): boolean => {
     try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
@@ -3124,6 +3261,19 @@ export function relocateBoardsForRenumber(
     for (const d of createdDirs) {
       try { fs.rmdirSync(d); } catch { /* non-empty or gone — leave it */ }
     }
+    // In-memory half: restore every moved shot (paths patched in phase 4,
+    // plus the number the caller already changed) and the registries, so a
+    // failed relocate leaves the production object itself unchanged.
+    for (const { shot, oldNum } of moves) {
+      const snap = shotSnapshots.get(shot.id);
+      if (!snap) continue;
+      const rec = shot as unknown as Record<string, unknown>;
+      for (const key of Object.keys(rec)) delete rec[key];
+      Object.assign(rec, structuredClone(snap));
+      shot.number = oldNum;
+    }
+    p.media = mediaSnapshot;
+    p.promptOverrides = overridesSnapshot;
   };
   const fail = (msg: string): never => {
     rollback();
@@ -3206,8 +3356,11 @@ export function relocateBoardsForRenumber(
   }
 
   // Phase 2: temp → final new dir, renaming inner shot-<old>- filenames.
-  // A pre-existing new dir would mean clobbering another shot's frames, so
-  // fail (rolling back) instead of deleting it.
+  // A pre-existing new dir owned by a stationary shot would mean clobbering
+  // another shot's frames, so fail (rolling back) instead of deleting it.
+  // A pre-existing new dir owned by NO shot is an orphan (a deleted shot's
+  // leftover): park it under boards/outdated/orphan-<NNNN> — journaled, so
+  // a later failure puts it back — and proceed.
   const renameInDir = (dirRel: string, oldNum: string, newNum: string) => {
     let dirAbs: string;
     try { dirAbs = assetPath(p, dirRel); } catch { return; }
@@ -3234,7 +3387,16 @@ export function relocateBoardsForRenumber(
     if (!tmpRel) continue;
     const newRel = `${boardsDir}/${newNum}`;
     if (existsRel(newRel)) {
-      fail(`Shot reorder failed: ${newRel} already exists and is not part of this reorder — refusing to overwrite another shot's frames.`);
+      if (stationaryNumbers.has(newNum)) {
+        fail(`Shot reorder failed: ${newRel} already exists and is not part of this reorder — refusing to overwrite another shot's frames.`);
+      }
+      // Orphaned folder (its shot was deleted): park it out of the numbered
+      // namespace instead of failing or overwriting it.
+      let parkRel = `${boardsDir}/outdated/orphan-${newNum}`;
+      for (let i = 2; existsRel(parkRel); i++) parkRel = `${boardsDir}/outdated/orphan-${newNum}-${i}`;
+      mkdirs(path.dirname(assetPath(p, parkRel)));
+      rename(assetPath(p, newRel), assetPath(p, parkRel), `orphaned board folder ${newRel}`);
+      parkedOrphans.push({ from: newRel, to: parkRel });
     }
     mkdirs(path.dirname(assetPath(p, newRel)));
     rename(assetPath(p, tmpRel), assetPath(p, newRel), `board folder ${tmpRel}`);
@@ -3311,6 +3473,43 @@ export function relocateBoardsForRenumber(
     }
     p.promptOverrides = nextOverrides;
   }
+  return { parkedOrphans };
+}
+
+/**
+ * Rehome files a generation job wrote under the shot's pre-renumber folder.
+ * A long job holds its own copy of the production; when a reorder commits
+ * while it runs, `writeBoardFrame`/`writeShotVideo` still write into
+ * `boards/<jobNumber>/` — a folder the reorder may have since given to
+ * another shot. On the job's rebase, move exactly the files THIS shot
+ * references from the stale folder into `boards/<current number>/`
+ * (renaming `shot-<old>-` like every other relocation) and rewrite the
+ * stored paths + registry. Other files in the stale folder (another shot's
+ * frames) are never touched. Returns how many files moved.
+ */
+export function rehomeJobFilesAfterRenumber(p: Production, shot: ProductionShot, jobNumber: string): number {
+  if (!jobNumber || jobNumber === shot.number) return 0;
+  const boardsDir = p.assets.boardsDir;
+  const fromPrefix = `${boardsDir}/${jobNumber}/`;
+  const exists = (rel: string): boolean => {
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const landed = new Map<string, string>();
+  for (const rel of shotMediaRefs(shot)) {
+    if (!rel.startsWith(fromPrefix) || !exists(rel)) continue;
+    const dest = `${boardsDir}/${shot.number}/` +
+      rel.slice(fromPrefix.length).split(`shot-${jobNumber}-`).join(`shot-${shot.number}-`);
+    if (dest === rel || exists(dest)) continue;
+    try {
+      fs.mkdirSync(path.dirname(assetPath(p, dest)), { recursive: true });
+      fs.renameSync(assetPath(p, rel), assetPath(p, dest));
+      landed.set(rel, dest);
+    } catch { /* leave the path as-is; the repair scan can still find it */ }
+  }
+  if (!landed.size) return 0;
+  mapShotMediaPaths(shot, (rel) => landed.get(rel) ?? rel);
+  mediaFiles.remapPaths(p, (rel) => landed.get(rel) ?? rel);
+  return landed.size;
 }
 
 /** Move one shot's per-shot media folder from `fromDirRel` to `toDirRel` and
@@ -3443,6 +3642,54 @@ export function removeOutdatedShot(p: Production, shotId: string): void {
   }
 }
 
+/**
+ * Clean up a deleted shot's board folder so it cannot linger as an orphaned
+ * `boards/<NNNN>` that a later renumber would trip over. Follows the
+ * codebase's archive convention (`archiveShotsToOutdated`): the folder moves
+ * to the number-free `boards/outdated/<shotId>/` namespace — frames stay
+ * recoverable on disk, but no numbered folder is left behind. Stray
+ * referenced files outside the per-shot folder (legacy flat files) move into
+ * the archive folder alongside it. Best-effort and never throws: a failed
+ * move leaves an orphan, which reorder now tolerates and the repair scan
+ * reports. Returns the archive folder's rel path, or null when the shot had
+ * nothing on disk. Callers remove the shot from the document and save.
+ */
+export function deleteShotBoards(p: Production, shot: ProductionShot): string | null {
+  const boardsDir = p.assets.boardsDir;
+  const fromRel = `${boardsDir}/${shot.number}`;
+  const exists = (rel: string): boolean => {
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const strays = shotMediaRefs(shot).filter((rel) => !rel.startsWith(`${fromRel}/`) && exists(rel));
+  if (!exists(fromRel) && !strays.length) return null;
+  let toRel = `${boardsDir}/outdated/${shot.id}`;
+  for (let i = 2; exists(toRel); i++) toRel = `${boardsDir}/outdated/${shot.id}-${i}`;
+  try {
+    if (exists(fromRel)) {
+      moveShotMediaDir(p, shot, fromRel, toRel, shot.number, shot.number);
+    } else {
+      fs.mkdirSync(assetPath(p, toRel), { recursive: true });
+    }
+  } catch {
+    return null; // leave the orphan; reorder tolerates it, repair reports it
+  }
+  const landed = new Map<string, string>();
+  for (const rel of strays) {
+    const base = rel.split("/").pop() ?? rel;
+    let dest = `${toRel}/${base}`;
+    for (let i = 2; exists(dest); i++) dest = `${toRel}/${i}-${base}`;
+    try {
+      fs.renameSync(assetPath(p, rel), assetPath(p, dest));
+      landed.set(rel, dest);
+    } catch { /* stray stays where it is */ }
+  }
+  if (landed.size) {
+    mapShotMediaPaths(shot, (rel) => landed.get(rel) ?? rel);
+    mediaFiles.remapPaths(p, (rel) => landed.get(rel) ?? rel);
+  }
+  return toRel;
+}
+
 /** Re-link a shot's board-image paths to files that actually exist on disk.
  *  When board files are moved/renamed externally (or a production is
  *  re-registered from a folder whose JSON is gone), `shot.artwork`, its
@@ -3549,6 +3796,195 @@ export function refreshBoardLinks(p: Production): number {
   return repaired;
 }
 
+
+/** The still a shot's canvas actually holds, in trust order: the stored
+ *  graph's Frame Output wire, the flat output pipe, the newest on-disk
+ *  generation across the image/edit/upscale histories, then the classic
+ *  artwork. This is the ground truth the storyboard lost when numbers and
+ *  folders drifted apart — the node tiles render these histories directly,
+ *  which is why the canvas stayed intact. Null when nothing the shot
+ *  references exists on disk. */
+function canvasFrameTruth(
+  p: Production,
+  shot: ProductionShot
+): { rel: string; kind: "imagegen" | "editgen" | "upscale"; nodeId?: string } | null {
+  const exists = (rel: string | undefined): rel is string => {
+    if (!rel) return false;
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const candidates: Array<string | undefined> = [];
+  // 1. The stored graph wire into the output node.
+  const outEdge = (shot.graph?.edges ?? []).find((e) => e.to?.node === "output");
+  const srcNode = outEdge?.from?.node;
+  if (srcNode === "imagegen") candidates.push(shot.graphImageGens?.[shot.graphImageGenIndex ?? 0]?.path);
+  else if (srcNode?.startsWith("editgen:")) candidates.push(editNodeSelection(shot, srcNode.slice("editgen:".length))?.path);
+  else if (srcNode === "upscale") candidates.push(upscaleSelection(shot)?.path);
+  // 2. The flat pipe's selection.
+  const piped = resolveSelectedOutput(shot);
+  candidates.push(piped.media === "still" ? piped.path : piped.stillPath);
+  // 3. Every still generation, newest first.
+  const gens = [
+    ...(shot.graphImageGens ?? []),
+    ...(shot.graphEditNodes ?? []).flatMap((n) => n.gens ?? []),
+    ...(shot.graphUpscale?.gens ?? []),
+  ].sort((x, y) => (Date.parse(y.at) || 0) - (Date.parse(x.at) || 0));
+  for (const g of gens) candidates.push(g.path);
+  // 4. Classic artwork + history.
+  candidates.push(shot.artwork, ...(shot.artworkHistory ?? []));
+  for (const rel of candidates) {
+    if (!exists(rel)) continue;
+    const gen = findGeneration(shot, rel);
+    if (gen?.kind === "edit") return { rel, kind: "editgen", nodeId: gen.nodeId };
+    if (gen?.kind === "upscale") return { rel, kind: "upscale" };
+    return { rel, kind: "imagegen" };
+  }
+  return null;
+}
+
+/** True when the shot records any still frame (so "nothing on disk" means a
+ *  lost frame, not a blank panel). */
+function shotHasStillRefs(shot: ProductionShot): boolean {
+  return !!(
+    shot.artwork || shot.artworkHistory?.length ||
+    shot.graphImageGens?.length || shot.graphUpscale?.gens?.length ||
+    (shot.graphEditNodes ?? []).some((n) => n.gens?.length) ||
+    shot.graphOutputSource === "imagegen" || shot.graphOutputSource === "editgen" || shot.graphOutputSource === "upscale"
+  );
+}
+
+/**
+ * Scan for shots whose number and board folder drifted apart (read-only —
+ * the caller shows the report and applies on confirmation). For each shot,
+ * the canvas truth (`canvasFrameTruth`) names the frame that really belongs
+ * to it; when that frame lives under a differently-numbered `boards/<NNNN>`
+ * folder, a relink is proposed (rename the folder to the shot's current
+ * number — folder number equals shot number is the user-facing contract).
+ * Shots whose folder is right but whose output pipe was lost get a pipe
+ * restore (the automated form of the canvas disconnect/reconnect fix).
+ * Orphaned numbered folders and truly missing frames are only reported.
+ */
+export function scanBoardRelinks(p: Production): BoardRepairReport {
+  const boardsDir = p.assets.boardsDir;
+  const esc = boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const folderRx = new RegExp(`^${esc}/(\\d{4})/`);
+  const exists = (rel: string): boolean => {
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const shots = p.scenes.flatMap((sc) => sc.shots);
+  const liveNumbers = new Set(shots.map((s) => s.number));
+  const relinks: BoardRelinkProposal[] = [];
+  const pipeRestores: BoardPipeRestore[] = [];
+  const missing: BoardRepairReport["missing"] = [];
+  const conflicts: BoardRepairReport["conflicts"] = [];
+  const claimedFound = new Map<string, string>();
+  for (const shot of shots) {
+    const truth = canvasFrameTruth(p, shot);
+    if (!truth) {
+      if (shotHasStillRefs(shot)) missing.push({ shotId: shot.id, number: shot.number });
+      continue;
+    }
+    const m = folderRx.exec(truth.rel);
+    const foundNum = m?.[1];
+    if (foundNum && foundNum !== shot.number) {
+      const foundFolder = `${boardsDir}/${foundNum}`;
+      const expectedFolder = `${boardsDir}/${shot.number}`;
+      const claimer = claimedFound.get(foundFolder);
+      const otherRefs = shots.some(
+        (s) => s.id !== shot.id && s.number === foundNum &&
+          shotMediaRefs(s).some((r) => r.startsWith(`${foundFolder}/`))
+      );
+      if (claimer && claimer !== shot.id) {
+        conflicts.push({ shotId: shot.id, number: shot.number, reason: `${foundFolder} is also claimed by another shot's frames.` });
+      } else if (otherRefs) {
+        conflicts.push({ shotId: shot.id, number: shot.number, reason: `${foundFolder} still holds frames referenced by shot ${foundNum}.` });
+      } else if (exists(expectedFolder)) {
+        conflicts.push({ shotId: shot.id, number: shot.number, reason: `${expectedFolder} already exists — move or remove it before relinking.` });
+      } else {
+        claimedFound.set(foundFolder, shot.id);
+        relinks.push({ shotId: shot.id, number: shot.number, foundFolder, expectedFolder, framePath: truth.rel });
+      }
+      continue;
+    }
+    if (resolveSelectedOutput(shot).path !== truth.rel && resolveShotDisplay(shot).path !== truth.rel) {
+      pipeRestores.push({ shotId: shot.id, number: shot.number, kind: truth.kind, nodeId: truth.nodeId, framePath: truth.rel });
+    }
+  }
+  const orphans: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(assetPath(p, boardsDir))) {
+      if (!/^\d{4}$/.test(entry) || liveNumbers.has(entry)) continue;
+      const rel = `${boardsDir}/${entry}`;
+      if (claimedFound.has(rel)) continue;
+      try {
+        if (fs.statSync(assetPath(p, rel)).isDirectory()) orphans.push(rel);
+      } catch { /* unreadable entry — skip */ }
+    }
+  } catch { /* no boards dir yet */ }
+  return { relinks, pipeRestores, missing, orphans, conflicts };
+}
+
+/**
+ * Apply a repair report (re-scanned when not supplied): rename each drifted
+ * folder to its shot's current number (inner `shot-<number>-` files renamed,
+ * every stored path + registry entry rewritten via `moveShotMediaDir`),
+ * then re-register the frame the canvas held — select its owning node's
+ * take through the one write-through and record it as the shot's artwork,
+ * exactly what a manual canvas disconnect/reconnect does, in bulk. Pipe
+ * restores do the same without a folder move. Nothing is ever deleted;
+ * per-shot failures are collected, not thrown, so one bad folder cannot
+ * block the rest of the repair. Callers save the production.
+ */
+export function applyBoardRelinks(
+  p: Production,
+  report: BoardRepairReport = scanBoardRelinks(p)
+): { applied: number; pipeRestored: number; failures: Array<{ shotId: string; reason: string }> } {
+  const failures: Array<{ shotId: string; reason: string }> = [];
+  const byId = new Map(p.scenes.flatMap((sc) => sc.shots).map((s) => [s.id, s]));
+  const exists = (rel: string): boolean => {
+    try { return fs.existsSync(assetPath(p, rel)); } catch { return false; }
+  };
+  const reregister = (shot: ProductionShot): boolean => {
+    const truth = canvasFrameTruth(p, shot);
+    if (!truth) return false;
+    try {
+      selectBoardFrame(shot, truth.rel);
+    } catch {
+      // Not a stored generation (disk-only frame): adopt it the way
+      // refreshBoardLinks does, as the image node's newest output.
+      recordGraphImageGen(shot, truth.rel, "", "repair");
+      hookImageGenToOutput(shot);
+    }
+    recordBoardArtwork(shot, truth.rel);
+    return resolveShotDisplay(shot).path === truth.rel;
+  };
+  let applied = 0;
+  for (const relink of report.relinks) {
+    const shot = byId.get(relink.shotId);
+    if (!shot) { failures.push({ shotId: relink.shotId, reason: "Shot no longer exists." }); continue; }
+    if (!exists(relink.foundFolder)) { failures.push({ shotId: relink.shotId, reason: `${relink.foundFolder} is no longer on disk.` }); continue; }
+    if (exists(relink.expectedFolder)) { failures.push({ shotId: relink.shotId, reason: `${relink.expectedFolder} already exists.` }); continue; }
+    const foundNum = relink.foundFolder.split("/").pop() ?? "";
+    try {
+      moveShotMediaDir(p, shot, relink.foundFolder, relink.expectedFolder, foundNum, shot.number);
+    } catch (e) {
+      failures.push({ shotId: relink.shotId, reason: e instanceof Error ? e.message : String(e) });
+      continue;
+    }
+    if (!reregister(shot)) {
+      failures.push({ shotId: relink.shotId, reason: "Folder moved, but no frame could be re-registered to the shot." });
+      continue;
+    }
+    applied++;
+  }
+  let pipeRestored = 0;
+  for (const restore of report.pipeRestores) {
+    const shot = byId.get(restore.shotId);
+    if (!shot) { failures.push({ shotId: restore.shotId, reason: "Shot no longer exists." }); continue; }
+    if (reregister(shot)) pipeRestored++;
+    else failures.push({ shotId: restore.shotId, reason: "No frame could be re-registered to the shot." });
+  }
+  return { applied, pipeRestored, failures };
+}
 
 /** Adopt generated clips that reached disk but were never recorded on their
  *  shot — the video counterpart of `refreshBoardLinks`. A provider writes
@@ -3664,10 +4100,16 @@ export function recordGraphUpscaleGen(shot: ProductionShot, rel: string, model: 
   node.genIndex = 0;
 }
 
-/** Store an AI-edited frame on the named edit node (newest first). */
+/** Store an AI-edited frame on the named edit node (newest first), creating
+ *  the node when it vanished mid-flight (mirroring `recordGraphVideoGen`):
+ *  a finished take must never be silently dropped just because its node was
+ *  deleted while the job ran — the file is already on disk. */
 export function recordGraphEditGen(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string): void {
-  const node = getEditNode(shot, nodeId);
-  if (!node) return;
+  let node = getEditNode(shot, nodeId);
+  if (!node) {
+    node = { id: nodeId || "edit0", prompt };
+    (shot.graphEditNodes ??= []).push(node);
+  }
   const item: GraphGenItem = { path: rel, prompt, model, at: new Date().toISOString() };
   node.gens = [item, ...(node.gens ?? [])].slice(0, GRAPH_HISTORY_CAP);
   node.genIndex = 0;
@@ -3717,6 +4159,9 @@ export function recordBoardEdit(shot: ProductionShot, rel: string, prompt: strin
   // The fresh edit becomes the output feed through the one write-through:
   // pipe fields + artwork/videoPath mirrors derive there.
   setShotSelectedOutput(shot, { kind: "editgen", nodeId: target.id });
+  // Durable frame registration (see completeEditGeneration): the edit is
+  // the shot's frame in its own right, not only this node's history entry.
+  recordBoardArtwork(shot, rel);
   return target.id;
 }
 
@@ -3899,17 +4344,28 @@ export function completeVideoGeneration(shot: ProductionShot, nodeId: string, re
 }
 
 /** Record a finished edit generation on its node; classic surface
- *  also makes it the output feed. */
+ *  also makes it the output feed. Whenever the edit node feeds the output
+ *  (classic, or a node-surface take on the already-wired node), the frame
+ *  is ALSO recorded as the shot's artwork — the durable, node-independent
+ *  frame registration an image generation gets from its flat main-owned
+ *  history. An edit take held only in its node's history would vanish as
+ *  the shot's frame the moment that history is lost; the artwork record
+ *  (relocated on renumber like every other board path) survives it. */
 export function completeEditGeneration(shot: ProductionShot, nodeId: string, rel: string, prompt: string, model: string, surface: GenerationSurface): void {
   recordGraphEditGen(shot, nodeId, rel, prompt, model);
   if (surface === "classic") setShotSelectedOutput(shot, { kind: "editgen", nodeId });
+  if (shot.graphOutputSource === "editgen" && (shot.graphOutputEditNodeId ?? "edit0") === nodeId) {
+    recordBoardArtwork(shot, rel);
+  }
 }
 
 /** Record a finished upscale on its node; classic surface also
- *  makes it the output feed. */
+ *  makes it the output feed. Same durable artwork registration as the
+ *  edit path whenever the upscale node feeds the output. */
 export function completeUpscaleGeneration(shot: ProductionShot, rel: string, model: string, surface: GenerationSurface): void {
   recordGraphUpscaleGen(shot, rel, model);
   if (surface === "classic") setShotSelectedOutput(shot, { kind: "upscale" });
+  if (shot.graphOutputSource === "upscale") recordBoardArtwork(shot, rel);
 }
 
 /**
@@ -5295,8 +5751,40 @@ export async function ingestScript(
   emit(`Breaking into scenes and shots (model: ${model})…`);
   const gab = new ChatClient(apiKey, baseUrl);
   const { text: reply } = await gab.completeOnce(model, [systemMessage(), breakdownPrompt(scriptText)], 8000);
-  const parsed = parseBreakdownJson(reply);
-  const scenes = normalizeScenes(parsed);
+  let parsed = parseBreakdownJson(reply);
+  let scenes = normalizeScenes(parsed);
+
+  // Deterministic coverage check: the prompt alone cannot be trusted to use
+  // every script sentence, so verify it in code. On any miss, retry the
+  // breakdown ONCE with the dropped lines called out, adopting the retry
+  // only when it strictly improves coverage; whatever remains missing is
+  // surfaced as a warning below. Never blocks ingest.
+  let coverage = checkBreakdownCoverage(scriptText, scenes);
+  if (coverage.missing.length) {
+    emit(`Coverage check: ${coverage.missing.length} script line(s) missing from the breakdown — retrying once…`);
+    try {
+      const { text: retryReply } = await gab.completeOnce(model, [systemMessage(), breakdownPrompt(scriptText, coverage.missing)], 8000);
+      const retryParsed = parseBreakdownJson(retryReply);
+      const retryScenes = normalizeScenes(retryParsed);
+      const retryCoverage = checkBreakdownCoverage(scriptText, retryScenes);
+      if (retryScenes.some((s) => s.shots.length) && retryCoverage.missing.length < coverage.missing.length) {
+        parsed = retryParsed;
+        scenes = retryScenes;
+        coverage = retryCoverage;
+      }
+    } catch {
+      // A failed retry keeps the first breakdown; the warning below names
+      // what is still missing.
+    }
+  }
+  if (coverage.missing.length) {
+    const named = coverage.missing.slice(0, 20).map((line) => `"${line}"`).join(" ");
+    const rest = coverage.missing.length > 20 ? ` (+${coverage.missing.length - 20} more)` : "";
+    emit(
+      `Coverage warning: the breakdown dropped ${coverage.missing.length} script line(s) — check the shot list and add them back: ${named}${rest}`,
+      "error",
+    );
+  }
   const shotCount = scenes.reduce((n, s) => n + s.shots.length, 0);
   if (!shotCount) throw new Error("The breakdown came back with no shots — check the script and retry.");
   emit(`Parsed ${scenes.length} scene(s), ${shotCount} shot(s).`);

@@ -160,7 +160,11 @@ describe("shot reorder keeps frames with their shots", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cascade-shot-collision-"));
     try {
       const shot = makeShot("0100", { artwork: "boards/0100/shot-0100-a.jpg" });
-      const p = makeProduction(root, [{ number: 1, title: "S1", shots: [shot] }]);
+      // boards/0200 belongs to a live shot that is not part of this
+      // renumber — the guard must still refuse. (A folder owned by NO shot
+      // is an orphan instead: see board-repair.test.ts.)
+      const owner = makeShot("0200", { id: "shot-0200", artwork: "boards/0200/unrelated.jpg" });
+      const p = makeProduction(root, [{ number: 1, title: "S1", shots: [shot, owner] }]);
       write(root, "boards/0100/shot-0100-a.jpg", "A-bytes");
       write(root, "boards/0200/unrelated.jpg", "junk");
 

@@ -88,7 +88,7 @@ const OutdatedCard = memo(function OutdatedCard({
         <button
           className="prod-btn danger"
           onClick={async () => {
-            if (await confirmDestructive({ title: `Delete outdated shot ${shot.number}?`, body: "This deletes the shot and its preserved frames, and can't be undone.", confirmLabel: "Delete" })) {
+            if (await confirmDestructive({ title: `Delete outdated shot ${shot.number}?`, body: "This deletes the shot and its preserved frames. You can undo with Ctrl+Z until the app closes.", confirmLabel: "Delete" })) {
               onMutate(window.cascade.removeOutdatedShot(prod.meta.id, shot.id, revOf(prod)));
             }
           }}

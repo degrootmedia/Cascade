@@ -15,6 +15,9 @@ import { windowChannels } from "./ipc-channels/window.js";
 import { cameraGridChannels } from "./ipc-channels/camera-grid.js";
 import { voiceChannels } from "./ipc-channels/voice.js";
 import type { VoiceStatusIpc, VoiceProgressIpc, WhisperModel } from "./voice.js";
+import type { PromptSnippet } from "./prompt-snippets.js";
+import type { HistoryCommitMeta, ProductionHistoryState } from "./production-history.js";
+export type { HistoryCommitMeta, ProductionHistoryState } from "./production-history.js";
 import type {
   GenParams,
   GraphLayout,
@@ -413,6 +416,10 @@ export interface CascadeApi {
    *  keyed by template id. Absent id = the built-in wording. */
   getPromptTemplates(): Promise<Record<string, string>>;
   setPromptTemplates(overrides: Record<string, string>): Promise<void>;
+  /** The user's prompt-snippet library (global user setting; never stored
+   *  resolves to the seeded starter library in shared/prompt-snippets.ts). */
+  getPromptSnippets(): Promise<PromptSnippet[]>;
+  setPromptSnippets(snippets: PromptSnippet[]): Promise<void>;
   /** Dev Model Customizer: per-parameter placement (`modelId::flag` →
    *  core/advanced/hidden). */
   getModelOptionExposure(): Promise<Record<string, ModelParamExposure>>;
@@ -477,6 +484,10 @@ export interface CascadeApi {
   onOpenSettings(cb: () => void): () => void;
   /** Fired after the window's page zoom changes (Ctrl+/-/0 or pinch), so canvases can re-rasterize. */
   onZoomChanged(cb: () => void): () => void;
+  /** Step the sending window's whole-page zoom by a level delta (the
+   *  panel-aware Ctrl+wheel fallback when no panel zoom claims the wheel).
+   *  Fire-and-forget: wheel gestures arrive at input rate. */
+  zoomPageBy(levelDelta: number): void;
   listModels(): Promise<ModelListResult>;
   /** Settings "Test connection": list models AND send a 1-token completion
    *  to the selected model, so a key that can list but not run inference
@@ -583,7 +594,19 @@ export interface CascadeApi {
   loadProduction(id: string): Promise<Production | null>;
   /** Persist a whole renderer snapshot; resolves with the saved document
    *  (its stamped `rev` is how optimistic callers resync their revision). */
-  saveProduction(p: Production): Promise<Production>;
+  saveProduction(p: Production, meta?: HistoryCommitMeta): Promise<Production>;
+  /** App-wide undo: restore the previous document snapshot (board
+   *  folders reconciled on disk). Null when there is nothing to undo.
+   *  Never deletes generated files, refunds credits, or touches the
+   *  job ledger — only the document's registration of media rewinds. */
+  undoProduction(id: string): Promise<Production | null>;
+  redoProduction(id: string): Promise<Production | null>;
+  productionHistoryState(id: string): Promise<ProductionHistoryState>;
+  /** Subscribe to undo/redo availability changes for any production. */
+  onHistoryChanged(cb: (e: { productionId: string } & ProductionHistoryState) => void): () => void;
+  /** Edit-menu Undo/Redo clicks (main sends to the focused window). */
+  onUndoRequest(cb: () => void): () => void;
+  onRedoRequest(cb: () => void): () => void;
   removeProduction(id: string, mode: "delete" | "archive"): Promise<boolean>;
   /** Native file dialog for a script (pdf/docx/txt/md/fountain). */
   pickScriptFile(): Promise<string | null>;
@@ -754,6 +777,12 @@ export interface CascadeApi {
   startBlank(productionId: string): Promise<Production>;
   /** Insert an empty scene after the given ordinal (0 = before the first, null = at the end); later scenes renumber. */
   addScene(productionId: string, afterSceneNumber: number | null): Promise<Production>;
+  /** Rename a scene (addressed by its ordinal). The title is trimmed; an empty title is rejected. Only the title changes — ordinals, shots, and numbering are untouched, and script.md is rewritten with the new heading. */
+  renameScene(productionId: string, sceneNumber: number, title: string): Promise<Production>;
+  /** Delete a scene and all of its shots (Feature #12). Board folders
+   *  archive recoverably (like shot delete) and the whole removal is
+   *  one app-wide-undo step. A `baseRev` rejects a stale delete. */
+  deleteScene(productionId: string, sceneNumber: number, baseRev?: number): Promise<Production>;
   /**
    * Step 3: generate storyboard frames via the OpenArt MCP server. Generates
    * for shots without artwork (or all shots when `regenerateAll`), capped at
@@ -798,7 +827,7 @@ export interface CascadeApi {
   /** Step 3: return one shot's full generation prompt (used by the per-frame copy button). */
   getBoardPrompt(productionId: string, shotId: string): Promise<string | null>;
   /** Step 3: set a shot's editable board prompt (empty clears the override back to auto-derived). */
-  updateBoardPrompt(productionId: string, shotId: string, prompt: string): Promise<Production>;
+  updateBoardPrompt(productionId: string, shotId: string, prompt: string, meta?: HistoryCommitMeta): Promise<Production>;
   /**
    * Step 3: discard a shot's manually edited prompt and re-derive it from the
    * current design (style, brand, references) + script. Returns the updated
@@ -1016,14 +1045,14 @@ export interface CascadeApi {
    * fold together, and a stale whole-document save can't wholesale replace a
    * newer layout. Returns the updated production.
    */
-  updateGraphLayout(productionId: string, shotId: string, patch: GraphLayoutPatch): Promise<Production>;
+  updateGraphLayout(productionId: string, shotId: string, patch: GraphLayoutPatch, meta?: HistoryCommitMeta): Promise<Production>;
   /**
    * Narrow graph-field edit for one shot: only allow-listed renderer-owned
    * graph fields are applied, onto the freshest document main-side, so an
    * unrelated edit cannot overwrite a generation that landed after the
    * renderer's snapshot. Returns the updated production.
    */
-  updateGraphShotFields(productionId: string, shotId: string, patch: Partial<ProductionShot>): Promise<Production>;
+  updateGraphShotFields(productionId: string, shotId: string, patch: Partial<ProductionShot>, meta?: HistoryCommitMeta): Promise<Production>;
   /**
    * The main job ledger's current state for one production — every
    * non-terminal generation job plus recently finished ones. Call on open,
@@ -1302,7 +1331,9 @@ type SubscriptionMethod =
   | "onCanvasBusy"
   | "onDetachedClosed"
   | "onVoiceProgress"
-  | "onModelsChanged";
+  | "onModelsChanged"
+  | "onUndoRequest"
+  | "onRedoRequest";
 
 /** Every non-subscription method on CascadeApi must be wired in ipcContract,
  *  and every contract method must exist on CascadeApi — a type-level drift

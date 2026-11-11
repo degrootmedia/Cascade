@@ -15,11 +15,13 @@ import * as sessions from "./sessions.js";
 import { searchSessions } from "./session-search.js";
 import * as agents from "./agents.js";
 import * as productions from "./productions.js";
+import { installProductionHistory, undoProduction, redoProduction, historyState, setNextHistoryMeta } from "./production-history.js";
+import type { HistoryCommitMeta } from "../shared/production-history.js";
 import { nextNumberedRefName, sanitizeReferenceName, suggestSuiteRefName } from "../shared/ref-names.js";
 import { parseStylePreset, STYLE_PRESET_SEEDS, type StylePreset } from "../shared/style-presets.js";
 import * as shotter from "./shotter.js";
 import { ingestScript, refineStylePrompt, refineCharacterDescription, generateStyleSet, stylePromptFromImage, assetPath, scriptMarkdown, generateBoards, planAnimatic, exportBoardPrompts, importBoards, importBoardDataUrl, importBoardVideo, deleteReference, renameReference, assignReferenceAlias, dismissCitedRefName, describeReference, applyMagicRefDecision, deleteGeneration, saveGenerationAsReference, saveVideoStillAsReference, validReferenceCategoryId, newRefId, uniqueReferenceName, scanBoardImportFolder, effectivePrompt, shotReferences, refArtworkDataUrl, refMediaDataUrl, recordBoardArtwork, recordGraphImageGen, recordGraphVideoGen, completeImageGeneration, completePendingImageGeneration, applyJobShotChanges, completeVideoGeneration, completeEditGeneration, completeUpscaleGeneration, replaceVideoGenTake, recordGraphEditGen, hookImageGenToOutput, hookVideoGenToOutput, writeBoardFrame, writeStyleFrame, brandPrompt, archiveAsset, generateMagicPrompts, composeVideoPrompt, stripMagicLeakage, originalForJpegRel, regenerateBoardJpeg, relocateBoardsForRenumber, refreshBoardLinks, refreshShotVideos, restoreOutdatedShot, removeOutdatedShot, deleteShotBoards, scanBoardRelinks, applyBoardRelinks, rehomeJobFilesAfterRenumber, characterSheetPrompt, upsertCharacterSheetRef, recordTweenBlockGen, tweenSelectedClips, tweenClampGap, syncTweenBlocks, buildTweenConcatList, unstitchTween, removeShotSequence, removeShotsFromSequences, relocateClipToSequence, deleteSequenceTake, effectiveShotStyle, styleFrameDataUrl } from "./pipeline.js";
-import { create720pReference } from "./pipeline.js";
+import { create720pReference, undoTrashDir } from "./pipeline.js";
 import { styleFramePrompt, withLookClause, styleFrameForShot } from "../shared/look.js";
 import { resolvePromptTemplate, renderPromptTemplate, cameraGridPromptVars } from "../shared/prompt-templates.js";
 import { McpManager } from "./mcp.js";
@@ -54,7 +56,7 @@ import { loadSessionGoal, makeSessionGoalTools, patchSessionGoal } from "./sessi
 import { makeOpenArtUploadTool } from "./openart-upload.js";
 import { makeProductionAgentTools, type ProductionOp } from "./production-tools.js";
 import { ipcContract, TWEEN_KEY_IMGGEN, isVideoGenRef, parseEditNodeKeyframe, sanitizeGenParams, sortByModelOrder, 
-styleFrameOverride, normalizeCanvasBusy, normalizeCameraGridData, recordSequenceVideoGen, sequenceSelectedTake, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, 
+styleFrameOverride, normalizeCanvasBusy, nextPageZoomLevel, normalizeCameraGridData, recordSequenceVideoGen, sequenceSelectedTake, CAMERA_GRID_CATEGORY_ID, CAMERA_GRID_CATEGORY_NAME, 
 CAMERA_GRID_COLS, CAMERA_GRID_ROWS, type DisplayItem, type GraphSource, type ChatAttachment } from "../shared/ipc.js";
 import { validateIpcArgs } from "../shared/ipc-schemas.js";
 import { isTrustedSender } from "./ipc/handle.js";
@@ -1133,6 +1135,20 @@ function autoNameSession(entry: LiveChat): Promise<string | null> {
 
 // ---- IPC ------------------------------------------------------------------
 function registerIpc() {
+  // App-wide undo: hook the document-save funnel before any handler can
+  // write. State changes broadcast to every window (main + detached
+  // share the one main-side history) and refresh the Edit menu.
+  installProductionHistory((productionId, state) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try {
+        if (!w.isDestroyed()) w.webContents.send("production:historyChanged", { productionId, ...state });
+      } catch { /* a destroyed window must not break the broadcast */ }
+    }
+    if (settings.getActiveProductionId() === productionId) {
+      historyMenuState = state;
+      installApplicationMenu();
+    }
+  });
   // Every successful generation feeds the expenses ledger, which prices it
   // against the user's rules and keeps the CSV tally in sync.
   // The CLI binaries (Higgsfield/OpenArt CLI transports): an explicit
@@ -1355,6 +1371,9 @@ function registerIpc() {
   // no-op listener keeps the contract-drift guard happy (every declared
   // channel must be handled).
   on("production:jobsChanged", () => {});
+  // Same broadcast pattern for undo/redo availability (main emits on
+  // every history change; renderers only subscribe).
+  on("production:historyChanged", () => {});
 
   // Detached canvas window (Spec 03): a single window, retargeted on reopen.
   // `detached` is assigned in `whenReady` before registerIpc() runs, so these
@@ -1362,6 +1381,16 @@ function registerIpc() {
   handle("window:openDetachedCanvas", (_e, ctx: DetachedCanvasContext) => detached!.open(ctx));
   handle("window:closeDetachedCanvas", () => detached!.close());
   handle("window:detachedState", () => detached!.state());
+  // Panel-aware Ctrl+wheel page zoom (renderer fallback): step the sender
+  // window's own zoom level — main or detached, whichever sent it — within
+  // the same range as the Ctrl+= / Ctrl+- shortcuts, and tell that window
+  // to re-rasterize like the shortcut path does.
+  on("window:zoomPageBy", (e, levelDelta: number) => {
+    const wc = e.sender;
+    if (!wc || wc.isDestroyed()) return;
+    wc.setZoomLevel(nextPageZoomLevel(wc.getZoomLevel(), levelDelta));
+    wc.send("zoom:changed");
+  });
   on("canvas:selectionChanged", (_e, frameId: string | null) => detached?.selectionChanged(frameId ?? null));
 
   // Cross-window in-flight canvas jobs (Spec 03, retired Phase 4): the main
@@ -1685,6 +1714,14 @@ function registerIpc() {
   // Creative prompt-template overrides (Settings → Advanced → Prompts). Absent
   // ids fall back to the built-ins in shared/prompt-templates.ts.
   handle("settings:getPromptTemplates", () => settings.getPromptTemplates());
+
+  // Prompt-snippet library (global user setting; seeds in
+  // shared/prompt-snippets.ts until the user customizes the library).
+  handle("settings:getPromptSnippets", () => settings.getPromptSnippets());
+
+  handle("settings:setPromptSnippets", (_e, snippets: import("../shared/prompt-snippets.js").PromptSnippet[]) => {
+    settings.setPromptSnippets(snippets ?? []);
+  });
 
   handle("settings:setPromptTemplates", (_e, overrides: Record<string, string>) => {
     settings.setPromptTemplates(overrides ?? {});
@@ -2355,10 +2392,13 @@ function registerIpc() {
     // Follow the open production's references so an external save lands
     // immediately (not just on the next window focus).
     refWatcher.watch(p ? p.meta.id : null);
+    // Edit menu tracks the newly active production's undo availability.
+    historyMenuState = historyState(id);
+    installApplicationMenu();
     return p;
   });
 
-  handle("production:save", (_e, p: Production) => {
+  handle("production:save", (_e, p: Production, meta?: HistoryCommitMeta) => {
     // Persist renderer-owned state (edited shots, step focus, style…). The id
     // must exist already; new productions go through production:create. The
     // field-whitelist merge lives in the productions module (applyRendererState)
@@ -2366,7 +2406,8 @@ function registerIpc() {
     const existing = productions.loadProduction(p?.meta?.id);
     if (!existing) throw new Error("Production not found — it may have been deleted.");
     const next = productions.applyRendererState(existing, p);
-    productions.saveProduction(next);
+    // The renderer's history meta (gesture coalescing) rides the write.
+    productions.saveProduction(next, meta);
     // Keep script.md in sync (renames and renderer-side edits land here too).
     if (next.scenes.some((s) => s.shots.length)) {
       try {
@@ -2379,6 +2420,18 @@ function registerIpc() {
     refWatcher.watch(next.meta.id, next);
     return next;
   });
+
+  // App-wide undo/redo (document-layer history). Serialized on the
+  // per-production queue like every structural write, so a restore can
+  // never interleave with a prompt save or a generation commit. Null =
+  // nothing to undo/redo (the renderer keeps its current snapshot).
+  handle("production:undo", (_e, id: string) =>
+    enqueueProduction(id, async () => undoProduction(id))
+  );
+  handle("production:redo", (_e, id: string) =>
+    enqueueProduction(id, async () => redoProduction(id))
+  );
+  handle("production:historyState", (_e, id: string) => historyState(id));
 
   handle("production:remove", (_e, id: string, mode: "delete" | "archive") => {
     const ok = mode === "archive" ? productions.archiveProduction(id) : productions.deleteProduction(id);
@@ -2657,6 +2710,8 @@ function registerIpc() {
       throw new Error("Pick or paste an image first.");
     }
     const rel = writeStyleFrame(p, style.id, imageDataUrl);
+    // Replaced frame goes to the undo trash first (the unlink below then no-ops).
+    if (style.imagePath && style.imagePath !== rel) mediaFiles.trashFile(p, style.imagePath, undoTrashDir(p));
     if (style.imagePath && style.imagePath !== rel) {
       try { fs.unlinkSync(assetPath(p, style.imagePath)); } catch { /* old frame already gone */ }
     }
@@ -2686,7 +2741,7 @@ function registerIpc() {
     const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "webp" ? "image/webp" : ext === "png" ? "image/png" : "image/jpeg";
     const rel = writeStyleFrame(p, target.id, `data:${mime};base64,${buf.toString("base64")}`);
     if (target.imagePath && target.imagePath !== rel) {
-      try { fs.unlinkSync(assetPath(p, target.imagePath)); } catch { /* old frame already gone */ }
+      mediaFiles.trashFile(p, target.imagePath, undoTrashDir(p));
     }
     target.imagePath = rel;
     target.frameSource = "anchor";
@@ -2699,7 +2754,8 @@ function registerIpc() {
   const mutateShots = (
     id: string,
     mutate: (p: Production) => void,
-    baseRev?: number
+    baseRev?: number,
+    meta?: HistoryCommitMeta
   ): Production => {
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
@@ -2707,6 +2763,7 @@ function registerIpc() {
     // instead of being silently applied (the caller refreshes and retries).
     productions.assertFreshRevision(p, baseRev);
     mutate(p);
+    setNextHistoryMeta(id, meta);
     // Keep the human-readable two-column markdown in sync with every edit.
     if (p.scenes.some((s) => s.shots.length)) {
       try {
@@ -2856,6 +2913,32 @@ function registerIpc() {
   handle("production:addScene", (_e, id: string, afterSceneNumber: number | null) =>
     mutateShots(id, (p) => {
       shotter.insertScene(p.scenes, afterSceneNumber);
+    })
+  );
+
+  // Scene delete (Feature #12, unblocked by app-wide undo): the scene's
+  // shots archive their board folders exactly like a shot delete
+  // (recoverable under boards/outdated/<shotId>/), dissolved sequences
+  // preserve their clip as a reference like a shot delete, and the whole
+  // removal is ONE undo step — one mutateShots transaction, forced so
+  // it can never coalesce into a neighboring gesture.
+  handle("production:deleteScene", (_e, id: string, sceneNumber: number, baseRev?: number) =>
+    enqueueProduction(id, async () =>
+      mutateShots(id, (p) => {
+        const scene = p.scenes.find((s) => s.number === sceneNumber);
+        if (!scene) return; // idempotent: already gone (retry-safe)
+        const shotIds = scene.shots.map((s) => s.id);
+        for (const s of [...scene.shots]) deleteShotBoards(p, s);
+        shotter.deleteScene(p.scenes, sceneNumber);
+        if (shotIds.length) removeShotsFromSequences(p, shotIds);
+        productionEmit(id, `Deleted scene ${sceneNumber} "${scene.title}" (${shotIds.length} shot${shotIds.length === 1 ? "" : "s"}). Undo with Ctrl+Z.`, "done");
+      }, baseRev, { forceStep: true })
+    )
+  );
+
+  handle("production:renameScene", (_e, id: string, sceneNumber: number, title: string) =>
+    mutateShots(id, (p) => {
+      shotter.renameScene(p.scenes, sceneNumber, title);
     })
   );
 
@@ -3451,7 +3534,7 @@ function registerIpc() {
       const rel = writeShotVideo(p, shot, got.buf, got.ext);
       const target = pending.target;
       if (target?.kind === "videoPath") {
-        if (shot.videoPath && shot.videoPath !== rel) { try { fs.unlinkSync(assetPath(p, shot.videoPath)); } catch { /* old clip already gone */ } }
+        if (shot.videoPath && shot.videoPath !== rel) mediaFiles.trashFile(p, shot.videoPath, undoTrashDir(p));
         shot.videoPath = rel;
         completeVideoGeneration(shot, "vid0", rel, pending.prompt, pending.model, pending.draftJobId, "classic");
       } else if (target?.kind === "editVideoNode") {
@@ -3735,7 +3818,7 @@ function registerIpc() {
     if (!p) throw new Error("Production not found.");
     if (p.storyboardPdf?.logoRel) {
       try {
-        fs.unlinkSync(assetPath(p, p.storyboardPdf.logoRel));
+        mediaFiles.trashFile(p, p.storyboardPdf.logoRel, undoTrashDir(p));
       } catch { /* missing file is already removed */ }
       delete p.storyboardPdf.logoRel;
       productions.saveProduction(p);
@@ -3771,7 +3854,7 @@ function registerIpc() {
   // Step 3: persist a shot's editable board-prompt override (empty clears it).
   // When Magic Prompt is enabled, edits target the magicPrompts map (content-only)
   // instead of the normal shot.prompt field; the original prompts stay untouched.
-  handle("production:updateBoardPrompt", (_e, id: string, shotId: string, prompt: string) =>
+  handle("production:updateBoardPrompt", (_e, id: string, shotId: string, prompt: string, meta?: HistoryCommitMeta) =>
     // Serialized per production (Fix B): see insertShot/deleteShot above.
     enqueueProduction(id, async () => {
       const p = productions.loadProduction(id);
@@ -3779,6 +3862,7 @@ function registerIpc() {
       const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
       if (!shot) throw new Error("Shot not found.");
       const text = typeof prompt === "string" ? prompt.trim() : "";
+      setNextHistoryMeta(id, meta);
       const clean = text ? stripReferenceClause(text) : "";
       if (p.magicEnabled) {
         p.magicPrompts ??= {};
@@ -4441,7 +4525,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     // take entry stays in history (now missing, therefore recoverable).
     const display = resolveShotDisplay(shot);
     const still = display.media === "still" ? display.path : display.stillPath;
-    if (still) mediaFiles.removeFile(p, still);
+    if (still) mediaFiles.trashFile(p, still, undoTrashDir(p));
     if (display.source === "imagegen" || display.source === "editgen" || display.source === "upscale") {
       setShotSelectedOutput(shot, { kind: "unpipe" });
     }
@@ -4594,7 +4678,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // file is unlinked; the recorded take + pipe bind resolve the new one).
       const showing = resolveShotDisplay(shot);
       if (showing.media === "clip" && showing.path && showing.path !== rel) {
-        mediaFiles.removeFile(p, showing.path);
+        mediaFiles.trashFile(p, showing.path, undoTrashDir(p));
       }
       completeVideoGeneration(shot, "vid0", rel, clean.prompt, clean.model, undefined, "classic");
       emit(`Shot ${shot.number}: video ready — it will play for the shot's ${shot.durationSec ?? 3}s window in the animatic.`, "done");
@@ -4753,7 +4837,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       }
       // Replace the take in place — same slot/selection, no dangling 480p file.
       const superseded = replaceVideoGenTake(shot, nodeId, rel, nextRel);
-      if (superseded && superseded !== nextRel) { try { fs.unlinkSync(assetPath(p, superseded)); } catch { /* draft file already gone */ } }
+      if (superseded && superseded !== nextRel) mediaFiles.trashFile(p, superseded, undoTrashDir(p));
       emit(`Shot ${shot.number}: draft finalized at 1080p.`, "done");
     })
   );
@@ -5273,7 +5357,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
         try { fs.unlinkSync(listPath); } catch { /* temp file already gone */ }
       }
       if (shot.graphTweenOutput && shot.graphTweenOutput !== rel) {
-        mediaFiles.removeFile(p, shot.graphTweenOutput);
+        mediaFiles.trashFile(p, shot.graphTweenOutput, undoTrashDir(p));
       }
       shot.graphTweenOutput = rel;
       mediaFiles.register(p, rel, "video", "generated");
@@ -5293,7 +5377,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const { changed, outputRel } = unstitchTween(shot);
     if (!changed) throw new Error("This shot isn't stitched — nothing to revert.");
     if (outputRel) {
-      try { fs.unlinkSync(assetPath(p, outputRel)); } catch { /* old stitch already gone */ }
+      mediaFiles.trashFile(p, outputRel, undoTrashDir(p));
     }
     productions.saveProduction(p);
     productionEmit(id, `Shot ${shot.number}: stitch undone — back to the individual block clips.`, "done");
@@ -5410,7 +5494,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
     if (!shot) throw new Error("Shot not found.");
     if (shot.videoPath) {
-      mediaFiles.removeFile(p, shot.videoPath);
+      mediaFiles.trashFile(p, shot.videoPath, undoTrashDir(p));
       // The file is gone — no mirror may keep pointing at it. When the video
       // fed the output, unbind through the write-through so the storyboard
       // falls back to the still (the take history keeps the entry for
@@ -5539,7 +5623,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // together instead of last-write-wins on the whole layout object — and a
   // stale whole-document save carrying an older layout can't wholesale
   // replace the fresher one.
-  handle("production:updateGraphLayout", (_e, id: string, shotId: string, patch: GraphLayoutPatch): Production => {
+  handle("production:updateGraphLayout", (_e, id: string, shotId: string, patch: GraphLayoutPatch, meta?: HistoryCommitMeta): Production => {
+    setNextHistoryMeta(id, meta);
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     const shot = p.scenes.flatMap((s) => s.shots).find((s) => s.id === shotId);
@@ -5554,7 +5639,8 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
   // history kept main-owned by the shared merge. This replaces the old
   // saveGraphShotFields whole-project save for node moves of field data,
   // parameter edits, and pipe/selection changes.
-  handle("production:updateGraphShotFields", (_e, id: string, shotId: string, patch: Partial<ProductionShot>): Production => {
+  handle("production:updateGraphShotFields", (_e, id: string, shotId: string, patch: Partial<ProductionShot>, meta?: HistoryCommitMeta): Production => {
+    setNextHistoryMeta(id, meta);
     const p = productions.loadProduction(id);
     if (!p) throw new Error("Production not found.");
     for (const scene of p.scenes) {
@@ -6084,7 +6170,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
 
       if (sourceRef) {
         if (sourceRef.imagePath && sourceRef.imagePath !== rel) {
-          try { fs.unlinkSync(assetPath(p, sourceRef.imagePath)); } catch { /* old file already gone */ }
+          mediaFiles.trashFile(p, sourceRef.imagePath, undoTrashDir(p));
         }
         sourceRef.imagePath = rel;
         sourceRef.artwork = undefined;
@@ -6197,6 +6283,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const resolved = resolveGraphSourceImage(p, shot, source);
     if (!resolved) throw new Error("That input has no usable image — wire a frame or reference into the Grid image socket.");
     const bytes = dataUrlToBuffer(resolved.dataUrl);
+    // (A replaced sheet's old file is unlinked below — see undo report.)
     if (!bytes || !bytes.length) throw new Error("Couldn't read the grid image.");
     const dir = `${p.assets.referencesDir}/grids`;
     fs.mkdirSync(assetPath(p, dir), { recursive: true });
@@ -6342,7 +6429,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
       // reference point at the same on-disk file.
       upsertCharacterSheetRef(p, name, rel);
       for (const oldRel of new Set(stale)) {
-        try { fs.unlinkSync(assetPath(p, oldRel)); } catch { /* old file already gone */ }
+        mediaFiles.trashFile(p, oldRel, undoTrashDir(p));
       }
     })
   );
@@ -6353,7 +6440,7 @@ handle("production:boardThumbnail", (_e, id: string, shotId: string, framePath?:
     const p = productions.loadProduction(id);
     if (!p) return;
     if (typeof rel !== "string" || !rel) return;
-    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* missing file is already gone */ }
+    mediaFiles.trashFile(p, rel, undoTrashDir(p)); // undo-recoverable (session trash)
   });
 
   // Step 2: rescan referencesDir — adopt media the user dropped into the
@@ -6708,6 +6795,10 @@ function appIconPath(): string {
 /** Application menu (File → Settings…, standard Edit/View/Window roles). The
  *  app keeps its own Ctrl+= / Ctrl+- / Ctrl+0 zoom handling in
  *  before-input-event, so the View menu intentionally omits the zoom roles. */
+/** Edit-menu undo/redo availability for the active production, kept in
+ *  sync by the history broadcast (and on production load). */
+let historyMenuState: { canUndo: boolean; canRedo: boolean } = { canUndo: false, canRedo: false };
+
 function installApplicationMenu() {
   const template: Electron.MenuItemConstructorOptions[] = [
     {
@@ -6725,8 +6816,25 @@ function installApplicationMenu() {
     {
       label: "Edit",
       submenu: [
-        { role: "undo", label: "Undo" },
-        { role: "redo", label: "Redo" },
+        // Document undo (app-wide history), not the native text role:
+        // the focused window's workspace decides (in-field Ctrl+Z stays
+        // with the field's own editing history; the menu and the global
+        // shortcuts drive the document). No accelerator here — the
+        // renderer owns Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y so text fields keep
+        // their native editing undo.
+        {
+          label: "Undo",
+          enabled: historyMenuState.canUndo,
+          click: () => (BrowserWindow.getFocusedWindow() ?? win)?.webContents.send("menu:undo"),
+        },
+        {
+          label: "Redo",
+          enabled: historyMenuState.canRedo,
+          click: () => (BrowserWindow.getFocusedWindow() ?? win)?.webContents.send("menu:redo"),
+        },
+{ type: "separator" },
+        // Native undo/redo roles omitted: their accelerators would shadow
+        // the renderer's document shortcuts; fields keep native Ctrl+Z.
         { type: "separator" },
         { role: "cut", label: "Cut" },
         { role: "copy", label: "Copy" },
@@ -6893,10 +7001,10 @@ function createWindow() {
     };
     if (input.key === "=" || input.key === "+") {
       event.preventDefault();
-      zoomTo(Math.min(level + 0.5, 5));
+      zoomTo(nextPageZoomLevel(level, 0.5));
     } else if (input.key === "-" || input.key === "_") {
       event.preventDefault();
-      zoomTo(Math.max(level - 0.5, -5));
+      zoomTo(nextPageZoomLevel(level, -0.5));
     } else if (input.key === "0") {
       event.preventDefault();
       zoomTo(0);

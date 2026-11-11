@@ -10,6 +10,7 @@ export const windowChannels = {
   "window:openDetachedCanvas": { method: "openDetachedCanvas", kind: "invoke" },
   "window:closeDetachedCanvas": { method: "closeDetachedCanvas", kind: "invoke" },
   "window:detachedState": { method: "getDetachedCanvasState", kind: "invoke" },
+  "window:zoomPageBy": { method: "zoomPageBy", kind: "send" },
   "canvas:selectionChanged": { method: "canvasSelectionChanged", kind: "send" },
   "canvas:busyChanged": { method: "canvasBusyChanged", kind: "send" },
 } as const;

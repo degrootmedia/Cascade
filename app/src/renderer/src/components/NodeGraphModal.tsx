@@ -50,6 +50,7 @@ import { SOURCE_TAG_NAME, enforceSourceTag, hasRefTag, composePromptBoxes, parse
 import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { referenceUsage } from "../../../shared/reference-usage.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
+import { SnippetsButton } from "./snippets/SnippetsShelf.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed, usePersistedNumber } from "./production/persisted-state.js";
 import { refThumbUrl } from "./production/thumb-url.js";
@@ -59,6 +60,8 @@ import { refDragIds } from "./production/references.js";
 import { VideoPreview } from "./graph/video-preview.js";
 import { GraphLodProvider, GRAPH_CULL_NODE_LIMIT, GRAPH_PREVIEW_EDGE, GRAPH_TILE_EDGE, type GraphLodHandle } from "./graph/lod.js";
 import { RefShelf } from "./graph/ref-shelf.js";
+import { NodeShelf, type NodeShelfTile } from "./graph/node-shelf.js";
+import { PALETTE_TOOLS } from "../../../shared/graph/node-shelf.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
 import { DurationField, clampDurationSec, snapDurationSec } from "./production/duration-field.js";
 import { getPromptTemplate } from "./production/prompt-templates.js";
@@ -81,9 +84,10 @@ import { planReroutes, moveReroute, removeReroute, polylineCrossing, type WireCr
 import { storedOrMaterializedGraph, videoNodesFor } from "../../../shared/graph/materialize.js";
 import { normalizeGraph } from "../../../shared/graph/normalize.js";
 import { addGraphNode, applyCameraGridRefs, applyConnection, applyTweenKeys, canonicalNodeId, connectionToEdge, connectTweenKey, ensurePromptPipe, graphEdgesForDetach, nodeKindForId, promptRefWires, promptWiresAfterConnect, reconcilePromptRefEdges, removeGraphEdge, removeGraphNode, setStyleEdge, syncOutputEdge, tweenKeyForSource, tweenKeyToNode, wireComposerRefs, withPromptRefWires } from "../../../shared/graph/connect.js";
-import { pickGraphShotPatch } from "../../../shared/graph/shot-patch.js";
+// (pickGraphShotPatch fed the retired local snapshot stack; the narrow
+// command in main applies the same allowlist on every graph save.)
 import { tidyGraphLayout } from "../../../shared/graph/layout.js";
-import { createUndoHistory } from "./production/undo-history.js";
+import type { HistoryCommitMeta } from "../../../shared/ipc.js";
 import { canConnect, nodeOutputs, portDecl, refOutputMedia, REF_SOCKET_RE, TWEEN_SOCKET_RE } from "../../../shared/graph/ports.js";
 import { traceChain } from "../../../shared/graph/trace.js";
 import { nodeDataEqual } from "../../../shared/graph/reconcile.js";
@@ -2675,7 +2679,7 @@ export function toolDeleteWarning(ids: string[], shot: ProductionShot): string {
   if (!summaries.length) return "";
   const what = summaries.length === 1 ? `this node holds ${summaries[0]}` : `these nodes hold ${summaries.join("; ")}`;
   const feeds = ids.some((id) => nodeFeedsOutput(id, shot));
-  return `Delete ${what}?${feeds ? " It feeds the output, which will be cleared." : ""} This can't be undone.`;
+  return `Delete ${what}?${feeds ? " It feeds the output, which will be cleared." : ""} You can undo with Ctrl+Z.`;
 }
 
 /** Resolve a history target to the node's stored takes (newest first), the
@@ -2843,7 +2847,7 @@ function defaultPosition(id: string, availIds: string[], taggedIds: string[]): {
 /* ------------------------------------------------------------------ */
 
 export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, styleValue, includeBrand, magicActive = false, magicBusy = false, onToggleMagic, onRegenMagicShot, imageModels, videoModels, endFrameModelIds = null, upscaleUnavailable = false, videoEditUnavailable = false, genjutsuUnavailable = false, draftUpgradeAvailable = false, hiddenTools, hidePalette = false, subjectLabel, defaultImageModel, defaultImageResolution, initialLayout, onPromptChange, onStyleChange, onToggleBrand, onDropFile, onPasteFiles, onStyleDetached, onRunImageGen, onRunVideoGen, onUpgradeDraft = async () => {}, onRunEditGen, onRunEditVideo = async () => {}, onRunCameraGrid = async () => {}, onImportCameraGridImage = async () => null, onExportCameraGrid = async () => null, onRunUpscale = async () => {}, onRunTweenBlock = async () => {}, onStitchTween = async () => {}, onUnstitchTween = async () => {}, onFetchVideo = async () => {}, imageGenBusy = false, cameraGridBusy = false, upscaleBusy = false, videoBusyNodeIds = [], editVideoBusyNodeIds = [], editBusyNodeIds = [], busyTweenBlock = null, tweenStitching = false, onSelectGraphGen, onCycleGraphGen, onDeleteGeneration = () => {}, onSaveAsReference = () => {},
-  onSaveGenerationAsReference = async () => undefined, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onWaveformColorRef, onGraphField, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
+  onSaveGenerationAsReference = async () => undefined, onVideoStillSaved, onEditNodePrompt = () => {}, onSequenceSegments, onRevertFramePrompt, sequenceFramePrompts, onRenameRef, onWaveformColorRef, onGraphField, onDocUndo, onDocRedo, canUndo = false, canRedo = false, historyRestoreTick = 0, onPipeImageToVideo, onPipeEditToVideo = () => {}, onPipeRefToVideo = () => {}, onPipeImageToOutput, onPipeVideoToOutput, onPipeTweenToOutput = () => {}, onPipeUpscaleToOutput = () => {}, onPipeEditToOutput, onPipeRefToOutput, onTweenRefs = () => {}, onUnpipeImageGen, onUnpipeImageToVideo, onUnpipeVideoGen, onUnpipeTweenGen = () => {}, onUnpipeEditGen, onUnpipeOutput, onSaveLayout, onClose, readOnly = false, onDetach }: {
   prod: Production;
   shot: ProductionShot;
   /** Renderer content key — bumped when frames regenerate so the output thumbnail refetches. */
@@ -2992,7 +2996,15 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Persist an audio reference's waveform color (right-click swatch menu). */
   onWaveformColorRef?: (refId: string, colorId: string) => void;
   /** Merge shot-level graph fields (video prompt text, cycle index, pipes). */
-  onGraphField: (patch: Partial<ProductionShot>) => void;
+  onGraphField: (patch: Partial<ProductionShot>, meta?: HistoryCommitMeta) => void;
+  /** App-wide document undo/redo (one history at the document layer). */
+  onDocUndo?: () => void;
+  onDocRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  /** Bumped by the host after an undo/redo restore lands so live node
+   *  positions follow the restored layout. */
+  historyRestoreTick?: number;
   /** Pipe the image node's output into a video node's image input. */
   onPipeImageToVideo: (nodeId: string) => void;
   /** Pipe an edit-image node's output into a video node's image input
@@ -3027,7 +3039,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   /** Unbind whatever feeds the output. */
   onUnpipeOutput: () => void;
   /** Persist part of the canvas state (positions and/or viewport). */
-  onSaveLayout: (layout: GraphLayoutPatch) => void;
+  onSaveLayout: (layout: GraphLayoutPatch, meta?: HistoryCommitMeta) => void;
   onClose: () => void;
   /** The graph is being edited in the detached canvas window — show a banner
    *  and block canvas interaction here to prevent concurrent lost updates. */
@@ -3046,6 +3058,25 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   // restores the snapshot through the same narrow commands. Generation
   // results (gens, jobs) are main-owned and never enter a snapshot, so undo
   // can never un-record a finished generation.
+  // App-wide undo: graph/layout saves carry coalescing meta into the
+  // ONE document history in main (recorded on the narrow-command save).
+  // `captureHistory(force)` no longer snapshots — it only marks the
+  // next save as a discrete step, keeping every existing call site's
+  // gesture boundary. Bursts (drags, param tweaks) coalesce under the
+  // shot's key; viewport-only saves record nothing (view state).
+  const shotNowRef = useRef(shot);
+  shotNowRef.current = shot;
+  const pendingForceRef = useRef(false);
+  const historyMeta = useCallback((): HistoryCommitMeta => {
+    const force = pendingForceRef.current;
+    pendingForceRef.current = false;
+    return { coalesceKey: `graph:${shotNowRef.current.id}`, coalesceMs: 1200, ...(force ? { forceStep: true } : {}) };
+  }, []);
+  const captureHistory = useCallback((force = false) => {
+    if (force && !readOnly) pendingForceRef.current = true;
+  }, [readOnly]);
+  const doUndo = useCallback(() => { onDocUndo?.(); }, [onDocUndo]);
+  /* Retired local snapshot stack (superseded by document history):
   type GraphHistorySnapshot = { fields: Partial<ProductionShot>; layout: GraphLayout | undefined };
   const historyRef = useRef(createUndoHistory<GraphHistorySnapshot>({ limit: 50, coalesceMs: 1200 }));
   const restoringRef = useRef(false);
@@ -3060,6 +3091,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (restoringRef.current || readOnly) return;
     if (historyRef.current.push(snapshotNow(), { force })) setHistoryTick((n) => n + 1);
   }, [readOnly, snapshotNow]);
+  */
   const graphField = useCallback((patch: Partial<ProductionShot>): void => {
     captureHistory();
     // Write the patch through to the callback ref's mirrored fields NOW:
@@ -3072,12 +3104,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     // by then carry this same optimistic patch.
     const mirror = cb.current as unknown as Record<string, unknown>;
     for (const k of Object.keys(patch)) if (k in mirror) mirror[k] = (patch as Record<string, unknown>)[k];
-    cb.current.onGraphField(patch);
+    cb.current.onGraphField(patch, historyMeta());
   }, [captureHistory]);
   const saveLayout = useCallback((patch: GraphLayoutPatch): void => {
     // Pan/zoom alone is not an undoable edit.
     if (!("viewport" in patch && Object.keys(patch).length === 1)) captureHistory();
-    saveLayoutRef.current(patch);
+    saveLayoutRef.current(patch, historyMeta());
   }, [captureHistory]);
   /** Apply layout positions to the LIVE canvas. The reconcile effect
    *  deliberately keeps a mounted node's current position (so unrelated
@@ -3090,6 +3122,12 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     nodesRef.current = next;
     setNodes(next);
   }, []);
+  // After a document undo/redo restore, mounted nodes keep their live
+  // positions by design — move them to the restored layout explicitly.
+  useEffect(() => {
+    if (historyRestoreTick) applyLivePositions(cb.current.initialLayout?.positions);
+  }, [historyRestoreTick, applyLivePositions]);
+  /* Retired local restore (document history restores the whole shot):
   const restoreHistory = useCallback((entry: GraphHistorySnapshot) => {
     restoringRef.current = true;
     try {
@@ -3128,6 +3166,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     if (target) restoreHistory(target);
     setHistoryTick((n) => n + 1);
   }, [restoreHistory, snapshotNow]);
+  */
   /** Edge waypoint edits (click-to-add, drag, double-click delete). Each
    *  gesture is one forced history step; the layout save itself is the
    *  narrow updateGraphLayout command, so bends persist and classic view
@@ -3296,7 +3335,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         });
         const plan = planReroutes(crossings, current, () => `rr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`);
         captureHistory(true);
-        saveLayoutRef.current({ waypoints: plan });
+        saveLayoutRef.current({ waypoints: plan }, historyMeta());
       };
       const key = (ev: KeyboardEvent) => { if (ev.key === "Escape") { ev.stopPropagation(); moved = 0; finish(); } };
       window.addEventListener("pointermove", move, true);
@@ -3306,11 +3345,14 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     root.addEventListener("pointerdown", onDown, true);
     return () => root.removeEventListener("pointerdown", onDown, true);
   }, [readOnly, captureHistory]);
-  const doRedo = useCallback(() => {
+  const doRedo = useCallback(() => { onDocRedo?.(); }, [onDocRedo]);
+  /* Retired local redo:
+  const _doRedoRetired = useCallback(() => {
     const target = historyRef.current.redo(snapshotNow());
     if (target) restoreHistory(target);
     setHistoryTick((n) => n + 1);
   }, [restoreHistory, snapshotNow]);
+  */
   /** Node kinds / palette tools this host does not have at all (a shot sequence
    *  canvas hides the image-generation node and the shot-only generators):
    *  they are not rendered, not draggable, and stripped from a stored graph.
@@ -3726,6 +3768,37 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const hasGenjutsuSwapTool = genjutsuSwapNodes.length > 0;
   const hasCameraGridTool = cameraGridActive || placedTools.has("cameraGrid");
   const hasUpscaleTool = upscaleActive || placedTools.has("upscale");
+  /** Node-shelf tiles (right palette): every palette tool this host offers,
+   *  with its live drag/gate/count state. The shelf groups them by the
+   *  registry category of the kind each tool places (`PALETTE_TOOLS`). */
+  const nodeShelfTiles: NodeShelfTile[] = PALETTE_TOOLS.flatMap((def) => {
+    const base = { tool: def.tool, label: def.label };
+    switch (def.tool) {
+      case "video":
+        return [{ ...base, icon: <FilmStripIcon size={14} className="prod-graph-tools-icon" />, title: "Drag onto the canvas to add another video generation node", draggable: true, count: hasVideoTool ? videoNodes.length : undefined }];
+      case "edit":
+        if (hiddenToolsSet.has("edit")) return [];
+        return [{ ...base, icon: <EditIcon size={14} className="prod-graph-tools-icon" />, title: "Drag onto the canvas to add another edit-image node", draggable: true, count: hasEditTool ? editNodes.length : undefined }];
+      case "editvideo":
+        if (hiddenToolsSet.has("editvideo")) return [];
+        return [{ ...base, icon: <EditVideoIcon size={14} className="prod-graph-tools-icon" />, title: videoEditUnavailable ? VIDEO_EDIT_UNAVAILABLE_HINT : "Drag onto the canvas to add another edit-video node", draggable: !videoEditUnavailable, disabled: videoEditUnavailable, count: hasEditVideoTool ? editVidNodes.length : undefined }];
+      case "genjutsu-motion":
+        if (hiddenToolsSet.has("genjutsu-motion")) return [];
+        return [{ ...base, icon: <GenjutsuMotionIcon size={14} className="prod-graph-tools-icon" />, title: genjutsuUnavailable ? GENJUTSU_UNAVAILABLE_HINT : "Drag onto the canvas to add a Genjutsu Motion Transfer node — rebuild the scene around the source clip's motion", draggable: !genjutsuUnavailable, disabled: genjutsuUnavailable, count: hasGenjutsuMotionTool ? genjutsuMotionNodes.length : undefined }];
+      case "genjutsu-swap":
+        if (hiddenToolsSet.has("genjutsu-swap")) return [];
+        return [{ ...base, icon: <GenjutsuSwapIcon size={14} className="prod-graph-tools-icon" />, title: genjutsuUnavailable ? GENJUTSU_UNAVAILABLE_HINT : "Drag onto the canvas to add a Genjutsu Object Swap node — replace one element, keep the rest of the shot", draggable: !genjutsuUnavailable, disabled: genjutsuUnavailable, count: hasGenjutsuSwapTool ? genjutsuSwapNodes.length : undefined }];
+      case "tween":
+        if (hiddenToolsSet.has("tween")) return [];
+        return [{ ...base, icon: <InbetweenIcon size={14} className="prod-graph-tools-icon" />, title: hasTweenTool ? "Already on the canvas" : "Drag onto the canvas to add the in-betweener node", draggable: !hasTweenTool }];
+      case "cameraGrid":
+        if (hiddenToolsSet.has("cameraGrid")) return [];
+        return [{ ...base, icon: <CameraGridIcon size={14} className="prod-graph-tools-icon" />, title: hasCameraGridTool ? "Already on the canvas" : "Drag onto the canvas to add the 16-angle camera grid node", draggable: !hasCameraGridTool }];
+      case "upscale":
+        if (hiddenToolsSet.has("upscale")) return [];
+        return [{ ...base, icon: <UpscaleIcon size={14} className="prod-graph-tools-icon" />, title: upscaleUnavailable ? UPSCALE_UNAVAILABLE_HINT : hasUpscaleTool ? "Already on the canvas" : "Drag onto the canvas to add the upscale node", draggable: !hasUpscaleTool && !upscaleUnavailable, disabled: upscaleUnavailable }];
+    }
+  });
   // Which models actually accept a video input (the edit-video capability
   // probe). Empty for providers without a video-edit path.
   const [videoEditModelIds, setVideoEditModelIds] = useState<string[] | null>(null);
@@ -5291,7 +5364,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       const nextIds = new Set(g.edges.map((e) => e.id));
       const gone = prev.edges.filter((e) => !nextIds.has(e.id) && (cb.current.initialLayout?.waypoints?.[e.id]?.length ?? 0) > 0);
       if (gone.length) {
-        saveLayoutRef.current({ waypoints: Object.fromEntries(gone.map((e) => [e.id, [] as { x: number; y: number }[]])) });
+        saveLayoutRef.current({ waypoints: Object.fromEntries(gone.map((e) => [e.id, [] as { x: number; y: number }[]])) }, historyMeta());
       }
     }
   };
@@ -6340,7 +6413,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
   const commitFrames = useCallback((frames: Record<string, GraphFrame | null>, positions?: Record<string, { x: number; y: number }>) => {
     if (readOnly) return;
     captureHistory(true);
-    saveLayoutRef.current({ frames, ...(positions ? { positions } : {}) });
+    saveLayoutRef.current({ frames, ...(positions ? { positions } : {}) }, historyMeta());
     if (positions) applyLivePositions(positions);
   }, [captureHistory, readOnly, applyLivePositions]);
   const patchFrame = useCallback((id: string, patch: Partial<GraphFrame>) => {
@@ -6552,8 +6625,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
     <div className="prod-edit-overlay prod-graph-overlay" onClick={onClose}>
       <div className={"prod-graph-panel" + (magicActive ? " magic-active" : "") + (readOnly ? " prod-graph-readonly" : "")} onClick={(e) => e.stopPropagation()}>
         <div className="prod-graph-head">
+
           <span className="prod-graph-title">{subjectLabel ?? `Shot ${shot.number}`} — node graph</span>
           <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off an input socket to detach it · CTRL+Click a node routes it to Frame Output · hold ALT and hover a node to trace its chain</span>
+          <SnippetsButton />
           {onToggleMagic && (
             <button
               className={"prod-btn prod-magic-btn" + (magicActive ? " active" : "")}
@@ -6584,10 +6659,10 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           )}
           {!readOnly && (
             <>
-              <button className="prod-btn" onClick={doUndo} disabled={!historyRef.current.canUndo()} title="Undo (Ctrl+Z)">Undo</button>
-              <button className="prod-btn" onClick={doRedo} disabled={!historyRef.current.canRedo()} title="Redo (Ctrl+Shift+Z)">Redo</button>
+              <button className="prod-btn" onClick={doUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button>
+              <button className="prod-btn" onClick={doRedo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">Redo</button>
               <button className="prod-btn" onClick={groupSelection} title="Group the selected nodes into a named frame">Group into Frame</button>
-              <select className="prod-btn" value={initialLayout?.wireStyle ?? "curved"} title="Wire style" onChange={(e) => { captureHistory(true); saveLayoutRef.current({ wireStyle: e.target.value as "curved" | "straight" }); }}>
+              <select className="prod-btn" value={initialLayout?.wireStyle ?? "curved"} title="Wire style" onChange={(e) => { captureHistory(true); saveLayoutRef.current({ wireStyle: e.target.value as "curved" | "straight" }, historyMeta()); }}>
                 <option value="curved">Curved wires</option>
                 <option value="straight">Straight wires</option>
               </select>
@@ -6597,6 +6672,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           <button className="prod-btn" onClick={onClose}>Close</button>
         </div>
         <div className="prod-graph-body">
+
           <RefShelf
             prodId={prod.meta.id}
             prod={prod}
@@ -6740,135 +6816,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
           })()}
           </div>
           <div className={"prod-graph-tools" + (hidePalette ? " hidden" : "")}>
-            <div className="prod-graph-tools-head">
-              <span className="prod-graph-tools-title">Nodes</span>
-              <span className="prod-graph-tools-hint">Drag onto the canvas to add</span>
-            </div>
-            <div className="prod-graph-tools-list">
-              <div
-                className="prod-graph-tools-item"
-                draggable
-                title="Drag onto the canvas to add another video generation node"
-                onDragStart={(e) => {
-                  e.dataTransfer.setData("application/x-cascade-tool", "video");
-                  e.dataTransfer.effectAllowed = "copy";
-                }}
-              >
-                <FilmStripIcon size={14} className="prod-graph-tools-icon" />
-                <span className="prod-graph-tools-label">Video generation</span>
-                {hasVideoTool && <span className="prod-graph-shelf-count">{videoNodes.length}</span>}
-              </div>
-              {!hiddenToolsSet.has("edit") && (
-                <div
-                  className="prod-graph-tools-item"
-                  draggable
-                  title="Drag onto the canvas to add another edit-image node"
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData("application/x-cascade-tool", "edit");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <EditIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Edit image</span>
-                  {hasEditTool && <span className="prod-graph-shelf-count">{editNodes.length}</span>}
-                </div>
-              )}
-              {!hiddenToolsSet.has("editvideo") && (
-                <div
-                  className={"prod-graph-tools-item" + (videoEditUnavailable ? " disabled" : "")}
-                  draggable={!videoEditUnavailable}
-                  aria-disabled={videoEditUnavailable}
-                  title={videoEditUnavailable ? VIDEO_EDIT_UNAVAILABLE_HINT : "Drag onto the canvas to add another edit-video node"}
-                  onDragStart={(e) => {
-                    if (videoEditUnavailable) { e.preventDefault(); return; }
-                    e.dataTransfer.setData("application/x-cascade-tool", "editvideo");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <EditVideoIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Edit video</span>
-                  {hasEditVideoTool && <span className="prod-graph-shelf-count">{editVidNodes.length}</span>}
-                </div>
-              )}
-              {!hiddenToolsSet.has("genjutsu-motion") && (
-                <div
-                  className={"prod-graph-tools-item" + (genjutsuUnavailable ? " disabled" : "")}
-                  draggable={!genjutsuUnavailable}
-                  aria-disabled={genjutsuUnavailable}
-                  title={genjutsuUnavailable ? GENJUTSU_UNAVAILABLE_HINT : "Drag onto the canvas to add a Genjutsu Motion Transfer node — rebuild the scene around the source clip's motion"}
-                  onDragStart={(e) => {
-                    if (genjutsuUnavailable) { e.preventDefault(); return; }
-                    e.dataTransfer.setData("application/x-cascade-tool", "genjutsu-motion");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <GenjutsuMotionIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Genjutsu Motion Transfer</span>
-                  {hasGenjutsuMotionTool && <span className="prod-graph-shelf-count">{genjutsuMotionNodes.length}</span>}
-                </div>
-              )}
-              {!hiddenToolsSet.has("genjutsu-swap") && (
-                <div
-                  className={"prod-graph-tools-item" + (genjutsuUnavailable ? " disabled" : "")}
-                  draggable={!genjutsuUnavailable}
-                  aria-disabled={genjutsuUnavailable}
-                  title={genjutsuUnavailable ? GENJUTSU_UNAVAILABLE_HINT : "Drag onto the canvas to add a Genjutsu Object Swap node — replace one element, keep the rest of the shot"}
-                  onDragStart={(e) => {
-                    if (genjutsuUnavailable) { e.preventDefault(); return; }
-                    e.dataTransfer.setData("application/x-cascade-tool", "genjutsu-swap");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <GenjutsuSwapIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Genjutsu Object Swap</span>
-                  {hasGenjutsuSwapTool && <span className="prod-graph-shelf-count">{genjutsuSwapNodes.length}</span>}
-                </div>
-              )}
-              {!hiddenToolsSet.has("tween") && (
-                <div
-                  className="prod-graph-tools-item"
-                  draggable={!hasTweenTool}
-                  title={hasTweenTool ? "Already on the canvas" : "Drag onto the canvas to add the in-betweener node"}
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData("application/x-cascade-tool", "tween");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <InbetweenIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">In-betweener</span>
-                </div>
-              )}
-              {!hiddenToolsSet.has("cameraGrid") && (
-                <div
-                  className="prod-graph-tools-item"
-                  draggable={!hasCameraGridTool}
-                  title={hasCameraGridTool ? "Already on the canvas" : "Drag onto the canvas to add the 16-angle camera grid node"}
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData("application/x-cascade-tool", "cameraGrid");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <CameraGridIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Camera grid</span>
-                </div>
-              )}
-              {!hiddenToolsSet.has("upscale") && (
-                <div
-                  className={"prod-graph-tools-item" + (upscaleUnavailable ? " disabled" : "")}
-                  draggable={!hasUpscaleTool && !upscaleUnavailable}
-                  aria-disabled={upscaleUnavailable}
-                  title={upscaleUnavailable ? UPSCALE_UNAVAILABLE_HINT : hasUpscaleTool ? "Already on the canvas" : "Drag onto the canvas to add the upscale node"}
-                  onDragStart={(e) => {
-                    if (upscaleUnavailable) { e.preventDefault(); return; }
-                    e.dataTransfer.setData("application/x-cascade-tool", "upscale");
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                >
-                  <UpscaleIcon size={14} className="prod-graph-tools-icon" />
-                  <span className="prod-graph-tools-label">Upscale</span>
-                </div>
-              )}
-            </div>
+            <NodeShelf tiles={nodeShelfTiles} />
           </div>
         </div>
       </div>

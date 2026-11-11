@@ -107,7 +107,7 @@ export interface SequenceEditVideoGenOpts {
 }
 
 /** Statement of what the sequence's graph can host. */
-export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onWaveformColorRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
+export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFrameModelIds, videoEditUnavailable, busyNodeIds, readOnly, framePromptFor, onClose, onGraphField, onDocUndo, onDocRedo, canUndo, canRedo, historyRestoreTick, onGenerate, onGenerateEditVideo, onDropFile, onPasteFiles, onRenameRef, onWaveformColorRef, onSaveGenerationAsReference, onVideoStillSaved, onDeleteGeneration, onDetach }: {
   prod: Production;
   seq: ShotSequence;
   imageModels: OpenArtModelChoice[];
@@ -126,7 +126,12 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
    *  the graph reads). Accepts a value or an updater — the host evaluates an
    *  updater against the FRESHEST state, so a burst of writes (add a node,
    *  then save its layout) can't clobber each other. */
-  onGraphField: (patch: Partial<ProductionShot> | ((graph: ProductionShot) => Partial<ProductionShot>)) => void;
+  onGraphField: (patch: Partial<ProductionShot> | ((graph: ProductionShot) => Partial<ProductionShot>), meta?: import("../../../../shared/ipc.js").HistoryCommitMeta) => void;
+  onDocUndo?: () => void;
+  onDocRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  historyRestoreTick?: number;
   onGenerate: (opts: SequenceVideoGenOpts) => void;
   /** Submit an edit for one of the sequence's edit-video nodes. */
   onGenerateEditVideo?: (opts: SequenceEditVideoGenOpts) => void;
@@ -363,10 +368,15 @@ export function SequenceGraphModal({ prod, seq, imageModels, videoModels, endFra
       onRenameRef={onRenameRef}
       onWaveformColorRef={onWaveformColorRef}
       onGraphField={onGraphField}
+      onDocUndo={onDocUndo}
+      onDocRedo={onDocRedo}
+      canUndo={canUndo}
+      canRedo={canRedo}
+      historyRestoreTick={historyRestoreTick}
       sequenceFramePrompts={framePrompts}
       onSequenceSegments={setSegments}
       onRevertFramePrompt={revertFramePrompt}
-      onSaveLayout={(layout: GraphLayoutPatch) => onGraphField((g) => ({ graphLayout: mergeGraphLayoutPatch(g.graphLayout, layout) }))}
+      onSaveLayout={(layout: GraphLayoutPatch, meta) => onGraphField((g) => ({ graphLayout: mergeGraphLayoutPatch(g.graphLayout, layout) }), meta)}
       onRunImageGen={async () => {}}
       onRunVideoGen={runVideoGen}
       onRunEditVideo={runEditVideo}

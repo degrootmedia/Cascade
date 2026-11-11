@@ -22,7 +22,7 @@
  * written, the wire never draws).
  */
 import { describe, it, expect } from "vitest";
-import { NODE_KIND_REGISTRY, EXTRA_CANVAS_TYPES } from "../src/shared/graph/kinds.js";
+import { NODE_KIND_REGISTRY, EXTRA_CANVAS_TYPES, NODE_CATEGORIES, nodeCategoryFor } from "../src/shared/graph/kinds.js";
 import { CANVAS_TYPE_EQUAL, nodeDataEqual } from "../src/shared/graph/reconcile.js";
 import { nodeDecl } from "../src/shared/graph/ports.js";
 import { nodeKindForId } from "../src/shared/graph/connect.js";
@@ -63,6 +63,16 @@ const FULL_SHOT = {
 } as unknown as ProductionShot;
 
 describe("node-registration completeness", () => {
+  it("every GraphNodeKind declares a node-shelf category", () => {
+    const ids = new Set(NODE_CATEGORIES.map((c) => c.id));
+    for (const kind of ALL_KINDS) {
+      const declared = NODE_KIND_REGISTRY[kind].category;
+      expect(declared, kind).toBeDefined();
+      expect(ids.has(declared!), `${kind} -> ${declared}`).toBe(true);
+      expect(nodeCategoryFor(kind), kind).toBe(declared);
+    }
+  });
+
   it("every GraphNodeKind has a ports-table row", () => {
     for (const kind of ALL_KINDS) {
       const decl = nodeDecl(kind);

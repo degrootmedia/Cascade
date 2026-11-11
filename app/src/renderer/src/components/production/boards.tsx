@@ -125,15 +125,23 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
   // its own getBoardPrompt IPC at mount was N wasted round-trips per page
   // open, and the value was never even read (focusPrompt ignores it).
   // Shot direction edited on the card (Step 1's table edits the same fields).
-  // Local drafts commit on blur; incoming saves resync while not focused.
+  // Local drafts commit on blur (the script box's onBlur also fires when focus
+  // moves straight from one field to the other, so the field being left
+  // commits first). Incoming saves resync per field: a field adopts the new
+  // value only while its draft still mirrors the previous saved value. A
+  // diverged draft is a local edit and is never reset — gating resync on
+  // focus instead would wipe the leaving field's draft in the focus gap of a
+  // direct field-to-field switch, and the next commit would write that stale
+  // draft over the save (same pattern as the Step 1 shot table).
   const [audio, setAudio] = useState(shot.audio);
   const [visual, setVisual] = useState(shot.visual);
-  const [textFocused, setTextFocused] = useState(false);
+  const lastSaved = useRef({ audio: shot.audio, visual: shot.visual });
   useEffect(() => {
-    if (textFocused) return;
-    setAudio(shot.audio);
-    setVisual(shot.visual);
-  }, [shot.audio, shot.visual, textFocused]);
+    const prev = lastSaved.current;
+    if (shot.audio !== prev.audio) setAudio((cur) => (cur === prev.audio ? shot.audio : cur));
+    if (shot.visual !== prev.visual) setVisual((cur) => (cur === prev.visual ? shot.visual : cur));
+    lastSaved.current = { audio: shot.audio, visual: shot.visual };
+  }, [shot.audio, shot.visual]);
   function commitText() {
     if (audio !== shot.audio || visual !== shot.visual) onTextChange(shot.id, { audio, visual });
   }
@@ -286,7 +294,7 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
     // Include uncommitted card drafts: typed-but-unblurred direction counts.
     const effective = { ...shot, audio, visual };
     if (shotHasContent(effective)) {
-      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content and deleting it can't be undone.", confirmLabel: "Delete" }))) return;
+      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content. You can undo the delete with Ctrl+Z.", confirmLabel: "Delete" }))) return;
     }
     onDelete?.(shot.id);
   }
@@ -637,8 +645,6 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               maxHeight={120}
               placeholder="Dialogue / VO / SFX"
               onChange={(e) => setAudio(e.target.value)}
-              onFocus={() => setTextFocused(true)}
-              onBlur={() => setTextFocused(false)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
             />
           </label>
@@ -650,8 +656,6 @@ function BoardCardInner({ prod, shot, bust, regenerating, regenQueued, videoBusy
               maxHeight={120}
               placeholder="What we see"
               onChange={(e) => setVisual(e.target.value)}
-              onFocus={() => setTextFocused(true)}
-              onBlur={() => setTextFocused(false)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commitText(); e.currentTarget.blur(); } }}
             />
           </label>

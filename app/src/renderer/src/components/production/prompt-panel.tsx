@@ -5,6 +5,7 @@ import type { ProductionStyle } from "../../../../shared/ipc.js";
 import { TriplePrompt, type PromptContentHandle } from "../TriplePrompt.js";
 import { RefMediaGlyph, type PromptReference } from "./references.js";
 import { NodesIcon, RegenerateIcon } from "../icons.js";
+import { SnippetsButton } from "../snippets/SnippetsShelf.js";
 
 export function ReferencePromptEditor({ value, includeBrand, onChange, references, className, rows, resizable, autoFocus, placeholder, contentLabel, contentRef: externalContentRef, styleControl, brandControl, afterContent, styleReadOnly, brandReadOnly, onKeyDown, onFocus, onBlur }: {
   value: string;
@@ -155,11 +156,12 @@ export function ReferencePromptEditor({ value, includeBrand, onChange, reference
  *  (references are stored as files on disk now, so thumbnails + previews load
  *  through the streaming protocol rather than inline data URLs). */
 
-export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onToggleBrand, onStyleChange, onSubmit, submitting, queued, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; /** Extra regen clicks queued behind the running one for this shot. */ queued?: number; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
+export function PromptSidePanel({ shotNumber, value, includeBrand, styles, styleValue, references, onChange, onBlur, onToggleBrand, onStyleChange, onSubmit, submitting, queued, onOpenGraph, onOpenSuite, magicActive, onRegenMagic, magicBusy, submitSuffix }: { shotNumber?: string; value: string; includeBrand: boolean; /** Step 2 style set for the per-shot render-style override. */ styles: ProductionStyle[]; /** Selected style id ("None" when empty). */ styleValue: string; references: PromptReference[]; onChange: (value: string) => void; /** Editor blur — the committed-edit boundary for undo coalescing. */ onBlur?: () => void; onToggleBrand: (include: boolean) => void; /** Switch the focused shot's render style (rewrites the Style paragraph). */ onStyleChange: (style: string) => void; onSubmit: () => void; submitting: boolean; /** Extra regen clicks queued behind the running one for this shot. */ queued?: number; onOpenGraph: () => void; /** Hand this prompt (generate mode) to the Image Suite. */ onOpenSuite?: () => void; magicActive?: boolean; /** Regenerate THIS shot's Magic content prompt (replaces only this entry). */ onRegenMagic?: () => void; magicBusy?: boolean; /** Live credit-quote suffix for the Submit button. */ submitSuffix?: ReactNode }) {
   return (
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber}` : "Frame prompt"}</span>
+        <SnippetsButton />
         {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
       </div>
       {shotNumber ? <>
@@ -172,6 +174,7 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
           references={references}
           placeholder="Generation prompt — type @ to add a reference"
           onChange={onChange}
+          onBlur={onBlur}
           styleReadOnly
           brandReadOnly
           afterContent={magicActive && onRegenMagic ? (

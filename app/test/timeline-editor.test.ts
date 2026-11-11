@@ -4,12 +4,16 @@
  * Mounts the multi-track editor over a preset ProductionTimeline and
  * drives the real interactions: seed rendering, playhead seek, S split,
  * click-select + Delete, edge-drag trim, snap on/off drag landing, and
- * undo back to the exact start state. Commits are captured through
- * onTimelineChange into a stateful wrapper (the saveField round-trip).
+ * undo back to the exact start state. Undo is app-wide document
+ * history now: the editor only delegates (onDocUndo/onDocRedo), and
+ * the harness below plays the host — restoring a previous production
+ * prop the way the workspace applies a main-side restore. Commits are
+ * captured through
+ * `onTimelineChange` into a stateful wrapper (the saveField round-trip).
  * jsdom technique mirrors animatic-slip-gesture.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, createElement, useState } from "react";
+import { act, createElement, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { TimelineEditor } from "../src/renderer/src/components/production/timeline-editor.js";
 import type { Production, ProductionTimeline } from "../src/shared/ipc.js";
@@ -115,6 +119,9 @@ describe("TimelineEditor", () => {
   });
 
   async function renderEditor(timeline: ProductionTimeline) {
+    return renderEditorWithHistory(timeline);
+  }
+  async function __renderEditorLegacy(timeline: ProductionTimeline) {
     latest = timeline;
     function Harness() {
       const [prod, setProd] = useState<Production>(() => makeProduction(timeline));
@@ -126,6 +133,58 @@ describe("TimelineEditor", () => {
           latest = t;
           setProd((p) => ({ ...p, timeline: t }));
         },
+      });
+    }
+    await act(async () => {
+      root.render(createElement(Harness));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    if (!editorEl()) throw new Error("timeline editor did not render");
+  }
+
+  void __renderEditorLegacy;
+
+  /** Mount with a host-side document-history stand-in (app-wide undo):
+   *  commits push onto a past stack; undo/redo restore by feeding the
+   *  previous production back as a prop, exactly like the workspace
+   *  applying a main-side restore. Restores do NOT count as commits. */
+  async function renderEditorWithHistory(timeline: ProductionTimeline) {
+    latest = timeline;
+    function Harness() {
+      const [prod, setProd] = useState<Production>(() => makeProduction(timeline));
+      const [, setHistTick] = useState(0);
+      const pastRef = useRef<ProductionTimeline[]>([]);
+      const futureRef = useRef<ProductionTimeline[]>([]);
+      const prodNow = useRef(prod);
+      prodNow.current = prod;
+      const apply = (t: ProductionTimeline) => {
+        latest = t;
+        setProd((p) => ({ ...p, timeline: t }));
+        setHistTick((n) => n + 1);
+      };
+      return createElement(TimelineEditor, {
+        prodId: "prod1",
+        production: prod,
+        onTimelineChange: (t: ProductionTimeline) => {
+          commits.push(t);
+          pastRef.current.push(prodNow.current.timeline!);
+          futureRef.current = [];
+          apply(t);
+        },
+        onDocUndo: () => {
+          const prev = pastRef.current.pop();
+          if (!prev) return;
+          futureRef.current.push(prodNow.current.timeline!);
+          apply(prev);
+        },
+        onDocRedo: () => {
+          const next = futureRef.current.pop();
+          if (!next) return;
+          pastRef.current.push(prodNow.current.timeline!);
+          apply(next);
+        },
+        canUndo: pastRef.current.length > 0,
+        canRedo: futureRef.current.length > 0,
       });
     }
     await act(async () => {

@@ -40,6 +40,18 @@ export interface MediaService {
    *  registry stay exactly as they were, so an interrupted adoption is
    *  recoverable and no broken path is published. */
   moveFile(p: Production, fromRel: string, toRel: string): string | null;
+  /** Move a file into the undo trash (`trashDirRel`, with a sidecar naming
+   *  its original path) instead of unlinking it, so a document undo that
+   *  re-registers the file can put the bytes back. Registry state matches
+   *  a delete (`deleted` at the original path). Returns false when there
+   *  was nothing on disk to move (registry still marked). */
+  trashFile(p: Production, rel: string, trashDirRel: string): boolean;
+  /** Put a previously trashed file back at its original path. Returns
+   *  false when the trash holds no file for `rel` (or the original path
+   *  is occupied again — the trashed copy is then left in place). */
+  restoreTrashedFile(p: Production, rel: string, trashDirRel: string): boolean;
+  /** Drop every trashed file (session start: no history can reach them). */
+  purgeTrash(p: Production, trashDirRel: string): void;
   /** Delete a file and mark its registry entry `deleted`. */
   removeFile(p: Production, rel: string): boolean;
   /** Mark a referenced file missing (state drives the storyboard's explicit
@@ -96,6 +108,71 @@ export function createMediaService(deps: MediaServiceDeps): MediaService {
       }
       writeRegistry(p, remapMediaPaths(p.media, (rel) => (rel === fromRel ? toRel : rel)));
       return toRel;
+    },
+
+    trashFile(p, rel, trashDirRel) {
+      if (!rel) return false;
+      const markDeleted = (): void => {
+        const list = normalizeMediaRegistry(p.media);
+        const existing = list.find((e) => e.path === rel);
+        if (existing) {
+          existing.state = "deleted";
+          existing.at = new Date().toISOString();
+          writeRegistry(p, list);
+        }
+      };
+      const fromAbs = deps.resolveAbs(p, rel);
+      if (!fs.existsSync(fromAbs)) {
+        markDeleted();
+        return false;
+      }
+      const base = rel.split("/").pop() ?? "file";
+      let name = base;
+      for (let i = 2; fs.existsSync(deps.resolveAbs(p, `${trashDirRel}/${name}`)); i++) name = `${i}-${base}`;
+      try {
+        fs.mkdirSync(deps.resolveAbs(p, trashDirRel), { recursive: true });
+        fs.renameSync(fromAbs, deps.resolveAbs(p, `${trashDirRel}/${name}`));
+        fs.writeFileSync(
+          deps.resolveAbs(p, `${trashDirRel}/${name}.undo.json`),
+          JSON.stringify({ original: rel }),
+          "utf8"
+        );
+      } catch {
+        return false; // the file stays where it was — the delete reads as missing, never as data loss
+      }
+      markDeleted();
+      return true;
+    },
+
+    restoreTrashedFile(p, rel, trashDirRel) {
+      if (!rel) return false;
+      const destAbs = deps.resolveAbs(p, rel);
+      if (fs.existsSync(destAbs)) return false;
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(deps.resolveAbs(p, trashDirRel));
+      } catch {
+        return false;
+      }
+      for (const entry of entries) {
+        if (!entry.endsWith(".undo.json")) continue;
+        try {
+          const side = JSON.parse(fs.readFileSync(deps.resolveAbs(p, `${trashDirRel}/${entry}`), "utf8")) as { original?: unknown };
+          if (side.original !== rel) continue;
+          const name = entry.slice(0, -".undo.json".length);
+          fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+          fs.renameSync(deps.resolveAbs(p, `${trashDirRel}/${name}`), destAbs);
+          fs.unlinkSync(deps.resolveAbs(p, `${trashDirRel}/${entry}`));
+          return true;
+        } catch { /* try the next candidate */ }
+      }
+      return false;
+    },
+
+    purgeTrash(p, trashDirRel) {
+      try {
+        fs.rmSync(deps.resolveAbs(p, trashDirRel), { recursive: true, force: true });
+      } catch { /* nothing to purge */ }
     },
 
     removeFile(p, rel) {

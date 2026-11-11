@@ -1,3 +1,86 @@
+# App-wide undo/redo for all document editing (+ Feature #12 scene delete, unblocked)
+
+Ask: one consistent undo system (Ctrl+Z / Ctrl+Shift+Z, Ctrl+Y) at the document layer covering prompt/script edits, scene ops, storyboard ops, node graph edits, and deletions — bounded, and proven not buggy (Items 1-5). Out of batch-state (same as the scene rename below).
+
+- Design: MAIN-side snapshot history per production (`app/src/main/production-history.ts`), fed by the one write funnel — a hook on `productions.saveProduction` (61 call sites: every renderer save, narrow command, structural command, agent op, and rebased generation commit persists through it, so nothing can bypass history without bypassing persistence). Pure core in `app/src/shared/production-history.ts`: `reconcileShare` (structural sharing across snapshots; retained memory is O(changed path), frozen snapshots), `projectForHistory` (the Item 4 boundary: rev/status/currentStep/media registry/pending vendor receipts/assembly run bookkeeping/graph+moodboard viewports never enter or rewind), `mergeRestoredProduction`, `createDocumentHistory` (~100-step cap, gesture coalescing by key). Session-scoped v1.
+- Restore: snapshot + live excluded fields, board-folder reconciliation with the forward machinery (`deleteShotBoards` archive, `moveShotMediaDir` un-archive, `relocateBoardsForRenumber`, outdated park/un-park), trashed media rehydrated, script.md rewritten, suppressed write. Deletions made recoverable: `removeOutdatedShot` parks under `boards/outdated-removed/` instead of `rmSync`; take/reference/video/style-frame deletions go to `boards/undo-trash/` with original-path sidecars; both purged at session start per production (deferred deletion, chosen over immediate destroy — say-which per Item 3). Generation completions are their own entries; undo unregisters only — files, credits, job ledger untouched.
+- Coverage: prompt edits (live saves coalesce `prompt:<shotId>`, blur/frame-switch closes — one step per committed edit, Bug #18 boundary; paste = one save = one step); script/visual/audio blur commits; scene rename + NEW scene delete (`shotter.deleteScene`, `production:deleteScene`, ShotTable trash button with always-confirm naming scene + shot count); storyboard ops incl. atomic reorder = one `mutateShots` transaction = one step; node graph add/delete/move/connect/disconnect/frames/layout via meta-carrying narrow commands (local stacks retired; `captureHistory(force)` now marks discrete steps); timeline commits (volume drags coalesce `tlvol:<track>`); shot/scene/node deletions; moodboard + tile-size gestures coalesce.
+- Audit (Item 3): routed — every `saveProduction` writer (renderer `production:save` rebase + all narrow/structural/generation/agent commands). Left out deliberately: app Settings (separate store), suite session file (separate document; its exports into references DO save + record), expenses ledger entries (ledger store; `productionExpenses` doc field IS covered), in-field text undo (document step lands on blur commit), view state (selection/viewport/playhead — clamped, never restored), three generation-REPLACEMENT unlinks whose bytes are not recoverable (style-frame recheck, camera-grid sheet replace ×2 — registration restores, frame regenerable), external JSON edits / schema migration (history resets on rev mismatch instead of stacking an uncertain lineage).
+- Verification: red-first `app/test/production-history.test.ts` (20: reconcile sharing identity, projection boundary, round-trips per area incl. scene rename/delete + wire disconnect + generation landing, mixed-sequence undo-all == exact start / redo-all == exact final, coalescing, structural-sharing retained-object bound on 300 shots, cap), `app/test/production-undo-restore.test.ts` (8: real funnel + folders on disk — delete/reorder/scene-delete archive+return, generation file + ledger untouched, take trash, outdated park), `app/test/production-undo-wiring.test.ts` (7 guards), timeline delegation harness updated. Gates: tsc clean; full vitest 2570 passed / 1 failed (sole pre-existing `group` guard, present before this work) / 15 skipped after theme-token fix; core check:fast exit 0 (warnings only); build clean; ui:verify exit 0 (tasks/screenshots/2026-11-11T13-57-16-087Z) + live CDP probe (create → addScene/rename recorded depth 2 → Ctrl+Z un-renames → header Redo replays → deleteScene → Ctrl+Z restores; screenshot read: Undo/Redo header buttons, scene trash icon, activity line). Retired `production/undo-history.ts` + its test deleted.
+- Flagged judgment calls (unchanged, for Chuck): (1) snapshot+structural-sharing over inverse commands; (2) session-only history v1; (3) generation completions undoable as document entries, files/credits/ledger never; (4) ~100-step cap.
+- Blocked: fresh-eyes reviewer needs `GAB_API_KEY` (absent). Exact command when set: PowerShell `cd app; node scripts/review.mjs --model impl,kimi,deepseek,minimax "Review the app-wide undo/redo build (document-layer history in main, save-funnel hook, board-folder restore, retired per-view stacks, Feature #12 scene delete) for correctness bugs: snapshot corruption, lost-update or rev-lineage holes, folder-restore conflicts, coalescing errors, and scope creep."`
+- Next: none. Known cosmetic: retired local-stack code sits in labelled comment blocks in NodeGraphModal/timeline-editor (CRLF-safe migration); delete on next touch of those regions.
+
+# Scene rename in the script view (scene delete shipped with app-wide undo above)
+
+Ask: add scene rename + scene delete to the script view (Step 1 `ShotTable`).
+Two flagged decisions with safe defaults: confirm before delete; delete only
+if undoable through the script editor's existing undo.
+
+## Findings (verified)
+
+- Script view = Step 1 panel rendering `ShotTable`; one `SceneBlock` per
+  `ProductionScene { number, title, shots }` (no stable scene id - every
+  structural API addresses scenes by ordinal). `scene.title` is single-sourced:
+  script.md (`scriptMarkdown`), magic-prompt context, and the production-tools
+  digest all read it, so a rename through `mutateShots` (load -> mutate ->
+  rewrite script.md -> `saveProduction`) shows everywhere and persists.
+- Bug #18 panel-commit fix (pinned by `shot-table.test.ts` /
+  `board-script-switch.test.ts`): commit on the field's own blur so a direct
+  switch into another panel commits the field being left, and resync incoming
+  saves per-field via the `lastSaved` mirror - never gate on focus, which
+  wiped the leaving field's draft in the focus gap.
+- **The script editor has no undo.** `createUndoHistory` is used only by the
+  node graph (per-shot graph snapshots) and the timeline editor; shot delete
+  in `ShotTable`/`boards.tsx` is explicitly "can't be undone", and
+  `saveProduction` keeps no backup/history. Chat undo covers agent file turns,
+  not UI structural edits.
+
+## Decisions
+
+- Confirmation: **confirm** (safe default) - designed as `confirmDestructive`
+  naming the scene and its shot count. Not shipped because delete is stopped.
+- Undo: **delete half was STOPPED** per the ask - no existing script-editor undo (RESOLVED by the app-wide undo build at the top of this file: scene delete now ships with the confirm above, one Ctrl+Z step, recoverable board folders),
+  so no un-undoable destructive scene delete ships. Rename ships alone.
+  Unblocking delete needs a production structural undo (or a soft-delete /
+  restore path covering boards folders + shot sequences) first.
+
+## Plan (rename)
+
+- [x] Failing tests first: `shotter.renameScene`, IPC schema + contract,
+      `ShotTable` direct-switch commit (blur straight into a shot cell),
+      Enter/Escape/blank, Bug #18 draft-survives-snapshot.
+- [x] `shotter.ts`: `renameScene` (trim; missing scene / empty title throw).
+- [x] IPC: `production:renameScene` channel + `CascadeApi.renameScene` +
+      schema validator + main handler via `mutateShots`.
+- [x] `ShotTable.tsx`: pencil button in the scene header opens an inline
+      title input; commit on the input's own blur (Enter blurs into the same
+      path, Escape cancels); `lastSaved`-mirror resync; draft ref so the
+      commit always reads the freshest text.
+- [x] Verify: focused tests, `npm run typecheck`, full app suite, build.
+
+## Review
+
+Rename shipped; delete stopped (see Decisions). The header pencil in each
+`SceneBlock` swaps the toggle for an inline input (autofocused, title
+selected); Enter blurs into the one commit path, Escape resets the draft ref
+before unmount so an unmount blur can't commit a cancel, and a blank or
+unchanged (post-trim) title reverts without an IPC call. Main side is the
+thin `mutateShots` + `shotter.renameScene` pairing every structural edit
+uses, so the rename bumps `rev`, rewrites script.md, and persists via
+`saveProduction` in the same step.
+
+Tests (16 new): `shotter.test.ts` renameScene (4), `ipc-validation.test.ts`
+payload + contract (1), `shot-table.test.ts` scene rename (10, incl. the
+direct-switch panel-commit and diverged-draft-survives-snapshot pins),
+`productions.test.ts` save/reopen + script.md heading round-trip (1). Red
+first: 15 failed / 55 passed; after: focused 70/70. Verify: `npm run
+typecheck` clean; full app suite 2528 passed / 1 failed (the pre-existing
+`group` lessons-guard, failing before this change per tasks/progress.md) /
+15 skipped; `npm run build` clean. Not committed.
+
+---
+
 # Frequent crashes in chat-agent mode (autonomous production runs)
 
 User report: still frequent crashes in chat agent mode. Evidence: recent crash
@@ -5646,3 +5729,39 @@ header drag 172->262px remembered across relaunch. Evidence in
       probe (seeded production, two launches): placeholder 518x291.375 at
       (224,206), card at (758,206); after adding a render the video box was
       identical and the card did not move.
+
+---
+
+# Ctrl+Mouse Wheel zoom in all views, panel-aware
+
+Ask: Ctrl+wheel zooms every view; over a panel with its own zoom control
+(e.g. Design reference categories) it zooms only that panel within its
+existing range; elsewhere it applies the page zoom. It must not scroll
+while zooming; plain wheel is unchanged.
+
+- [x] Inventory: page zoom = Electron zoom level (Ctrl+=/-/0 in main,
+      ±5). Slider zooms with no wheel handling: Script zoom (80–180),
+      Storyboard frame size (180–440), per-category reference tile size
+      (80–320). Wheel-owning canvases already zooming themselves with
+      `preventDefault`: moodboard (0.1–8), timeline (0.25–40), media
+      lightbox (1–8), node graph (React Flow, min 0.2). Design "Panel
+      width" is a width, not a zoom — left to the page zoom.
+- [x] Tests first (red: missing module / conditional-panel case):
+      `app/test/ctrl-wheel-zoom.test.ts` (12) — panel-only zoom with
+      clamping on the real `ReferenceCategorySection`, page fallback,
+      nested wheel-owning canvas, plain-wheel passthrough, IPC contract
+      + validator, page-level clamp.
+- [x] `components/common/ctrl-wheel-zoom.ts`: `useCtrlWheelZoom`
+      (callback-ref zone claim: preventDefault + stopPropagation,
+      `defaultPrevented` guard) and `installCtrlWheelPageZoom`
+      (window bubble-phase fallback, installed once in `main.tsx`).
+- [x] Page zoom IPC: `zoomPageBy` (`window:zoomPageBy`, send) +
+      finite-number validator + `nextPageZoomLevel` shared range; main
+      steps the sender window and emits `zoom:changed`; keyboard zoom
+      reuses the same clamp.
+- [x] Verify: focused 12/12; neighbors 99 + design-ref-grid 10/10
+      (one EPERM load flake, green alone); tsc clean; full suite 2540
+      passed / 1 failed (pre-existing `group` guard) / 15 skipped;
+      build clean; ui:verify exit 0; live CDP probe on the built app:
+      native zoom cancelable, plain wheel scrolls only, Ctrl+wheel
+      zooms ×1.162 (single step) with zero scroll.

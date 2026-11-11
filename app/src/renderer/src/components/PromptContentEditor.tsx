@@ -11,6 +11,9 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import { isTagOnlyDiff, refTagMatches, type RefTagMatch } from "../../../shared/prompt-grammar.js";
 import { clipboardText } from "../clipboard.js";
+import { insertSnippetText as computeSnippetInsertion, type TextRange } from "../../../shared/prompt-snippets.js";
+import { notePromptFieldFocused, registerPromptEditor, unregisterPromptEditor } from "./snippets/prompt-field.js";
+import { openSnippetsShelf } from "./snippets/snippets-ui.js";
 
 export interface PromptContentHandle {
   focus(): void;
@@ -33,6 +36,13 @@ export interface PromptContentHandle {
    *  socket adds the tag from OUTSIDE the editor, and the user should be able
    *  to keep typing immediately after the new block. */
   focusAfterTag(name: string): void;
+  /** Insert a prompt snippet's body at the caret (or at `at`, the caret the
+   *  Snippets shelf snapshotted before focus moved to the shelf; appended
+   *  when neither exists) as an INTERNAL edit, then refocus the box and
+   *  select the body's first [placeholder] when it has one. */
+  insertSnippetText(body: string, at?: TextRange | null): void;
+  /** The currently selected text ("" when the caret is collapsed/outside). */
+  selectedText(): string;
 }
 
 /** Text length (in the box's serialized form) before a range's start. */
@@ -133,6 +143,8 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   const isDraggingRef = useRef(false);
   const pendingCaret = useRef<number | null>(null);
   const [dropCaret, setDropCaret] = useState<{ left: number; top: number; height: number } | null>(null);
+  // "Save selection as snippet" context menu (only with a live selection).
+  const [snippetMenu, setSnippetMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   // Every raw text this editor produced from the user's own editing. The
   // parent echoes values back (the graph's reconcile lags one render, and
   // composed/serialized variants can arrive in sequence), so suppression must
@@ -302,6 +314,34 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
   /** Collapse the caret right after `name`'s tag in the CURRENT DOM and focus
    *  the box. Used when an external rebuild already carries the tag (or when a
    *  rebuild is not needed). */
+  /** Select the serialized-text range [start, end] in the CURRENT DOM. */
+  function selectOffsets(el: HTMLElement, start: number, end: number) {
+    const r = offsetToRange(el, start);
+    if (end !== start) {
+      const er = offsetToRange(el, end);
+      try { r.setEnd(er.startContainer, er.startOffset); } catch { /* keep collapsed */ }
+    }
+    const sel = window.getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+  }
+
+  /** Insert a snippet body through the editor's own commit path (see the
+   *  handle doc): live caret wins, else the shelf's snapshot, else append. */
+  function insertSnippet(body: string, at?: TextRange | null) {
+    const el = elRef.current;
+    if (!el || !body) return;
+    const text = el.textContent ?? "";
+    const sel = window.getSelection();
+    const liveInBox = !!sel && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).startContainer) && el.contains(sel.getRangeAt(0).endContainer);
+    const use = at ?? (liveInBox ? selectionOffsets(el) : null);
+    pushUndo("snippet");
+    const r = computeSnippetInsertion(text, use?.start ?? null, use?.end ?? null, body);
+    applyEdit(el, r.text, r.caret);
+    if (r.placeholder) selectOffsets(el, r.placeholder.start, r.placeholder.end);
+    el.focus();
+    notePromptFieldFocused(el);
+  }
+
   function placeCaretAfterTag(el: HTMLElement, text: string, name: string) {
     const m = refTagMatches(text).find((x) => x.name.toLowerCase() === name.toLowerCase());
     if (!m) return;
@@ -643,6 +683,24 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
     };
   }, []);
 
+  // Snippets shelf target: register this box's inserter so a shelf click can
+  // land at the caret the shelf snapshotted before it took focus.
+  useEffect(() => {
+    const el = elRef.current;
+    if (!el) return;
+    registerPromptEditor(el, (body, at) => insertSnippet(body, at));
+    return () => unregisterPromptEditor(el);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Close the snippet context menu on Escape.
+  useEffect(() => {
+    if (!snippetMenu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSnippetMenu(null); };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [snippetMenu]);
+
   useImperativeHandle(ref, () => ({
     focus() { elRef.current?.focus(); },
     get selectionStart() { return elRef.current ? selectionOffsets(elRef.current).start : 0; },
@@ -677,6 +735,12 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
       if (open < 0) return;
       pushUndo("insert-ref");
       applyEdit(el, `${text.slice(0, open)}@[${name}]${text.slice(selectionOffsets(el).start)}`, open + name.length + 3);
+    },
+    insertSnippetText(body: string, at?: TextRange | null) { insertSnippet(body, at); },
+    selectedText() {
+      const el = elRef.current; if (!el) return "";
+      const { start, end } = selectionOffsets(el);
+      return end > start ? (el.textContent ?? "").slice(start, end) : "";
     },
     focusAfterTag(name: string) {
       pendingFocusTag.current = name;
@@ -764,7 +828,17 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
             isDraggingRef.current = false;
           }
         }}
-        onFocus={onFocus}
+        onFocus={(e) => { notePromptFieldFocused(e.currentTarget); onFocus?.(); }}
+        onContextMenu={(e) => {
+          const el = elRef.current;
+          if (!el) return;
+          const { start, end } = selectionOffsets(el);
+          const picked = end > start ? (el.textContent ?? "").slice(start, end) : "";
+          if (!picked.trim()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setSnippetMenu({ x: e.clientX, y: e.clientY, text: picked });
+        }}
         onBlur={onBlur}
       />
       {dropCaret &&
@@ -780,6 +854,16 @@ export const PromptContentEditor = forwardRef<PromptContentHandle, {
             style={{ left: dropCaret.left, top: dropCaret.top, height: dropCaret.height }}
             aria-hidden="true"
           />,
+          document.body
+        )}
+      {snippetMenu &&
+        createPortal(
+          <>
+            <div className="snippets-menu-backdrop" data-snippets-ui onMouseDown={() => setSnippetMenu(null)} onContextMenu={(e) => { e.preventDefault(); setSnippetMenu(null); }} />
+            <div className="snippets-context-menu" data-snippets-ui role="menu" style={{ left: snippetMenu.x, top: snippetMenu.y }}>
+              <button type="button" role="menuitem" onMouseDown={(e) => e.preventDefault()} onClick={() => { const text = snippetMenu.text; setSnippetMenu(null); openSnippetsShelf({ prefillBody: text }); }}>Save selection as snippet</button>
+            </div>
+          </>,
           document.body
         )}
     </>

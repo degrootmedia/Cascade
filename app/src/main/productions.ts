@@ -27,6 +27,7 @@ import { nodeDecl } from "../shared/graph/ports.js";
 import { brandEdgePresent, resolveNodeStyleText, stripSharedSections, styleEdgePresent, type StylePromptTarget } from "../shared/graph/render.js";
 import { hasBrandParagraph, parsePromptBoxes, stripBrandParagraph, stripStyleParagraph } from "../shared/prompt-grammar.js";
 import { createStore } from "./store.js";
+import type { HistoryCommitMeta } from "../shared/production-history.js";
 import { SHOT_INDEX_FIELDS, SHOT_MERGE_DENIED_FIELDS, SHOT_SPECIAL_FIELDS } from "./shot-ownership.js";
 import { archiveSuiteSession, removeSuiteSession } from "./suite.js";
 import { sanitizeAliases } from "../shared/ref-names.js";
@@ -318,6 +319,9 @@ export function loadProduction(id: string): ProductionFile | null {
       backfillGenerationMediaIds(p);
       ensureShotGraphs(p);
       lastBootstrap.set(id, { obj: p, at: Date.now() });
+      if (historyHook) {
+        try { historyHook.onLoaded(p); } catch { /* history must never break a load */ }
+      }
     }
     return structuredClone(p);
   }
@@ -341,6 +345,9 @@ export function loadProduction(id: string): ProductionFile | null {
   validateMigratedProduction(working);
   writePreMigrationBackup(p.meta.id, fromVersion, p);
   store.save(working);
+  if (historyHook) {
+    try { historyHook.onLoaded(working); } catch { /* history must never break a load */ }
+  }
   return structuredClone(working);
 }
 
@@ -461,7 +468,30 @@ export function referenceThumbnailPaths(p: ProductionFile): string[] {
   return [...imagePaths, ...videoPaths];
 }
 
-export function saveProduction(p: ProductionFile): void {
+/**
+ * App-wide undo hook (registered by `main/production-history.ts` at
+ * startup; a registration slot instead of an import so this module —
+ * which the history service itself builds on — stays cycle-free and
+ * tests that never register pay nothing). `onSaved` fires after every
+ * persisted write with the written document; `onLoaded` fires when a
+ * load's read-repair pass ran over the cached document, so the service
+ * can seed/sync its snapshot from disk truth without repairs becoming
+ * steps (it tells repairs from external rewrites by the write `rev`:
+ * repairs never bump it, every persisted write does).
+ */
+export interface ProductionHistoryHook {
+  onSaved(after: ProductionFile, meta?: HistoryCommitMeta): void;
+  onLoaded(cached: ProductionFile): void;
+  onRemoved(id: string): void;
+}
+
+let historyHook: ProductionHistoryHook | null = null;
+
+export function setProductionHistoryHook(hook: ProductionHistoryHook | null): void {
+  historyHook = hook;
+}
+
+export function saveProduction(p: ProductionFile, meta?: HistoryCommitMeta): void {
   normalize(p);
   p.meta.updatedAt = new Date().toISOString();
   p.schemaVersion ??= PRODUCTION_SCHEMA_VERSION;
@@ -472,6 +502,11 @@ export function saveProduction(p: ProductionFile): void {
   const cur = typeof p.rev === "number" && Number.isFinite(p.rev) ? p.rev : 0;
   p.rev = cur + 1;
   store.save(p);
+  // App-wide undo: every persisted write is a potential history commit.
+  // The hook clones before snapshotting — `p` stays the caller's to mutate.
+  if (historyHook) {
+    try { historyHook.onSaved(p, meta); } catch { /* history must never break a save */ }
+  }
 }
 
 /**
@@ -1479,9 +1514,15 @@ export function upsertProductionStyle(
 }
 
 export function deleteProduction(id: string): boolean {
+  if (historyHook) {
+    try { historyHook.onRemoved(id); } catch { /* best-effort */ }
+  }
   return store.remove(id);
 }
 
 export function archiveProduction(id: string): boolean {
+  if (historyHook) {
+    try { historyHook.onRemoved(id); } catch { /* best-effort */ }
+  }
   return store.archive(id);
 }

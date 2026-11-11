@@ -218,6 +218,10 @@ describe("ShotTable draft resync", () => {
     return container.querySelector(".shot-cell.audio") as HTMLTextAreaElement;
   }
 
+  function visualCell(): HTMLTextAreaElement {
+    return container.querySelector(".shot-cell.visual") as HTMLTextAreaElement;
+  }
+
   /** Drive a controlled textarea the way the other renderer tests do. */
   function typeInto(el: HTMLTextAreaElement, text: string) {
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set
@@ -277,6 +281,59 @@ describe("ShotTable draft resync", () => {
     expect(updateCalls).toEqual([["p1", "a", { audio: "draft", visual: "v-old" }]]);
   });
 
+  // Reported bug: edit Visual, click DIRECTLY into Audio (no neutral click
+  // between), edit there — both edits must survive. The first commit's
+  // snapshot only lands after the switch (async IPC), so it is applied
+  // mid-sequence the way ProductionWorkspace would apply it.
+  it("direct Visual -> Audio switch commits Visual first and keeps both edits", () => {
+    renderProd(prodWith("a-old", "v-old"));
+    const visual = visualCell();
+    act(() => { visual.focus(); });
+    typeInto(visual, "v-new");
+    // Direct switch: one click, but the browser dispatches focusout and
+    // focusin as separate events and React flushes between them — model
+    // that with separate acts (a single act batches the two together).
+    const audio = audioCell();
+    act(() => { visual.blur(); });
+    act(() => { audio.focus(); });
+    // The panel being left commits immediately on the switch...
+    expect(updateCalls).toEqual([["p1", "a", { audio: "a-old", visual: "v-new" }]]);
+    // ...and its text is not wiped by the focus gap between the two cells.
+    expect(visualCell().value).toBe("v-new");
+    typeInto(audio, "a-new");
+    // The first commit's snapshot lands while Audio is being edited.
+    renderProd(prodWith("a-old", "v-new"));
+    expect(audioCell().value).toBe("a-new");
+    expect(visualCell().value).toBe("v-new");
+    act(() => { audio.blur(); });
+    // The Audio commit carries the committed Visual, never the stale one.
+    expect(updateCalls).toEqual([
+      ["p1", "a", { audio: "a-old", visual: "v-new" }],
+      ["p1", "a", { audio: "a-new", visual: "v-new" }],
+    ]);
+  });
+
+  it("direct Audio -> Visual switch commits Audio first and keeps both edits", () => {
+    renderProd(prodWith("a-old", "v-old"));
+    const audio = audioCell();
+    act(() => { audio.focus(); });
+    typeInto(audio, "a-new");
+    const visual = visualCell();
+    act(() => { audio.blur(); });
+    act(() => { visual.focus(); });
+    expect(updateCalls).toEqual([["p1", "a", { audio: "a-new", visual: "v-old" }]]);
+    expect(audioCell().value).toBe("a-new");
+    typeInto(visual, "v-new");
+    renderProd(prodWith("a-new", "v-old"));
+    expect(visualCell().value).toBe("v-new");
+    expect(audioCell().value).toBe("a-new");
+    act(() => { visual.blur(); });
+    expect(updateCalls).toEqual([
+      ["p1", "a", { audio: "a-new", visual: "v-old" }],
+      ["p1", "a", { audio: "a-new", visual: "v-new" }],
+    ]);
+  });
+
   it("ignores Enter while an IME composition is active", () => {
     renderProd(prodWith("old"));
     const cell = audioCell();
@@ -288,5 +345,186 @@ describe("ShotTable draft resync", () => {
     expect(g.document.activeElement).toBe(cell);
     keyEnter(cell, false);
     expect(updateCalls).toEqual([["p1", "a", { audio: "draft", visual: "v-old" }]]);
+  });
+});
+
+/**
+ * Scene rename (header pencil -> inline title input). The commit must follow
+ * the Bug #18 panel-commit fix: the input's own blur commits, so clicking
+ * DIRECTLY into another panel/cell (no neutral click between) still saves,
+ * and an incoming snapshot resyncs via the lastSaved mirror instead of
+ * wiping a diverged draft in the focus gap.
+ */
+describe("ShotTable scene rename", () => {
+  const g = globalThis as Record<string, any>;
+  let container: HTMLElement;
+  let root: Root | null = null;
+  let renameCalls: unknown[][];
+
+  function prodWithScenes(scenes: ProductionScene[]): Production {
+    return { meta: { id: "p1", name: "T" }, scenes } as unknown as Production;
+  }
+
+  function twoScenes(t1 = "Opening", t2 = "Chase"): Production {
+    return prodWithScenes([
+      { number: 1, title: t1, shots: [{ id: "a", number: "0100", audio: "a-old", visual: "v-old" }] },
+      { number: 2, title: t2, shots: [{ id: "b", number: "0200", audio: "", visual: "" }] },
+    ]);
+  }
+
+  function renderProd(prod: Production) {
+    act(() => { root!.render(createElement(ShotTable, { prod, onMutation: () => {} })); });
+  }
+
+  function sceneHead(idx: number): Element {
+    return container.querySelectorAll(".shot-scene")[idx];
+  }
+
+  function titleInput(idx: number): HTMLInputElement | null {
+    return sceneHead(idx).querySelector(".shot-scene-title-input") as HTMLInputElement | null;
+  }
+
+  function openRename(idx: number): HTMLInputElement {
+    const btn = sceneHead(idx).querySelector(".shot-scene-rename") as HTMLButtonElement;
+    expect(btn, "rename button").toBeTruthy();
+    act(() => { btn.click(); });
+    const input = titleInput(idx);
+    expect(input, "title input").toBeTruthy();
+    return input!;
+  }
+
+  function typeTitle(el: HTMLInputElement, text: string) {
+    const setter = Object.getOwnPropertyDescriptor(g.window.HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      setter!.call(el, text);
+      el.dispatchEvent(new g.Event("input", { bubbles: true }));
+    });
+  }
+
+  function keyOn(el: HTMLElement, key: string, isComposing = false) {
+    const ev = new g.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "isComposing", { value: isComposing });
+    act(() => { el.dispatchEvent(ev); });
+    return ev;
+  }
+
+  beforeEach(() => {
+    renameCalls = [];
+    g.window.cascade = {
+      reorderShot: () => Promise.resolve(null),
+      insertShot: () => Promise.resolve(null),
+      addScene: () => Promise.resolve(null),
+      updateShot: () => Promise.resolve(null),
+      deleteShot: () => Promise.resolve(null),
+      setShotNumber: () => Promise.resolve(null),
+      renameScene: (...args: unknown[]) => { renameCalls.push(args); return Promise.resolve(null); },
+    };
+    container = g.document.createElement("div");
+    g.document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => { root?.unmount(); });
+    root = null;
+    container.remove();
+  });
+
+  it("opens an inline input prefilled with the current title", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    expect(input.value).toBe("Opening");
+    expect(g.document.activeElement).toBe(input);
+  });
+
+  // The acceptance-critical path: edit the title, click DIRECTLY into a shot
+  // cell (another panel) - the rename must commit on that switch.
+  it("commits on a direct switch into a shot cell (Bug #18 panel-commit)", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "Rooftop chase");
+    const audio = container.querySelector(".shot-cell.audio") as HTMLTextAreaElement;
+    act(() => { input.blur(); });
+    act(() => { audio.focus(); });
+    expect(renameCalls).toEqual([["p1", 1, "Rooftop chase"]]);
+    expect(titleInput(0)).toBeNull();
+    // The commit's snapshot lands: the header shows the new title.
+    renderProd(twoScenes("Rooftop chase"));
+    expect(sceneHead(0).textContent).toContain("Scene 1 — Rooftop chase");
+    // The audio cell the user switched into is untouched by the rename.
+    expect((container.querySelector(".shot-cell.audio") as HTMLTextAreaElement).value).toBe("a-old");
+  });
+
+  it("addresses the scene by its ordinal (renaming scene 2)", () => {
+    renderProd(twoScenes());
+    const input = openRename(1);
+    typeTitle(input, "Alley");
+    act(() => { input.blur(); });
+    expect(renameCalls).toEqual([["p1", 2, "Alley"]]);
+  });
+
+  it("commits exactly once on Enter", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "New opening");
+    keyOn(input, "Enter");
+    expect(renameCalls).toEqual([["p1", 1, "New opening"]]);
+    expect(titleInput(0)).toBeNull();
+  });
+
+  it("ignores Enter while an IME composition is active", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "New opening");
+    keyOn(input, "Enter", true);
+    expect(renameCalls).toEqual([]);
+    expect(titleInput(0)).toBeTruthy();
+  });
+
+  it("cancels on Escape without committing", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "Discard me");
+    keyOn(input, "Escape");
+    expect(renameCalls).toEqual([]);
+    expect(titleInput(0)).toBeNull();
+    expect(sceneHead(0).textContent).toContain("Scene 1 — Opening");
+  });
+
+  it("reverts a blank title on blur without committing", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "   ");
+    act(() => { input.blur(); });
+    expect(renameCalls).toEqual([]);
+    expect(sceneHead(0).textContent).toContain("Scene 1 — Opening");
+  });
+
+  it("commits nothing when the trimmed title is unchanged", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "  Opening  ");
+    act(() => { input.blur(); });
+    expect(renameCalls).toEqual([]);
+  });
+
+  it("keeps a diverged draft through an incoming snapshot; the draft wins at blur", () => {
+    renderProd(twoScenes());
+    const input = openRename(0);
+    typeTitle(input, "My draft");
+    // An unrelated save lands mid-edit with a different stored title: the
+    // draft must survive (lastSaved-mirror resync, never a focus-gated reset).
+    renderProd(twoScenes("Renamed elsewhere"));
+    expect(titleInput(0)!.value).toBe("My draft");
+    act(() => { titleInput(0)!.blur(); });
+    expect(renameCalls).toEqual([["p1", 1, "My draft"]]);
+  });
+
+  it("adopts an incoming title while not editing", () => {
+    renderProd(twoScenes());
+    renderProd(twoScenes("Fresh title"));
+    expect(sceneHead(0).textContent).toContain("Scene 1 — Fresh title");
+    const input = openRename(0);
+    expect(input.value).toBe("Fresh title");
   });
 });

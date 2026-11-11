@@ -12,6 +12,7 @@ import { getProvider } from "../shared/providers.js";
 import { normalizeSandboxMode, type SandboxMode } from "@core";
 import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface, type UiIconSet, type UiTheme, type VerifyCommandIpc } from "../shared/ipc.js";
 import { coerceWhisperModel, isWhisperModel, type WhisperModel } from "../shared/voice.js";
+import { resolvePromptSnippets, sanitizePromptSnippets, type PromptSnippet } from "../shared/prompt-snippets.js";
 
 interface SettingsFile {
   /** Selected LLM API provider id (see shared/providers.ts). */
@@ -127,6 +128,13 @@ interface SettingsFile {
   /** User overrides for the creative prompt templates (shared/prompt-templates.ts),
    *  keyed by template id. Absent id = the built-in wording. */
   promptTemplates: Record<string, string>;
+  /**
+   * The user's prompt-snippet library (shared/prompt-snippets.ts) — global
+   * across all projects. `null` = never customized, resolves to the seeded
+   * starter library; any stored array (even empty) is used as-is so seeded
+   * snippets stay deletable.
+   */
+  promptSnippets: PromptSnippet[] | null;
   /** Custom path to the `whisper-cli` binary (null = resolve bundled / PATH). */
   whisperCliBinary: string | null;
   /** Whether the chat composer offers voice input (local Whisper). */
@@ -203,6 +211,7 @@ const DEFAULTS: SettingsFile = {
   modelSurfaces: {},
   modelParamDefaults: {},
   promptTemplates: {},
+  promptSnippets: null,
   whisperCliBinary: null,
   voiceEnabled: false,
   whisperModel: "base.en",
@@ -840,6 +849,18 @@ export function setPromptTemplates(overrides: Record<string, string>): void {
     }
   }
   load().promptTemplates = clean;
+  save();
+}
+
+/** The user's prompt-snippet library. Never stored = the seeded starter
+ *  library (shared/prompt-snippets.ts); a stored array is used as-is. */
+export function getPromptSnippets(): PromptSnippet[] {
+  return resolvePromptSnippets(load().promptSnippets);
+}
+
+/** Replace the snippet library (sanitized main-side; empty = all deleted). */
+export function setPromptSnippets(snippets: PromptSnippet[]): void {
+  load().promptSnippets = sanitizePromptSnippets(snippets);
   save();
 }
 

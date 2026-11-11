@@ -8,8 +8,10 @@
  * edge zones trim, Alt+edge rolls, right-drag slips, S splits at the
  * playhead, Delete removes, Ctrl+Z / Ctrl+Shift+Z undo/redo. Ripple is a
  * toolbar toggle (all-tracks default scope) applied to trims and deletes.
- * Every commit is one undo step (snapshot history) and persists through
- * `onTimelineChange`.
+ * Every commit is one step of the app-wide document history (recorded
+ * in main on the save through `onTimelineChange`; live volume drags
+ * coalesce into one step per gesture) — this editor keeps no stack.
+ *
  *
  * A gesture applies its pure op to the gesture-start timeline on every
  * pointermove and shows the (already clamped) result as a preview; the
@@ -70,7 +72,7 @@ import {
 import { resolveShotDisplay } from "../../../../shared/selected-output.js";
 import { cascadeMedia } from "./animatic.js";
 import { usePersistedNumber } from "./persisted-state.js";
-import { createUndoHistory } from "./undo-history.js";
+import type { HistoryCommitMeta } from "../../../../shared/ipc.js";
 import { EMPTY_LOOP_REGION, loopSpan, withLoopPoint, type TimelineLoopRegion } from "./timeline-preview.js";
 import { HelpTip } from "../common/HelpTip.js";
 import { uid } from "./hex.js";
@@ -187,6 +189,10 @@ export function TimelineEditor({
   prodId,
   production,
   onTimelineChange,
+  onDocUndo,
+  onDocRedo,
+  canUndo: canUndoProp = false,
+  canRedo: canRedoProp = false,
   proxyBySrc = {},
   onGenerateProxies,
   onImportAudio,
@@ -197,7 +203,13 @@ export function TimelineEditor({
 }: {
   prodId: string;
   production: Production;
-  onTimelineChange: (timeline: ProductionTimeline) => void;
+  onTimelineChange: (timeline: ProductionTimeline, meta?: HistoryCommitMeta) => void;
+  /** App-wide document undo/redo (the workspace's one history). The
+   *  editor keeps no stack of its own any more. */
+  onDocUndo?: () => void;
+  onDocRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   /** Ready proxies (source rel → proxy rel); filmstrips prefer them. */
   proxyBySrc?: Readonly<Record<string, string>>;
   /** Kick off proxy generation (whole timeline when no rels given). */
@@ -258,7 +270,8 @@ export function TimelineEditor({
   const [headerW, setHeaderW] = usePersistedNumber(HEADER_W_KEY, HEADER_W, { min: HEADER_W_MIN, max: HEADER_W_MAX });
   const headerResizeRef = useRef<{ startX: number; startW: number; curW: number } | null>(null);
   const [viewportW, setViewportW] = useState(0);
-  const [historyTick, setHistoryTick] = useState(0);
+  // (Undo history lives at the document layer in main — one stack for
+  // the whole production; this editor only commits through it.)
   const [addShotId, setAddShotId] = useState("");
   /** Length field draft (mm:ss); null = display the current length. */
   const [lenDraft, setLenDraft] = useState<string | null>(null);
@@ -266,7 +279,7 @@ export function TimelineEditor({
   const [proxyBusy, setProxyBusy] = useState(false);
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
-  const historyRef = useRef(createUndoHistory<ProductionTimeline>({ limit: 100, coalesceMs: 0 }));
+  // No local undo stack (retired with app-wide undo).
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lanesRef = useRef<HTMLDivElement | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
@@ -406,8 +419,12 @@ export function TimelineEditor({
   // ---- commit / undo ---------------------------------------------------------
   const commit = useCallback((next: ProductionTimeline | null) => {
     if (!next || next === timelineRef.current) return;
-    historyRef.current.push(timelineRef.current, { force: true });
+    /* Local stack retired — the document save below is the one step:
     setHistoryTick((n) => n + 1);
+    onTimelineChange(next);
+  }, [onTimelineChange]);
+
+    */
     onTimelineChange(next);
   }, [onTimelineChange]);
 
@@ -418,18 +435,18 @@ export function TimelineEditor({
   // throttled so a drag doesn't whole-document-save every pixel.
   const [volDraft, setVolDraft] = useState<{ trackId: string; pct: number } | null>(null);
   const volLiveRef = useRef<{ trackId: string; base: ProductionTimeline; pendingPct: number; lastAt: number; timer: ReturnType<typeof setTimeout> | null } | null>(null);
-  const applyTrackVolume = useCallback((trackId: string, pct: number) => {
+  const applyTrackVolume = useCallback((trackId: string, pct: number, endGesture = false) => {
     const g = volLiveRef.current;
     const base = g && g.trackId === trackId ? g.base : timelineRef.current;
-    onTimelineChange(setTrackVolume(base, trackId, pct / 100));
+    onTimelineChange(setTrackVolume(base, trackId, pct / 100), { coalesceKey: `tlvol:${trackId}`, coalesceMs: 2000, ...(endGesture ? { coalesceEnd: true } : {}) });
   }, [onTimelineChange]);
   const onTrackVolumeInput = useCallback((trackId: string, pct: number) => {
     setVolDraft({ trackId, pct });
     let g = volLiveRef.current;
     if (!g || g.trackId !== trackId) {
-      historyRef.current.push(timelineRef.current, { force: true });
+      /* Local stack retired — document history coalesces the live volume saves into one step:
       setHistoryTick((n) => n + 1);
-      g = { trackId, base: timelineRef.current, pendingPct: pct, lastAt: 0, timer: null };
+      */ g = { trackId, base: timelineRef.current, pendingPct: pct, lastAt: 0, timer: null };
       volLiveRef.current = g;
     }
     g.pendingPct = pct;
@@ -450,11 +467,14 @@ export function TimelineEditor({
   const endTrackVolumeGesture = useCallback((trackId: string) => {
     const g = volLiveRef.current;
     if (g?.timer) clearTimeout(g.timer);
-    if (g && g.trackId === trackId) applyTrackVolume(trackId, g.pendingPct);
+    if (g && g.trackId === trackId) applyTrackVolume(trackId, g.pendingPct, true);
     volLiveRef.current = null;
     setVolDraft((d) => (d?.trackId === trackId ? null : d));
   }, [applyTrackVolume]);
-  const undo = useCallback(() => {
+  const undo = useCallback(() => { onDocUndo?.(); }, [onDocUndo]);
+  const redo = useCallback(() => { onDocRedo?.(); }, [onDocRedo]);
+  /* Retired local-stack undo/redo (superseded by the app-wide document history):
+  const _undoRetired = useCallback(() => {
     const prev = historyRef.current.undo(timelineRef.current);
     if (prev) {
       setHistoryTick((n) => n + 1);
@@ -471,6 +491,10 @@ export function TimelineEditor({
   void historyTick;
   const canUndo = historyRef.current.canUndo();
   const canRedo = historyRef.current.canRedo();
+
+  */
+  const canUndo = canUndoProp;
+  const canRedo = canRedoProp;
 
   // ---- snapping ---------------------------------------------------------------
   /** Snap points: 0, the playhead, and every clip edge on every track

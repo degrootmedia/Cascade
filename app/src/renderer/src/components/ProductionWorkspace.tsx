@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { clipboardText } from "../clipboard.js";
-import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, seedTimelineFromProduction, reconcileTimelineShotMedia, type ProductionTimeline, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence } from "../../../shared/ipc.js";
+import { TWEEN_KEY_IMGGEN, TWEEN_KEY_EDITGEN, TWEEN_KEY_EDITGEN_PREFIX, isImageModel, isVideoModel, modelOnSurface, styleFrameOverride, providerSupportsUpscale, unusableRefsMessage, providerSupportsVideoEdit, providerSupportsGenjutsu, isVideoEditFamilyMode, providerSupportsDraftUpgrade, createShotSequence, sequenceOverlapReason, sequenceOutputMedia, sequenceSelectedTake, seedTimelineFromProduction, reconcileTimelineShotMedia, type ProductionTimeline, type MediaProviderId, type Production, type ProductionMeta, type ProductionShot, type ShotColorTag, type OpenArtModelChoice, type SuggestedReference, type ReferenceCategory, type CustomRef, type VideoGenOptions, type RefSwap, type Retry720pAction, type VideoModelOptions, type CliModelSchema, type GenerationCostRequest, type GraphLayout, type GraphLayoutPatch, type GraphEditNode, type GraphVideoNode, type ReferenceImageGenOptions, type CharacterSheetGenOptions, type DetachedCanvasContext, type CanvasBusySnapshot, type CameraGridGenOptions, type CameraGridCutoutRequest, type CameraGridImportResult, type GraphSource, type ShotSequence, type HistoryCommitMeta, type ProductionHistoryState } from "../../../shared/ipc.js";
 import { addRefTag, composePromptBoxes, parsePromptBoxes, refTagNames } from "../../../shared/prompt-grammar.js";
 import { applySavedRevision, isForCurrentProduction, isFresh, isStaleRevisionError, revOf, sameSnapshotExceptRev } from "../../../shared/snapshot-freshness.js";
 import { findGeneration, generationInUse, generationInUseMessage } from "../../../shared/generations.js";
@@ -13,6 +13,7 @@ import { formatReferenceUsage, referenceUsage } from "../../../shared/reference-
 import { ShotTable } from "./ShotTable.js";
 import { MediaLightbox } from "./common/MediaLightbox.js";
 import { HelpTip } from "./common/HelpTip.js";
+import { useCtrlWheelZoom, zoomedSliderValue } from "./common/ctrl-wheel-zoom.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 import { importableImageDataUrl } from "./production/image-downsample.js";
 import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
@@ -48,6 +49,8 @@ import { GenerationCostSuffix } from "./production/generation-cost-label.js";
 import { isQuotableCostModel } from "./production/generation-cost.js";
 import { primeModelParamDefaults, seedModelOptionValues } from "./production/model-param-defaults.js";
 import { getPromptTemplate, primePromptTemplates } from "./production/prompt-templates.js";
+import { SnippetsShelfHost } from "./snippets/SnippetsShelf.js";
+import { primePromptSnippets } from "./snippets/snippet-store.js";
 import { countByShot, genQueue, genKeys, genButtonLabel, nextRegenRound } from "./production/gen-queue.js";
 import { renderShotPrompt, renderPromptText, promptRefsFor, promptContent, wiredPromptTarget, stripSharedSections, reconcileRefTags } from "../../../shared/graph/render.js";
 import { editVideoGenNodeId, videoGenNodeId } from "../../../shared/ipc/graph.js";
@@ -65,6 +68,18 @@ import { EditIcon, ExpensesIcon, ImageIcon, MagicIcon, MagnifyIcon, PlusIcon, Re
 /** Hard cap on the Step 2 style set. */
 const MAX_STYLES = 5;
 
+/** True when a key event lands in a text-editing surface (its own
+ *  editing undo owns Ctrl+Z there; the document history must not fire).
+ *  Mirrors the node graph's guard. */
+function isEditingTarget(el: unknown): boolean {
+  const node = el as HTMLElement | null;
+  if (!node || typeof node.tagName !== "string") return false;
+  const tag = node.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return typeof node.closest === "function"
+    && !!node.closest(".prompt-content-editor, .prod-ref-prompt-editor, .prod-graph-composer");
+}
+
 /** The one warning shown before any generation is deleted. */
 const DELETE_GENERATION_WARNING =
   "Are you sure you want to delete this generation? This permanently removes it from your disk, but you can always access it again on your Higgsfield/OpenArt account.";
@@ -72,9 +87,9 @@ const DELETE_GENERATION_WARNING =
 /** Shown before a shot sequence is deleted. The video clause is appended only
  *  when the sequence actually has a generated clip to preserve. */
 const DELETE_SEQUENCE_WARNING =
-  "Are you sure you want to delete this shot sequence? This can't be undone.";
+  "Are you sure you want to delete this shot sequence? You can undo with Ctrl+Z.";
 const DELETE_SEQUENCE_VIDEO_WARNING =
-  "Are you sure you want to delete this shot sequence? Its generated video will be saved to your references under \"Shot Sequences\". This can't be undone.";
+  "Are you sure you want to delete this shot sequence? Its generated video will be saved to your references under \"Shot Sequences\". You can undo with Ctrl+Z.";
 
 /** Last video-generation attempt per surface target, remembered so the
  *  activity log's 720p-retry action can resubmit with identical settings
@@ -164,13 +179,17 @@ function ErrorNotice({ message, onClear }: { message: string; onClear: () => voi
  *  state so per-frame playhead updates re-render only this section. */
 function TimelineSection({
   prodId, production, timelineOverride,
-  proxyBySrc, onTimelineChange, onGenerateProxies, onImportAudio, onSaveAsReference,
+  proxyBySrc, onTimelineChange, onGenerateProxies, onImportAudio, onSaveAsReference, onDocUndo, onDocRedo, canUndo, canRedo,
 }: {
   prodId: string;
   production: Production;
   timelineOverride: TimelineOverride;
   proxyBySrc: Readonly<Record<string, string>>;
-  onTimelineChange: (timeline: ProductionTimeline) => void;
+  onTimelineChange: (timeline: ProductionTimeline, meta?: HistoryCommitMeta) => void;
+  onDocUndo?: () => void;
+  onDocRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   onGenerateProxies: (srcRels?: string[]) => Promise<void>;
   onImportAudio: () => Promise<{ rel: string; name: string; durationSec: number | null } | null>;
   onSaveAsReference: (shotId: string, rel: string) => void;
@@ -180,6 +199,12 @@ function TimelineSection({
   // Loop In/Out region: marked in the editor (I/O keys + Loop
   // toggle), honored by the preview transport above.
   const [loopRegion, setLoopRegion] = useState<TimelineLoopRegion>(EMPTY_LOOP_REGION);
+  // Playhead is view state (never in history): after an undo shortens
+  // the timeline, clamp it back inside the restored document.
+  const timelineTotal = production.timeline ? timelineTotalSec(production.timeline) : 0;
+  useEffect(() => {
+    setPlayheadSec((s) => Math.min(s, timelineTotal));
+  }, [timelineTotal]);
   const seek = useCallback((sec: number) => {
     setPlaying(false);
     setPlayheadSec(sec);
@@ -200,6 +225,10 @@ function TimelineSection({
         prodId={prodId}
         production={production}
         onTimelineChange={onTimelineChange}
+        onDocUndo={onDocUndo}
+        onDocRedo={onDocRedo}
+        canUndo={canUndo}
+        canRedo={canRedo}
         proxyBySrc={proxyBySrc}
         onGenerateProxies={onGenerateProxies}
         onImportAudio={onImportAudio}
@@ -224,6 +253,14 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 }) {
   const [list, setList] = useState<ProductionMeta[]>([]);
   const [prod, setProd] = useState<Production | null>(null);
+  // App-wide undo (document-layer history in main): availability for the
+  // open production + a restore tick the node graph uses to re-apply
+  // live node positions after an undo/redo lands.
+  const [histState, setHistState] = useState<ProductionHistoryState>({ canUndo: false, canRedo: false, depth: 0 });
+  const [historyRestoreTick, setHistoryRestoreTick] = useState(0);
+  /** One-shot history meta for the next whole-document save (saveField
+   *  sets it; persistProduction consumes it synchronously). */
+  const pendingSaveMetaRef = useRef<HistoryCommitMeta | undefined>(undefined);
   const [log, setLog] = useState<LogLine[]>([]);
   const videoAttemptsRef = useRef(new Map<string, VideoAttempt>());
   const [busy, setBusy] = useState(false);
@@ -310,6 +347,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // step 1: Script panel uniform zoom (%) — the bottom "Script zoom" slider,
   // same fixed bar as Steps 2/3 (UI-only, like frameZoom).
   const [scriptZoom, setScriptZoom] = useState(100);
+  // Ctrl+wheel over the Script / Storyboard panels steps those panels' own
+  // zoom sliders (same ranges as their bottom bars); anywhere else the
+  // gesture falls through to the whole-page zoom.
+  const scriptZoomPanelRef = useCtrlWheelZoom<HTMLElement>((f) => setScriptZoom((z) => zoomedSliderValue(z, f, 80, 180)));
+  const frameZoomPanelRef = useCtrlWheelZoom<HTMLDivElement>((f) => setFrameZoom((z) => zoomedSliderValue(z, f, 180, 440)));
   const [boardsBusy, setBoardsBusy] = useState(false);
   // Step 3: whether the Audio/Visual direction boxes render under each frame.
   const [showBoardText, setShowBoardText] = useState(true);
@@ -498,6 +540,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
   // the focus.
   const promptShotIdRef = useRef<string | null>(null);
   promptShotIdRef.current = promptShotId;
+  const seqCanvasIdRef = useRef<string | null>(null);
+  seqCanvasIdRef.current = seqCanvasId;
+  const detachedWindowRef = useRef(detachedWindow);
+  detachedWindowRef.current = detachedWindow;
   const graphShotIdRef = useRef<string | null>(null);
   graphShotIdRef.current = graphShotId;
   /** Newest Production.rev applied so far. Whole-object IPC snapshots with an
@@ -797,6 +843,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     void primeMediaDefaults().then(() => setMediaDefaultsReady(true));
     void primeModelParamDefaults();
     void primePromptTemplates();
+    void primePromptSnippets();
   }, []);
 
   // The Step-3 image dropdown starts at the user's last chosen model: a
@@ -1129,11 +1176,104 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** `window.cascade.saveProduction` + revision adoption (above). Every
    *  whole-document save in this workspace goes through here. */
-  const persistProduction = useCallback(async (next: Production): Promise<Production> => {
-    const saved = await window.cascade.saveProduction(next);
+  const persistProduction = useCallback(async (next: Production, meta?: HistoryCommitMeta): Promise<Production> => {
+    const effectiveMeta = meta ?? pendingSaveMetaRef.current;
+    pendingSaveMetaRef.current = undefined;
+    const saved = await window.cascade.saveProduction(next, effectiveMeta);
     if (saved) adoptSavedRev(saved);
     return saved ?? next;
   }, [adoptSavedRev]);
+
+  // ---- App-wide undo/redo (document-layer history in main) ----------
+  // Availability streams in from main (which owns the one history); the
+  // initial fetch covers opening a production with existing steps.
+  const activeProdIdForHistory = prod?.meta.id ?? "";
+  useEffect(() => {
+    if (!activeProdIdForHistory) {
+      setHistState({ canUndo: false, canRedo: false, depth: 0 });
+      return;
+    }
+    if (typeof window.cascade.productionHistoryState !== "function") return;
+    let live = true;
+    void window.cascade.productionHistoryState(activeProdIdForHistory)
+      .then((s) => { if (live && s) setHistState(s); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [activeProdIdForHistory]);
+  useEffect(() => {
+    if (typeof window.cascade.onHistoryChanged !== "function") return;
+    return window.cascade.onHistoryChanged((e) => {
+      if (e.productionId === prodRef.current?.meta.id) {
+        setHistState({ canUndo: e.canUndo, canRedo: e.canRedo, depth: e.depth });
+      }
+    });
+  }, []);
+
+  /** One document undo/redo step. View state (selection, viewport,
+   *  playhead) is untouched — only focus pointing at entities the
+   *  restore removed is clamped by the Fix C effect below. A pending
+   *  prompt save settles first so the restore can't cross it. */
+  const runDocHistory = useCallback(async (direction: "undo" | "redo"): Promise<void> => {
+    const current = prodRef.current;
+    if (!current) return;
+    const api = direction === "undo" ? window.cascade.undoProduction : window.cascade.redoProduction;
+    if (typeof api !== "function") return;
+    try {
+      await promptSaveQueue.current.catch(() => {});
+      const next = await api(current.meta.id);
+      if (!next) return;
+      // The restore may have removed the open sequence canvas' span.
+      if (seqCanvasIdRef.current && !(next.shotSequences ?? []).some((s) => s.id === seqCanvasIdRef.current)) {
+        setSeqCanvasId(null);
+      }
+      if (applySnapshot(next)) {
+        setHistoryRestoreTick((n) => n + 1);
+        void refreshList();
+      }
+    } catch (e) {
+      setErr(String(e).replace(/^Error:\s*/, ""));
+    }
+  }, [applySnapshot, refreshList]);
+  const doDocUndo = useCallback(() => { void runDocHistory("undo"); }, [runDocHistory]);
+  const doDocRedo = useCallback(() => { void runDocHistory("redo"); }, [runDocHistory]);
+  const doDocUndoRef = useRef(doDocUndo);
+  doDocUndoRef.current = doDocUndo;
+  const doDocRedoRef = useRef(doDocRedo);
+  doDocRedoRef.current = doDocRedo;
+
+  // Global shortcuts: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y drive the document
+  // history — except inside text fields, where the field's own editing
+  // undo owns the keys (prompt fields commit to the document on blur,
+  // which is when the document step is recorded). While the detached
+  // canvas hosts this production, the main window stands down: the
+  // detached window's workspace owns editing (and these shortcuts).
+  useEffect(() => {
+    if (!activeProdIdForHistory) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.isComposing || e.defaultPrevented) return;
+      if (isEditingTarget(e.target)) return;
+      if (!detached && detachedWindowRef.current?.open) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) { e.preventDefault(); doDocUndoRef.current(); }
+      else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); doDocRedoRef.current(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeProdIdForHistory, detached]);
+
+  // Edit-menu Undo/Redo: committing the focused field first (blur =
+  // the Bug #18 commit boundary) makes the step being undone the one
+  // the user just finished, never a half-typed draft.
+  useEffect(() => {
+    if (typeof window.cascade.onUndoRequest !== "function") return;
+    const commitFocusedField = (): void => {
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && isEditingTarget(ae) && typeof ae.blur === "function") ae.blur();
+    };
+    const offUndo = window.cascade.onUndoRequest(() => { commitFocusedField(); doDocUndoRef.current(); });
+    const offRedo = window.cascade.onRedoRequest(() => { commitFocusedField(); doDocRedoRef.current(); });
+    return () => { offUndo(); offRedo(); };
+  }, []);
 
   // Dangling-focus cleanup (Fix C): whenever the production's shot set changes,
   // clear sidebar/graph focus that points at a shot id no longer present and
@@ -1150,6 +1290,13 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
     if (graphShotId && !ids.has(graphShotId)) setGraphShotId(null);
     if (boardZoomId && !ids.has(boardZoomId)) setBoardZoomId(null);
+    // Selection is view state: an undo never restores it, but ids the
+    // restore removed are clamped out so range math stays honest.
+    setSeqSelection((prev) => {
+      if (![...prev].some((id) => !ids.has(id))) return prev;
+      if (seqAnchorRef.current && !ids.has(seqAnchorRef.current)) seqAnchorRef.current = null;
+      return new Set([...prev].filter((id) => ids.has(id)));
+    });
     for (const k of Object.keys(promptCacheRef.current)) {
       if (!ids.has(k)) delete promptCacheRef.current[k];
     }
@@ -1350,7 +1497,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     void persistProduction(next).then(() => refreshList()).catch(() => {});
   }
 
-  function saveField(patch: Partial<Production>) {
+  function saveField(patch: Partial<Production>, meta?: HistoryCommitMeta) {
+    if (meta !== undefined) pendingSaveMetaRef.current = meta;
     const current = prodRef.current;
     if (!current) return;
     const next = { ...current, ...patch };
@@ -1587,10 +1735,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     // The Uncategorized group ("") has no category record: its size lives
     // on the production itself (`uncategorizedTileSize`).
     if (!id) {
-      saveField({ uncategorizedTileSize: refTileSize({ tileSize: size }) });
+      saveField({ uncategorizedTileSize: refTileSize({ tileSize: size }) }, { coalesceKey: `tilesize:${id}`, coalesceMs: 800 });
       return;
     }
-    saveField({ referenceCategories: applyCategoryTileSize(current.referenceCategories ?? [], id, size) });
+    saveField({ referenceCategories: applyCategoryTileSize(current.referenceCategories ?? [], id, size) }, { coalesceKey: `tilesize:${id}`, coalesceMs: 800 });
   }
 
   function setRefPurpose(id: string, purpose: CustomRef["purpose"]) {
@@ -2641,14 +2789,20 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  The returned production is merged into renderer state immediately —
    *  otherwise the next saveField would write the stale pre-edit prompt back
    *  and silently revert the manual edit (and its refresh button). */
-  async function saveShotPrompt(shotId: string, prompt: string) {
+  /** Shots with an open prompt-edit gesture (Item 2: one undo step per
+   *  committed edit — live saves coalesce under the shot's key until the
+   *  field blur / frame switch ends the gesture). */
+  const promptGestureOpenRef = useRef(new Set<string>());
+
+  async function saveShotPrompt(shotId: string, prompt: string, endGesture = false) {
+    if (!endGesture) promptGestureOpenRef.current.add(shotId);
     if (!prod) return;
     latestPromptRef.current[shotId] = prompt;
     promptSaveQueue.current = promptSaveQueue.current.then(async () => {
       const latest = latestPromptRef.current[shotId];
       if (latest !== prompt) return;
       try {
-        const next = await window.cascade.updateBoardPrompt(prod.meta.id, shotId, prompt);
+        const next = await window.cascade.updateBoardPrompt(prod.meta.id, shotId, prompt, { coalesceKey: `prompt:${shotId}`, coalesceMs: 600000, ...(endGesture ? { coalesceEnd: true } : {}) });
         if (latestPromptRef.current[shotId] === prompt) applySnapshot(next);
       } catch (e) {
         setErr(String(e).replace(/^Error:\s*/, ""));
@@ -2656,6 +2810,34 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     });
     await promptSaveQueue.current;
   }
+
+  /** Close a shot's prompt-edit gesture (field blur / frame switch):
+   *  one final coalesceEnd save so the whole edit is exactly one undo
+   *  step. No-op when nothing was typed — a bare focus/blur must never
+   *  write (it would flip promptManual and mint a spurious step). */
+  function endPromptGesture(shotId: string | null) {
+    if (!shotId || !promptGestureOpenRef.current.has(shotId)) return;
+    promptGestureOpenRef.current.delete(shotId);
+    const latest = latestPromptRef.current[shotId] ?? promptCacheRef.current[shotId];
+    if (latest !== undefined) void saveShotPrompt(shotId, latest, true);
+  }
+
+  // Switching frames ends the previous frame's prompt gesture even when
+  // focus never blurred (keyboard navigation between frames).
+  const prevPromptShotIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevPromptShotIdRef.current;
+    prevPromptShotIdRef.current = promptShotId;
+    if (prev && prev !== promptShotId) endPromptGesture(prev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promptShotId]);
+  const prevGraphShotIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevGraphShotIdRef.current;
+    prevGraphShotIdRef.current = graphShotId;
+    if (prev && prev !== graphShotId) endPromptGesture(prev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graphShotId]);
 
   /** Queue panel: "Shot 0100 \u00B7 node vid1" style description of a job's target. */
   function describeJobTarget(job: JobRecord): string {
@@ -2870,7 +3052,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** Step 3 node graph: merge shot-level graph fields (video prompt text,
    *  cycle index, pipes). */
-  function saveGraphShotFields(shotId: string, patch: Partial<ProductionShot>) {
+  function saveGraphShotFields(shotId: string, patch: Partial<ProductionShot>, meta?: HistoryCommitMeta) {
     const current = prodRef.current;
     if (!current) return;
     // Narrow command (Step 2): only allow-listed graph fields travel; main
@@ -2885,7 +3067,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     };
     prodRef.current = next;
     setProd(next);
-    void window.cascade.updateGraphShotFields(current.meta.id, shotId, allowed)
+    void window.cascade.updateGraphShotFields(current.meta.id, shotId, allowed, meta)
       .then((merged) => { applySnapshot(merged); })
       .catch(() => {
         void window.cascade.loadProduction(current.meta.id)
@@ -3498,7 +3680,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  the render closure) — a graph mutation (adding an edit node) saves its
    *  shot fields just before the layout save, and a stale `prod` here would
    *  clobber the new node. */
-  async function saveGraphLayout(shotId: string, layout: GraphLayoutPatch) {
+  async function saveGraphLayout(shotId: string, layout: GraphLayoutPatch, meta?: HistoryCommitMeta) {
     const current = prodRef.current;
     if (!current) return;
     const next = {
@@ -3511,7 +3693,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     prodRef.current = next;
     setProd(next);
     try {
-      const merged = await window.cascade.updateGraphLayout(current.meta.id, shotId, layout);
+      const merged = await window.cascade.updateGraphLayout(current.meta.id, shotId, layout, meta);
       // A viewport-only save whose round-trip brought no news (nothing else
       // moved main-side meanwhile) adopts just the stamped rev: wholesale-
       // applying the snapshot would bust every shot/prod identity and
@@ -3800,7 +3982,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
    *  other with stale copies, exactly like `saveGraphShotFields` for shots. */
   function updateSequenceGraph(
     sequenceId: string,
-    patch: Partial<ProductionShot> | ((graph: ProductionShot) => Partial<ProductionShot>)
+    patch: Partial<ProductionShot> | ((graph: ProductionShot) => Partial<ProductionShot>),
+    meta?: HistoryCommitMeta
   ) {
     const current = prodRef.current;
     if (!current) return;
@@ -3808,6 +3991,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       shotSequences: (current.shotSequences ?? []).map((s) => {
         if (s.id !== sequenceId) return s;
         const g = s.graph ?? { id: s.id, number: s.name, audio: "", visual: "" };
+        pendingSaveMetaRef.current = meta;
         const p = typeof patch === "function" ? patch(g) : patch;
         return { ...s, graph: { ...g, ...p, id: s.id, number: s.name } };
       }),
@@ -4185,6 +4369,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   return (
     <div className={"prod-workspace" + (detached ? " prod-workspace--detached" : "")}>
+      <SnippetsShelfHost />
       <header className="prod-header">
         <input
           className="prod-name"
@@ -4196,6 +4381,10 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
         />
         <span className="prod-folder" title={prod.meta.folder}>{prod.meta.folder}</span>
         <span className="prod-shotcount">{shotCount} shots</span>
+        <span className="prod-history-btns">
+          <button className="prod-btn" onClick={doDocUndo} disabled={!histState.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">Undo</button>
+          <button className="prod-btn" onClick={doDocRedo} disabled={!histState.canRedo} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">Redo</button>
+        </span>
         {(() => {
           const busy = queueBtn.active > 0;
           const showBar = busy || queueBtn.justDone;
@@ -4289,7 +4478,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             <MoodboardCanvas
               prod={prod}
               initialLayout={prod.moodboard}
-              onLayoutChange={(moodboard) => saveField({ moodboard })}
+              onLayoutChange={(moodboard) => saveField({ moodboard }, { coalesceKey: "moodboard", coalesceMs: 1200 })}
               onAddReference={addMoodboardReference}
               onAddFiles={addMoodboardFiles}
               onRename={(id, name) => void updateRef(id, name)}
@@ -4314,7 +4503,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
           <>
         {prod.currentStep === 1 && (
           <>
-          <section className="prod-panel prod-script-panel" style={{ "--script-zoom": `${scriptZoom / 100}` } as React.CSSProperties}>
+          <section ref={scriptZoomPanelRef} className="prod-panel prod-script-panel" style={{ "--script-zoom": `${scriptZoom / 100}` } as React.CSSProperties}>
             <h3>1 · Script ingestion</h3>
             <div className="prod-ingest">
               <button disabled={busy} title="Pick a script file — PDF · DOCX · TXT · MD (legacy .doc must be re-saved as .docx)" onClick={async () => { const f = await window.cascade.pickScriptFile(); if (f) setSource(f); }}>
@@ -4832,7 +5021,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
             {err && <ErrorNotice message={err} onClear={() => setErr(null)} />}
             {refWarning && <div className="hint" role="status">⚠ {refWarning}</div>}
             {shotCount > 0 && (
-              <div className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
+              <div ref={frameZoomPanelRef} className="prod-storyboard-layout" style={{ "--frame-min-width": `${frameZoom}px` } as React.CSSProperties}>
               <div
                 className="prod-boards-grid"
                 ref={boardsGridRef}
@@ -4956,6 +5145,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                 styleValue={focusedShot ? shotStyleSelectValue(focusedShot, prod) : ""}
                 references={promptShotId ? promptRefsForShot(prod, promptShotId) : []}
                 onChange={(value) => { setPromptForShot(promptShotId, value); if (promptShotId) { promptCacheRef.current[promptShotId] = value; void saveShotPrompt(promptShotId, value); } }}
+                onBlur={() => endPromptGesture(promptShotId)}
                 onToggleBrand={(include) => { if (promptShotId) void setBrandForShot(promptShotId, include); }}
                 onStyleChange={(style) => { if (promptShotId) void updateShotStyle(promptShotId, style); }}
                   onSubmit={() => { if (promptShotId) void regenBoard(promptShotId); }}
@@ -5044,7 +5234,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onEditNodePrompt={(nodeId, text) => { if (graphShotId) setEditNodePrompt(graphShotId, nodeId, text); }}
                   onRenameRef={(id, name) => void updateRef(id, name)}
                   onWaveformColorRef={(id, colorId) => setRefWaveformColor(id, colorId)}
-                  onGraphField={(patch) => { if (graphShotId) saveGraphShotFields(graphShotId, patch); }}
+                  onGraphField={(patch, meta) => { if (graphShotId) saveGraphShotFields(graphShotId, patch, meta); }}
+                  onDocUndo={doDocUndo}
+                  onDocRedo={doDocRedo}
+                  canUndo={histState.canUndo}
+                  canRedo={histState.canRedo}
+                  historyRestoreTick={historyRestoreTick}
                   onPipeImageToVideo={(nodeId) => { if (graphShotId) pipeImageToVideo(graphShotId, nodeId); }}
                   onPipeEditToVideo={(nodeId, sourceNodeId) => { if (graphShotId) pipeEditToVideo(graphShotId, nodeId, sourceNodeId); }}
                   onPipeRefToVideo={(nodeId, refId) => { if (graphShotId) pipeRefToVideo(graphShotId, nodeId, refId); }}
@@ -5060,7 +5255,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   onUnpipeTweenGen={() => { if (graphShotId) unpipeTweenGen(graphShotId); }}
                   onUnpipeEditGen={(nodeId) => { if (graphShotId) unpipeEditGen(graphShotId, nodeId); }}
                   onUnpipeOutput={() => { if (graphShotId) unpipeOutput(graphShotId); }}
-                   onSaveLayout={(layout) => { if (graphShotId) saveGraphLayout(graphShotId, layout); }}
+                   onSaveLayout={(layout, meta) => { if (graphShotId) saveGraphLayout(graphShotId, layout, meta); }}
                    readOnly={!detached && detachedWindow?.open === true && detachedWindow.target === "graph"}
                    onDetach={detached ? undefined : detachGraph}
                    onClose={() => { if (detached) { void window.cascade.closeDetachedCanvas(); } else { setGraphShotId(null); } }}
@@ -5082,7 +5277,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   readOnly={!detached && detachedWindow?.open === true && detachedWindow.target === "sequence"}
                   framePromptFor={(shotId) => window.cascade.getBoardPrompt(prod.meta.id, shotId).then((t) => t ?? "")}
                   onClose={() => { setSeqCanvasId(null); }}
-                  onGraphField={(patch) => updateSequenceGraph(seqCanvasId, patch)}
+                  onGraphField={(patch, meta) => updateSequenceGraph(seqCanvasId, patch, meta)}
+                  onDocUndo={doDocUndo}
+                  onDocRedo={doDocRedo}
+                  canUndo={histState.canUndo}
+                  canRedo={histState.canRedo}
+                  historyRestoreTick={historyRestoreTick}
                   onGenerate={(opts) => runSequenceVideoGen(seqCanvasId, opts)}
                   onGenerateEditVideo={(opts) => runSequenceEditVideoGen(seqCanvasId, opts)}
                   onDropFile={(file) => addFileReference(seq.shotIds[0] ?? seq.id, file)}
@@ -5176,7 +5376,11 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                       timelineOverride={timelineOverride}
                       onImportAudio={importTimelineAudioFile}
                       proxyBySrc={proxyBySrc}
-                      onTimelineChange={(timeline) => saveField({ timeline })}
+                      onTimelineChange={(timeline, meta) => saveField({ timeline }, meta)}
+                      onDocUndo={doDocUndo}
+                      onDocRedo={doDocRedo}
+                      canUndo={histState.canUndo}
+                      canRedo={histState.canRedo}
                       onGenerateProxies={async (rels) => {
                         await window.cascade.generateProxies(prod.meta.id, rels);
                         await refreshProxies(prod.meta.id);

@@ -30,6 +30,37 @@ function checkOptionalPathString(v: unknown, what: string, max = 4096): string |
   return checkPathString(v, what, max);
 }
 
+/** An optional undo-history commit hint (Item 2 granularity): a small
+ *  flat object — a short coalesce key, an optional merge window, and
+ *  boolean flags. Anything else is rejected so a buggy renderer cannot
+ *  smuggle arbitrary payloads through the trailing meta argument. */
+function checkOptionalHistoryMeta(v: unknown): void {
+  if (v === null || v === undefined) return;
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    throw new Error("IPC validation: history meta must be an object");
+  }
+  const m = v as Record<string, unknown>;
+  for (const k of Object.keys(m)) {
+    if (!["coalesceKey", "coalesceMs", "coalesceEnd", "forceStep", "suppress"].includes(k)) {
+      throw new Error(`IPC validation: history meta field not allowed: ${k}`);
+    }
+  }
+  if (m.coalesceKey !== undefined && (typeof m.coalesceKey !== "string" || m.coalesceKey.length === 0 || m.coalesceKey.length > 128)) {
+    throw new Error("IPC validation: history meta coalesceKey must be a string of 1..128 chars");
+  }
+  if (m.coalesceMs !== undefined && (typeof m.coalesceMs !== "number" || !Number.isFinite(m.coalesceMs) || m.coalesceMs < 0 || m.coalesceMs > 3600000)) {
+    throw new Error("IPC validation: history meta coalesceMs must be a finite number in 0..3600000");
+  }
+  for (const k of ["coalesceEnd", "forceStep", "suppress"] as const) {
+    if (m[k] !== undefined && typeof m[k] !== "boolean") {
+      throw new Error(`IPC validation: history meta ${k} must be a boolean`);
+    }
+  }
+  // `suppress` is main-internal (a restore write); a renderer asking for
+  // it would silently punch a hole in history — reject it at the border.
+  if (m.suppress === true) throw new Error("IPC validation: history meta suppress is not renderer-settable");
+}
+
 /** An optional caller-supplied base revision for structural commands. */
 function checkOptionalRev(v: unknown): void {
   if (v === null || v === undefined) return;
@@ -71,6 +102,30 @@ const validators: Record<string, (args: unknown[]) => void> = {
       }
       if (typeof value !== "string" || value.length > 20000) {
         throw new Error("IPC validation: prompt template value must be a string (max 20000 chars)");
+      }
+    }
+  },
+  "settings:setPromptSnippets": (args) => {
+    const list = args[0];
+    if (!Array.isArray(list) || list.length > 500) {
+      throw new Error("IPC validation: prompt snippets must be an array (max 500)");
+    }
+    for (const entry of list) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error("IPC validation: prompt snippet must be an object");
+      }
+      const e = entry as Record<string, unknown>;
+      if (typeof e.id !== "string" || e.id.length === 0 || e.id.length > 64) {
+        throw new Error("IPC validation: prompt snippet id must be 1..64 chars");
+      }
+      if (typeof e.name !== "string" || e.name.length === 0 || e.name.length > 120) {
+        throw new Error("IPC validation: prompt snippet name must be 1..120 chars");
+      }
+      if (typeof e.category !== "string" || e.category.length > 80) {
+        throw new Error("IPC validation: prompt snippet category must be a string (max 80 chars)");
+      }
+      if (typeof e.body !== "string" || e.body.length === 0 || e.body.length > 20000) {
+        throw new Error("IPC validation: prompt snippet body must be 1..20000 chars");
       }
     }
   },
@@ -206,6 +261,7 @@ const validators: Record<string, (args: unknown[]) => void> = {
         throw new Error("IPC validation: updateGraphLayout remove must be a string array");
       }
     }
+    checkOptionalHistoryMeta(args[3]);
   },
   "production:updateGraphShotFields": (args) => {
     checkPathString(args[0], "productionId");
@@ -219,6 +275,7 @@ const validators: Record<string, (args: unknown[]) => void> = {
         throw new Error("IPC validation: updateGraphShotFields field not allowed: " + key);
       }
     }
+    checkOptionalHistoryMeta(args[3]);
   },
 
   "production:import": (args) => {
@@ -302,6 +359,31 @@ const validators: Record<string, (args: unknown[]) => void> = {
     checkPathString(args[1], "sequenceId", 256);
     checkOptionalRev(args[2]);
   },
+  "production:deleteScene": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    if (typeof args[1] !== "number" || !Number.isInteger(args[1]) || (args[1] as number) < 1) {
+      throw new Error("IPC validation: deleteScene sceneNumber must be a positive integer");
+    }
+    checkOptionalRev(args[2]);
+  },
+  "production:undo": (args) => {
+    checkPathString(args[0], "productionId", 256);
+  },
+  "production:redo": (args) => {
+    checkPathString(args[0], "productionId", 256);
+  },
+  "production:historyState": (args) => {
+    checkPathString(args[0], "productionId", 256);
+  },
+  "production:renameScene": (args) => {
+    checkPathString(args[0], "productionId", 256);
+    if (typeof args[1] !== "number" || !Number.isInteger(args[1]) || (args[1] as number) < 1) {
+      throw new Error("IPC validation: renameScene sceneNumber must be a positive integer");
+    }
+    if (typeof args[2] !== "string" || !(args[2] as string).trim() || (args[2] as string).length > 256) {
+      throw new Error("IPC validation: renameScene title must be a non-empty string of at most 256 chars");
+    }
+  },
   "production:insertShot": (args) => {
     checkPathString(args[0], "productionId", 256);
     if (args[3] !== undefined && (typeof args[3] !== "string" || (args[3] as string).length > 256)) {
@@ -333,6 +415,12 @@ const validators: Record<string, (args: unknown[]) => void> = {
     }
     if (o.frameId !== null && o.frameId !== undefined && typeof o.frameId !== "string") {
       throw new Error("IPC validation: detached canvas frameId must be a string or null");
+    }
+  },
+  // Panel-aware Ctrl+wheel page zoom: one finite level delta per wheel event.
+  "window:zoomPageBy": (args) => {
+    if (typeof args[0] !== "number" || !Number.isFinite(args[0])) {
+      throw new Error("IPC validation: window:zoomPageBy levelDelta must be a finite number");
     }
   },
   "canvas:selectionChanged": (args) => {
@@ -410,3 +498,4 @@ export function validateIpcArgs(channel: string, args: unknown[]): void {
   for (const a of args) checkNoNul(a);
   validators[channel]?.(args);
 }
+

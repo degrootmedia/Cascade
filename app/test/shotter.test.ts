@@ -12,6 +12,7 @@ import {
   insertScene,
   insertShotAt,
   nextNumber,
+  renameScene,
   removeShotById,
   reorderShot,
   renumber,
@@ -73,6 +74,34 @@ describe("insertScene", () => {
 
   it("throws when the anchor scene does not exist", () => {
     expect(() => insertScene([scene(1, ["0100"])], 7)).toThrow(/Scene 7 not found/);
+  });
+});
+
+describe("renameScene", () => {
+  it("renames the named scene and trims the title", () => {
+    const scenes = [scene(1, ["0100"]), scene(2, ["0200"])];
+    const renamed = renameScene(scenes, 2, "  Rooftop chase  ");
+    expect(renamed.title).toBe("Rooftop chase");
+    expect(scenes.map((s) => s.title)).toEqual(["Scene 1", "Rooftop chase"]);
+  });
+
+  it("leaves scene ordinals, shots, and shot numbers untouched", () => {
+    const scenes = [scene(1, ["0100", "0200"]), scene(2, ["0300"])];
+    renameScene(scenes, 1, "Opening");
+    expect(scenes.map((s) => s.number)).toEqual([1, 2]);
+    expect(scenes.flatMap((s) => s.shots.map((x) => x.number))).toEqual(["0100", "0200", "0300"]);
+    expect(validate(scenes)).toEqual([]);
+  });
+
+  it("throws when the scene does not exist", () => {
+    expect(() => renameScene([scene(1, ["0100"])], 7, "Nope")).toThrow(/Scene 7 not found/);
+  });
+
+  it("rejects an empty or blank title without changing the scene", () => {
+    const scenes = [scene(1, ["0100"])];
+    expect(() => renameScene(scenes, 1, "")).toThrow(/empty/);
+    expect(() => renameScene(scenes, 1, "   ")).toThrow(/empty/);
+    expect(scenes[0].title).toBe("Scene 1");
   });
 });
 

@@ -26,6 +26,15 @@ describe("validateIpcArgs", () => {
     expect(() => validateIpcArgs("production:create", ["", "C:\\x"])).toThrow();
     expect(() => validateIpcArgs("production:create", ["name", 42])).toThrow();
   });
+  it("validates production:renameScene payloads", () => {
+    expect(() => validateIpcArgs("production:renameScene", ["p1", 2, "Rooftop chase"])).not.toThrow();
+    expect(() => validateIpcArgs("production:renameScene", ["p1", "2", "Rooftop chase"])).toThrow(/sceneNumber/);
+    expect(() => validateIpcArgs("production:renameScene", ["p1", 0, "Rooftop chase"])).toThrow(/sceneNumber/);
+    expect(() => validateIpcArgs("production:renameScene", ["p1", 2, ""])).toThrow(/title/);
+    expect(() => validateIpcArgs("production:renameScene", ["p1", 2, 42])).toThrow(/title/);
+    expect(() => validateIpcArgs("production:renameScene", ["p1", 2, "x".repeat(257)])).toThrow(/title/);
+    expect(ipcContract["production:renameScene"]).toEqual({ method: "renameScene", kind: "invoke" });
+  });
   it("validates cameraGrid:importGridImage source payloads", () => {
     expect(() => validateIpcArgs("cameraGrid:importGridImage", ["p1", "s1", { kind: "ref", refId: "r1" }])).not.toThrow();
     expect(() => validateIpcArgs("cameraGrid:importGridImage", ["p1", "s1", { kind: "editgen" }])).toThrow();

@@ -15,6 +15,7 @@ import { rememberMediaDefault } from "../../components/production/media-defaults
 import { cascadeMedia } from "../../components/production/animatic.js";
 import { refThumbUrl } from "../../components/production/thumb-url.js";
 import { MagnifyIcon } from "../../components/icons.js";
+import { SnippetsButton } from "../../components/snippets/SnippetsShelf.js";
 import { MediaLightbox } from "../../components/common/MediaLightbox.js";
 import { GenerationCostSuffix } from "../../components/production/generation-cost-label.js";
 import { costAspect, isQuotableCostModel } from "../../components/production/generation-cost.js";
@@ -119,6 +120,7 @@ export function SuitePromptPanel({
 
   return (
     <section className="suite-prompt" aria-label="Suite controls">
+      <div className="suite-prompt-snippets-row"><SnippetsButton /></div>
       <div className="suite-prompt-tabs">
         {(["generate", "edit", "upscale"] as const).map((m) => {
           const disabled = m === "upscale" && upscaleUnavailable;

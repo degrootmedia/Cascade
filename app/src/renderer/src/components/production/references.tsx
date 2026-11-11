@@ -23,6 +23,7 @@ import { ModelOptionsForm, pruneModelOptionValues, type ModelOptionValues } from
 import { ImageGenForm } from "./ImageGenForm.js";
 import { OpenInSuiteButton } from "../common/OpenInSuiteButton.js";
 import { MediaLightbox } from "../common/MediaLightbox.js";
+import { useCtrlWheelZoom, zoomedSliderValue } from "../common/ctrl-wheel-zoom.js";
 import { genQueue, genKeys, genButtonLabel, useGenStatus } from "./gen-queue.js";
 
 interface RefItem {
@@ -494,11 +495,22 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prodId}.refcat.${category.id || "uncategorized"}`);
   const open = !collapsed;
   const tileSize = refTileSize(category);
+  // Ctrl+wheel over the panel steps this category's own "Reference size"
+  // slider (same range, same persist path); the ref mirror lets a fast
+  // wheel burst accumulate before the saved tileSize prop comes back.
+  const tileSizeRef = useRef(tileSize);
+  tileSizeRef.current = tileSize;
+  const panelZoomRef = useCtrlWheelZoom<HTMLElement>(onSetCategoryTileSize ? (factor) => {
+    const next = zoomedSliderValue(tileSizeRef.current, factor, REF_TILE_MIN, REF_TILE_MAX);
+    if (next === tileSizeRef.current) return;
+    tileSizeRef.current = next;
+    onSetCategoryTileSize(category.id, next);
+  } : null);
   // The panel's item order is the axis a Shift range selects along.
   const order = useMemo(() => items.map((r) => r.id), [items]);
   const handleSelect = useCallback((id: string, mode: "single" | "toggle" | "range") => onSelect(id, mode, order), [onSelect, order]);
   return (
-    <section className="prod-category" onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); }} onDragLeave={(e) => e.currentTarget.classList.remove("dragover")} onDrop={(e) => {
+    <section ref={panelZoomRef} className="prod-category" onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); }} onDragLeave={(e) => e.currentTarget.classList.remove("dragover")} onDrop={(e) => {
       e.preventDefault(); e.currentTarget.classList.remove("dragover");
       const ids = refDragIds(e.dataTransfer);
       if (ids.length) { onMove(ids, category.id || undefined); return; }

@@ -56,6 +56,21 @@ export interface CanvasBusySnapshot {
 
 /** Validate + sanitize an untrusted busy snapshot (main-side IPC boundary).
  *  Throws on a malformed shape so the generic IPC guard rejects it. */
+/** Page-zoom level bounds (Electron `webContents` zoom level, where the
+ *  factor is 1.2^level). The Ctrl+= / Ctrl+- / Ctrl+0 shortcuts and the
+ *  panel-aware Ctrl+wheel page zoom share this one range. */
+export const PAGE_ZOOM_LEVEL_MIN = -5;
+export const PAGE_ZOOM_LEVEL_MAX = 5;
+
+/** The page-zoom level after stepping by `delta`, clamped to the shared
+ *  range. A non-finite input leaves the (clamped) current level alone, so
+ *  a malformed wheel payload can never push a window to a wild zoom. */
+export function nextPageZoomLevel(current: number, delta: number): number {
+  const clamp = (v: number) => Math.min(PAGE_ZOOM_LEVEL_MAX, Math.max(PAGE_ZOOM_LEVEL_MIN, v));
+  const base = Number.isFinite(current) ? clamp(current) : 0;
+  return Number.isFinite(delta) ? clamp(base + delta) : base;
+}
+
 export function normalizeCanvasBusy(value: unknown): CanvasBusySnapshot {
   if (!value || typeof value !== "object") throw new Error("canvas busy: snapshot must be an object");
   const o = value as Record<string, unknown>;

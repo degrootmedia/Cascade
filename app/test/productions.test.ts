@@ -27,7 +27,8 @@ vi.mock("../src/main/scripting.js", () => ({
 
 import { applyRendererState, applyMagicPromptDelta, assertFreshRevision, importProduction, loadProduction, saveProduction, unclaimedReferenceFiles, referenceThumbnailPaths, generationVideoThumbnailPaths, generationImageThumbnailPaths, resetProductionLoadCacheForTests } from "../src/main/productions.js";
 import type { ProductionFile } from "../src/main/productions.js";
-import { recordBoardEdit, recordGraphEditGen, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
+import { recordBoardEdit, recordGraphEditGen, scriptMarkdown, selectBoardFrame, syncBoardOutputToPipe } from "../src/main/pipeline.js";
+import { renameScene } from "../src/main/shotter.js";
 import { assemblyPlan } from "../src/main/assembly.js";
 import { boardFrameHistory } from "../src/shared/board-frames.js";
 import { mediaEntryForPath } from "../src/shared/media-registry.js";
@@ -1020,6 +1021,28 @@ describe("board frame selection persistence", () => {
     expect(boardFrameHistory(incoming.scenes[0].shots[0])).toEqual([
       "boards/0100/edit-1.jpg", "boards/0100/image-0.jpg", "boards/0100/image-1.jpg",
     ]);
+  });
+});
+
+describe("scene rename persistence", () => {
+  it("persists a renamed scene title through save/reopen and into script.md", () => {
+    const doc = baseProduction({
+      meta: { ...baseProduction().meta, id: "scene-rename-roundtrip", folder: path.join(dataDir, "assets") },
+      scenes: [
+        { number: 1, title: "Opening", shots: [{ id: "s1", number: "0100", audio: "line", visual: "v" }] },
+        { number: 2, title: "Chase", shots: [{ id: "s2", number: "0200", audio: "", visual: "" }] },
+      ],
+    });
+    // The handler path: load -> shotter.renameScene -> saveProduction.
+    renameScene(doc.scenes, 2, "Rooftop chase");
+    saveProduction(doc as unknown as ProductionFile);
+    const loaded = loadProduction("scene-rename-roundtrip")!;
+    expect(loaded.scenes.map((s) => s.title)).toEqual(["Opening", "Rooftop chase"]);
+    // The renamed heading is what script.md (rewritten by mutateShots on
+    // every structural edit) carries for the scene.
+    const md = scriptMarkdown(loaded.meta.name, loaded.scenes);
+    expect(md).toContain("## Scene 2 — Rooftop chase");
+    expect(md).toContain("## Scene 1 — Opening");
   });
 });
 

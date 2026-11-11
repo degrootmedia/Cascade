@@ -2768,10 +2768,48 @@ export function selectBoardFrame(shot: ProductionShot, rel: string): void {
   }
 }
 
+/** Board-frame original pairing: the originals-folder file sharing a
+ *  board JPEG's tag, or null when `jpegRel` isn't a board JPEG path. */
+function boardOriginalPrefix(p: Production, jpegRel: string): { originalsDir: string; prefix: string } | null {
+  const esc = p.assets.boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`^${esc}/(\\d{4})/shot-\\d{4}-([^/]+)\\.jpg$`, "i").exec(jpegRel);
+  if (!m) return null;
+  return { originalsDir: `${p.assets.boardsDir}/${m[1]}/originals`, prefix: `shot-${m[1]}-${m[2]}.` };
+}
+
+/** Undo-restore counterpart of the board-original trashing in
+ *  `deleteGeneration`: when a restored document re-registers a board
+ *  JPEG (and its bytes came back from the undo trash), put the archived
+ *  original sharing its tag back too. No-op otherwise. */
+export function restoreBoardOriginalFromTrash(p: Production, jpegRel: string): void {
+  const info = boardOriginalPrefix(p, jpegRel);
+  if (!info) return;
+  let names: string[];
+  try {
+    names = fs.readdirSync(assetPath(p, undoTrashDir(p)));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name.endsWith(".undo.json")) continue;
+    if (!name.startsWith(info.prefix) && !name.replace(/^\d+-/, "").startsWith(info.prefix)) continue;
+    // Resolve the sidecar's original path; only originals of THIS frame.
+    try {
+      const side = JSON.parse(fs.readFileSync(assetPath(p, `${undoTrashDir(p)}/${name}.undo.json`), "utf8")) as { original?: unknown };
+      if (typeof side.original === "string" && side.original.startsWith(`${info.originalsDir}/`)) {
+        mediaFiles.restoreTrashedFile(p, side.original, undoTrashDir(p));
+      }
+    } catch { /* no sidecar — not ours to move */ }
+  }
+}
+
 /** Delete a board frame's archived original when it shares the JPEG's tag.
  *  Strict (no legacy newest-file guess): a frame without a matching original
  *  leaves the originals folder alone rather than destroying another take. */
 function deleteBoardOriginal(p: Production, jpegRel: string): void {
+  // App-wide undo: the original goes to the undo trash alongside its
+  // JPEG instead of being unlinked, so undoing the take deletion can
+  // restore the pair (`restoreBoardOriginalFromTrash`).
   const esc = p.assets.boardsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const m = new RegExp(`^${esc}/(\\d{4})/shot-\\d{4}-([^/]+)\\.jpg$`, "i").exec(jpegRel);
   if (!m) return;
@@ -2785,7 +2823,7 @@ function deleteBoardOriginal(p: Production, jpegRel: string): void {
   }
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
-    try { fs.unlinkSync(assetPath(p, `${originalsDir}/${f}`)); } catch { /* already gone */ }
+    mediaFiles.trashFile(p, `${originalsDir}/${f}`, undoTrashDir(p));
   }
 }
 
@@ -2802,9 +2840,12 @@ export function deleteGeneration(p: Production, shot: ProductionShot, rel: strin
   const reason = generationInUse(shot, gen);
   if (reason) throw new Error(generationInUseMessage(reason));
   if (!removeGeneration(shot, gen)) throw new Error("That generation's owner no longer exists.");
-  // The one deletion path: unlink + the registry entry's terminal `deleted`
+  // The one deletion path: the file moves to the undo trash (registry
+  // still terminal-`deleted` at the original path) so a document undo
+  // that re-registers this take restores its bytes too. The trash is
+  // purged at session start, when no history can reach it any more.
   // state (dropped from the doc by the next normalize).
-  mediaFiles.removeFile(p, rel);
+  mediaFiles.trashFile(p, rel, undoTrashDir(p));
   deleteBoardOriginal(p, rel);
 }
 
@@ -2993,7 +3034,7 @@ export function deleteSequenceTake(p: Production, sequenceId: string, rel: strin
   if (!removed) throw new Error("That take no longer exists.");
   // Only files under the sequence's own folder are ours to unlink.
   if (rel.startsWith(sequenceVideoDir(p, seq))) {
-    try { fs.unlinkSync(assetPath(p, rel)); } catch { /* already gone */ }
+    mediaFiles.trashFile(p, rel, undoTrashDir(p)); // undo trash, not unlink — an undo restores the clip
   }
 }
 
@@ -3519,7 +3560,21 @@ export function rehomeJobFilesAfterRenumber(p: Production, shot: ProductionShot,
  *  text-only panel that never generated) is not an error: there is nothing to
  *  move and no paths to rewrite. Refuses to clobber an existing target folder.
  *  Returns true when files were moved. */
-function moveShotMediaDir(
+/** The undo trash: media files a document deletion unregistered,
+ *  kept (with original-path sidecars) until the session ends so an undo
+ *  that re-registers them can restore the bytes. Lives under boardsDir
+ *  next to the `outdated/` archive namespace. */
+export function undoTrashDir(p: Production): string {
+  return `${p.assets.boardsDir}/undo-trash`;
+}
+
+/** Where a permanently removed outdated panel's folder is parked so the
+ *  removal stays undoable for the session (see `removeOutdatedShot`). */
+export function outdatedRemovedDir(p: Production, shotId: string): string {
+  return `${p.assets.boardsDir}/outdated-removed/${shotId}`;
+}
+
+export function moveShotMediaDir(
   p: Production,
   shot: ProductionShot,
   fromDirRel: string,
@@ -3623,8 +3678,15 @@ export function restoreOutdatedShot(p: Production, shotId: string): ProductionSh
 }
 
 /**
- * Permanently drop one outdated panel: remove it from the bucket and delete its
- * relocated media folder (plus any stray referenced files outside it).
+ * Permanently drop one outdated panel: remove it from the bucket and park its
+ * media folder under `boards/outdated-removed/<id>/` (strays go to the undo
+ * trash). RECOVERABLE BY DESIGN (app-wide undo Item 3): this used to
+ * `rmSync` the folder, which destroyed exactly what an undo of the removal
+ * needs to restore. The parked folder is purged at session start, when no
+ * history entry can reach it any more — deletion is deferred, not faked.
+ * (The folder move rewrites the shot's stored paths through the shared
+ * remap; the pre-removal document snapshot in history keeps the original
+ * paths, and the restore moves the folder back to match them.)
  */
 export function removeOutdatedShot(p: Production, shotId: string): void {
   const list = p.outdatedShots ?? [];
@@ -3634,11 +3696,13 @@ export function removeOutdatedShot(p: Production, shotId: string): void {
   p.outdatedShots = list;
   const dirRel = `${p.assets.boardsDir}/outdated/${shot.id}`;
   try {
-    fs.rmSync(assetPath(p, dirRel), { recursive: true, force: true });
+    const parkedRel = outdatedRemovedDir(p, shot.id);
+    fs.rmSync(assetPath(p, parkedRel), { recursive: true, force: true }); // stale park from an earlier session
+    moveShotMediaDir(p, shot, dirRel, parkedRel, shot.number, shot.number);
   } catch { /* folder already gone */ }
   for (const rel of shotMediaRefs(shot)) {
-    if (rel.startsWith(`${dirRel}/`)) continue; // removed with the folder
-    mediaFiles.removeFile(p, rel);
+    if (rel.startsWith(`${dirRel}/`) || rel.startsWith(`${outdatedRemovedDir(p, shot.id)}/`)) continue; // parked with the folder
+    mediaFiles.trashFile(p, rel, undoTrashDir(p));
   }
 }
 
@@ -5374,7 +5438,7 @@ export function deleteReference(p: Production, refId: string, emit: EmitFn): Pro
   for (const rel of [ref.imagePath, ref.mediaPath]) {
     if (typeof rel !== "string" || !rel) continue;
     try {
-      fs.unlinkSync(assetPath(p, rel));
+      mediaFiles.trashFile(p, rel, undoTrashDir(p)); // undo-recoverable (session trash, not unlink)
     } catch {
       /* missing file is already gone */
     }

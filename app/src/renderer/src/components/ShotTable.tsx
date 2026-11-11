@@ -19,7 +19,7 @@ import { shotHasContent } from "../../../shared/ipc.js";
 import { revOf } from "../../../shared/snapshot-freshness.js";
 import { uid } from "./production/hex.js";
 import { AutoTextarea } from "./AutoTextarea.js";
-import { DragHandleIcon, PlusIcon, TrashIcon } from "./icons.js";
+import { DragHandleIcon, EditIcon, PlusIcon, TrashIcon } from "./icons.js";
 import { usePersistedCollapsed } from "./production/persisted-state.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 
@@ -208,14 +208,119 @@ function SceneBlock({ scene, prod, occupied, onMutation, onToggleDisabled, dragI
   const [collapsed, setCollapsed] = usePersistedCollapsed(`cascade.prod.${prod.meta.id}.scene.${scene.number}`);
   const open = !collapsed;
   const dragging = dragId !== null;
+  // Inline scene-title rename (header pencil). The draft commits on the
+  // input's OWN blur — the Bug #18 panel-commit fix: clicking straight into
+  // another panel or shot cell blurs this input first, so the rename saves
+  // on the switch with no neutral click needed. Incoming saves resync via
+  // the lastSaved mirror (same pattern as ShotRow): the draft adopts a new
+  // stored title only while it still mirrors the previous one, so a diverged
+  // draft is never wiped in the focus gap. The ref mirrors every keystroke
+  // so the commit always reads the freshest text, and Escape resets it
+  // before unmount so a blur fired by the unmount can't commit a cancel.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(scene.title);
+  const titleDraftRef = useRef(scene.title);
+  const lastSavedTitle = useRef(scene.title);
+  useEffect(() => {
+    const prev = lastSavedTitle.current;
+    if (scene.title !== prev) {
+      if (titleDraftRef.current === prev) {
+        titleDraftRef.current = scene.title;
+        setTitleDraft(scene.title);
+      }
+      lastSavedTitle.current = scene.title;
+    }
+  }, [scene.title]);
+
+  function startRename() {
+    titleDraftRef.current = scene.title;
+    setTitleDraft(scene.title);
+    setEditingTitle(true);
+  }
+
+  function commitTitle() {
+    setEditingTitle(false);
+    const next = titleDraftRef.current.trim();
+    if (!next || next === scene.title) {
+      titleDraftRef.current = scene.title;
+      setTitleDraft(scene.title);
+      return;
+    }
+    onMutation(window.cascade.renameScene(prod.meta.id, scene.number, next));
+  }
+
+  // Scene delete (Feature #12): always confirmed, naming the scene and
+  // its shot count. Shipped with app-wide undo — the whole removal is
+  // one Ctrl+Z step and board folders archive recoverably (main side).
+  async function handleDeleteScene() {
+    const n = scene.shots.length;
+    const label = scene.title.trim() ? `Scene ${scene.number} \u201C${scene.title.trim()}\u201D` : `Scene ${scene.number}`;
+    if (!(await confirmDestructive({
+      title: `Delete ${label}?`,
+      body: `This deletes the scene and its ${n} shot${n === 1 ? "" : "s"}. You can undo with Ctrl+Z.`,
+      confirmLabel: "Delete",
+    }))) return;
+    onMutation(window.cascade.deleteScene(prod.meta.id, scene.number, revOf(prod)));
+  }
+
+  function cancelTitle() {
+    titleDraftRef.current = scene.title;
+    setTitleDraft(scene.title);
+    setEditingTitle(false);
+  }
+
+  const shotCount = <span className="shot-scene-count">{scene.shots.length} shot{scene.shots.length === 1 ? "" : "s"}</span>;
   return (
     <section className="shot-scene">
       <header className="shot-scene-head">
-        <button className="shot-scene-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={open}>
-          <span className={"shot-caret" + (open ? " open" : "")}>▸</span>
-          Scene {scene.number} — {scene.title}
-          <span className="shot-scene-count">{scene.shots.length} shot{scene.shots.length === 1 ? "" : "s"}</span>
-        </button>
+        {editingTitle ? (
+          <span className="shot-scene-toggle editing">
+            <span className={"shot-caret" + (open ? " open" : "")}>▸</span>
+            Scene {scene.number} —
+            <input
+              className="shot-scene-title-input"
+              autoFocus
+              value={titleDraft}
+              maxLength={256}
+              aria-label={`Title of Scene ${scene.number}`}
+              title="Enter to save, Escape to cancel"
+              onFocus={(e) => e.currentTarget.select()}
+              onChange={(e) => { titleDraftRef.current = e.target.value; setTitleDraft(e.target.value); }}
+              onBlur={commitTitle}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.blur(); }
+                else if (e.key === "Escape") { e.preventDefault(); cancelTitle(); }
+              }}
+            />
+            {shotCount}
+          </span>
+        ) : (
+          <button className="shot-scene-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={open}>
+            <span className={"shot-caret" + (open ? " open" : "")}>▸</span>
+            Scene {scene.number} — {scene.title}
+            {shotCount}
+          </button>
+        )}
+        {!editingTitle && (
+          <button
+            className="shot-scene-rename"
+            title={`Rename Scene ${scene.number}`}
+            aria-label={`Rename Scene ${scene.number}`}
+            onClick={startRename}
+          >
+            <EditIcon size={13} />
+          </button>
+        )}
+        {!editingTitle && (
+          <button
+            className="shot-scene-delete"
+            title={`Delete Scene ${scene.number}`}
+            aria-label={`Delete Scene ${scene.number}`}
+            onClick={() => void handleDeleteScene()}
+          >
+            <TrashIcon size={13} />
+          </button>
+        )}
         <button
           className="shot-insert scene"
           title="Insert a shot at the start of this scene"
@@ -467,15 +572,21 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
   const shot = scene.shots[index];
   const [audio, setAudio] = useState(shot.audio);
   const [visual, setVisual] = useState(shot.visual);
-  // Local drafts commit on blur; in-flight saves from elsewhere (AI refine, undo,
-  // a board-card edit) resync into these cells while neither is focused, so a
-  // later blur can never write a stale draft back over a newer value.
-  const [textFocused, setTextFocused] = useState(false);
+  // Local drafts commit on blur (the row's onBlur also fires when focus moves
+  // straight from one cell to the other, so the cell being left commits first).
+  // Incoming saves (AI refine, undo, a board-card edit, or the snapshot from
+  // this row's own commit) resync per field: a field adopts the new value only
+  // while its draft still mirrors the previous saved value. A diverged draft
+  // is a local edit and is never reset — gating resync on focus instead would
+  // wipe the leaving cell's draft in the focus gap of a direct cell-to-cell
+  // switch, and the next commit would write that stale draft over the save.
+  const lastSaved = useRef({ audio: shot.audio, visual: shot.visual });
   useEffect(() => {
-    if (textFocused) return;
-    setAudio(shot.audio);
-    setVisual(shot.visual);
-  }, [shot.audio, shot.visual, textFocused]);
+    const prev = lastSaved.current;
+    if (shot.audio !== prev.audio) setAudio((cur) => (cur === prev.audio ? shot.audio : cur));
+    if (shot.visual !== prev.visual) setVisual((cur) => (cur === prev.visual ? shot.visual : cur));
+    lastSaved.current = { audio: shot.audio, visual: shot.visual };
+  }, [shot.audio, shot.visual]);
   const dirty = audio !== shot.audio || visual !== shot.visual;
 
   function commit() {
@@ -489,7 +600,7 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
     // Include uncommitted drafts: typed-but-unblurred text still counts as content.
     const effective = { ...shot, audio, visual };
     if (shotHasContent(effective)) {
-      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content and deleting it can't be undone.", confirmLabel: "Delete" }))) return;
+      if (!(await confirmDestructive({ title: `Delete Shot ${shot.number}?`, body: "This shot has content. You can undo the delete with Ctrl+Z.", confirmLabel: "Delete" }))) return;
     }
     onMutation(window.cascade.deleteShot(prod.meta.id, shot.id, revOf(prod)));
   }
@@ -521,8 +632,6 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
         value={audio}
         placeholder="Dialogue / VO / SFX"
         onChange={(e) => setAudio(e.target.value)}
-        onFocus={() => setTextFocused(true)}
-        onBlur={() => setTextFocused(false)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); } }}
       />
       <AutoTextarea
@@ -530,8 +639,6 @@ function ShotRow({ prod, scene, index, occupied, onMutation, onToggleDisabled, d
         value={visual}
         placeholder="What we see"
         onChange={(e) => setVisual(e.target.value)}
-        onFocus={() => setTextFocused(true)}
-        onBlur={() => setTextFocused(false)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); commit(); } }}
       />
       <span className="shot-actions">

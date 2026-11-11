@@ -52,6 +52,16 @@ function buildApi(): CascadeApi {
     ipcRenderer.on("workspace:changed", listener);
     return () => ipcRenderer.removeListener("workspace:changed", listener);
   };
+  api.onUndoRequest = (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("menu:undo", listener);
+    return () => ipcRenderer.removeListener("menu:undo", listener);
+  };
+  api.onRedoRequest = (cb: () => void) => {
+    const listener = () => cb();
+    ipcRenderer.on("menu:redo", listener);
+    return () => ipcRenderer.removeListener("menu:redo", listener);
+  };
   api.onOpenSettings = (cb: () => void) => {
     const listener = () => cb();
     ipcRenderer.on("menu:openSettings", listener);
@@ -105,6 +115,11 @@ function buildApi(): CascadeApi {
     const listener = (_e: unknown, snapshot: CanvasBusySnapshot) => cb(snapshot);
     ipcRenderer.on("canvas:busyChanged", listener);
     return () => ipcRenderer.removeListener("canvas:busyChanged", listener);
+  };
+  api.onHistoryChanged = (cb: (e: { productionId: string } & import("../shared/ipc.js").ProductionHistoryState) => void) => {
+    const listener = (_e: unknown, ev: { productionId: string } & import("../shared/ipc.js").ProductionHistoryState) => cb(ev);
+    ipcRenderer.on("production:historyChanged", listener);
+    return () => ipcRenderer.removeListener("production:historyChanged", listener);
   };
   api.onJobsChanged = (cb: (snapshot: import("../shared/ipc.js").JobSnapshot) => void) => {
     const listener = (_e: unknown, snapshot: import("../shared/ipc.js").JobSnapshot) => cb(snapshot);

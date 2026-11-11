@@ -288,3 +288,43 @@ export function insertScene(
   renumberSceneOrdinals(scenes);
   return scene;
 }
+
+/**
+ * Rename one scene (addressed by ordinal, like every structural command).
+ * The title is trimmed; an empty title is rejected so a scene always keeps a
+ * readable heading. Only `title` changes — ordinals, shots, and shot numbers
+ * are untouched. Returns the renamed scene. Mutates `scenes`.
+ */
+/**
+ * Delete one scene (addressed by ordinal, like every structural command)
+ * together with all of its shots, then re-derive the remaining scene
+ * ordinals 1..N. Shot numbers keep their gaps, exactly like shot delete.
+ * Returns the removed scene (whose `shots` the caller archives on disk and
+ * drops from shot sequences), or null when the scene was already gone —
+ * the delete command is idempotent like `removeShotById`, so a retry
+ * after an uncertain response succeeds without changing the document.
+ * Mutates `scenes`. Deleting the last scene leaves `scenes` empty.
+ */
+export function deleteScene(
+  scenes: ProductionScene[],
+  sceneNumber: number
+): ProductionScene | null {
+  const at = scenes.findIndex((s) => s.number === sceneNumber);
+  if (at === -1) return null;
+  const [removed] = scenes.splice(at, 1);
+  renumberSceneOrdinals(scenes);
+  return removed;
+}
+
+export function renameScene(
+  scenes: ProductionScene[],
+  sceneNumber: number,
+  title: string
+): ProductionScene {
+  const next = typeof title === "string" ? title.trim() : "";
+  if (!next) throw new Error("Scene title can't be empty.");
+  const scene = scenes.find((s) => s.number === sceneNumber);
+  if (!scene) throw new Error(`Scene ${sceneNumber} not found`);
+  scene.title = next;
+  return scene;
+}

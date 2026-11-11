@@ -4,6 +4,7 @@ import { App } from "./App.js";
 import { DetachedCanvasApp } from "./components/DetachedCanvasApp.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { applyIconSet, applyTheme, readCachedIconSet, readCachedTheme } from "./theme.js";
+import { installCtrlWheelPageZoom } from "./components/common/ctrl-wheel-zoom.js";
 import "./styles.css";
 
 // The detached canvas window boots the same bundle with `?window=detached`
@@ -23,6 +24,10 @@ window.addEventListener("unhandledrejection", (e) => {
 
 // Paint the cached theme before first render (both windows share this
 // bundle + localStorage); App re-applies the authoritative setting on load.
+// Ctrl+wheel page zoom for every view in either window. Panel zooms claim
+// the wheel first (see ctrl-wheel-zoom.ts); this is only the fallback.
+installCtrlWheelPageZoom(window, (levelDelta) => window.cascade?.zoomPageBy?.(levelDelta));
+
 applyTheme(readCachedTheme());
 applyIconSet(readCachedIconSet());
 

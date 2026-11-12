@@ -8,7 +8,7 @@
  */
 import { memo, useEffect, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { MoodboardFrame } from "../../../../shared/ipc.js";
-import { XIcon } from "../../components/icons.js";
+import { ResizeIcon, XIcon } from "../../components/icons.js";
 import { MOODBOARD_FRAME_COLORS, frameColorHex } from "./moodboard-layout.js";
 
 export const MoodboardFrameView = memo(function MoodboardFrameView({
@@ -125,7 +125,7 @@ export const MoodboardFrameView = memo(function MoodboardFrameView({
         className="moodboard-frame-resize"
         title="Resize frame"
         onPointerDown={(e) => { stop(e); onStartResize(e, frame.id); }}
-      />
+      ><ResizeIcon size={9} /></span>
     </div>
   );
 }, (a, b) =>

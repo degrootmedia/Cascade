@@ -19,6 +19,11 @@ export interface LedgerEntry {
   durationSec?: number;
   /** Aspect ratio for images (e.g. "16:9"). */
   aspectRatio?: string;
+  /** Model-specific generation parameters that were actually sent with the
+   *  job (the subset of the node's params the model's live form declares,
+   *  e.g. `{ background: "transparent" }`). Absent when none were sent.
+   *  Pricing never reads it - it is the recorded truth of the submission. */
+  params?: Record<string, string | number | boolean | string[]>;
   /** The price stamped when the entry was recorded ($0 when no rule matched).
    *  For credit-tracked rows (Higgsfield CLI) this is credits × the credit
    *  rate at record/reprice time — the row's `credits` is the source of
@@ -79,6 +84,9 @@ export interface LedgerGenMeta {
   resolution: string;
   durationSec?: number;
   aspectRatio?: string;
+  /** Model-specific generation parameters actually sent with the job (see
+   *  `LedgerEntry.params`). Absent when none were sent. */
+  params?: Record<string, string | number | boolean | string[]>;
   /** Credits the generation cost (Higgsfield CLI preflight at submit time).
    *  Recorded on the entry so credit-tracked rows never need $ rules. */
   credits?: number;

@@ -686,6 +686,135 @@ describe("OpenArtClient.imageGenFn", () => {
     expect(params.imageCount).toBe(1);
   });
 
+  it("forwards declared model-specific params (background), drops undeclared ones, and records what was sent", async () => {
+    const generated: Record<string, unknown>[] = [];
+    const onGeneration = vi.fn();
+    const pendingSeen: (PendingImageGen | null)[] = [];
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "seedream-5-5", displayName: "Seedream 5.5", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              aspectRatio: { type: "string", enum: ["16:9", "1:1"] },
+              resolution: { type: "string", enum: ["1k", "2k"] },
+              imageCount: { type: "integer" },
+              background: { type: "string", enum: ["auto", "transparent", "opaque"] },
+              seed: { type: "integer", minimum: 0, maximum: 999 },
+              negativePrompt: { type: "string" },
+            },
+          },
+        }),
+      openart_generate_image: (args) => {
+        generated.push(args);
+        return '{"status":"PENDING","historyId":"h-bg","pollAfterSeconds":0}';
+      },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("bg-png")] }),
+    });
+    const gen = new OpenArtClient(mcp, { onGeneration }).imageGenFn(makeProduction())!;
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const out = await gen(
+      "A glass orb",
+      [],
+      shot,
+      { background: "transparent", seed: 42, negative_prompt: "blurry", notDeclared: "x", prompt: "hijack" },
+      (rec) => { pendingSeen.push(rec); }
+    );
+    expect(out.toString()).toBe("bg-png");
+    const params = (generated[0] as Record<string, unknown>).params as Record<string, unknown>;
+    expect(params.background).toBe("transparent");
+    expect(params.seed).toBe(42);
+    // Stored under the snake_case alias, sent under the form's own key.
+    expect(params.negativePrompt).toBe("blurry");
+    expect(params.negative_prompt).toBeUndefined();
+    expect(params.notDeclared).toBeUndefined();
+    // Dedicated controls stay authoritative - params can never hijack them.
+    expect(params.prompt).toBe("A glass orb");
+    expect(params.aspectRatio).toBe("16:9");
+    expect(params.resolution).toBe("1k");
+    expect(params.imageCount).toBe(1);
+    // The submitted job's records show what was actually sent.
+    const sent = { background: "transparent", seed: 42, negativePrompt: "blurry" };
+    expect(pendingSeen.find((r) => r !== null)?.params).toEqual(sent);
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+    expect(onGeneration.mock.calls[0][0].params).toEqual(sent);
+  });
+
+  it("does not send a value the form's enum does not list, and falls back to production params", async () => {
+    const generated: Record<string, unknown>[] = [];
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "seedream-5-5", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              aspectRatio: { type: "string", enum: ["16:9"] },
+              background: { type: "string", enum: ["auto", "transparent", "opaque"] },
+            },
+          },
+        }),
+      openart_generate_image: (args) => {
+        generated.push(args);
+        return '{"status":"PENDING","historyId":"h-enum","pollAfterSeconds":0}';
+      },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("enum-png")] }),
+    });
+    const client = new OpenArtClient(mcp);
+    // An unlisted enum value is dropped, never guessed.
+    await client.imageGenFn(makeProduction())!("A glass orb", [], undefined, { background: "plaid" });
+    expect(((generated[0] as Record<string, unknown>).params as Record<string, unknown>).background).toBeUndefined();
+    // No per-call params (the storyboard batch path): the production's
+    // stored params ride instead.
+    generated.length = 0;
+    await client.imageGenFn(makeProduction({ openArt: { model: "auto", resolution: "1k", params: { background: "transparent" } } }))!("A glass orb", []);
+    expect(((generated[0] as Record<string, unknown>).params as Record<string, unknown>).background).toBe("transparent");
+  });
+
+  it("forwards declared params on the image EDIT path too (image2image)", async () => {
+    const generated: Record<string, unknown>[] = [];
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "seedream-5-5", media: ["image"], modes: [] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              visualReferences: { type: "array" },
+              background: { type: "string", enum: ["auto", "transparent", "opaque"] },
+              strength: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+        }),
+      openart_upload_sign: () =>
+        JSON.stringify({ signURL: "https://example.invalid/sign", visualReference: { id: "vr-1", url: "https://example.invalid/vr" } }),
+      openart_generate_image: (args) => {
+        generated.push(args);
+        return '{"status":"PENDING","historyId":"h-edit","pollAfterSeconds":0}';
+      },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("edit-png")] }),
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    try {
+      const gen = new OpenArtClient(mcp).imageGenFn(makeProduction())!;
+      const out = await gen(
+        "Remove the backdrop",
+        [{ name: "Source", dataUrl: "data:image/png;base64,VkVSWS1MT05HREFUQVVSTC1JTkdBR0U=" }],
+        undefined,
+        { background: "opaque", strength: 0.5, bogus: true }
+      );
+      expect(out.toString()).toBe("edit-png");
+      const args = generated[0] as Record<string, unknown>;
+      expect(args.mode).toBe("image2image");
+      const params = args.params as Record<string, unknown>;
+      expect(params.background).toBe("opaque");
+      expect(params.strength).toBe(0.5);
+      expect(params.bogus).toBeUndefined();
+      expect(params.visualReferences).toEqual([{ id: "vr-1", url: "https://example.invalid/vr" }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("uploads references, cites them positionally, and runs in image2image mode", async () => {
     const generated: Record<string, unknown>[] = [];
     const mcp = fakeMcp({
@@ -1456,6 +1585,51 @@ describe("OpenArtClient generation recorder", () => {
       shotId: "s1",
     });
   });
+  it("forwards declared video params, drops undeclared ones, and records what was sent", async () => {
+    const onGeneration = vi.fn();
+    const generated: Record<string, unknown>[] = [];
+    const folder = path.join(dataDir, "prod-vid-params");
+    fs.mkdirSync(path.join(folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    const mcp = fakeMcp({
+      openart_model_list: () => JSON.stringify([{ model: "veo-3", displayName: "Veo 3", media: ["image"], modes: ["video"] }]),
+      openart_model_form_get: () =>
+        JSON.stringify({
+          jsonSchema: {
+            properties: {
+              resolution: { type: "string", enum: ["720p", "1080p"] },
+              duration: { type: "string", enum: ["5s", "10s"] },
+              generateAudio: { type: "boolean" },
+              seed: { type: "integer" },
+            },
+          },
+        }),
+      openart_generate_video: (args) => {
+        generated.push(args);
+        return '{"status":"PENDING","historyId":"h-vid-params","pollAfterSeconds":0}';
+      },
+      openart_creation_wait: () => ({ text: '{"status":"SUCCEEDED"}', images: [Buffer.from("fake-mp4")] }),
+    });
+    const client = new OpenArtClient(mcp, { onGeneration });
+    const prod = makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    await client.generateVideoClip(
+      prod,
+      shot,
+      { model: "auto", resolution: "1080p", durationSec: 5, prompt: "animate", params: { generateAudio: false, seed: 7, nope: "x" } },
+      () => {}
+    );
+    const params = (generated[0] as Record<string, unknown>).params as Record<string, unknown>;
+    // Boolean false is a real pick - it must be sent, not treated as unset.
+    expect(params.generateAudio).toBe(false);
+    expect(params.seed).toBe(7);
+    expect(params.nope).toBeUndefined();
+    expect(onGeneration).toHaveBeenCalledTimes(1);
+    expect(onGeneration.mock.calls[0][0].params).toEqual({ generateAudio: false, seed: 7 });
+  });
+
   it("records a video job at submission (before the wait ends) and clears it on success", async () => {
     const folder = path.join(dataDir, "prod-vid-pending");
     fs.mkdirSync(path.join(folder, "boards"), { recursive: true });

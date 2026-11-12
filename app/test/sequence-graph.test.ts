@@ -116,6 +116,31 @@ function dropTool(host: HTMLElement, kind: string): void {
   act(() => { canvas.dispatchEvent(ev); });
 }
 
+describe("node canvas header + output node (Features #17/#18/#25)", () => {
+  it("header carries no instructional hint line, but keeps its controls", () => {
+    const { host } = renderCanvas();
+    const head = host.querySelector(".prod-graph-head") as HTMLElement;
+    expect(head).toBeTruthy();
+    expect(host.querySelector(".prod-graph-hint")).toBeNull();
+    expect(head.textContent).not.toContain("Connections are stored wiring");
+    expect(head.textContent).toContain("node graph");
+    const close = [...head.querySelectorAll("button")].find((b) => b.textContent === "Close");
+    expect(close).toBeTruthy();
+    // Feature #18: no snippets entry point in the header (shelf tab only).
+    expect([...head.querySelectorAll("button")].some((b) => b.textContent === "Snippets")).toBe(false);
+  });
+
+  it("empty Frame Output shows 'No output yet' but no piping caption (Feature #25)", () => {
+    const { host } = renderCanvas();
+    const output = node(host, "output")!;
+    expect(output).toBeTruthy();
+    expect(output.textContent).toContain("No output yet");
+    expect(output.textContent).not.toContain("Pipe an image");
+    expect(host.querySelector(".prod-graph-output-hint")).toBeNull();
+    expect(host.textContent).not.toContain("Pipe an image, video, or reference in to feed the output");
+  });
+});
+
 describe("sequence canvas (the node graph, hosted on the sequence)", () => {
   it("comes pre-populated: the member frames, a Sequence generator, and a timeline", () => {
     const { host } = renderCanvas();

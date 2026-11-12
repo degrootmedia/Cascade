@@ -287,6 +287,41 @@ describe("Design reference categories (the cited zoomable panel)", () => {
   });
 });
 
+describe("zoom handlers never touch clicks", () => {
+  it("a Ctrl+click after a Ctrl+wheel still reaches click handlers, claimed by neither zoom", () => {
+    // Regression guard: the zoom claim is wheel-only. A following
+    // Ctrl+click (e.g. storyboard toggle-select under a zoom zone, or the
+    // node graph's CTRL+Click wiring) must arrive unclaimed — no
+    // preventDefault, no stopPropagation, no zoom state left behind.
+    const onZoom = vi.fn();
+    const zoomPageBy = vi.fn();
+    const uninstall = installCtrlWheelPageZoom(window, zoomPageBy);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    act(() => { root.render(createElement(ZoomZone, { onZoom })); });
+    const zone = host.querySelector(".zone") as HTMLElement;
+    const clicks: MouseEvent[] = [];
+    zone.addEventListener("click", (e) => clicks.push(e));
+
+    act(() => { zone.dispatchEvent(wheel({ deltaY: -100, ctrlKey: true })); });
+    expect(onZoom).toHaveBeenCalledTimes(1);
+
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true });
+    act(() => { zone.dispatchEvent(click); });
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0].ctrlKey).toBe(true);
+    expect(click.defaultPrevented).toBe(false);
+    // The click zoomed nothing (panel or page).
+    expect(onZoom).toHaveBeenCalledTimes(1);
+    expect(zoomPageBy).not.toHaveBeenCalled();
+
+    act(() => { root.unmount(); });
+    uninstall();
+    document.body.removeChild(host);
+  });
+});
+
 describe("page zoom IPC", () => {
   it("is a fire-and-forget window channel with a finite-number payload", () => {
     expect(ipcContract["window:zoomPageBy" as keyof typeof ipcContract])

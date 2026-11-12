@@ -1,0 +1,159 @@
+{
+  "stamp": "2026-11-11T22-27-17-506Z",
+  "startedAt": "2026-11-11T22:27:17.506Z",
+  "steps": [
+    {
+      "name": "launched",
+      "at": "2026-11-11T22:27:17.538Z",
+      "pid": 150764
+    },
+    {
+      "name": "originalProvider",
+      "at": "2026-11-11T22:27:27.990Z",
+      "originalProvider": "higgsfield-cli"
+    },
+    {
+      "name": "providerSwitched",
+      "at": "2026-11-11T22:27:28.009Z",
+      "nowProvider": "openart"
+    },
+    {
+      "name": "models",
+      "at": "2026-11-11T22:27:29.565Z",
+      "count": 32
+    },
+    {
+      "name": "seedreamCandidates",
+      "at": "2026-11-11T22:27:29.566Z",
+      "seedreamish": [
+        {
+          "id": "byte-plus-seedream-5-5",
+          "displayName": "Seedream 5.5"
+        },
+        {
+          "id": "byte-plus-seedream-5-pro",
+          "displayName": "Seedream 5 Pro"
+        }
+      ]
+    },
+    {
+      "name": "seedream55",
+      "at": "2026-11-11T22:27:29.567Z",
+      "id": "byte-plus-seedream-5-5",
+      "displayName": "Seedream 5.5",
+      "cost": null
+    },
+    {
+      "name": "liveForm",
+      "at": "2026-11-11T22:27:31.411Z",
+      "fieldCount": 6,
+      "backgroundField": {
+        "flag": "background",
+        "name": "background",
+        "values": [
+          "auto",
+          "transparent",
+          "opaque"
+        ]
+      }
+    },
+    {
+      "name": "creditsBefore",
+      "at": "2026-11-11T22:27:31.642Z",
+      "creditsBefore": 16
+    },
+    {
+      "name": "4521_IMMI Rolltek",
+      "at": "2026-11-11T22:27:31.742Z",
+      "id": "mvzku671-kpq0mz",
+      "folder": "D:\\Dropbox (Personal)\\_Projects\\Clum\\4521_IMMI Rolltek"
+    },
+    {
+      "name": "submitted",
+      "at": "2026-11-11T22:27:32.348Z"
+    },
+    {
+      "name": "entryAfterSubmit",
+      "at": "2026-11-11T22:27:58.479Z",
+      "id": "suite-mwcow7ei-5c8gw",
+      "model": "byte-plus-seedream-5-5",
+      "outputPath": "out/suite/Suite (46).png",
+      "params": {
+        "background": "transparent"
+      },
+      "pending": null,
+      "error": null
+    },
+    {
+      "name": "creditsAfter",
+      "at": "2026-11-11T22:27:58.818Z",
+      "creditsAfter": 4,
+      "creditsBefore": 16,
+      "delta": 12
+    },
+    {
+      "name": "outputFile",
+      "at": "2026-11-11T22:27:58.826Z",
+      "absOut": "D:\\Dropbox (Personal)\\_Projects\\Clum\\4521_IMMI Rolltek\\out\\suite\\Suite (46).png",
+      "copyPath": "D:\\Cascade\\tasks\\openart-live\\2026-11-11T22-27-17-506Z\\generated.png",
+      "bytes": 1217347,
+      "sha256": "e9d8ee31d14bcece43d195a8c1809f7ff2c67042a51dc2e7e07f7b9c656ba069"
+    },
+    {
+      "name": "ledgerEntry",
+      "at": "2026-11-11T22:27:58.827Z",
+      "ledgerEntry": {
+        "kind": "image",
+        "model": "byte-plus-seedream-5-5",
+        "resolution": "1k",
+        "aspectRatio": "1:1",
+        "params": {
+          "background": "transparent"
+        },
+        "at": "2026-11-11T22:27:34.410Z"
+      }
+    }
+  ],
+  "production": {
+    "id": "mvzku671-kpq0mz",
+    "name": "4521_IMMI Rolltek",
+    "folder": "D:\\Dropbox (Personal)\\_Projects\\Clum\\4521_IMMI Rolltek"
+  },
+  "request": {
+    "toolSurface": "suite:generate -> OpenArtClient.imageGenFn -> openart_generate_image",
+    "model": "byte-plus-seedream-5-5",
+    "mode": "text2image",
+    "resolution": "1k",
+    "aspectRatio": "1:1",
+    "prompt": "A single glossy red sphere in the center of the frame, studio product photography",
+    "params": {
+      "background": "transparent"
+    }
+  },
+  "entry": {
+    "id": "suite-mwcow7ei-5c8gw",
+    "model": "byte-plus-seedream-5-5",
+    "outputPath": "out/suite/Suite (46).png",
+    "params": {
+      "background": "transparent"
+    },
+    "createdAt": "2026-11-11T22:27:32.346Z"
+  },
+  "outputFile": "D:\\Dropbox (Personal)\\_Projects\\Clum\\4521_IMMI Rolltek\\out\\suite\\Suite (46).png",
+  "outputCopy": "D:\\Cascade\\tasks\\openart-live\\2026-11-11T22-27-17-506Z\\generated.png",
+  "outputSha256": "e9d8ee31d14bcece43d195a8c1809f7ff2c67042a51dc2e7e07f7b9c656ba069",
+  "outputBytes": 1217347,
+  "ledgerPath": "C:\\Users\\degro\\AppData\\Roaming\\cascade-app\\ledger\\mvzku671-kpq0mz.json",
+  "ledgerEntry": {
+    "kind": "image",
+    "model": "byte-plus-seedream-5-5",
+    "resolution": "1k",
+    "aspectRatio": "1:1",
+    "params": {
+      "background": "transparent"
+    },
+    "at": "2026-11-11T22:27:34.410Z"
+  },
+  "ok": true,
+  "restoredProvider": "higgsfield-cli"
+}

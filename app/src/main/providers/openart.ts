@@ -327,6 +327,92 @@ export function videoRefsAssign(
   return Object.keys(out).length || audioKey ? withAudio(out) : null;
 }
 
+/** Fold a param name for alias matching (`negative_prompt` = `negativePrompt`). */
+const foldParamName = (s: string): string => s.toLowerCase().replace(/[_-]+/g, "");
+
+/**
+ * The model-specific params a submission may carry: the subset of `values`
+ * (a node's stored options, keyed by flag/name/alias) that the model's live
+ * form actually declares, re-keyed to the form's own property names and
+ * coerced to the declared shapes. Undeclared keys are never sent (a stale
+ * pick from a previous model must not leak into the next submission), enum
+ * values the form does not list are dropped rather than guessed, and keys
+ * the dedicated assigners already own (`owned`) are left to them. Media /
+ * reference / frame-slot fields are skipped - the reference binders own
+ * them. With no form (unreadable), `props` is empty and nothing is
+ * forwarded: an unknown schema cannot prove a key is declared.
+ */
+export function declaredParamsAssign(
+  props: Record<string, unknown>,
+  values: Record<string, string | number | boolean | string[]> | undefined,
+  owned: ReadonlySet<string> = new Set()
+): Record<string, string | number | boolean | string[]> {
+  const out: Record<string, string | number | boolean | string[]> = {};
+  if (!values || !Object.keys(values).length) return out;
+  const folded = new Map<string, string | number | boolean | string[]>();
+  for (const [k, v] of Object.entries(values)) {
+    const f = foldParamName(k);
+    if (!folded.has(f)) folded.set(f, v);
+  }
+  for (const key of Object.keys(props)) {
+    if (owned.has(key)) continue;
+    const fk = foldParamName(key);
+    if (fk === "prompt") continue;
+    if (START_FRAME_KEY_RX.test(key) || END_FRAME_KEY_RX.test(key)) continue;
+    const p = props[key] as {
+      type?: string; enum?: unknown[]; items?: unknown; properties?: unknown;
+      minimum?: unknown; maximum?: unknown; oneOf?: unknown[]; anyOf?: unknown[];
+    } | undefined;
+    if (!p) continue;
+    if (p.type === "object" || p.properties) continue;
+    const isArray = p.type === "array" || p.items !== undefined;
+    if (isArray && (REFERENCE_ARRAY_KEY_RX.test(key) || /audio|sound/i.test(key))) continue;
+    const v = key in values ? values[key] : folded.get(fk);
+    if (v === undefined || v === null || v === "") continue;
+    // Closed value set (enum / oneOf / anyOf consts): only a listed literal
+    // may be sent, in the form's own spelling (and type).
+    const closed: unknown[] = [];
+    if (Array.isArray(p.enum)) closed.push(...p.enum);
+    for (const c of [...(p.oneOf ?? []), ...(p.anyOf ?? [])]) {
+      const entry = c as { const?: unknown; enum?: unknown[] } | null | undefined;
+      if (entry?.const !== undefined) closed.push(entry.const);
+      if (Array.isArray(entry?.enum)) closed.push(...entry.enum);
+    }
+    if (isArray) {
+      let items = (Array.isArray(v) ? v : [v]).map((e) => String(e).trim()).filter(Boolean);
+      if (closed.length) {
+        const canon = new Map(closed.map((e) => [String(e).toLowerCase(), String(e)]));
+        items = items.map((i) => canon.get(i.toLowerCase())).filter((e): e is string => e !== undefined);
+      }
+      if (items.length) out[key] = items;
+      continue;
+    }
+    if (Array.isArray(v)) continue; // repeatable value for a scalar field - corrupt shape
+    if (closed.length) {
+      const match = closed.find((e) => String(e).toLowerCase() === String(v).trim().toLowerCase());
+      if (match !== undefined && (typeof match === "string" || typeof match === "number" || typeof match === "boolean")) out[key] = match;
+      continue;
+    }
+    const t = String(p.type ?? "").toLowerCase();
+    if (/bool/.test(t)) {
+      out[key] = v === true || v === 1 || String(v).trim() === "1" || String(v).trim().toLowerCase() === "true";
+    } else if (/int|number|float|double|decimal/.test(t)) {
+      let n = typeof v === "number" ? v : Number(String(v).trim());
+      if (!Number.isFinite(n)) continue;
+      if (/int/.test(t)) n = Math.round(n);
+      if (typeof p.minimum === "number") n = Math.max(p.minimum, n);
+      if (typeof p.maximum === "number") n = Math.min(p.maximum, n);
+      out[key] = n;
+    } else if (typeof v === "string") {
+      const s = v.trim();
+      if (s) out[key] = s;
+    } else {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
 export class OpenArtClient implements MediaProvider {
   readonly id = "openart" as const;
   readonly displayName = "OpenArt";
@@ -845,6 +931,11 @@ private videoRefsAssign = videoRefsAssign;
    *   - resolution / resolutionTier per the 1k/2k/4k dropdown
    *   - imageCount      → 1 (exactly one frame per shot)
    *   - visualReferences → uploaded reference art (image2image mode only)
+   *   - every other parameter the model's live form declares that the node
+   *     carries (`extraParams`, e.g. Seedream's `background`) - see
+   *     `declaredParamsAssign`; undeclared keys are never sent. The merged
+   *     subset comes back as `sentParams` so the job records (pending
+   *     receipt, expense ledger) show what was actually sent.
    */
   private imageGenArgs(
     prompt: string,
@@ -854,8 +945,9 @@ private videoRefsAssign = videoRefsAssign;
     projectId: string | null,
     mode: string,
     formProps: Record<string, unknown> | null,
-    aspectRatio: ImageGenAspectRatio = "16:9"
-  ): Record<string, unknown> {
+    aspectRatio: ImageGenAspectRatio = "16:9",
+    extraParams?: Record<string, string | number | boolean | string[]>
+  ): { args: Record<string, unknown>; sentParams: Record<string, string | number | boolean | string[]> } {
     const props = formProps ?? {};
     const params: Record<string, unknown> = { prompt };
 
@@ -875,6 +967,11 @@ private videoRefsAssign = videoRefsAssign;
       const vk = Object.keys(props).find((k) => /visualReference|references/i.test(k));
       if (vk) params[vk] = refs;
     }
+    // Model-specific options the node carries (background, seed, ...) -
+    // only the ones this model's live form declares, and never a key the
+    // dedicated assigners above already own.
+    const sentParams = declaredParamsAssign(props, extraParams, new Set(Object.keys(params)));
+    Object.assign(params, sentParams);
 
     const args: Record<string, unknown> = { mode, params };
     // model is REQUIRED by the OpenArt tool (minLength 1); guard against the
@@ -884,7 +981,7 @@ private videoRefsAssign = videoRefsAssign;
     // Route into the production's own OpenArt project when one is resolved, so
     // every frame for a production lands in a project named after the production.
     if (projectId) args.projectId = projectId;
-    return args;
+    return { args, sentParams };
   }
 
   /** Build the OpenArt generate-tool args for one video clip. Mirrors the
@@ -899,7 +996,7 @@ private videoRefsAssign = videoRefsAssign;
     mode: string,
     formProps: Record<string, unknown> | null,
     frames: boolean
-  ): Record<string, unknown> {
+  ): { args: Record<string, unknown>; sentParams: Record<string, string | number | boolean | string[]> } {
     const props = formProps ?? {};
     const params: Record<string, unknown> = { prompt };
     const res = this.videoResolutionAssign(opts.resolution, props);
@@ -911,10 +1008,14 @@ private videoRefsAssign = videoRefsAssign;
       if (refAssign) Object.assign(params, refAssign);
       else params.visualReferences = refs; // last-resort fallback
     }
+    // Model-specific options the node carries - only the ones this model's
+    // live form declares, and never a key the dedicated assigners own.
+    const sentParams = declaredParamsAssign(props, opts.params, new Set(Object.keys(params)));
+    Object.assign(params, sentParams);
     const args: Record<string, unknown> = { mode, params };
     if (modelId) args.model = modelId;
     if (projectId) args.projectId = projectId;
-    return args;
+    return { args, sentParams };
   }
 
 // ---- reply parsing --------------------------------------------------------
@@ -1316,7 +1417,7 @@ private videoRefsAssign = videoRefsAssign;
     // the rest of the run); null when the lookup/create fails.
     let projectId: string | null | undefined;
 
-    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, _params?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
+    return async (prompt: string, refs: GenerationRef[], shot?: ProductionShot, genParams?: Record<string, string | number | boolean | string[]>, onPending?: (rec: PendingImageGen | null) => void): Promise<Buffer> => {
       // A fresh submission supersedes any earlier pending job — the new
       // historyId is the one a future recheck must poll.
       // The delete is in-memory only; clearPending must also tell the
@@ -1408,7 +1509,13 @@ private videoRefsAssign = videoRefsAssign;
       if (projectId === undefined) {
         projectId = await this.resolveProject(p, onNotice).catch(() => null);
       }
-      const args = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps, aspectRatio);
+      // Schema-driven model options the node/modal carries; the storyboard
+      // batch passes none, so the production's stored params ride instead
+      // (mirrors the Higgsfield CLI contract). imageGenArgs forwards only
+      // the ones this model's live form declares.
+      const extraParams = genParams ?? cfgUsed.params;
+      const { args, sentParams } = this.imageGenArgs(fullPrompt, uploaded, cfgUsed, models, projectId, mode, formProps, aspectRatio, extraParams);
+      const sentParamsField = Object.keys(sentParams).length ? { params: { ...sentParams } } : {};
       // Diagnostics: name the resolved model + mode so a wrong-model
       // suspicion can be settled from the log (mirrors Higgsfield's submit line).
       onNotice?.(`Submitting image job via ${modelId || "(model resolution failed)"} (mode=${mode}${hasRefs ? ` refs x${uploaded.length}` : " no refs"})`);
@@ -1421,6 +1528,7 @@ private videoRefsAssign = videoRefsAssign;
         model: modelId ?? "",
         resolution: cfgUsed.resolution,
         aspectRatio,
+        ...sentParamsField,
         at: Date.now(),
         productionId: p.meta.id,
         shotId: shot?.id,
@@ -1439,7 +1547,7 @@ private videoRefsAssign = videoRefsAssign;
         // Record the receipt NOW, before the wait: if the app closes (or
         // crashes) mid-wait, the persisted record still names the job and a
         // recheck can download the finished frame instead of re-paying.
-        recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
+        recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...sentParamsField, ...OpenArtClient.exclusionArrays(exclude) });
         try {
           const done = await this.waitOpenArtImage(historyId, IMAGE_WAIT_DEADLINE_MS, exclude);
           if (done) buffer = done;
@@ -1452,7 +1560,7 @@ private videoRefsAssign = videoRefsAssign;
           // The input identity rides along so the recheck excludes the same
           // echoed references (notably the style frame) the wait did.
           if (!(e instanceof OpenArtImageFailedError)) {
-            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
+            recordPending({ historyId, prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...sentParamsField, ...OpenArtClient.exclusionArrays(exclude) });
           } else {
             clearPending();
           }
@@ -1476,7 +1584,7 @@ private videoRefsAssign = videoRefsAssign;
           // recheck can retry the download without regenerating. The input
           // identity rides along so a later historyId recheck (or an echo
           // check) can still tell input from output.
-          recordPending({ url: e instanceof DownloadError && e.url ? e.url : urls[0], prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...OpenArtClient.exclusionArrays(exclude) });
+          recordPending({ url: e instanceof DownloadError && e.url ? e.url : urls[0], prompt, model: modelId ?? "auto", resolution: cfgUsed.resolution, aspectRatio, ...sentParamsField, ...OpenArtClient.exclusionArrays(exclude) });
           throw e;
         }
         if (this.isExcludedInput(downloaded, exclude)) {
@@ -1682,7 +1790,8 @@ private videoRefsAssign = videoRefsAssign;
       );
     }
 
-    const args = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps, !!frameRefs);
+    const { args, sentParams } = this.videoGenArgs(fullPrompt, uploaded, opts, modelId, projectId, mode, formProps, !!frameRefs);
+    const sentParamsField = Object.keys(sentParams).length ? { params: { ...sentParams } } : {};
     // Diagnostics: surface exactly what reaches OpenArt so a silently-ignored
     // length (the recurring "asked 2s, got the 5s default" bug) is visible in
     // the job log instead of a mystery. The params carry no secrets.
@@ -1768,7 +1877,7 @@ private videoRefsAssign = videoRefsAssign;
       model: modelId ?? "auto",
       resolution: opts.resolution || "",
       durationSec: opts.durationSec,
-      ...(opts.params && Object.keys(opts.params).length ? { params: { ...opts.params } } : {}),
+      ...sentParamsField,
       ...(sourcePathOverride?.trim() ? { sourcePath: sourcePathOverride.trim() } : {}),
     };
     if (historyId || directUrl) {
@@ -1821,6 +1930,7 @@ private videoRefsAssign = videoRefsAssign;
       model: modelId ?? "",
       resolution: opts.resolution || "",
       durationSec: opts.durationSec,
+      ...sentParamsField,
       at: Date.now(),
       productionId: p.meta.id,
       shotId: shot.id,

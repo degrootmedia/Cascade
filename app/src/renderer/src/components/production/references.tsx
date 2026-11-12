@@ -520,7 +520,7 @@ const CategoryPanel = memo(function CategoryPanel({ prodId, category, items, usa
         // Oversize images get the convert-to-JPEG offer (null = cancelled).
         void importableImageDataUrl(file).then((dataUrl) => {
           if (dataUrl) onAddReference(file.name.replace(/\.[^.]+$/, ""), category.id || undefined, dataUrl);
-        }).catch(() => { /* unreadable or unshrinkable drop: nothing to add */ });
+        }).catch((e) => { console.error(`[reference-import] Dropped image "${file.name}" couldn't be read or shrunk: ${String(e).replace(/^Error:\s*/, "")}`); });
       }
     }}>
       <div className="prod-category-head">

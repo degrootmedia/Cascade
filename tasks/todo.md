@@ -1,3 +1,99 @@
+# Moodboard image-node rotate/scale handles are gray dots in minimal icon mode
+
+Root cause (verified): the node's other controls (`RefFigure` actions: zoom/
+import/edit/remove, in-use badge) render through the shared `icons.tsx`
+`Icon` (colorful `<img>` / minimal CSS-mask glyph). The rotate and resize
+handles in `MoodboardNode.tsx` never used that system at all — they are empty
+`<span>`s styled as 14px circles (`styles.css` `.moodboard-node-rotate/-resize`),
+so there is no glyph in either set; in minimal mode, where every sibling
+control became a line icon, they read as placeholder gray dots. Same shape as
+the earlier node-shelf fix (camera-grid/upscale tiles bypassed the shared
+`Icon`; fixed by giving them paired colorful+minimal assets and routing
+through `Icon` — guarded by `graph-shelf.test.ts` "renders every tool tile
+icon through the shared icon set").
+
+Plan:
+- [x] Red test first: `app/test/moodboard-node-icons.test.ts` — in minimal mode
+      every node control (rotate, resize, zoom, remove) carries a masked
+      glyph; frame resize too; pointerdown on handles still fires
+      rotate/resize; colorful mode has no minimal glyphs and its handle
+      artwork stays hidden (plain nub, as today).
+- [x] Artwork: `assets/icons/{rotate,resize}.svg` + `assets/icons/minimal/{rotate,resize}.svg`
+      (minimal: 24x24, `#000` stroke 1.8 round caps — circular arrow;
+      diagonal expand corners). `RotateIcon`/`ResizeIcon` in `icons.tsx`;
+      `icons.test.ts` counts 27 -> 29.
+- [x] `MoodboardNode` + `MoodboardFrame` handles render the icons (size 9);
+      CSS centers the glyph and hides only the colorful `<img>` glyph inside
+      these handles, so non-minimal rendering is byte-for-byte today's nub.
+- [x] Sweep: rest of node controls, moodboard frame/toolbar/shelf/minimap,
+      and every other rotate/resize handle surface; fix same-shape gaps only.
+- [x] Verify: focused tests, typecheck, full suite, build.
+
+Sweep (2026-11-12): node controls besides the two handles all go through
+`icons.tsx` (Magnify/Import/Edit/X/Nodes/FilmStrip) — clean. Moodboard frame
+resize is the same empty-circle handle — fixed in this pass. Toolbar buttons
+are text labels; shelf zoom uses MagnifyIcon; minimap has no icon controls;
+note delete uses TrashIcon. Elsewhere: the only rotate handle in the app is
+the moodboard node's; other resize surfaces are drag strips/edges
+(graph-shelf, animatic, timeline, sidebar) or the graph frame's gradient
+corner (`prod-frame-resize`) — none render through the icon set and none are
+dots, so no change.
+
+## Review
+
+Fixed via the node-shelf approach: `RotateIcon`/`ResizeIcon` added to `icons.tsx` with paired colorful+minimal SVGs (29-icon set; minimal = 24x24 `#000` stroke-1.8 circular arrow / diagonal expand corners), rendered at size 9 inside the node rotate/resize handles and the frame resize handle (same empty-circle gap found in the sweep). CSS centers the glyph and suppresses only the colorful `<img>` inside these handles, so colorful rendering is exactly the prior plain nub; the minimal masked span shows. Gesture handlers untouched (glyph is `pointer-events:none`). Tests: `app/test/moodboard-node-icons.test.ts` (6; red 4/6 -> green 6/6: minimal glyphs on rotate/resize/frame-resize + zoom/remove, pointerdown still fires rotate/resize for r1, colorful has no minimal glyph + CSS suppression pinned), `icons.test.ts` counts 27->29. Gates: typecheck clean; focused 12/12; full vitest 2596 passed / 1 failed (sole pre-existing `group` CANVAS_TYPE_EQUAL lessons-guard, unrelated) / 15 skipped; `npm run build` clean. Sweep: all other node controls already route through `icons.tsx`; toolbar = text buttons, shelf zoom = MagnifyIcon, minimap = no icon controls, note delete = TrashIcon; the only rotate handle in the app is this node's; other resize surfaces are drag strips/edges, the graph frame's gradient corner, or React Flow NodeResizer chrome (not icon-set glyphs, unchanged). Live verification (2026-11-12, `tasks/screenshots/moodboard-icons-verify.mjs`, evidence in `tasks/screenshots/moodboard-icons/2026-11-12T00-30-53-082Z/`): built app on an isolated seeded profile, window moved off-display to -32000,0 immediately (Electron ignores `--headless` on Windows — verified `IsWindowVisible=True` — so the runs drove the offscreen window over CDP; a brief on-screen flash at each launch is inherent). 15/15 rows passed, screenshots read back: minimal board/node/frame/import crops show real glyphs on rotate/resize/frame-resize/zoom/remove/import (computed mask URLs, white tint, no empty buttons, no dots); real mouse drags rotated Hero to 44.84deg (29 intermediate transforms) and scaled it 260x210 -> 320.87x253.48 (25 intermediate widths), frame 560x290 -> 607.83x323.04, all persisted in the saved production JSON; rAF during drags 217 frames/1.31s and 195/1.18s (avg ~165/s offscreen-uncapped, p95/max frame delta 6.2ms, no stalls); zoom opened the lightbox (glyphed close), rename persisted, remove 5 -> 4 nodes, suite button opened Image Suite in Edit mode (the board has no AI-edit button by design — `MoodboardNode` passes no `onEditRef`), and the import click opened the real OS picker (window class `#32770`, title "Open", watcher-cancelled). Colorful relaunch: zero minimal glyphs on the board, handle glyph `<img>`s `display:none` (plain nubs, same circle bg/border/radius), zoom/remove full-color icons visible; no pageerrors in either run. Not committed.
+
+---
+
+# Paste image -> Save sometimes creates no reference (silent, intermittent)
+
+Ask: paste visibly registers (save popup shows), clicking Save sometimes produces no reference and no error. Trace clipboard paste -> preview/confirm UI -> Save -> file write + reference record; check async race, silent swallow, state collision, clipboard variance; state relation to Bug #11 (paste not registering, fixed).
+
+## Trace (verified by reading)
+
+- Two paste entry points, one shared commit shape:
+  - Design page (`ProductionWorkspace.tsx` paste listener, step 2) -> `createReferenceFromFile`.
+  - Node-graph canvas (`NodeGraphModal.tsx` paste listener) -> `onPasteFiles` -> `addPastedReferences` -> `addFileReference` (same fn as graph file drops).
+- Both: `promptReferenceSave` (`NamePromptDialog` `askReferenceSave`) runs FIRST. The Save click only resolves the name/category promise and dismisses the dialog. ALL real work happens after dismissal: `importableImageDataUrl` (FileReader read; >15MB also a convert popup + main downsample), `persistRefImage` (`production:addReferenceImage` IPC, main `writeFileSync` into `referencesDir`), then `saveField({references})` -> `void persistProduction(next).catch(() => {})` (whole-doc `production:save`, main `applyRendererState`).
+- Bug #11 (test `image-paste-focus.test.ts`, Nov 5): the paste LISTENER bailed when focus sat in any text field, so the popup never appeared. Fixed via the `clipboardText` guard. This bug is downstream of that: listener fires, popup shows, post-Save commit dies. DISTINCT root cause; shared surface only.
+
+## Findings (failure points, in the asked order)
+
+1. Async race (structural): data materialization starts only AFTER Save, with the dialog already gone — no busy state, no readiness gate, nothing retaining the image. Slow reads/writes (large images) widen the window in which any failure below is invisible and unrecoverable (File handle dropped, user must re-paste).
+2. Silent swallows: `if (!dataUrl) return null` in both paste fns (no error at all); `persistRefImage` `catch { return undefined }` (IPC reason discarded); `saveField`'s `persistProduction(...).catch(() => {})` (record-save failure = file on disk, no record, success assumed; never verified); graph paste `void (async ...)()` with no catch; panel drop's `.catch(() => {})` in `references.tsx`. The one error surface (`setErr` -> `ErrorNotice`) renders in page flow, UNDER the node-graph overlay (z-90 fixed) — invisible for canvas pastes. No logging anywhere on the path.
+3. State collision: dialog submit has no busy/settled guard — a double submit resolves + `hostQueue.shift()`s twice, which can skip a queued paste dialog entirely (its promise never resolves = silent no-op). Rapid separate pastes run concurrent commit loops (only the dialogs serialize).
+4. Clipboard variance: size is the lever — >15MB pastes (large screenshots/photos) take the late convert-popup + downsample path after the dialog closed; cancelling/escaping it returns null silently. Formats ride the same data-URL transport (main re-derives ext from MIME), so size, not format, drives intermittence.
+
+## Plan
+
+- [x] Red tests first: `app/test/paste-save-commit.test.ts` — slow image write + immediate Save (exactly one ref, dialog busy meanwhile); write failure -> visible in-dialog error + retained + retry succeeds (file written once); record-save failure -> same; double-submit -> exactly one; 20 consecutive paste->Save cycles incl. one >15MB -> 20 refs.
+- [x] `image-downsample.ts`: split materialization so the paste path can start it at paste time (oversize convert consent is asked up front from `file.size`, then read+downsample runs in flight).
+- [x] `NamePromptDialog.tsx`: optional async `onConfirm` for the reference-save variant — dialog stays open with a busy Save while it runs, an error string keeps it open with an inline error for retry; busy blocks cancel/backdrop/Escape/double-submit; settle-once guard for every variant.
+- [x] `ProductionWorkspace.tsx`: paste commits (`createReferenceFromFile`, `addFileReference`) run inside `onConfirm`: await materialized data, write file (memoized across retries), await `persistProduction` and VERIFY the saved document contains the new record id (+ returned file path) before success; one pre-minted id per paste (retry/double-click idempotent); `console.error` with reason on every failure (renderer console is mirrored to `main.log`); `persistRefImage` logs its swallowed reason.
+- [x] `NodeGraphModal.tsx`: paste async loop gets a catch + log.
+- [x] Verify: focused tests green, full app suite, typecheck, build.
+
+## Review
+
+Root cause (distinct from Bug #11): Save committed nothing — it only resolved the name promise; the read/downsample/write/record-save all ran after dismissal, fire-and-forget, with silent-null returns, a reason-swallowing `persistRefImage`, and `saveField`'s `.catch(() => {})` on the record save. Any slow or failing step (large images widen the window; a double-submit could also shift the dialog queue past a queued paste) produced no reference, no visible error (the `ErrorNotice` sits under the canvas overlay), no log, and no retry. Red evidence: the new tests on the old code failed 5/6 (dialog not retained under slow read/write, no error on write/record failure, double-submit -> ZERO references) while the 20-cycle happy path passed — matching the intermittent field report.
+
+Fix shipped: image/media data materializes at paste/drop time (`beginImportableImageDataUrl`, oversize consent up front); the commit runs inside the save dialog (`onConfirm`: busy "Saving…" Save, dismissal blocked, inline error + retained image on failure, settle-once against double-submit); the record save is awaited and verified against the document main persisted, with optimistic rollback on failure (`commitReferenceRecord`); one pre-minted id + memoized file write per paste make retries/double-clicks produce exactly one reference; every failure logs `[paste-reference]`/`[reference-import]`/`[reference-image]` + reason via `console.error` (mirrored to `main.log`). Graph-canvas paste (`addFileReference` via `addPastedReferences`) and Design-page paste (`createReferenceFromFile`) share the fixed shape; graph drops ride the same fn.
+
+Tests: `app/test/paste-save-commit.test.ts` (6, red 5/6 -> green 6/6): slow write + immediate Save, slow read + immediate Save, write failure -> error/retain/retry + log assertion, record-save failure -> retry reuses the one written file, double-submit -> one ref/one write, 20 consecutive cycles incl. one >15MB (downsampled) -> Ref_001..Ref_020. Gates: `npm run typecheck` clean; focused paste files 14/14; full `npm test` 2590 passed / 1 failed (sole pre-existing `group` CANVAS_TYPE_EQUAL lessons-guard, unrelated, documented failing before this work) / 15 skipped; `npm run build` clean. Mocks sit at the same `window.cascade` seam as the existing paste tests (main's synchronous file write unchanged); no live-Electron paste run was made. Not committed.
+
+---
+
+# OpenArt provider forwards node generation parameters (Seedream background et al.)
+
+Ask: OpenArt MCP generate path dropped the node's params (live-verified: Seedream 5.5 `background: transparent` works via direct MCP, no effect in Cascade). Forward generally per the model's live form, record what was sent (job ledger), check image EDIT too.
+
+- Findings: `OpenArtClient.imageGenFn` named its 4th arg `_params` and never read it (nor `Production.openArt.params`); `imageGenArgs` built params from prompt/aspect/resolution/count/refs only. Every image call site in `index.ts` already passed params (frame node, edit node, classic edit, suite, references, character sheet, style frame) and the storyboard batch passes none (relies on the provider's production-config fallback, the Higgsfield contract). Image EDIT is the same `imageGenFn` in image2image mode (form fetched per mode), so it dropped params identically. Video had the same drop: `videoGenArgs` never read `VideoGenOptions.params` (it was only copied raw onto the pending record). `PendingImageGen.params` was never set by this provider; `LedgerGenMeta`/`LedgerEntry` had no params field at all.
+- Fix: new exported `declaredParamsAssign` in `openart.ts` - subset of node values the live form declares, re-keyed to form property names (folded alias match), enum/oneOf-validated (unlisted dropped), type-coerced (bool false preserved, int clamped), media/frame/prompt fields and dedicated-assigner keys skipped; no form = forward nothing. `imageGenArgs`/`videoGenArgs` merge it and return `{ args, sentParams }`; `imageGenFn` uses `genParams ?? cfgUsed.params`. Records show the sent subset: `LedgerGenMeta.params` -> `LedgerEntry.params` (`ledger.ts` recordGeneration/normalize/entryMeta, sanitized, pricing untouched, CSV unchanged), `PendingImageGen.params` at all three record sites, `PendingVideoGen.params` now sent-subset instead of raw, and the four recheck billing sites in `index.ts` pass `pending.params` into the reclaim's ledger row. Dedicated controls stay authoritative (params cannot hijack prompt/aspect/resolution/duration/refs).
+- Tests (red first: 5 failed / 112 passed; tsc flagged missing `params` fields): `openart.test.ts` +5 - background/seed/alias forwarding + undeclared dropped + pending & recorder carry sent subset; unlisted enum dropped + production-config fallback; image EDIT (image2image) forwarding; video forwarding incl. boolean false. `ledger.test.ts` +1 - params recorded, absent when none, survives disk round-trip. Plain generation pinned unchanged by the pre-existing exact recorder/params tests.
+- Verification: `npm run typecheck` clean; focused openart+ledger 117/117; full `npm test` 2580 passed / 1 failed (sole pre-existing `group` lessons-guard - re-verified failing with this change stashed) / 15 skipped; `npm run build` clean. Not committed.
+- Live check (2026-11-11, `tasks/openart-live/2026-11-11T22-27-17-506Z/`): built app on the real profile over CDP; provider temporarily switched `higgsfield-cli` -> `openart` and restored after. Pre-spend probe in the running app: catalog listed Seedream 5.5 as `byte-plus-seedream-5-5`, its live form declared `background` enum `[auto, transparent, opaque]`, credits 16. One suite generation (model `byte-plus-seedream-5-5`, 1k, 1:1, neutral red-sphere prompt with no transparency wording, `params: { background: "transparent" }`) through `suite:generate` -> `imageGenFn` completed; credits 16 -> 4 (12 spent, exactly one submission). The expense-ledger row for the job records `params: { background: "transparent" }` (the sent subset derived from the built request; the fake-server tests pin the literal nested `{ mode, params: { ..., background: "transparent" } }` tool arguments). Downloaded file `out/suite/Suite (46).png` in production `4521_IMMI Rolltek` (evidence copy `generated.png`, sha256 `e9d8ee31...a069`, hashes identical) decoded from disk in a separate process: PNG 1024x1024 color type 6 (RGBA), 61.6% fully transparent pixels, all four corners alpha 0, center alpha 255 - a real alpha channel. Media provider setting verified back on `higgsfield-cli`; no Electron left running.
+- Flagged, out of scope: the OpenArt **CLI** transport (`openart-cli.ts`) also ignores `_params`, but that binary surface has no known per-model param flags (it cannot even take aspect/resolution), so forwarding there needs a live CLI probe of accepted flags first. "Job ledger" read as the job's recorded params (pending receipt + expense ledger entry) - `JobRecord.settings` already snapshots raw IPC args at begin and was left as-is.
+
 # App-wide undo/redo for all document editing (+ Feature #12 scene delete, unblocked)
 
 Ask: one consistent undo system (Ctrl+Z / Ctrl+Shift+Z, Ctrl+Y) at the document layer covering prompt/script edits, scene ops, storyboard ops, node graph edits, and deletions — bounded, and proven not buggy (Items 1-5). Out of batch-state (same as the scene rename below).

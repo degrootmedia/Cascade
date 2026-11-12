@@ -1,0 +1,30 @@
+{
+  "file": "D:\\Cascade\\tasks\\openart-live\\2026-11-11T22-27-17-506Z\\generated.png",
+  "bytes": 1217347,
+  "pngSignature": true,
+  "width": 1024,
+  "height": 1024,
+  "bitDepth": 8,
+  "colorType": 6,
+  "interlace": 0,
+  "hasTRNS": false,
+  "hasPLTE": false,
+  "channels": 4,
+  "hasAlphaChannel": true,
+  "alpha": {
+    "totalPixels": 1048576,
+    "fullyTransparent": 645939,
+    "fullyTransparentPct": 61.6,
+    "partial": 3411,
+    "partialPct": 0.33,
+    "opaque": 399226,
+    "corners": {
+      "tl": 0,
+      "tr": 0,
+      "bl": 0,
+      "br": 0
+    },
+    "center": 255
+  },
+  "verdict": "REAL ALPHA: background is genuinely transparent"
+}

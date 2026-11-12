@@ -162,6 +162,17 @@ describe("ledger records", () => {
     expect(image).toMatchObject({ kind: "image", price: 0.1, aspectRatio: undefined });
   });
 
+  it("records the generation params that were actually sent (e.g. background)", () => {
+    recordGeneration(img({ params: { background: "transparent", seed: 42 } }));
+    recordGeneration(img());
+    const [plain, withParams] = view(P1).entries;
+    expect(withParams.params).toEqual({ background: "transparent", seed: 42 });
+    expect(plain.params).toBeUndefined();
+    // Survives the on-disk round-trip (normalizeEntry keeps it).
+    setLedgerUserDataDir(dataDir);
+    expect(view(P1).entries[1].params).toEqual({ background: "transparent", seed: 42 });
+  });
+
   it("keeps one production's entries out of another's view", () => {
     setPriceRules([rangeRule({ id: "r1", model: "*", minPrice: 0.25, maxPrice: 0.25 })]);
     recordGeneration(img({ model: "a" })); // p1

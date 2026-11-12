@@ -4435,8 +4435,8 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 .prod-graph-head { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.prod-graph-title { font-weight: 600; color: var(--text); white-space: nowrap; }
-.prod-graph-hint { flex: 1; min-width: 0; font-size: 0.74rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prod-graph-title { font-weight: 600; color: var(--text); white-space: nowrap; margin-right: auto; }
+
 .prod-graph-canvas { flex: 1; min-height: 0; position: relative; --graph-socket-ref: var(--accent); --graph-socket-style: var(--cat-style); --graph-socket-brand: var(--cat-brand); --graph-socket-grid: var(--cat-grid); }
 .prod-graph-body { display: flex; flex: 1; min-height: 0; }
 .prod-graph-shelf {
@@ -4661,6 +4661,15 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   min-height: 0;
   background: var(--bg);
 }
+/* Tabbed right shelf (Nodes / Snippets). The Snippets tab is wider so
+   snippet entries and the edit form fit; the Nodes tab keeps its width. */
+.prod-graph-tools.snippets-tab { width: 288px; }
+.prod-graph-tools-tabs { display: flex; gap: 6px; padding: 8px 8px 0; flex-shrink: 0; }
+.prod-graph-tools-tab { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px; padding: 5px 6px; cursor: pointer; font: inherit; font-size: 0.74rem; }
+.prod-graph-tools-tab:hover { color: var(--text); }
+.prod-graph-tools-tab.active { color: var(--text); border-color: var(--accent); background: var(--bg-raised); }
+.prod-graph-tools-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.prod-graph-tools-pane.hidden { display: none; }
 .prod-graph-tools-head { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .prod-graph-tools-title { font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
 .prod-graph-tools-hint { font-size: 0.68rem; color: var(--text-dim); }
@@ -5138,7 +5147,7 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-graph-history-badge { position: absolute; left: 5px; bottom: 5px; padding: 1px 5px; border-radius: 5px; background: rgba(0, 0, 0, 0.62); color: var(--on-overlay); font-size: 0.66rem; }
 .prod-graph-history-upgrade { position: absolute; right: 5px; bottom: 5px; padding: 2px 6px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 0.64rem; font-weight: 600; cursor: pointer; }
 .prod-graph-history-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
-.prod-graph-output-hint { font-size: 0.68rem; color: var(--text-dim); line-height: 1.4; }
+
 /* The in-betweener shares the gen node chrome but is not resizable. */
 .prod-graph-tween { width: 300px; height: auto; }
 
@@ -5620,6 +5629,16 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .moodboard-node.selected .moodboard-node-resize { opacity: 1; }
 .moodboard-node-resize { right: -7px; bottom: -7px; cursor: nwse-resize; }
 .moodboard-node-rotate { right: -7px; top: -7px; cursor: alias; }
+/* Handle glyphs (RotateIcon/ResizeIcon) sit centered in the nub. Only the
+   minimal set draws one: in the colorful set the handles stay the plain
+   nubs they have always been, so the colorful <img> glyph is suppressed
+   (the minimal glyph is a masked span, not an <img>, and still shows). */
+.moodboard-node-rotate,
+.moodboard-node-resize,
+.moodboard-frame-resize { display: flex; align-items: center; justify-content: center; }
+.moodboard-node-rotate > img.cascade-icon,
+.moodboard-node-resize > img.cascade-icon,
+.moodboard-frame-resize > img.cascade-icon { display: none; }
 
 /* Grouped-reference frames: a translucent tinted region behind the members with
    a header bar (label + color + ungroup). Only the head and the resize handle
@@ -6374,6 +6393,14 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--text); display: flex; flex-direction: column;
   padding: 12px; gap: 10px; box-sizing: border-box;
 }
+/* Embedded home (node-canvas shelf tab): same panel, inline. Mirrors the
+   overlay drawer's column so the shared inner classes lay out identically. */
+.snippets-embedded {
+  flex: 1; min-height: 0; overflow: hidden auto;
+  color: var(--text); display: flex; flex-direction: column;
+  padding: 10px; gap: 10px; box-sizing: border-box;
+}
+.snippets-embedded .snippets-head-actions { margin-left: auto; }
 .snippets-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .snippets-title { font-weight: 600; font-size: 0.95rem; }
 .snippets-head-actions { display: flex; align-items: center; gap: 6px; }

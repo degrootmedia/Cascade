@@ -34,6 +34,8 @@ import videoEditingUrl from "../assets/icons/video-editing.svg";
 import genjutsuMotionUrl from "../assets/icons/genjutsu-motion.svg";
 import genjutsuSwapUrl from "../assets/icons/genjutsu-swap.svg";
 import cameraGridUrl from "../assets/icons/camera-grid.svg";
+import resizeUrl from "../assets/icons/resize.svg";
+import rotateUrl from "../assets/icons/rotate.svg";
 import upscaleUrl from "../assets/icons/upscale.svg";
 import xUrl from "../assets/icons/X.svg";
 import mAttachFileUrl from "../assets/icons/minimal/attach-file.svg";
@@ -61,6 +63,8 @@ import mVideoEditingUrl from "../assets/icons/minimal/video-editing.svg";
 import mGenjutsuMotionUrl from "../assets/icons/minimal/genjutsu-motion.svg";
 import mGenjutsuSwapUrl from "../assets/icons/minimal/genjutsu-swap.svg";
 import mCameraGridUrl from "../assets/icons/minimal/camera-grid.svg";
+import mResizeUrl from "../assets/icons/minimal/resize.svg";
+import mRotateUrl from "../assets/icons/minimal/rotate.svg";
 import mUpscaleUrl from "../assets/icons/minimal/upscale.svg";
 import mXUrl from "../assets/icons/minimal/X.svg";
 
@@ -169,3 +173,7 @@ export const MagicIcon = (p: IconProps) => <Icon colorful={magicUrl} minimal={mM
 export const CameraGridIcon = (p: IconProps) => <Icon colorful={cameraGridUrl} minimal={mCameraGridUrl} {...p} />;
 /** Up arrow over a tray — the upscale node. */
 export const UpscaleIcon = (p: IconProps) => <Icon colorful={upscaleUrl} minimal={mUpscaleUrl} {...p} />;
+/** Circular arrow — drag-to-rotate handles (moodboard node). */
+export const RotateIcon = (p: IconProps) => <Icon colorful={rotateUrl} minimal={mRotateUrl} {...p} />;
+/** Diagonal expand corners — drag-to-resize/scale handles (moodboard node/frame). */
+export const ResizeIcon = (p: IconProps) => <Icon colorful={resizeUrl} minimal={mResizeUrl} {...p} />;

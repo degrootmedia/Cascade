@@ -33,6 +33,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExpensePriceRule, LedgerEntry, LedgerGenMeta, LedgerView } from "../shared/ipc.js";
+import { sanitizeGenParams } from "../shared/ipc.js";
 
 /** Fallback video resolution labels when a video model's live form can't be
  *  read (mirrors the renderer fallback in boards.tsx). */
@@ -322,6 +323,7 @@ function normalizeEntry(e: LedgerEntry): LedgerEntry | null {
     resolution: String(e.resolution ?? ""),
     durationSec: kind === "video" && e.durationSec != null ? Math.max(0, e.durationSec) : undefined,
     aspectRatio: typeof e.aspectRatio === "string" ? e.aspectRatio : undefined,
+    params: sanitizeGenParams(e.params),
     price: Number.isFinite(e.price) ? Math.max(0, e.price) : 0,
     credits,
     at: Number.isFinite(e.at) ? e.at : 0,
@@ -436,6 +438,7 @@ export function recordGeneration(meta: LedgerGenMeta, creditUsd?: number | null)
     resolution: meta.resolution || "",
     durationSec: meta.kind === "video" ? meta.durationSec : undefined,
     aspectRatio: meta.aspectRatio,
+    ...(sanitizeGenParams(meta.params) ? { params: sanitizeGenParams(meta.params) } : {}),
     price: priceFor(rules.priceRules, { ...meta, credits }, creditUsd ?? null),
     credits,
     at: meta.at || Date.now(),
@@ -485,6 +488,7 @@ function entryMeta(e: LedgerEntry): LedgerGenMeta {
     resolution: e.resolution,
     durationSec: e.durationSec,
     aspectRatio: e.aspectRatio,
+    ...(e.params && Object.keys(e.params).length ? { params: { ...e.params } } : {}),
     credits: e.credits,
     at: e.at,
     productionId: e.productionId,

@@ -11,6 +11,7 @@ import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { NodeGraphModal } from "../src/renderer/src/components/NodeGraphModal.js";
 import { materializeGraph } from "../src/shared/graph/materialize.js";
+import { installCtrlWheelPageZoom } from "../src/renderer/src/components/common/ctrl-wheel-zoom.js";
 import type { Production, ProductionShot } from "../src/shared/ipc.js";
 
 class ROStub { observe() {} unobserve() {} disconnect() {} }
@@ -132,6 +133,45 @@ function ctrlClick(host: HTMLElement, nodeId: string) {
   act(() => {
     el!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }));
   });
+}
+
+/** The full press sequence a browser emits for one CTRL+Click on a node:
+ *  pointer/mouse down on the node body, an optional drift while pressed
+ *  (d3 listens for move/up on the window), up, then click. Events carry
+ *  `view` — without it jsdom leaves d3-drag unable to arm its post-drag
+ *  click suppression, which is the exact path that ate real CTRL+Clicks:
+ *  at React Flow's default nodeClickDistance (0), any drift ≥1px between
+ *  down and up suppresses the click React Flow turns into onNodeClick. */
+function ctrlPress(host: HTMLElement, nodeId: string, movePx = 0) {
+  const el = host.querySelector(`.react-flow__node[data-id="${nodeId}"]`) as HTMLElement;
+  expect(el, `node ${nodeId} rendered`).toBeTruthy();
+  const target = (el.querySelector(".prod-graph-node, div") as HTMLElement) ?? el;
+  const W = window as unknown as { MouseEvent: typeof MouseEvent };
+  const init = { bubbles: true, cancelable: true, ctrlKey: true, button: 0, clientX: 100, clientY: 100, view: window } as MouseEventInit;
+  act(() => {
+    target.dispatchEvent(new W.MouseEvent("pointerdown", init));
+    target.dispatchEvent(new W.MouseEvent("mousedown", init));
+    if (movePx) window.dispatchEvent(new W.MouseEvent("mousemove", { ...init, clientX: 100 + movePx }));
+    target.dispatchEvent(new W.MouseEvent("pointerup", init));
+    window.dispatchEvent(new W.MouseEvent("mouseup", init));
+    target.dispatchEvent(new W.MouseEvent("click", init));
+  });
+}
+
+/** One CTRL+wheel notch over the canvas (Feature #8 zoom gesture). */
+function ctrlWheelCanvas(host: HTMLElement) {
+  const renderer = host.querySelector(".react-flow__renderer") as HTMLElement;
+  expect(renderer, "canvas renderer").toBeTruthy();
+  const WE = (window as unknown as { WheelEvent: typeof WheelEvent }).WheelEvent;
+  const ev = new WE("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 });
+  act(() => { renderer.dispatchEvent(ev); });
+  return ev;
+}
+
+function viewportScale(host: HTMLElement): number {
+  const t = (host.querySelector(".react-flow__viewport") as HTMLElement)?.style.transform ?? "";
+  const m = /scale\(([\d.]+)\)/.exec(t);
+  return m ? Number(m[1]) : NaN;
 }
 
 describe("CTRL+Click routes to Frame Output", () => {
@@ -355,6 +395,64 @@ describe("CTRL+Click routes to Frame Output", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(host.querySelector(".prod-graph-drop-hint")?.textContent).toContain("Refreshed gen-b.png");
+    act(() => { root.unmount(); });
+    host.remove();
+  });
+
+  it("CTRL+wheel over the canvas zooms the canvas and creates no wiring", async () => {
+    const pageZooms: number[] = [];
+    const uninstall = installCtrlWheelPageZoom(window, (d) => pageZooms.push(d));
+    const patches: Array<Partial<ProductionShot>> = [];
+    const { host, root } = renderModal(baseShot({ graphOutputSource: undefined }), (p) => patches.push(p));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    patches.length = 0;
+    expect(viewportScale(host)).toBe(1);
+    const ev = ctrlWheelCanvas(host);
+    // The canvas's own zoom claimed the wheel (Feature #8: no double zoom
+    // from the page fallback, no scroll) — and a zoom is never a wire.
+    expect(ev.defaultPrevented).toBe(true);
+    expect(pageZooms).toEqual([]);
+    expect(viewportScale(host)).toBeGreaterThan(1);
+    expect(patches.find((p) => p.graph), "no graph write from a wheel zoom").toBeUndefined();
+    act(() => { root.unmount(); });
+    uninstall();
+    host.remove();
+  });
+
+  it("sequence: CTRL+wheel zoom, then CTRL+Click (with press drift) still wires to Frame Output", async () => {
+    // Regression: with the Feature #8 zoom handlers installed, a realistic
+    // CTRL+Click press (down/up with a couple px of drift, as a trackpad or
+    // post-wheel hand produces) lost its click to d3-drag's post-drag
+    // suppression at nodeClickDistance 0, so onNodeClick never fired and
+    // nothing wired — while selection (mousedown-based) kept working.
+    const pageZooms: number[] = [];
+    const uninstall = installCtrlWheelPageZoom(window, (d) => pageZooms.push(d));
+    const patches: Array<Partial<ProductionShot>> = [];
+    const { host, root } = renderModal(baseShot({ graphOutputSource: undefined }), (p) => patches.push(p));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    ctrlWheelCanvas(host);
+    expect(viewportScale(host)).toBeGreaterThan(1);
+    patches.length = 0;
+    ctrlPress(host, "imagegen", 2);
+    const graphPatches = patches.filter((p) => p.graph);
+    expect(graphPatches.length, "a stored graph write after zoom + CTRL+Click").toBeGreaterThan(0);
+    const finalGraph = graphPatches[graphPatches.length - 1]!.graph as { edges: { id: string; to: { node: string } }[] };
+    expect(finalGraph.edges.some((e) => e.id === "e-img-out" && e.to.node === "output")).toBe(true);
+    expect(finalGraph.edges.filter((e) => e.to.node === "output")).toHaveLength(1);
+    // The click wired; it did not also become a page zoom.
+    expect(pageZooms).toEqual([]);
+    act(() => { root.unmount(); });
+    uninstall();
+    host.remove();
+  });
+
+  it("a press that moves well past the click distance is a drag, not a CTRL+Click wire", async () => {
+    const patches: Array<Partial<ProductionShot>> = [];
+    const { host, root } = renderModal(baseShot({ graphOutputSource: undefined }), (p) => patches.push(p));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    patches.length = 0;
+    ctrlPress(host, "imagegen", 20);
+    expect(patches.find((p) => p.graph), "no wiring from a drag").toBeUndefined();
     act(() => { root.unmount(); });
     host.remove();
   });

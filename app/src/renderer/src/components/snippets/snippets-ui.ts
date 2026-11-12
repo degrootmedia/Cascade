@@ -14,8 +14,21 @@ export interface SnippetsShelfRequest {
 
 const listeners = new Set<(req: SnippetsShelfRequest) => void>();
 
+/**
+ * A surface that embeds the snippet library itself (the node canvas's
+ * tabbed right shelf) can claim shelf-open requests while it is mounted:
+ * "Save selection as snippet" from a node prompt then lands in the
+ * embedded Snippets tab instead of also opening the overlay shelf.
+ * Only one claim is active at a time (the most recently mounted).
+ */
+let claimHandler: ((req: SnippetsShelfRequest) => void) | null = null;
+
 /** Ask the mounted shelf host to open. No-op when no host is mounted. */
 export function openSnippetsShelf(req: SnippetsShelfRequest = {}): void {
+  if (claimHandler) {
+    claimHandler(req);
+    return;
+  }
   for (const fn of [...listeners]) fn(req);
 }
 
@@ -23,4 +36,13 @@ export function openSnippetsShelf(req: SnippetsShelfRequest = {}): void {
 export function onOpenSnippetsShelf(fn: (req: SnippetsShelfRequest) => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
+}
+
+/** Claim shelf-open requests (see above). Returns a release function that
+ *  only clears the claim when it is still the active one. */
+export function claimSnippetsShelfRequests(fn: (req: SnippetsShelfRequest) => void): () => void {
+  claimHandler = fn;
+  return () => {
+    if (claimHandler === fn) claimHandler = null;
+  };
 }

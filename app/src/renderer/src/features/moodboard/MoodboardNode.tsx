@@ -6,6 +6,7 @@
  */
 import { memo, type CSSProperties, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { CustomRef, MoodboardNodeLayout } from "../../../../shared/ipc.js";
+import { ResizeIcon, RotateIcon } from "../../components/icons.js";
 import { RefFigure } from "../../components/production/references.js";
 
 /** The wrapper never starts a drag from an interactive control. */
@@ -86,8 +87,8 @@ export const MoodboardNode = memo(function MoodboardNode({
         inUseTitle={inUseTitle}
         onReorder={() => {}}
       />
-      <span className="moodboard-node-rotate" title="Drag to rotate (Shift snaps to 15°)" onPointerDown={(e) => { stop(e); onRotateStart(e, node.refId); }} />
-      <span className="moodboard-node-resize" title="Drag to resize" onPointerDown={(e) => { stop(e); onResizeStart(e, node.refId); }} />
+      <span className="moodboard-node-rotate" title="Drag to rotate (Shift snaps to 15°)" onPointerDown={(e) => { stop(e); onRotateStart(e, node.refId); }}><RotateIcon size={9} /></span>
+      <span className="moodboard-node-resize" title="Drag to resize" onPointerDown={(e) => { stop(e); onResizeStart(e, node.refId); }}><ResizeIcon size={9} /></span>
     </div>
   );
 }, (prev, next) =>

@@ -1030,9 +1030,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
     };
     try {
       const detail = await this.modelDetail(raw).catch(() => null);
-      const args = [raw, "--prompt", COST_PROBE_PROMPT];
+      // Prompt-less models (depth_anything_video, background removers,
+      // upscalers) declare no `prompt` param and the CLI rejects the flag
+      // as unknown; same for `duration` on video utilities. Key both off
+      // the declared schema, exactly like the image submit path; an
+      // unreadable schema keeps the legacy probe shape.
+      const acceptsPrompt = !detail || !!HiggsfieldCliProvider.param(detail, "prompt");
+      const args = acceptsPrompt ? [raw, "--prompt", COST_PROBE_PROMPT] : [raw];
       if (req.kind === "video") {
-        args.push("--duration", String(Math.round(req.durationSec ?? 0) || 5));
+        const acceptsDuration = !detail || !!HiggsfieldCliProvider.param(detail, "duration", "length", "seconds");
+        if (acceptsDuration) args.push("--duration", String(Math.round(req.durationSec ?? 0) || 5));
       }
       if (req.resolution) {
         const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
@@ -1991,7 +1998,16 @@ export class HiggsfieldCliProvider implements MediaProvider {
       // Cite only after routing: a reference the model couldn't carry
       // (dropped above) must never be cited as submitted.
       const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
-      args.splice(1, 0, "--prompt", fullPrompt);
+      // Prompt-less video models (depth_anything_video, background
+      // removers, video upscalers) declare no `prompt` param and reject
+      // the flag as unknown — key emission off the declared schema, the
+      // same rule the image path uses. An unreadable schema, or a
+      // required prompt, keeps the legacy emission; an optional prompt
+      // rides only when there is text to send.
+      const clipPromptParam = detail ? HiggsfieldCliProvider.param(detail, "prompt") : null;
+      if (!detail || (clipPromptParam && (clipPromptParam.required === true || fullPrompt.trim().length > 0))) {
+        args.splice(1, 0, "--prompt", fullPrompt);
+      }
 
       // Schema-driven extras (genre, speedramp, batch_size, an explicit
       // mode, …) from the caller's params map. Runs before the seedance
@@ -2022,7 +2038,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
           throw new Error(`"${modelId}" doesn't support a ${durationSec}s clip (supports ${sorted.join(", ")}s) — retime the block or pick another model.`);
         }
       }
-      args.push("--duration", String(durationSec));
+      // Same schema gate for duration: video utilities declare none.
+      if (!detail || durParam) args.push("--duration", String(durationSec));
       const resValues = detail ? (HiggsfieldCliProvider.param(detail, "resolution")?.values ?? []) : [];
       // A draft is always 480p regardless of the node's resolution pick.
       const wantResolution = opts.draft ? DRAFT_RESOLUTION : opts.resolution;
@@ -2218,7 +2235,14 @@ export class HiggsfieldCliProvider implements MediaProvider {
       // literal — it stands for the source clip (uploaded first above),
       // so it becomes "reference image 1" inline at submit below.
       const fullPrompt = citePrompt(resolved, refs, uploaded, styleRefNames(p));
-      if (!(genjutsuMode && !fullPrompt.trim())) args.splice(1, 0, "--prompt", replaceSourceTag(fullPrompt));
+      // Schema gate, same rule as generateVideoClip: no declared prompt
+      // param means no --prompt at all; an optional prompt (Genjutsu,
+      // sam_3_video) rides only when there is text to send.
+      const editPromptParam = detail ? HiggsfieldCliProvider.param(detail, "prompt") : null;
+      const editedPrompt = replaceSourceTag(fullPrompt);
+      if (!detail || (editPromptParam && (editPromptParam.required === true || editedPrompt.trim().length > 0))) {
+        args.splice(1, 0, "--prompt", editedPrompt);
+      }
 
       if (detail && opts.params) {
         emitExtraParams(normalizeCliModelDetail(detail, null, modelId, null), opts.params, args);

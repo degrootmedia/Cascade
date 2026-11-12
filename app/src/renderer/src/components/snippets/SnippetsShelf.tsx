@@ -1,6 +1,11 @@
 /**
- * The Snippets shelf: the user's prompt-snippet library, openable from the
- * classic view (prompt side panel) and the node view (graph header).
+ * The Snippets shelf: the user's prompt-snippet library. Two homes share
+ * one panel (`SnippetsPanel`):
+ *  - Overlay: `SnippetsShelfHost` (the classic side panel and the Image
+ *    Suite open it via `SnippetsButton`) — a portaled right-hand drawer.
+ *  - Embedded: the node canvas's tabbed right shelf (its Snippets tab) —
+ *    mounted there for as long as the canvas is open; inserting returns
+ *    focus to the prompt field and the panel stays put.
  *
  * Click model (insert first, copy second):
  *  - Clicking a snippet inserts its body at the cursor of the most
@@ -10,7 +15,7 @@
  *    to the clipboard and shows a toast — never a silent no-op.
  *  - The copy icon on each entry always copies.
  *
- * The panel is portaled to <body>: inside the node graph it would
+ * The overlay is portaled to <body>: inside the node graph it would
  * otherwise sit under React Flow's transformed viewport. Entry buttons
  * swallow mousedown so a live prompt selection survives the click.
  */
@@ -41,7 +46,9 @@ import {
 } from "./snippet-store.js";
 import { onOpenSnippetsShelf, openSnippetsShelf } from "./snippets-ui.js";
 
-/** Button that opens the shelf. Rendered in each view's prompt chrome. */
+/** Button that opens the overlay shelf. Rendered in the classic view's
+ *  and the Image Suite's prompt chrome (the node canvas uses its shelf
+ *  tab instead). */
 export function SnippetsButton({ className }: { className?: string }) {
   return (
     <button
@@ -76,13 +83,30 @@ interface FormState {
 
 const EMPTY_FORM: FormState = { editingId: null, name: "", category: "", body: "" };
 
+/** An external "open with this body pre-filled" ask (Save selection as
+ *  snippet). `nonce` makes repeat asks with the same body re-fire. */
+export interface SnippetPrefillRequest {
+  body: string;
+  nonce: number;
+}
+
 /**
- * The shelf host: mount once above both views. Renders nothing until
- * opened (plus a transient toast). Also carries the snippet form used for
- * add / edit / save-selection (pre-filled body).
+ * The snippet library panel: search, the grouped entries, the
+ * add/edit/delete form, and the copy toast. `embedded` renders inline
+ * (the node canvas's shelf tab — no backdrop, title, or close chrome);
+ * otherwise it renders the portaled overlay drawer, shown only while
+ * `visible` (the toast outlives a close, as before).
  */
-export function SnippetsShelfHost() {
-  const [open, setOpen] = useState(false);
+export function SnippetsPanel({ embedded = false, visible = true, prefillRequest = null, onInserted, onClose }: {
+  embedded?: boolean;
+  visible?: boolean;
+  prefillRequest?: SnippetPrefillRequest | null;
+  /** Called after a successful insert (the overlay closes; the embedded
+   *  panel passes nothing and stays put). */
+  onInserted?: () => void;
+  /** Overlay close (backdrop / X / Escape). Unused when embedded. */
+  onClose?: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [form, setForm] = useState<FormState | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -90,42 +114,56 @@ export function SnippetsShelfHost() {
   const toastTimer = useRef<number | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const nameRef = useRef<HTMLInputElement | null>(null);
+  const seenPrefillNonce = useRef<number | null>(null);
+  const wasVisible = useRef(false);
 
   useSyncExternalStore(subscribeSnippets, snippetsVersion, snippetsVersion);
   const snippets = getSnippets();
-  const visible = filterSnippets(snippets, query);
-  const groups = groupSnippetsByCategory(visible);
+  const visibleSnippets = filterSnippets(snippets, query);
+  const groups = groupSnippetsByCategory(visibleSnippets);
   const categories = [...new Set(snippets.map((s) => s.category))];
 
   useEffect(() => {
     installPromptFieldTracking();
     void primePromptSnippets();
-    return onOpenSnippetsShelf((req) => {
-      setOpen(true);
-      setConfirmDeleteId(null);
-      if (req.prefillBody !== undefined) {
-        setForm({ ...EMPTY_FORM, body: req.prefillBody });
-      }
-    });
   }, []);
 
+  // Save-selection asks routed here pre-fill the add form.
   useEffect(() => {
-    if (!open) return;
+    if (!prefillRequest || prefillRequest.nonce === seenPrefillNonce.current) return;
+    seenPrefillNonce.current = prefillRequest.nonce;
+    setConfirmDeleteId(null);
+    setForm({ ...EMPTY_FORM, body: prefillRequest.body });
+  }, [prefillRequest]);
+
+  // Becoming visible starts from a clean list state (no stale delete arm).
+  useEffect(() => {
+    if (visible && !wasVisible.current) setConfirmDeleteId(null);
+    wasVisible.current = visible;
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        e.stopPropagation();
-        if (form) setForm(null);
-        else setOpen(false);
+        if (form) {
+          e.stopPropagation();
+          setForm(null);
+        } else if (!embedded) {
+          e.stopPropagation();
+          onClose?.();
+        }
       }
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [open, form]);
+  }, [visible, form, embedded, onClose]);
 
   useEffect(() => {
-    if (open && !form) searchRef.current?.focus();
+    if (!visible) return;
+    if (!form) searchRef.current?.focus();
     if (form) nameRef.current?.focus();
-  }, [open, form]);
+  }, [visible, form]);
 
   function showToast(message: string) {
     setToast(message);
@@ -147,7 +185,7 @@ export function SnippetsShelfHost() {
   /** Primary click: insert at the tracked cursor, else copy + toast. */
   function useSnippet(snippet: PromptSnippet) {
     if (hasActivePromptField() && insertIntoActivePromptField(snippet.body)) {
-      setOpen(false);
+      onInserted?.();
       return;
     }
     void copySnippet(snippet, true);
@@ -189,14 +227,136 @@ export function SnippetsShelfHost() {
     showToast(`Deleted “${snippet.name}”`);
   }
 
-  const selectionAvailable = open && !form ? getActivePromptSelectionText().length > 0 : false;
+  const selectionAvailable = visible && !form ? getActivePromptSelectionText().length > 0 : false;
 
-  if (!open && !toast) return null;
+  const toastEl = toast ? (
+    <div className="snippets-toast" data-snippets-ui role="status">
+      {toast}
+    </div>
+  ) : null;
+
+  const body = (
+    <>
+      <div className="snippets-head">
+        {!embedded && <span className="snippets-title">Snippets</span>}
+        <span className="snippets-head-actions">
+          {selectionAvailable && (
+            <button type="button" className="prod-btn ghost snippets-small-btn" onClick={startAddFromSelection} title="Save the text selected in the prompt field as a new snippet">
+              New from selection
+            </button>
+          )}
+          <button type="button" className="prod-btn ghost snippets-small-btn" onClick={() => startAdd()} title="Add a new snippet">
+            <PlusIcon size={13} /> New
+          </button>
+          {!embedded && (
+            <button type="button" className="snippets-icon-btn" onClick={() => onClose?.()} title="Close snippets" aria-label="Close snippets">
+              <XIcon size={14} />
+            </button>
+          )}
+        </span>
+      </div>
+
+      <label className="snippets-search">
+        <SearchIcon size={14} />
+        <input
+          ref={searchRef}
+          type="text"
+          value={query}
+          placeholder="Search snippets…"
+          aria-label="Search snippets"
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </label>
+
+      {form ? (
+        <div className="snippets-form">
+          <div className="snippets-form-title">{form.editingId ? "Edit snippet" : "New snippet"}</div>
+          <label className="snippets-field">
+            <span>Name</span>
+            <input ref={nameRef} type="text" value={form.name} placeholder="e.g. Geometry & camera lock" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </label>
+          <label className="snippets-field">
+            <span>Category</span>
+            <input type="text" value={form.category} placeholder="e.g. Locks — geometry & pose" list="snippets-categories" onChange={(e) => setForm({ ...form, category: e.target.value })} />
+            <datalist id="snippets-categories">
+              {categories.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </label>
+          <label className="snippets-field">
+            <span>Body</span>
+            <textarea rows={10} value={form.body} placeholder="Prompt text — [bracketed placeholders] get selected on insert" onChange={(e) => setForm({ ...form, body: e.target.value })} />
+          </label>
+          <div className="snippets-form-actions">
+            <button type="button" className="prod-btn ghost" onClick={() => setForm(null)}>Cancel</button>
+            <button type="button" className="prod-btn" disabled={!form.name.trim() || !form.body.trim()} onClick={saveForm}>
+              {form.editingId ? "Save changes" : "Add snippet"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="snippets-list">
+          {groups.length === 0 && (
+            <p className="hint snippets-empty">
+              {snippets.length === 0 ? "No snippets yet. Add one with New." : "No snippets match your search."}
+            </p>
+          )}
+          {groups.map((g) => (
+            <div key={g.category} className="snippets-group">
+              <div className="snippets-category">{g.category}</div>
+              {g.snippets.map((s) => (
+                <div key={s.id} className="snippets-entry">
+                  <button
+                    type="button"
+                    className="snippets-entry-main"
+                    title="Insert at the prompt cursor (copies when no prompt field is active)"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => useSnippet(s)}
+                  >
+                    <span className="snippets-entry-name">{s.name}</span>
+                    <span className="snippets-entry-preview">{snippetPreview(s.body)}</span>
+                  </button>
+                  <span className="snippets-entry-actions">
+                    <button type="button" className="snippets-icon-btn" title="Copy to clipboard" aria-label={`Copy ${s.name}`} onMouseDown={(e) => e.preventDefault()} onClick={() => void copySnippet(s, false)}>
+                      <CopyGlyph />
+                    </button>
+                    <button type="button" className="snippets-icon-btn" title="Edit snippet" aria-label={`Edit ${s.name}`} onClick={() => startEdit(s)}>
+                      <EditIcon size={13} />
+                    </button>
+                    {confirmDeleteId === s.id ? (
+                      <button type="button" className="snippets-confirm-delete" onClick={() => removeSnippet(s)}>Delete?</button>
+                    ) : (
+                      <button type="button" className="snippets-icon-btn" title="Delete snippet" aria-label={`Delete ${s.name}`} onClick={() => setConfirmDeleteId(s.id)}>
+                        <TrashIcon size={13} />
+                      </button>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="snippets-foot">Click a snippet to insert it at your prompt cursor. Stored with your app settings, across all projects.</div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <>
+        <div className="snippets-embedded" data-snippets-ui>{body}</div>
+        {toastEl && createPortal(toastEl, document.body)}
+      </>
+    );
+  }
+
+  if (!visible && !toast) return null;
 
   return createPortal(
     <>
-      {open && (
-        <div className="snippets-backdrop" data-snippets-ui onMouseDown={() => setOpen(false)}>
+      {visible && (
+        <div className="snippets-backdrop" data-snippets-ui onMouseDown={() => onClose?.()}>
           <aside
             className="snippets-shelf"
             data-snippets-ui
@@ -204,115 +364,42 @@ export function SnippetsShelfHost() {
             aria-label="Prompt snippets"
             onMouseDown={(e) => e.stopPropagation()}
           >
-            <div className="snippets-head">
-              <span className="snippets-title">Snippets</span>
-              <span className="snippets-head-actions">
-                {selectionAvailable && (
-                  <button type="button" className="prod-btn ghost snippets-small-btn" onClick={startAddFromSelection} title="Save the text selected in the prompt field as a new snippet">
-                    New from selection
-                  </button>
-                )}
-                <button type="button" className="prod-btn ghost snippets-small-btn" onClick={() => startAdd()} title="Add a new snippet">
-                  <PlusIcon size={13} /> New
-                </button>
-                <button type="button" className="snippets-icon-btn" onClick={() => setOpen(false)} title="Close snippets" aria-label="Close snippets">
-                  <XIcon size={14} />
-                </button>
-              </span>
-            </div>
-
-            <label className="snippets-search">
-              <SearchIcon size={14} />
-              <input
-                ref={searchRef}
-                type="text"
-                value={query}
-                placeholder="Search snippets…"
-                aria-label="Search snippets"
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </label>
-
-            {form ? (
-              <div className="snippets-form">
-                <div className="snippets-form-title">{form.editingId ? "Edit snippet" : "New snippet"}</div>
-                <label className="snippets-field">
-                  <span>Name</span>
-                  <input ref={nameRef} type="text" value={form.name} placeholder="e.g. Geometry & camera lock" onChange={(e) => setForm({ ...form, name: e.target.value })} />
-                </label>
-                <label className="snippets-field">
-                  <span>Category</span>
-                  <input type="text" value={form.category} placeholder="e.g. Locks — geometry & pose" list="snippets-categories" onChange={(e) => setForm({ ...form, category: e.target.value })} />
-                  <datalist id="snippets-categories">
-                    {categories.map((c) => (
-                      <option key={c} value={c} />
-                    ))}
-                  </datalist>
-                </label>
-                <label className="snippets-field">
-                  <span>Body</span>
-                  <textarea rows={10} value={form.body} placeholder="Prompt text — [bracketed placeholders] get selected on insert" onChange={(e) => setForm({ ...form, body: e.target.value })} />
-                </label>
-                <div className="snippets-form-actions">
-                  <button type="button" className="prod-btn ghost" onClick={() => setForm(null)}>Cancel</button>
-                  <button type="button" className="prod-btn" disabled={!form.name.trim() || !form.body.trim()} onClick={saveForm}>
-                    {form.editingId ? "Save changes" : "Add snippet"}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="snippets-list">
-                {groups.length === 0 && (
-                  <p className="hint snippets-empty">
-                    {snippets.length === 0 ? "No snippets yet. Add one with New." : "No snippets match your search."}
-                  </p>
-                )}
-                {groups.map((g) => (
-                  <div key={g.category} className="snippets-group">
-                    <div className="snippets-category">{g.category}</div>
-                    {g.snippets.map((s) => (
-                      <div key={s.id} className="snippets-entry">
-                        <button
-                          type="button"
-                          className="snippets-entry-main"
-                          title="Insert at the prompt cursor (copies when no prompt field is active)"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => useSnippet(s)}
-                        >
-                          <span className="snippets-entry-name">{s.name}</span>
-                          <span className="snippets-entry-preview">{snippetPreview(s.body)}</span>
-                        </button>
-                        <span className="snippets-entry-actions">
-                          <button type="button" className="snippets-icon-btn" title="Copy to clipboard" aria-label={`Copy ${s.name}`} onMouseDown={(e) => e.preventDefault()} onClick={() => void copySnippet(s, false)}>
-                            <CopyGlyph />
-                          </button>
-                          <button type="button" className="snippets-icon-btn" title="Edit snippet" aria-label={`Edit ${s.name}`} onClick={() => startEdit(s)}>
-                            <EditIcon size={13} />
-                          </button>
-                          {confirmDeleteId === s.id ? (
-                            <button type="button" className="snippets-confirm-delete" onClick={() => removeSnippet(s)}>Delete?</button>
-                          ) : (
-                            <button type="button" className="snippets-icon-btn" title="Delete snippet" aria-label={`Delete ${s.name}`} onClick={() => setConfirmDeleteId(s.id)}>
-                              <TrashIcon size={13} />
-                            </button>
-                          )}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="snippets-foot">Click a snippet to insert it at your prompt cursor. Stored with your app settings, across all projects.</div>
+            {body}
           </aside>
         </div>
       )}
-      {toast && (
-        <div className="snippets-toast" data-snippets-ui role="status">
-          {toast}
-        </div>
-      )}
+      {toastEl}
     </>,
     document.body,
+  );
+}
+
+/**
+ * The overlay shelf host: mount once above the classic view (the
+ * workspace owns it in both windows). Renders nothing until opened
+ * (plus a transient toast). While the node canvas's embedded Snippets
+ * tab claims shelf-open requests, `openSnippetsShelf` never reaches
+ * this host, so the two homes never open at once.
+ */
+export function SnippetsShelfHost() {
+  const [open, setOpen] = useState(false);
+  const [prefillRequest, setPrefillRequest] = useState<SnippetPrefillRequest | null>(null);
+  const nonceRef = useRef(0);
+
+  useEffect(() => onOpenSnippetsShelf((req) => {
+    setOpen(true);
+    if (req.prefillBody !== undefined) {
+      nonceRef.current += 1;
+      setPrefillRequest({ body: req.prefillBody, nonce: nonceRef.current });
+    }
+  }), []);
+
+  return (
+    <SnippetsPanel
+      visible={open}
+      prefillRequest={prefillRequest}
+      onInserted={() => setOpen(false)}
+      onClose={() => setOpen(false)}
+    />
   );
 }

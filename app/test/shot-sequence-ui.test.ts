@@ -146,7 +146,7 @@ async function ctrlClickFrame(host: HTMLElement, shotId: string): Promise<void> 
 
 function styleFrameButton(host: HTMLElement): HTMLButtonElement {
   return [...host.querySelectorAll(".prod-boards-actions button")]
-    .find((b) => (b.textContent ?? "").includes("Export selected frames")) as HTMLButtonElement;
+    .find((b) => (b.textContent ?? "").includes("Export style frames")) as HTMLButtonElement;
 }
 
 function cards(host: HTMLElement, cls: string): string[] {
@@ -332,7 +332,7 @@ describe("shot sequence storyboard flow", () => {
     expect(cards(host, "selected")).toEqual(["s1"]);
   });
 
-  it("export selected frames sends the selection in storyboard order", async () => {
+  it("export style frames sends the selection in storyboard order", async () => {
     expect(styleFrameButton(host)).toBeTruthy();
     expect(styleFrameButton(host).disabled).toBe(true);
 
@@ -341,7 +341,9 @@ describe("shot sequence storyboard flow", () => {
     await ctrlClickFrame(host, "s1");
     const btn = styleFrameButton(host);
     expect(btn.disabled).toBe(false);
-    expect(btn.textContent).toContain("(2)");
+    // Feature #20: the action's one name everywhere is "Export style frames".
+    expect(btn.textContent).toBe("Export style frames (2)");
+    expect(btn.textContent).not.toContain("selected");
 
     await act(async () => { btn.click(); await new Promise((r) => setTimeout(r, 0)); });
     expect(styleFrameExportCalls).toEqual([{ productionId: "p1", shotIds: ["s1", "s3"] }]);

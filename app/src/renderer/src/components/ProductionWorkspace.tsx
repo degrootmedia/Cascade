@@ -15,7 +15,7 @@ import { MediaLightbox } from "./common/MediaLightbox.js";
 import { HelpTip } from "./common/HelpTip.js";
 import { useCtrlWheelZoom, zoomedSliderValue } from "./common/ctrl-wheel-zoom.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
-import { importableImageDataUrl } from "./production/image-downsample.js";
+import { importableImageDataUrl, beginImportableImageDataUrl } from "./production/image-downsample.js";
 import { askReferenceSave, type ReferenceSaveChoice } from "./NamePromptDialog.js";
 import { nextNumberedRefName } from "../../../shared/ref-names.js";
 import { NodeGraphModal, type GraphRef } from "./NodeGraphModal.js";
@@ -2030,7 +2030,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
 
   /** The save-reference popup: name + category for a brand-new reference.
    *  Null means the user cancelled — callers must create nothing. */
-  async function promptReferenceSave(initialName: string, opts?: { title?: string; defaultCategoryId?: string }): Promise<ReferenceSaveChoice | null> {
+  async function promptReferenceSave(initialName: string, opts?: { title?: string; defaultCategoryId?: string; onConfirm?: (choice: ReferenceSaveChoice) => Promise<string | null>; busyLabel?: string }): Promise<ReferenceSaveChoice | null> {
     const current = prodRef.current;
     if (!current) return null;
     return askReferenceSave({
@@ -2040,6 +2040,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       initialName,
       categories: current.referenceCategories ?? [],
       defaultCategoryId: opts?.defaultCategoryId,
+      onConfirm: opts?.onConfirm,
+      busyLabel: opts?.busyLabel,
     });
   }
 
@@ -2090,10 +2092,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     await styleFromImageDataUrl(dataUrl);
   }
 
-  /** Create a pasted image as a new reference: the save popup names and
-   *  categorizes it first (defaulting to the next Ref_001-style name and
-   *  Uncategorized), so cancelling saves nothing. Returns the created
-   *  reference (for the node graph to place it on the canvas). */
+  /** Create a pasted image as a new reference. The image data is
+   *  materialized at paste time; the save popup (next Ref_001-style name,
+   *  Uncategorized by default) then commits inside the dialog — busy while
+   *  writing, inline error + retry on failure, closing only once the saved
+   *  production verifiably contains the reference. Cancelling saves
+   *  nothing. Returns the created reference (for the node graph). */
   async function createReferenceFromFile(file: File): Promise<{ id: string; name: string; artwork: string } | null> {
     if (!prodRef.current) return null;
     if (!file.type.startsWith("image/")) {
@@ -2101,22 +2105,55 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       return null;
     }
     const prodId = prodRef.current.meta.id;
-    const choice = await promptReferenceSave(nextRefName(), { title: "Save pasted image as reference" });
-    if (!choice || prodRef.current?.meta.id !== prodId) return null;
-    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
-    let dataUrl: string | null;
-    try {
-      dataUrl = await importableImageDataUrl(file);
-    } catch {
-      setErr("Couldn't read the pasted image.");
-      return null;
-    }
-    if (!dataUrl || prodRef.current?.meta.id !== prodId) return null;
-    const imagePath = await persistRefImage(dataUrl, name);
-    if (!imagePath) { setErr("Couldn't save the pasted image."); return null; }
+    // Materialize the image NOW, at paste time — the Save commit must never
+    // run against unfinished data. Declining the oversize conversion aborts
+    // here, explicitly, before the save popup ever opens.
+    const pendingData = await beginImportableImageDataUrl(file);
+    if (!pendingData || prodRef.current?.meta.id !== prodId) return null;
+    let dataUrl: string | null = null;
+    let inFlight: Promise<string> = pendingData.dataUrl;
+    void inFlight.catch(() => {}); // awaited (and surfaced) at commit; avoid an unhandled rejection while the popup waits
+    const ensureDataUrl = async (): Promise<string> => {
+      if (dataUrl) return dataUrl;
+      try {
+        dataUrl = await inFlight;
+        return dataUrl;
+      } catch (e) {
+        // A retry re-reads the file instead of re-awaiting the failed read.
+        inFlight = (async () => {
+          const again = await beginImportableImageDataUrl(file);
+          if (!again) throw new Error("Image conversion was cancelled.");
+          return again.dataUrl;
+        })();
+        void inFlight.catch(() => {});
+        throw e;
+      }
+    };
+    // One id per pasted image, minted up front: retries and double-clicks
+    // can only ever produce this one reference.
     const id = uid("ref");
-    saveField({ references: [...(prodRef.current?.references ?? []), { id, name, ...(choice.categoryId ? { categoryId: choice.categoryId } : {}), imagePath, shotIds: [] }] });
-    return { id, name, artwork: cascadeMedia(prodId, imagePath) };
+    let finalName: string | null = null;
+    let imagePath: string | undefined;
+    let created: { id: string; name: string; artwork: string } | null = null;
+    const commit = async (choice: ReferenceSaveChoice): Promise<string | null> => {
+      try {
+        if (prodRef.current?.meta.id !== prodId) throw new Error("the production changed — paste the image again.");
+        const url = await ensureDataUrl();
+        const chosen = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
+        if (chosen !== finalName) { finalName = chosen; imagePath = undefined; }
+        imagePath ??= await persistRefImageOrThrow(url, finalName);
+        await commitReferenceRecord({ id, name: finalName, categoryId: choice.categoryId, imagePath });
+        created = { id, name: finalName, artwork: cascadeMedia(prodId, imagePath) };
+        return null;
+      } catch (e) {
+        const reason = String(e).replace(/^Error:\s*/, "");
+        console.error(`[paste-reference] Couldn't save pasted image as reference "${choice.name}": ${reason}`);
+        return `Couldn't save the pasted image: ${reason} Your image is still here — try Save again.`;
+      }
+    };
+    const choice = await promptReferenceSave(nextRefName(), { title: "Save pasted image as reference", onConfirm: commit });
+    if (!choice) return null;
+    return created;
   }
 
   // Step 2: while the Design panel is open, Ctrl+V with an image creates a
@@ -2142,7 +2179,12 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
       if (!files.length) return;
       e.preventDefault();
       void (async () => {
-        for (const f of files) await createReferenceFromFile(f);
+        try {
+          for (const f of files) await createReferenceFromFile(f);
+        } catch (e) {
+          console.error(`[paste-reference] Paste failed: ${String(e).replace(/^Error:\s*/, "")}`);
+          setErr("Couldn't save the pasted image. Try pasting it again.");
+        }
       })();
     };
     window.addEventListener("paste", onPaste);
@@ -2699,6 +2741,55 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     return references?.find((r) => r.name.trim().toLowerCase() === name.toLowerCase())?.id;
   }
 
+  /** Append one reference record and AWAIT the document save, verifying the
+   *  document main persisted actually contains it. Throws with the
+   *  underlying reason when the save fails or the record is missing — an
+   *  unverified, fire-and-forget save must never read as success. Keyed by
+   *  the record's pre-minted id: a retry replaces the same id (never a
+   *  duplicate), and a failed attempt rolls the optimistic record back out
+   *  so local state can't claim a reference the disk doesn't have. */
+  async function commitReferenceRecord(record: { id: string; name: string; categoryId?: string; imagePath?: string; media?: "video" | "audio"; mediaPath?: string }): Promise<void> {
+    const current = prodRef.current;
+    if (!current) throw new Error("No production is open.");
+    const entry: CustomRef = {
+      id: record.id,
+      name: record.name,
+      ...(record.categoryId ? { categoryId: record.categoryId } : {}),
+      ...(record.imagePath ? { imagePath: record.imagePath } : {}),
+      ...(record.media ? { media: record.media, mediaPath: record.mediaPath } : {}),
+      shotIds: [],
+    };
+    const next = { ...current, references: [...(current.references ?? []).filter((r) => r.id !== record.id), entry] };
+    prodRef.current = next;
+    setProd(next);
+    try {
+      const saved = await persistProduction(next);
+      if (!(saved.references ?? []).some((r) => r.id === record.id)) {
+        throw new Error("the saved production doesn't contain the new reference.");
+      }
+    } catch (e) {
+      const latest = prodRef.current;
+      if (latest?.meta.id === current.meta.id) {
+        const rolled = { ...latest, references: (latest.references ?? []).filter((r) => r.id !== record.id) };
+        prodRef.current = rolled;
+        setProd(rolled);
+      }
+      throw e;
+    }
+    void refreshList();
+  }
+
+  /** persistRefImage that throws with the reason instead of returning
+   *  undefined — for commits that must surface and retry a failed write.
+   *  A returned path means main has written the file (synchronous write). */
+  async function persistRefImageOrThrow(dataUrl: string, baseName: string): Promise<string> {
+    const current = prodRef.current;
+    if (!current) throw new Error("No production is open.");
+    const res = await window.cascade.addReferenceImage(current.meta.id, `${baseName}.png`, dataUrl);
+    if (!res?.path) throw new Error("the image file couldn't be written.");
+    return res.path;
+  }
+
   /** Save a dropped/picked reference image (inline data URL) into the
    *  production's referencesDir on disk and return its workspace-relative
    *  path — image references live as files, not JSON data URLs. */
@@ -2708,7 +2799,8 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     try {
       const res = await window.cascade.addReferenceImage(current.meta.id, `${baseName}.png`, dataUrl);
       return res?.path;
-    } catch {
+    } catch (e) {
+      console.error(`[reference-image] Couldn't write reference image "${baseName}": ${String(e).replace(/^Error:\s*/, "")}`);
       return undefined;
     }
   }
@@ -2731,45 +2823,101 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
     }
   }
 
-  /** Step 3: any image/video/audio dropped into the node graph automatically
-   *  becomes a reference: all files are written into the production's
-   *  referencesDir on disk. The reference is NOT tagged into the prompt —
-   *  connecting it to the prompt node is an explicit socket action.
-   *  Returns the created reference so the graph can place its node. */
+  /** Step 3: any image/video/audio dropped or pasted into the node graph
+   *  automatically becomes a reference: all files are written into the
+   *  production's referencesDir on disk. The reference is NOT tagged into
+   *  the prompt — connecting it to the prompt node is an explicit socket
+   *  action. The file's data is materialized up front and the save popup
+   *  commits inside the dialog (busy, inline error + retry on failure,
+   *  closing only after the saved production verifiably contains the
+   *  reference). Returns the created reference so the graph can place its
+   *  node. */
   async function addFileReference(shotId: string, file: File, opts?: { defaultName?: string; title?: string }): Promise<GraphRef | null> {
     if (!prod) return null;
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : null;
     if (!kind) { setErr(`${file.name}: not an image, video, or audio file.`); return null; }
     const baseName = opts?.defaultName ?? (file.name.trim().replace(/\.[^.]+$/, "").replace(/\s+/g, " ").slice(0, 60) || "Dropped reference");
-    // The save popup names + categorizes the new reference before any file
-    // is written; cancelling drops nothing onto the canvas either.
     const prodId = prod.meta.id;
-    const choice = await promptReferenceSave(baseName, { title: opts?.title ?? "Save dropped file as reference" });
-    if (!choice || prodRef.current?.meta.id !== prodId) return null;
-    // A chosen name that already exists gets a numbered suffix so a fresh
-    // drop is always a distinct reference (saveRefOnly would otherwise
-    // merge it into the same-named one).
-    const name = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
-    try {
-      if (kind === "image") {
-        const dataUrl = await importableImageDataUrl(file);
-        if (!dataUrl) return null;
-        const imagePath = await persistRefImage(dataUrl, name);
-        if (!imagePath) { setErr("Couldn't save the dropped image."); return null; }
-        const id = saveRefOnly(name, { imagePath, categoryId: choice.categoryId });
-        if (!id) return null;
-        return { id, name, artwork: cascadeMedia(prod.meta.id, imagePath) };
-      } else {
-        const saved = await window.cascade.addReferenceMedia(prod.meta.id, file.name, file.type, await file.arrayBuffer());
-        if (!saved) { setErr("Couldn't save the dropped media file."); return null; }
-        const id = saveRefOnly(name, { media: saved.kind, mediaPath: saved.path, categoryId: choice.categoryId });
-        if (!id) return null;
-        return { id, name, artwork: "", media: saved.kind, mediaPath: saved.path };
-      }
-    } catch (e) {
-      setErr(String(e).replace(/^Error:\s*/, ""));
-      return null;
+    // Materialize the file's data NOW (drop/paste time), before the save
+    // popup: the commit must never run against unfinished data. Declining
+    // the oversize conversion aborts here, explicitly.
+    let dataUrl: string | null = null;
+    let inFlightImage: Promise<string> | null = null;
+    let mediaBytes: ArrayBuffer | null = null;
+    let inFlightBytes: Promise<ArrayBuffer> | null = null;
+    if (kind === "image") {
+      const pendingImage = await beginImportableImageDataUrl(file);
+      inFlightImage = pendingImage?.dataUrl ?? null;
+      if (!inFlightImage || prodRef.current?.meta.id !== prodId) return null;
+      void inFlightImage.catch(() => {}); // awaited (and surfaced) at commit
+    } else {
+      inFlightBytes = file.arrayBuffer();
+      void inFlightBytes.catch(() => {});
     }
+    const ensureDataUrl = async (): Promise<string> => {
+      if (dataUrl) return dataUrl;
+      try {
+        dataUrl = await inFlightImage!;
+        return dataUrl;
+      } catch (e) {
+        inFlightImage = (async () => {
+          const again = await beginImportableImageDataUrl(file);
+          if (!again) throw new Error("Image conversion was cancelled.");
+          return again.dataUrl;
+        })();
+        void inFlightImage.catch(() => {});
+        throw e;
+      }
+    };
+    const ensureBytes = async (): Promise<ArrayBuffer> => {
+      if (mediaBytes) return mediaBytes;
+      try {
+        mediaBytes = await inFlightBytes!;
+        return mediaBytes;
+      } catch (e) {
+        inFlightBytes = file.arrayBuffer();
+        void inFlightBytes.catch(() => {});
+        throw e;
+      }
+    };
+    // One id per dropped/pasted file, minted up front: retries and
+    // double-clicks can only ever produce this one reference. A chosen name
+    // that already exists gets a numbered suffix at commit time (below), so
+    // a fresh drop is always a distinct reference.
+    const id = uid("ref");
+    let finalName: string | null = null;
+    let imagePath: string | undefined;
+    let mediaSaved: { path: string; kind: "video" | "audio" } | undefined;
+    let created: GraphRef | null = null;
+    const commit = async (choice: ReferenceSaveChoice): Promise<string | null> => {
+      try {
+        if (prodRef.current?.meta.id !== prodId) throw new Error("the production changed — drop or paste the file again.");
+        const chosen = uniqueRefName((prodRef.current?.references ?? []).map((r) => r.name), choice.name);
+        if (chosen !== finalName) { finalName = chosen; imagePath = undefined; }
+        if (kind === "image") {
+          const url = await ensureDataUrl();
+          imagePath ??= await persistRefImageOrThrow(url, finalName);
+          await commitReferenceRecord({ id, name: finalName, categoryId: choice.categoryId, imagePath });
+          created = { id, name: finalName, artwork: cascadeMedia(prodId, imagePath) };
+        } else {
+          if (!mediaSaved) {
+            const saved = await window.cascade.addReferenceMedia(prodId, file.name, file.type, await ensureBytes());
+            if (!saved) throw new Error("the media file couldn't be written.");
+            mediaSaved = saved;
+          }
+          await commitReferenceRecord({ id, name: finalName, categoryId: choice.categoryId, media: mediaSaved.kind, mediaPath: mediaSaved.path });
+          created = { id, name: finalName, artwork: "", media: mediaSaved.kind, mediaPath: mediaSaved.path };
+        }
+        return null;
+      } catch (e) {
+        const reason = String(e).replace(/^Error:\s*/, "");
+        console.error(`[reference-import] Couldn't save ${kind} file "${file.name}" as reference "${choice.name}": ${reason}`);
+        return `Couldn't save the file: ${reason} Your file is still here — try Save again.`;
+      }
+    };
+    const choice = await promptReferenceSave(baseName, { title: opts?.title ?? "Save dropped file as reference", onConfirm: commit });
+    if (!choice) return null;
+    return created;
   }
 
   /** Pasted files prompt one at a time, defaulting to auto-numbered names
@@ -5003,7 +5151,7 @@ export function ProductionWorkspace({ onOpenSettings, detached = null, onDetache
                   Export storyboard PDF
                 </button>
                 <button disabled={boardsBusy || importBusy || styleFramePdfBusy || !seqSelection.size} onClick={() => void exportStyleFrames()} title="Export only the selected panels as a style-frame deck (one frame per page, storyboard order). Select panels with Shift+click (range) or Ctrl+click (add/remove)">
-                  {styleFramePdfBusy ? "Exporting…" : `Export selected frames${seqSelection.size ? ` (${seqSelection.size})` : ""}`}
+                  {styleFramePdfBusy ? "Exporting…" : `Export style frames${seqSelection.size ? ` (${seqSelection.size})` : ""}`}
                 </button>
                 <span className="prod-boards-sep" />
                 <button disabled={boardsBusy || importBusy || !shotCount} onClick={() => void refreshBoardLinks()} title="Re-link broken storyboard frame paths to the newest frame files on disk">

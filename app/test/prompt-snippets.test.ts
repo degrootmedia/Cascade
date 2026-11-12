@@ -265,9 +265,14 @@ describe("snippet IPC wiring", () => {
     expect(read("../src/shared/ipc-schemas.ts")).toContain('"settings:setPromptSnippets"');
   });
 
-  it("the shelf is openable from the classic side panel and the node graph header", () => {
+  it("the shelf is openable from the classic side panel; the node canvas uses its shelf tab (Feature #18)", () => {
     expect(read("../src/renderer/src/components/production/prompt-panel.tsx")).toContain("<SnippetsButton />");
-    expect(read("../src/renderer/src/components/NodeGraphModal.tsx")).toContain("<SnippetsButton />");
+    // Feature #18: the node-graph header button is gone — snippets live in
+    // the tabbed right shelf instead (see graph-right-shelf.test.ts).
+    const modal = read("../src/renderer/src/components/NodeGraphModal.tsx");
+    expect(modal).not.toContain("<SnippetsButton");
+    expect(modal).toContain("<GraphRightShelf");
+    expect(read("../src/renderer/src/components/graph/right-shelf.tsx")).toContain("<SnippetsPanel embedded");
     expect(read("../src/renderer/src/components/ProductionWorkspace.tsx")).toContain("<SnippetsShelfHost />");
   });
 

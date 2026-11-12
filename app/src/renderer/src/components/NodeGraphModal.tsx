@@ -50,7 +50,7 @@ import { SOURCE_TAG_NAME, enforceSourceTag, hasRefTag, composePromptBoxes, parse
 import { resolveRefByTagName } from "../../../shared/ref-names.js";
 import { referenceUsage } from "../../../shared/reference-usage.js";
 import { TriplePrompt, type PromptContentHandle } from "./TriplePrompt.js";
-import { SnippetsButton } from "./snippets/SnippetsShelf.js";
+import { GraphRightShelf } from "./graph/right-shelf.js";
 import { TweenTimelineModal, deriveTweenBlocksClient, filterTweenModels } from "./TweenTimelineModal.js";
 import { usePersistedCollapsed, usePersistedNumber } from "./production/persisted-state.js";
 import { refThumbUrl } from "./production/thumb-url.js";
@@ -60,7 +60,7 @@ import { refDragIds } from "./production/references.js";
 import { VideoPreview } from "./graph/video-preview.js";
 import { GraphLodProvider, GRAPH_CULL_NODE_LIMIT, GRAPH_PREVIEW_EDGE, GRAPH_TILE_EDGE, type GraphLodHandle } from "./graph/lod.js";
 import { RefShelf } from "./graph/ref-shelf.js";
-import { NodeShelf, type NodeShelfTile } from "./graph/node-shelf.js";
+import type { NodeShelfTile } from "./graph/node-shelf.js";
 import { PALETTE_TOOLS } from "../../../shared/graph/node-shelf.js";
 import { getMediaDefault, rememberMediaDefault } from "./production/media-defaults.js";
 import { DurationField, clampDurationSec, snapDurationSec } from "./production/duration-field.js";
@@ -1061,7 +1061,6 @@ const OutputNodeView = memo(function OutputNodeView({ id, data, selected }: Node
           : data.previewUrl
             ? <img className="prod-graph-output-img" src={previewSrc} alt={`Shot ${data.shotNumber}`} draggable={false} loading="lazy" decoding="async" />
             : <div className="prod-graph-output-blank">No output yet</div>}
-        {!data.bound && <span className="prod-graph-output-hint">Pipe an image, video, or reference in to feed the output</span>}
       </div>
     </>
   );
@@ -6262,14 +6261,18 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
       if (!files.length) return;
       e.preventDefault();
       void (async () => {
-        if (onPasteFiles) {
-          const refs = await onPasteFiles(files);
-          for (const ref of refs ?? []) addPlacedRef(ref, pastePosition());
-          return;
-        }
-        for (const file of files) {
-          const ref = await onDropFile(file);
-          if (ref) addPlacedRef(ref, pastePosition());
+        try {
+          if (onPasteFiles) {
+            const refs = await onPasteFiles(files);
+            for (const ref of refs ?? []) addPlacedRef(ref, pastePosition());
+            return;
+          }
+          for (const file of files) {
+            const ref = await onDropFile(file);
+            if (ref) addPlacedRef(ref, pastePosition());
+          }
+        } catch (e) {
+          console.error(`[paste-reference] Canvas paste failed: ${String(e).replace(/^Error:\s*/, "")}`);
         }
       })();
     };
@@ -6627,8 +6630,6 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
         <div className="prod-graph-head">
 
           <span className="prod-graph-title">{subjectLabel ?? `Shot ${shot.number}`} — node graph</span>
-          <span className="prod-graph-hint">Connections are stored wiring · drag references from the left shelf or tool nodes from the right panel onto the canvas · left-drag moves nodes · right-drag pans · drag a connection off an input socket to detach it · CTRL+Click a node routes it to Frame Output · hold ALT and hover a node to trace its chain</span>
-          <SnippetsButton />
           {onToggleMagic && (
             <button
               className={"prod-btn prod-magic-btn" + (magicActive ? " active" : "")}
@@ -6715,6 +6716,13 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
               minZoom={0.2}
               connectionRadius={30}
               nodesConnectable
+              // d3-drag suppresses the click after a press that moved more
+              // than this distance; at the library default (0) any 1px drift
+              // during a press eats the click, killing CTRL+Click routing
+              // (selection survives because it happens on mousedown). 4px
+              // matches the OS drag threshold: a near-still CTRL+Click still
+              // counts as a click, a real drag still doesn't.
+              nodeClickDistance={4}
               connectionLineType={ConnectionLineType.Straight}
               autoPanOnSelection={false}
               elevateEdgesOnSelect
@@ -6815,9 +6823,7 @@ export function NodeGraphModal({ prod, shot, bust, prompt, references, styles, s
             );
           })()}
           </div>
-          <div className={"prod-graph-tools" + (hidePalette ? " hidden" : "")}>
-            <NodeShelf tiles={nodeShelfTiles} />
-          </div>
+          <GraphRightShelf tiles={nodeShelfTiles} hidden={hidePalette} />
         </div>
       </div>
       {tweenOpen && (

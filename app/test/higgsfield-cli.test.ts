@@ -1625,6 +1625,254 @@ describe("HiggsfieldCliProvider.generateVideoClip", () => {
   });
 });
 
+describe("HiggsfieldCliProvider prompt-less video models", () => {
+  /** Live `model get depth_anything_video` shape (probed 2026-11-11): no
+   *  prompt and no duration param at all. The CLI rejects undeclared
+   *  params outright ("Unknown params: prompt, duration"), so the video
+   *  path must take its argument shape from the declared schema. */
+  const depthGet = () => JSON.stringify({
+    display_name: "Depth Anything Video",
+    job_type: "depth_anything_video",
+    params: [
+      { name: "colormap", type: "string", default: "grayscale", required: false, enum: ["grayscale", "turbo", "inferno", "magma", "viridis"] },
+      { name: "max_frames", type: "integer|null", default: null, required: false },
+      { name: "resolution", type: "string", default: "auto", required: false, enum: ["auto", "360p", "480p", "720p", "1080p"] },
+      { name: "side_by_side", type: "boolean", default: false, required: false },
+      { name: "variant", type: "string", default: "VDA-Large", required: false, enum: ["VDA-Small", "VDA-Base", "VDA-Large"] },
+      { name: "video_references", type: "array", default: null, required: true },
+    ],
+    rules: [],
+    type: "video",
+  });
+  /** Live `model get video_background_remover`: a lone video_references. */
+  const bgRemoverGet = () => JSON.stringify({
+    display_name: "Video Background Remover",
+    job_type: "video_background_remover",
+    params: [{ name: "video_references", type: "array", default: null, required: false }],
+    rules: [{ cel: "size(params.video_references) == 1", message: "exactly one video is required in video_references" }],
+    type: "video",
+  });
+  /** Live `model get sam_3_video`: prompt declared but optional (default
+   *  ""), no duration. */
+  const sam3Get = () => JSON.stringify({
+    display_name: "Remove Background",
+    job_type: "sam_3_video",
+    params: [
+      { name: "apply_mask", type: "boolean", default: true, required: false },
+      { name: "frames_count", type: "integer|null", default: null, required: false },
+      { name: "prompt", type: "string", default: "", required: false },
+      { name: "video_references", type: "array", default: null, required: false },
+    ],
+    rules: [{ cel: "size(params.video_references) == 1", message: "exactly one video_references entry is required" }],
+    type: "video",
+  });
+  const PROMPTLESS_VIDEO_LIST = JSON.stringify([
+    { job_type: "seedance_2_0", name: "Seedance 2.0" },
+    { job_type: "depth_anything_video", name: "Depth Anything Video" },
+    { job_type: "video_background_remover", name: "Video Background Remover" },
+    { job_type: "sam_3_video", name: "Remove Background" },
+  ]);
+
+  const videoProd = (name: string): Production => {
+    const folder = path.join(dataDir, name);
+    fs.mkdirSync(path.join(folder, "videos"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "videos", "source.mp4"), Buffer.from("video-bytes"));
+    return makeProduction({
+      meta: { id: "prod-1", name: "Test Production", folder, createdAt: "", updatedAt: "", stepDone: 0, shotCount: 0 },
+    });
+  };
+
+  it("submits depth_anything_video with no --prompt/--duration and forwards its own params", async () => {
+    const seen: string[][] = [];
+    const jobId = "12121212-1212-1212-1212-121212121212";
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --video": () => ok(PROMPTLESS_VIDEO_LIST),
+        "model get depth_anything_video": () => ok(depthGet()),
+        "generate cost depth_anything_video": () => ok(JSON.stringify({ credits: 1.5 })),
+        "generate create depth_anything_video": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "completed", video_url: "https://example.invalid/depth.mp4" }])),
+      })
+    );
+    const onGeneration = vi.fn();
+    const p = new HiggsfieldCliProvider({ binary: () => "higgsfield", run, recorder: { onGeneration } });
+    const prod = videoProd("prod-depth");
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([4, 4]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    let rel = "";
+    try {
+      ({ rel } = await p.generateVideoClip(
+        prod,
+        shot,
+        {
+          model: `${HIGGSFIELD_CLI_ID_PREFIX}depth_anything_video`, resolution: "720p", durationSec: 5,
+          prompt: "this text has nowhere to go",
+          params: { variant: "VDA-Small", colormap: "turbo", side_by_side: true, max_frames: 24 },
+        },
+        () => {},
+        "videos/source.mp4"
+      ));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(fs.existsSync(path.join(prod.meta.folder, rel))).toBe(true);
+    expect(seen).toHaveLength(1);
+    const args = seen[0];
+    expect(args[0]).toBe("depth_anything_video");
+    expect(args).not.toContain("--prompt");
+    expect(args).not.toContain("--duration");
+    expect(args[args.indexOf("--video-references") + 1]).toMatch(/\.mp4$/);
+    expect(args[args.indexOf("--variant") + 1]).toBe("VDA-Small");
+    expect(args[args.indexOf("--colormap") + 1]).toBe("turbo");
+    expect(args[args.indexOf("--side_by_side") + 1]).toBe("true");
+    expect(args[args.indexOf("--max_frames") + 1]).toBe("24");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("720p");
+    // Lands as a normal generation result: ledger entry with the quote.
+    expect(onGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "video",
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}depth_anything_video`,
+      credits: 1.5,
+      productionId: "prod-1",
+      shotId: "s1",
+    }));
+  });
+
+  it("quotes depth_anything_video cost with no --prompt/--duration", async () => {
+    const seen: string[][] = [];
+    const { run } = fakeRun(
+      baseHandler({
+        "model get depth_anything_video": () => ok(depthGet()),
+        "generate cost depth_anything_video": (args) => {
+          seen.push(args);
+          return ok(JSON.stringify({ credits: 1.5 }));
+        },
+      })
+    );
+    const cost = await provider(run).getGenerationCost({
+      model: `${HIGGSFIELD_CLI_ID_PREFIX}depth_anything_video`, kind: "video",
+      resolution: "720p", durationSec: 5,
+      params: { variant: "VDA-Small", colormap: "turbo" },
+    });
+    expect(cost).toBe(1.5);
+    const args = seen[0];
+    expect(args.slice(0, 3)).toEqual(["generate", "cost", "depth_anything_video"]);
+    expect(args).not.toContain("--prompt");
+    expect(args).not.toContain("--duration");
+    expect(args[args.indexOf("--variant") + 1]).toBe("VDA-Small");
+    expect(args[args.indexOf("--colormap") + 1]).toBe("turbo");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("720p");
+  });
+
+  it("submits video_background_remover and sam_3_video edits with no --prompt/--duration", async () => {
+    const seen = new Map<string, string[]>();
+    const jobs: Record<string, string> = {
+      video_background_remover: "34343434-3434-3434-3434-343434343434",
+      sam_3_video: "56565656-5656-5656-5656-565656565656",
+    };
+    const { run } = fakeRun(
+      baseHandler({
+        "model list --video": () => ok(PROMPTLESS_VIDEO_LIST),
+        "model get video_background_remover": () => ok(bgRemoverGet()),
+        "model get sam_3_video": () => ok(sam3Get()),
+        "generate cost video_background_remover": () => ok(JSON.stringify({ credits: 2 })),
+        "generate cost sam_3_video": () => ok(JSON.stringify({ credits: 2 })),
+        "generate create video_background_remover": (args) => {
+          seen.set("video_background_remover", args);
+          return ok(JSON.stringify({ job_id: jobs.video_background_remover }));
+        },
+        "generate create sam_3_video": (args) => {
+          seen.set("sam_3_video", args);
+          return ok(JSON.stringify({ job_id: jobs.sam_3_video }));
+        },
+        [`generate wait ${jobs.video_background_remover}`]: () =>
+          ok(JSON.stringify([{ id: jobs.video_background_remover, status: "completed", video_url: "https://example.invalid/nobg.mp4" }])),
+        [`generate wait ${jobs.sam_3_video}`]: () =>
+          ok(JSON.stringify([{ id: jobs.sam_3_video, status: "completed", video_url: "https://example.invalid/sam.mp4" }])),
+      })
+    );
+    const p = provider(run);
+    const prod = videoProd("prod-promptless-edit");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([6]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      for (const model of ["video_background_remover", "sam_3_video"] as const) {
+        const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+        await p.generateVideoEdit(
+          prod, shot,
+          { model: `${HIGGSFIELD_CLI_ID_PREFIX}${model}`, resolution: "", durationSec: 5, prompt: "" },
+          () => {}, "videos/source.mp4"
+        );
+        const args = seen.get(model)!;
+        expect(args).not.toContain("--prompt");
+        expect(args).not.toContain("--duration");
+        expect(args[args.indexOf("--video-references") + 1]).toMatch(/\.mp4$/);
+      }
+      // sam_3_video DOES declare a prompt: a supplied one still rides.
+      const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "" };
+      await p.generateVideoEdit(
+        prod, shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}sam_3_video`, resolution: "", durationSec: 0, prompt: "the person on the left" },
+        () => {}, "videos/source.mp4"
+      );
+      const args = seen.get("sam_3_video")!;
+      expect(args[args.indexOf("--prompt") + 1]).toBe("the person on the left");
+      expect(args).not.toContain("--duration");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("keeps prompt-based video arguments byte-for-byte unchanged (seedance_2_0)", async () => {
+    const seen: string[][] = [];
+    const jobId = "78787878-7878-7878-7878-787878787878";
+    const { run } = fakeRun(
+      baseHandler({
+        "generate create seedance_2_0": (args) => {
+          seen.push(args.slice(2));
+          return ok(JSON.stringify({ job_id: jobId }));
+        },
+        [`generate wait ${jobId}`]: () =>
+          ok(JSON.stringify([{ id: jobId, status: "succeeded", video_url: "https://example.invalid/clip.mp4" }])),
+      })
+    );
+    const prod = videoProd("prod-seedance-unchanged");
+    fs.mkdirSync(path.join(prod.meta.folder, "boards"), { recursive: true });
+    fs.writeFileSync(path.join(prod.meta.folder, "boards", "shot-0100.jpg"), Buffer.from("jpeg-bytes"));
+    const shot: ProductionShot = { id: "s1", number: "0100", audio: "", visual: "", artwork: "boards/shot-0100.jpg" };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => Uint8Array.from([1]).buffer as ArrayBuffer,
+    }) as unknown as typeof fetch;
+    try {
+      await provider(run).generateVideoClip(
+        prod, shot,
+        { model: `${HIGGSFIELD_CLI_ID_PREFIX}seedance_2_0`, resolution: "720p", durationSec: 8, prompt: "animate" },
+        () => {}
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const args = seen[0];
+    const flags = args.filter((a) => a.startsWith("--"));
+    expect(flags).toEqual(["--prompt", "--image-references", "--duration", "--resolution", "--aspect_ratio"]);
+    expect(args[args.indexOf("--duration") + 1]).toBe("8");
+    expect(args[args.indexOf("--resolution") + 1]).toBe("720p");
+    expect(args[args.indexOf("--prompt") + 1]).toContain("animate");
+  });
+});
+
 describe("HiggsfieldCliProvider.modelOptions (schema normalization)", () => {
   it("normalizes gpt_image_2_5's full parameter surface", async () => {
     const { run } = fakeRun(baseHandler());

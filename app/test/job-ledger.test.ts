@@ -217,6 +217,8 @@ describe("channel → job mapping", () => {
       .toEqual({ kind: "tweenBlock", shotId: "s4", nodeId: "tw0" });
     expect(jobForChannel("suite:generate", ["p1", { mode: "generate" }]))
       .toEqual({ kind: "suite", shotId: undefined, nodeId: undefined });
+    expect(jobForChannel("production:generateWorkflow", ["p1", "s5", { workflow: "image_decompose" }]))
+      .toEqual({ kind: "workflow", shotId: "s5", nodeId: undefined });
     expect(jobForChannel("production:save", ["p1", {}])).toBeNull();
     // The 3D model feature was removed — its channel maps to no job.
     expect(jobForChannel("production:generate3dModel", ["p1", "s1", {}])).toBeNull();
@@ -235,7 +237,7 @@ describe("channel → job mapping", () => {
       "production:generateStyleFrame": 1, "production:recheckStyleFrame": 1,
       "production:generateReferenceImage": 1, "production:generateCharacterSheet": 1,
       "production:generateMagicPrompts": 1, "production:regenerateMagicPrompt": 1,
-      "suite:generate": 1,
+      "suite:generate": 1, "production:generateWorkflow": 1,
     })) {
       const job = jobForChannel(channel, ["p1", "s1", {}]);
       expect(job, channel).not.toBeNull();

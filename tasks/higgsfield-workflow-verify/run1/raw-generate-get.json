@@ -1,0 +1,60 @@
+{
+  "created_at": "2026-11-12T22:59:46.6254Z",
+  "display_name": "Image Decompose",
+  "id": "a548dc30-078d-4ff8-81e9-4cf39a3425af",
+  "job_type": "image_decompose",
+  "min_result_url": null,
+  "params": {
+    "folder_id": null,
+    "medias": [
+      {
+        "data": {
+          "id": "0828eec8-0e4c-42ee-a07d-0671cd18ab75",
+          "type": "media_input",
+          "url": "https://d2ol7oe51mr4n9.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/0828eec8-0e4c-42ee-a07d-0671cd18ab75.png"
+        },
+        "role": "image"
+      }
+    ],
+    "mode": "granular"
+  },
+  "result_json": {
+    "background_url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_12542e4f-4375-4d72-adff-3a8408e0363a.png",
+    "layers": [
+      {
+        "h": 625,
+        "label": "bottle",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_0.png",
+        "w": 244,
+        "x": 390,
+        "y": 227
+      },
+      {
+        "h": 207,
+        "label": "sun",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_1.png",
+        "w": 207,
+        "x": 766,
+        "y": 46
+      },
+      {
+        "h": 182,
+        "label": "blue circle",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_2.png",
+        "w": 183,
+        "x": 109,
+        "y": 689
+      },
+      {
+        "h": 161,
+        "label": "yellow square",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_3.png",
+        "w": 161,
+        "x": 750,
+        "y": 689
+      }
+    ]
+  },
+  "result_url": null,
+  "status": "completed"
+}

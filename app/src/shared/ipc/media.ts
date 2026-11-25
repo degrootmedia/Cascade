@@ -5,7 +5,7 @@
  * `../shared/ipc.js` import paths are unchanged.
  */
 
-import type { GenjutsuMode, PendingVideoGen } from "./graph.js";
+import type { GenjutsuMode, PendingVideoGen, PendingWorkflowGen } from "./graph.js";
 
 /** Which vendor serves image/video generation (global setting).
  *  `higgsfield-cli` is the Higgsfield account driven through the local
@@ -590,4 +590,88 @@ export function unusableRefsMessage(
   if (!bad.length) return null;
   const list = bad.map((r) => `"${r.name}" (${r.media})`).join(", ");
   return `${REF_PROVIDER_NAMES[id]} can't use these references: ${list}. They won't be sent — remove them or switch provider before generating.`;
+}
+
+/** One Higgsfield CLI workflow (`workflow list`), namespaced so it can
+ *  never collide with a model id: `higgsfield-cli:workflow:<job_type>`.
+ *  Workflows submit through `generate workflow`, never `generate create`. */
+export interface WorkflowChoice {
+  /** Provider-namespaced id (`higgsfield-cli:workflow:image_decompose`). */
+  id: string;
+  /** Raw CLI workflow name (`image_decompose`). */
+  jobType: string;
+  displayName: string;
+  /** Output kind the CLI declares. */
+  type: "image" | "video";
+}
+
+/** Credit quote for one workflow run (`generate cost workflow <name>`).
+ *  Only the workflow's declared `cost_params` may travel — the CLI
+ *  rejects media flags ("Model does not accept media inputs.") and
+ *  non-cost params ("Unknown params") on this form — so `params` is
+ *  filtered to cost params by the provider before anything is sent. */
+export interface WorkflowCostRequest {
+  /** Namespaced workflow id or raw workflow name. */
+  workflow: string;
+  /** Candidate params; only declared cost params reach the CLI. */
+  params?: Record<string, string | number | boolean | string[]>;
+}
+
+/** One finished workflow output file, written into the project. */
+export interface WorkflowResultFile {
+  /** Workspace-relative path (registered in the media registry). */
+  rel: string;
+  /** File extension without the dot (e.g. "png"). */
+  ext: string;
+  /** Vendor result URL it was downloaded from. */
+  url: string;
+  /** Vendor label for structured (layered) results, e.g. "bottle" or
+   *  "background" from image_decompose. Absent for plain results. */
+  label?: string;
+  /** Placement of a cropped layer on the source canvas (pixels), when
+   *  the vendor reports it — layers are bounding-box crops, not
+   *  full-canvas frames. Absent for plain results. */
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+}
+
+/** One completed workflow generation. */
+export interface WorkflowGenResult {
+  /** Vendor job id. */
+  jobId: string;
+  /** Output kind (the workflow's declared type). */
+  kind: "image" | "video";
+  /** Every output file, in the order the CLI reported them. */
+  files: WorkflowResultFile[];
+  /** Result URLs in CLI reply order (provenance the node design reads). */
+  resultUrls: string[];
+}
+
+/** One workflow generation request. General for any CLI workflow: scalar
+ *  options ride `params` (validated against the live `workflow get`
+ *  schema; unknown keys are ignored), media rides the explicit `media`
+ *  map keyed by workflow param name, or the `refs` shorthand which the
+ *  provider routes onto the workflow's declared reference params. */
+export interface WorkflowGenRequest {
+  /** Namespaced workflow id or raw workflow name. */
+  workflow: string;
+  /** Scalar options keyed by param name (`mode`, `resolution`, …). */
+  params?: Record<string, string | number | boolean | string[]>;
+  /** Convenience prompt; sent as `prompt` when the workflow declares it. */
+  prompt?: string;
+  /** Media keyed by workflow param name (array params take lists,
+   *  object params take one ref). Undeclared keys fail before submit. */
+  media?: Record<string, { name: string; dataUrl: string } | { name: string; dataUrl: string }[]>;
+  /** Unkeyed refs routed by media kind onto declared reference params. */
+  refs?: { name: string; dataUrl: string }[];
+  /** Shot the run belongs to (ledger scoping), when there is one. */
+  shotId?: string;
+  /** Override for the generate-wait budget (ms). Defaults by output kind. */
+  waitTimeoutMs?: number;
+  /** Pending-job receipt hook (mirrors `VideoGenOptions.onPending`):
+   *  fired with the vendor job's record the moment it is submitted, and
+   *  with `null` once the run completes. */
+  onPending?: (rec: PendingWorkflowGen | null) => void;
 }

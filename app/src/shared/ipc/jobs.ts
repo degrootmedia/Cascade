@@ -34,7 +34,8 @@ export type JobKind =
   | "magicPrompts"
   | "proxies"
   | "assemblyRender"
-  | "suite";
+  | "suite"
+  | "workflow";
 
 /** Lifecycle: queued -> submitting -> running -> fetching -> succeeded.
  *  `failed`, `cancelled` and `succeeded` are final; `interrupted` stays until
@@ -198,6 +199,7 @@ export function jobForChannel(channel: string, args: unknown[]): { kind: JobKind
     "production:assemblyRender": "assemblyRender",
     "production:regenerateMagicPrompt": "magicPrompts",
     "suite:generate": "suite",
+    "production:generateWorkflow": "workflow",
   };
   const kind = kindByChannel[channel];
   if (!kind) return null;
@@ -277,6 +279,7 @@ export function jobLabel(kind: JobKind): string {
     proxies: "Generating preview proxies",
     assemblyRender: "Rendering animatic to MP4",
     suite: "Generating (Image Suite)",
+    workflow: "Running a workflow",
   };
   return labels[kind];
 }

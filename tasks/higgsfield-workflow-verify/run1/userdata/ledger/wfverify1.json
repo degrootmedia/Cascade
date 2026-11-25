@@ -1,0 +1,20 @@
+{
+  "productionId": "wfverify1",
+  "entries": [
+    {
+      "id": "mwe5i8g6-y35gmr",
+      "kind": "image",
+      "model": "higgsfield-cli:workflow:image_decompose",
+      "resolution": "",
+      "params": {
+        "mode": "granular"
+      },
+      "price": 0,
+      "credits": 2,
+      "at": 1794524420165,
+      "productionId": "wfverify1",
+      "shotId": "verify-shot"
+    }
+  ],
+  "updatedAt": "2026-11-12T23:00:20.166Z"
+}

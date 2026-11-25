@@ -1,0 +1,140 @@
+{
+  "result": {
+    "jobId": "a548dc30-078d-4ff8-81e9-4cf39a3425af",
+    "kind": "image",
+    "files": [
+      {
+        "rel": "out/workflows/image_decompose/a548dc30/image_decompose-01.png",
+        "ext": "png",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_0.png"
+      },
+      {
+        "rel": "out/workflows/image_decompose/a548dc30/image_decompose-02.png",
+        "ext": "png",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_1.png"
+      },
+      {
+        "rel": "out/workflows/image_decompose/a548dc30/image_decompose-03.png",
+        "ext": "png",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_2.png"
+      },
+      {
+        "rel": "out/workflows/image_decompose/a548dc30/image_decompose-04.png",
+        "ext": "png",
+        "url": "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_3.png"
+      }
+    ],
+    "resultUrls": [
+      "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_0.png",
+      "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_1.png",
+      "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_2.png",
+      "https://d8j0ntlcm91z4.cloudfront.net/user_39Igi0apaCuNCUIqXyLAPJLaYzo/hf_20261112_225946_a548dc30-078d-4ff8-81e9-4cf39a3425af/layer_3.png"
+    ]
+  },
+  "jobs": {
+    "productionId": "wfverify1",
+    "jobs": [
+      {
+        "id": "job-mwe5h9u9-jsmksv",
+        "productionId": "wfverify1",
+        "shotId": "verify-shot",
+        "kind": "workflow",
+        "state": "succeeded",
+        "label": "Running a workflow",
+        "startedAt": "2026-11-12T22:59:35.313Z",
+        "settings": [
+          "verify-shot",
+          {
+            "workflow": "higgsfield-cli:workflow:image_decompose",
+            "params": {
+              "mode": "granular"
+            },
+            "source": "source.png"
+          }
+        ],
+        "origin": "ui",
+        "channel": "production:generateWorkflow",
+        "finishedAt": "2026-11-12T23:00:20.169Z",
+        "taskId": "a548dc30-078d-4ff8-81e9-4cf39a3425af",
+        "provider": "higgsfield-cli",
+        "model": "higgsfield-cli:workflow:image_decompose"
+      }
+    ]
+  },
+  "expenses": {
+    "productionId": "wfverify1",
+    "entries": [
+      {
+        "id": "mwe5i8g6-y35gmr",
+        "kind": "image",
+        "model": "higgsfield-cli:workflow:image_decompose",
+        "resolution": "",
+        "params": {
+          "mode": "granular"
+        },
+        "price": 0,
+        "credits": 2,
+        "at": 1794524420165,
+        "productionId": "wfverify1",
+        "shotId": "verify-shot"
+      }
+    ],
+    "updatedAt": "2026-11-12T23:00:20.166Z"
+  },
+  "mediaRegistry": [
+    {
+      "id": "42a3b088-1243-4902-ba6c-65ab388460f1",
+      "path": "out/workflows/image_decompose/a548dc30/image_decompose-01.png",
+      "kind": "image",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-12T23:00:20.157Z"
+    },
+    {
+      "id": "e0d50af5-f97c-4df5-98f2-8c893f273cda",
+      "path": "out/workflows/image_decompose/a548dc30/image_decompose-02.png",
+      "kind": "image",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-12T23:00:20.159Z"
+    },
+    {
+      "id": "3c5afea8-1eb9-45de-be11-be335d7282b2",
+      "path": "out/workflows/image_decompose/a548dc30/image_decompose-03.png",
+      "kind": "image",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-12T23:00:20.162Z"
+    },
+    {
+      "id": "cd95347a-1ce6-4e6a-a927-56e69d270434",
+      "path": "out/workflows/image_decompose/a548dc30/image_decompose-04.png",
+      "kind": "image",
+      "origin": "generated",
+      "state": "present",
+      "at": "2026-11-12T23:00:20.164Z"
+    }
+  ],
+  "filesOnDisk": [
+    {
+      "rel": "out/workflows/image_decompose/a548dc30/image_decompose-01.png",
+      "bytes": 44298,
+      "abs": "D:\\Cascade\\tasks\\higgsfield-workflow-verify\\run1\\production\\out\\workflows\\image_decompose\\a548dc30\\image_decompose-01.png"
+    },
+    {
+      "rel": "out/workflows/image_decompose/a548dc30/image_decompose-02.png",
+      "bytes": 18735,
+      "abs": "D:\\Cascade\\tasks\\higgsfield-workflow-verify\\run1\\production\\out\\workflows\\image_decompose\\a548dc30\\image_decompose-02.png"
+    },
+    {
+      "rel": "out/workflows/image_decompose/a548dc30/image_decompose-03.png",
+      "bytes": 14292,
+      "abs": "D:\\Cascade\\tasks\\higgsfield-workflow-verify\\run1\\production\\out\\workflows\\image_decompose\\a548dc30\\image_decompose-03.png"
+    },
+    {
+      "rel": "out/workflows/image_decompose/a548dc30/image_decompose-04.png",
+      "bytes": 5730,
+      "abs": "D:\\Cascade\\tasks\\higgsfield-workflow-verify\\run1\\production\\out\\workflows\\image_decompose\\a548dc30\\image_decompose-04.png"
+    }
+  ]
+}

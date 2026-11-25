@@ -19,6 +19,15 @@
  *               job object(s) with result URLs; `generate get <id> --json`
  *               for rechecks
  * - credits:  `account status --json`
+ * - workflows: `workflow list --json` → `[{display_name, job_type, type}]`;
+ *   `workflow get <name> --json` → `{params, cost_params, rules, type}`
+ *   (same param vocabulary as `model get`); submit via
+ *   `generate workflow <name> [--param value]…` then `generate wait/get`
+ *   (same job id space as models). Cost is `generate cost workflow
+ *   <name>` with ONLY the workflow's declared `cost_params` — verified
+ *   live (v1.1.25): media flags there fail with "Model does not accept
+ *   media inputs." and non-cost params with "Unknown params", while the
+ *   submit form takes `--image-references <path>` normally.
  *
  * Feature notes vs the MCP adapter: end frames ride `--end-image`
  * (in-betweener fully supported on seedance/kling/cinematic-studio/…);
@@ -43,7 +52,7 @@ import {
   type CliRunResult,
 } from "./cli-run.js";
 import { downloadBytes, tryDownloadBytes, DownloadError } from "./download.js";
-import { assetPath, writeShotVideo, type ImageGenFn } from "../pipeline.js";
+import { assetPath, writeShotVideo, writeWorkflowResults, type ImageGenFn } from "../pipeline.js";
 import {
   dataUrlToBytes,
   IMAGE_URL_RX,
@@ -71,8 +80,13 @@ import {
   type ProductionShot,
   type VideoGenOptions,
   type VideoModelOptions,
+  type WorkflowChoice,
+  type WorkflowCostRequest,
+  type WorkflowGenRequest,
+  type WorkflowGenResult,
+  type PendingWorkflowGen,
 } from "../../shared/ipc.js";
-import type { GenerationRecorder, MediaProvider, ProviderEmit } from "./types.js";
+import type { GenerationRecorder, MediaProvider, ProviderEmit, WorkflowFetchResult } from "./types.js";
 import { citePrompt, resolvePromptRefs, styleRefNames } from "./refs.js";
 import { buildModelSchema, OWNED_FLAGS, type RawModelParam } from "./model-schema.js";
 import { imagePixelSize } from "./image-size.js";
@@ -98,6 +112,26 @@ function rawJobType(modelId: string): string {
   if (t.startsWith(HIGGSFIELD_CLI_ID_PREFIX)) return t.slice(HIGGSFIELD_CLI_ID_PREFIX.length);
   if (t.startsWith("higgsfield:")) return t.slice("higgsfield:".length);
   return t;
+}
+
+/** Prefix marking workflow ids (`higgsfield-cli:workflow:<name>`). It
+ *  nests under the model prefix so vendor routing keeps working, while
+ *  the `workflow:` segment keeps workflow names out of every model path
+ *  (a workflow submits via `generate workflow`, never `generate create`,
+ *  and several workflow job_types also resolve as models). */
+export const HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX = `${HIGGSFIELD_CLI_ID_PREFIX}workflow:`;
+
+/** True when the id names a workflow (namespaced), not a model. */
+export function isHiggsfieldWorkflowId(id: string): boolean {
+  return id.trim().startsWith(HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX);
+}
+
+/** Raw workflow name for a namespaced workflow id or a bare name;
+ *  "" for anything else (model ids, foreign namespaces). */
+export function higgsfieldWorkflowName(id: string): string {
+  const t = id.trim();
+  if (t.startsWith(HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX)) return t.slice(HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX.length).trim();
+  return t.includes(":") ? "" : t;
 }
 
 /** True when the id names a foreign provider (an explicit namespace that is
@@ -459,6 +493,140 @@ function parseCliModelDetail(stdout: string): CliModelDetail | null {
   return { params, roles, rules };
 }
 
+// ---- workflows -------------------------------------------------------------------
+
+/** One parsed `workflow get --json` reply: the shared param detail plus
+ *  the workflow-only `cost_params` names and the declared output type. */
+interface CliWorkflowDetail {
+  detail: CliModelDetail;
+  /** Param names the `generate cost workflow` form accepts (raw spelling). */
+  costParamNames: string[];
+  type: "image" | "video";
+  displayName: string;
+  raw: string;
+}
+
+/** Pure list shaping (exported for tests): `workflow list --json` items
+ *  become namespaced choices; an item with no job_type is skipped. */
+export function shapeHiggsfieldWorkflowChoices(items: CliListItem[]): WorkflowChoice[] {
+  const out: WorkflowChoice[] = [];
+  for (const m of items) {
+    const jobType = strField(m, "job_type", "jobType", "id", "name");
+    if (!jobType) continue;
+    out.push({
+      id: `${HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX}${jobType}`,
+      jobType,
+      displayName: strField(m, "display_name", "displayName", "title", "label") || jobType,
+      type: strField(m, "type").toLowerCase() === "video" ? "video" : "image",
+    });
+  }
+  return out;
+}
+
+/** Parse a `workflow get --json` reply. The `params`/`rules` vocabulary
+ *  matches `model get`, so the shared detail parser does the work; the
+ *  workflow-only `cost_params` names and `type` ride alongside. Exported
+ *  for tests. */
+export function parseWorkflowDetail(stdout: string): CliWorkflowDetail | null {
+  const obj = parseJsonLooseObject(stdout);
+  const detail = parseCliModelDetail(stdout);
+  if (!obj || !detail) return null;
+  const costParamNames: string[] = [];
+  if (Array.isArray(obj.cost_params)) {
+    for (const c of obj.cost_params) {
+      if (!c || typeof c !== "object") continue;
+      const n = strField(c as CliListItem, "name", "flag", "key", "param");
+      if (n && !costParamNames.includes(n)) costParamNames.push(n);
+    }
+  }
+  return {
+    detail,
+    costParamNames,
+    type: strField(obj as CliListItem, "type").toLowerCase() === "video" ? "video" : "image",
+    displayName: strField(obj as CliListItem, "display_name", "displayName") || strField(obj as CliListItem, "job_type") || "",
+    raw: stdout,
+  };
+}
+
+/** How a declared workflow param carries media, or null when it doesn't:
+ *  object-typed params are single media slots (`video`, `input_video`,
+ *  `product_image`, …); array-typed params are repeatable media lists
+ *  when the caller explicitly keys media to them. */
+function workflowMediaKind(param: CliParam): "single" | "array" | null {
+  const t = (param.rawType ?? "").toLowerCase();
+  if (/object/.test(t)) return "single";
+  if (/array|list/.test(t)) return "array";
+  return null;
+}
+
+/** Auto-routing tables for the `refs` shorthand (folded param names, in
+ *  preference order). Only the well-known reference spellings auto-route;
+ *  exotic media roles (`product_image`, `ref_image`, …) need the explicit
+ *  `media` map so a ref can never land in the wrong slot by guessing. */
+const WORKFLOW_IMAGE_ARRAYS = ["imagereferences", "inputimages"];
+const WORKFLOW_IMAGE_SINGLES = ["inputimage", "image", "startimage"];
+const WORKFLOW_VIDEO_ARRAYS = ["videoreferences"];
+const WORKFLOW_VIDEO_SINGLES = ["video", "inputvideo"];
+const WORKFLOW_AUDIO_ARRAYS = ["audioreferences"];
+
+/** One media flag's worth of refs, keyed by folded param name. */
+interface WorkflowMediaEmission {
+  flag: string;
+  kind: "single" | "array";
+  refs: { name: string; dataUrl: string }[];
+}
+
+/** Build the media emission plan for a workflow request: the explicit
+ *  `media` map (every key validated against the declared schema) plus
+ *  the `refs` shorthand routed by media kind. Throws BEFORE any submit
+ *  on an undeclared key, a non-media key, or an unroutable ref — media
+ *  is never silently dropped. Exported for tests. */
+export function planWorkflowMedia(
+  workflowName: string,
+  detail: CliModelDetail,
+  req: Pick<WorkflowGenRequest, "media" | "refs">
+): WorkflowMediaEmission[] {
+  const byFolded = new Map<string, WorkflowMediaEmission>();
+  const add = (folded: string, refs: { name: string; dataUrl: string }[]): void => {
+    const param = detail.params.get(folded);
+    if (!param) throw new Error(`Workflow "${workflowName}" has no parameter "${folded}". Nothing was submitted.`);
+    const kind = workflowMediaKind(param);
+    if (!kind) throw new Error(`"${param.rawName ?? folded}" on workflow "${workflowName}" isn't a media parameter — pass it via params instead. Nothing was submitted.`);
+    const existing = byFolded.get(folded);
+    const merged = [...(existing?.refs ?? []), ...refs];
+    if (kind === "single" && merged.length > 1) {
+      throw new Error(`"${param.rawName ?? folded}" on workflow "${workflowName}" takes one file, but ${merged.length} were routed to it. Nothing was submitted.`);
+    }
+    byFolded.set(folded, { flag: (param.rawName ?? folded).replace(/^--/, ""), kind, refs: merged });
+  };
+  for (const [key, val] of Object.entries(req.media ?? {})) {
+    add(foldName(key), Array.isArray(val) ? val : [val]);
+  }
+  const route = (ref: { name: string; dataUrl: string }, arrays: string[], singles: string[], label: string): void => {
+    for (const folded of arrays) {
+      if (detail.params.has(folded)) { add(folded, [ref]); return; }
+    }
+    for (const folded of singles) {
+      if (detail.params.has(folded)) { add(folded, [ref]); return; }
+    }
+    throw new Error(`Workflow "${workflowName}" has no ${label} input for reference "${ref.name}" — key it explicitly via the media map or remove it. Nothing was submitted.`);
+  };
+  for (const ref of req.refs ?? []) {
+    if (/^data:image\//i.test(ref.dataUrl)) route(ref, WORKFLOW_IMAGE_ARRAYS, WORKFLOW_IMAGE_SINGLES, "image");
+    else if (/^data:video\//i.test(ref.dataUrl)) route(ref, WORKFLOW_VIDEO_ARRAYS, WORKFLOW_VIDEO_SINGLES, "video");
+    else if (/^data:audio\//i.test(ref.dataUrl)) route(ref, WORKFLOW_AUDIO_ARRAYS, [], "audio");
+    else throw new Error(`Reference "${ref.name}" isn't an image, video, or audio data URL. Nothing was submitted.`);
+  }
+  return [...byFolded.values()];
+}
+
+/** Stable cache key for a workflow cost request (sorted params).
+ *  Exported for tests. */
+export function workflowCostCacheKey(name: string, params?: Record<string, string | number | boolean | string[]>): string {
+  const parts = params ? Object.keys(params).sort().map((k) => `${k}=${JSON.stringify(params[k])}`) : [];
+  return [`workflow|${name.trim()}`, ...parts].join("|");
+}
+
 // ---- schema normalization ---------------------------------------------------------
 
 /**
@@ -602,6 +770,44 @@ function emitExtraParams(
     if (v === undefined || v === null || v === "") continue;
     emitSchemaField(field, v, args);
   }
+}
+
+/**
+ * Emit a workflow's scalar params into argv and return what was actually
+ * sent (derived from the emitted argv pairs, so enum case-matching and
+ * numeric clamping are recorded truthfully). Media params are skipped
+ * (the media plan owns them); `prompt` is skipped here (the caller emits
+ * it explicitly — the schema builder drops it). Unlike the model paths'
+ * silent skip, a provided non-empty value the schema rejects (an
+ * unlisted enum, a non-finite number) THROWS before submit: silently
+ * dropping `mode: "standard"` because of a typo would bill a granular
+ * run the caller never asked for. Unknown keys are still ignored, so
+ * switching workflows never carries stale selections along.
+ */
+function emitWorkflowScalars(
+  schema: CliModelSchema,
+  detail: CliModelDetail,
+  values: Record<string, string | number | boolean | string[]> | undefined,
+  args: string[]
+): Record<string, string | number | boolean | string[]> {
+  const sent: Record<string, string | number | boolean | string[]> = {};
+  if (!values) return sent;
+  for (const field of schema.fields) {
+    if (field.mediaRole) continue;
+    const param = detail.params.get(field.name);
+    if (param && workflowMediaKind(param)) continue;
+    const v = pickParamValue(field, values);
+    if (v === undefined || v === null || v === "") continue;
+    const tmp: string[] = [];
+    if (!emitSchemaField(field, v, tmp)) {
+      const allowed = field.kind === "enum" && field.values?.length ? ` (accepted: ${field.values.join(", ")})` : "";
+      throw new Error(`"${field.flag}" value ${JSON.stringify(v)} isn't valid for this workflow${allowed}. Nothing was submitted.`);
+    }
+    args.push(...tmp);
+    const vals = tmp.filter((_, i) => i % 2 === 1);
+    sent[field.flag] = vals.length > 1 ? vals : vals[0];
+  }
+  return sent;
 }
 
 /** The job id out of a `generate create --json` reply (no --wait): the CLI
@@ -750,6 +956,77 @@ function cliResultUrls(stdout: string, video: boolean): string[] {
   return out;
 }
 
+/** One structured workflow result asset (see workflowResultAssets). */
+export interface WorkflowResultAsset {
+  url: string;
+  label?: string;
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+}
+
+/**
+ * Structured (layered) assets out of a job reply's `result_json` —
+ * the shape multi-asset workflows report (verified live for
+ * image_decompose, 2026-11-12): `{background_url, layers: [{url,
+ * label, x, y, w, h}]}` with `result_url: null`. The background plate
+ * comes first (bottom of the stack), then layers in vendor order —
+ * each a bounding-box crop placed at (x, y) on the source canvas.
+ * Returns [] when the reply carries no structured result (plain
+ * single-asset jobs keep riding `cliResultUrls`). Exported for tests.
+ */
+export function workflowResultAssets(stdout: string): WorkflowResultAsset[] {
+  const mediaUrlRx = /^https?:\/\/[^\s"'\\]+\.(png|jpe?g|webp|gif|mp4|webm|mov|m4v)(\?|$)/i;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const fromJob = (o: Record<string, unknown>): WorkflowResultAsset[] => {
+    let rj: unknown = o.result_json;
+    if (typeof rj === "string") {
+      try { rj = JSON.parse(rj) as unknown; } catch { return []; }
+    }
+    if (!rj || typeof rj !== "object" || Array.isArray(rj)) return [];
+    const rec = rj as Record<string, unknown>;
+    const out: WorkflowResultAsset[] = [];
+    const bg = rec.background_url;
+    if (typeof bg === "string" && mediaUrlRx.test(bg)) out.push({ url: bg, label: "background" });
+    if (Array.isArray(rec.layers)) {
+      for (const l of rec.layers) {
+        if (!l || typeof l !== "object") continue;
+        const lr = l as Record<string, unknown>;
+        const url = lr.url;
+        if (typeof url !== "string" || !mediaUrlRx.test(url)) continue;
+        out.push({
+          url,
+          ...(typeof lr.label === "string" && lr.label.trim() ? { label: lr.label.trim() } : {}),
+          ...(num(lr.x) !== undefined ? { x: num(lr.x) } : {}),
+          ...(num(lr.y) !== undefined ? { y: num(lr.y) } : {}),
+          ...(num(lr.w) !== undefined ? { w: num(lr.w) } : {}),
+          ...(num(lr.h) !== undefined ? { h: num(lr.h) } : {}),
+        });
+      }
+    }
+    return out;
+  };
+  const arr = parseJsonLooseArray(stdout);
+  if (arr && arr.length && arr[0] && typeof arr[0] === "object") {
+    const got = fromJob(arr[0] as Record<string, unknown>);
+    if (got.length) return got;
+  }
+  const obj = parseJsonLooseObject(stdout);
+  if (obj) {
+    const got = fromJob(obj as Record<string, unknown>);
+    if (got.length) return got;
+    for (const key of ["job", "data", "result"]) {
+      const v = (obj as Record<string, unknown>)[key];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const nested = fromJob(v as Record<string, unknown>);
+        if (nested.length) return nested;
+      }
+    }
+  }
+  return [];
+}
+
 /** The credit quote out of a `generate cost --json` reply. Live shape
  *  (v1.1.25) is a flat `{credits: N}` (fractional allowed — 32.5 for
  *  seedance_2_5 5s/720p); envelope/nested spellings and numeric strings are
@@ -848,6 +1125,10 @@ export class HiggsfieldCliProvider implements MediaProvider {
   /** Per-config credit quotes (TTL + cap). Keyed by costCacheKey — prompt
    *  text and media never participate (they don't move the price). */
   private costCache = new Map<string, { at: number; cost: number | null }>();
+  /** Workflow catalog + details + quotes (same TTL discipline as models;
+   *  workflow quotes live in `costCache` under workflow keys). */
+  private workflowListCache: { at: number; choices: WorkflowChoice[] } | null = null;
+  private workflowDetailCache = new Map<string, { at: number; wf: CliWorkflowDetail | null }>();
 
   /** `binary` resolves the CLI path lazily (Settings override → PATH probe
    *  cached by the caller) so a path change applies without a restart.
@@ -1016,7 +1297,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
    *  quality, exactly like the submit. */
   async getGenerationCost(req: GenerationCostRequest): Promise<number | null> {
     const raw = rawJobType(req.model);
-    if (!raw || raw === "auto" || isForeignId(req.model)) return null;
+    if (!raw || raw === "auto" || isForeignId(req.model) || isHiggsfieldWorkflowId(req.model)) return null;
     const key = costCacheKey({ ...req, model: raw });
     const hit = this.costCache.get(key);
     if (hit && Date.now() - hit.at < COST_TTL_MS) return hit.cost;
@@ -1127,6 +1408,8 @@ export class HiggsfieldCliProvider implements MediaProvider {
     this.detailCache.clear();
     this.schemaCache.clear();
     this.costCache.clear();
+    this.workflowListCache = null;
+    this.workflowDetailCache.clear();
   }
 
   /** Warm the per-model detail cache for every video-capable model.
@@ -1242,7 +1525,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
    *  lookup (the header documents the probed v1.1.24 vocabulary). */
   async modelOptions(modelId: string): Promise<CliModelSchema | null> {
     const raw = rawJobType(modelId);
-    if (!raw || raw === "auto" || isForeignId(modelId)) return null;
+    if (!raw || raw === "auto" || isForeignId(modelId) || isHiggsfieldWorkflowId(modelId)) return null;
     const hit = this.schemaCache.get(raw);
     if (hit?.schema && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.schema;
     let stdout: string;
@@ -1295,7 +1578,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
    *  projection stays for one release for existing consumers. */
   async videoModelOptions(modelId: string, withImage: boolean): Promise<VideoModelOptions | null> {
     const raw = rawJobType(modelId);
-    if (!raw || raw === "auto" || isForeignId(modelId)) return null;
+    if (!raw || raw === "auto" || isForeignId(modelId) || isHiggsfieldWorkflowId(modelId)) return null;
     const detail = await this.modelDetail(raw).catch(() => null);
     if (!detail) return null;
     const roles = HiggsfieldCliProvider.roles(detail);
@@ -1344,7 +1627,7 @@ export class HiggsfieldCliProvider implements MediaProvider {
    *  projection stays for one release for existing consumers. */
   async imageModelOptions(modelId: string): Promise<ImageModelOptions | null> {
     const raw = rawJobType(modelId);
-    if (!raw || raw === "auto" || isForeignId(modelId)) return null;
+    if (!raw || raw === "auto" || isForeignId(modelId) || isHiggsfieldWorkflowId(modelId)) return null;
     const detail = await this.modelDetail(raw).catch(() => null);
     if (!detail) return null;
     const quality = HiggsfieldCliProvider.param(detail, "quality");
@@ -1448,6 +1731,273 @@ export class HiggsfieldCliProvider implements MediaProvider {
     return null;
   }
 
+  // ---- workflows ----------------------------------------------------------------------
+
+  /** The workflow catalog (`workflow list`), namespaced. Cached like the
+   *  model lists; a failed or empty fetch is never cached (a signed-in
+   *  catalog is never legitimately empty), so the next call retries. */
+  async listWorkflowChoices(): Promise<WorkflowChoice[]> {
+    const hit = this.workflowListCache;
+    if (hit && Date.now() - hit.at < CATALOG_TTL_MS) return hit.choices;
+    try {
+      const choices = shapeHiggsfieldWorkflowChoices(parseCliList(await this.json(["workflow", "list"], 120_000)));
+      if (!choices.length) return hit?.choices ?? [];
+      this.workflowListCache = { at: Date.now(), choices };
+      return choices;
+    } catch {
+      return hit?.choices ?? [];
+    }
+  }
+
+  /** One workflow's parsed detail (cached); null when unknown/unreadable. */
+  private async workflowDetail(name: string): Promise<CliWorkflowDetail | null> {
+    const hit = this.workflowDetailCache.get(name);
+    if (hit && Date.now() - hit.at < CATALOG_TTL_MS) return hit.wf;
+    let wf: CliWorkflowDetail | null = null;
+    try {
+      wf = parseWorkflowDetail(await this.json(["workflow", "get", name]));
+      // A reply with neither params nor cost params carries no usable schema.
+      if (wf && !wf.detail.params.size && !wf.costParamNames.length) wf = null;
+    } catch {
+      wf = null;
+    }
+    this.workflowDetailCache.set(name, { at: Date.now(), wf });
+    return wf;
+  }
+
+  /** The normalized option schema for a workflow, derived live from
+   *  `workflow get <name> --json` (same normalizer as models). Null for
+   *  unknown names, model ids, and unreadable details. */
+  async workflowOptions(workflow: string): Promise<CliModelSchema | null> {
+    const name = higgsfieldWorkflowName(workflow);
+    if (!name || name === "auto") return null;
+    const wf = await this.workflowDetail(name).catch(() => null);
+    if (!wf) return null;
+    return normalizeCliModelDetail(wf.detail, wf.raw, name, null);
+  }
+
+  /** Live per-config credit quote via `generate cost workflow` (no job
+   *  submitted). ONLY the workflow's declared `cost_params` travel —
+   *  verified live: media flags fail with "Model does not accept media
+   *  inputs." and non-cost params with "Unknown params", so a config's
+   *  media and ordinary options (e.g. decompose's `mode`) never reach
+   *  this form. Never throws — failures resolve null (quote unknown). */
+  async getWorkflowCost(req: WorkflowCostRequest): Promise<number | null> {
+    const name = higgsfieldWorkflowName(req.workflow);
+    if (!name || name === "auto") return null;
+    const key = workflowCostCacheKey(name, req.params);
+    const hit = this.costCache.get(key);
+    if (hit && Date.now() - hit.at < COST_TTL_MS) return hit.cost;
+    const remember = (cost: number | null): number | null => {
+      this.costCache.set(key, { at: Date.now(), cost });
+      if (this.costCache.size > COST_CACHE_CAP) {
+        const oldest = this.costCache.keys().next();
+        if (!oldest.done) this.costCache.delete(oldest.value);
+      }
+      return cost;
+    };
+    try {
+      const wf = await this.workflowDetail(name).catch(() => null);
+      const args = ["generate", "cost", "workflow", name];
+      if (wf && req.params && wf.costParamNames.length) {
+        const costSet = new Set(wf.costParamNames.map((n) => foldName(n)));
+        const schema = normalizeCliModelDetail(wf.detail, null, name, null);
+        for (const field of schema.fields) {
+          if (!costSet.has(field.name) && !costSet.has(foldName(field.flag))) continue;
+          const v = pickParamValue(field, req.params);
+          if (v === undefined || v === null || v === "") continue;
+          emitSchemaField(field, v, args);
+        }
+      }
+      return remember(parseCostCredits(await this.json(args, 30_000)));
+    } catch {
+      return remember(null);
+    }
+  }
+
+  /**
+   * Run one workflow end-to-end: validate media + scalars against the
+   * live schema, submit (`generate workflow`, no --wait), wait, download
+   * EVERY output, land the set in the project (registered media), and
+   * record the run in the expenses ledger with the parameters actually
+   * sent. General for any CLI workflow — image output, video output,
+   * prompt or prompt-less, single-file or layer-set results.
+   */
+  async generateWorkflow(p: Production, req: WorkflowGenRequest, emit: ProviderEmit): Promise<WorkflowGenResult> {
+    if (!this.isAvailable()) {
+      throw new Error("The Higgsfield CLI isn't installed (no `higgsfield` binary found), so workflows can't run through it.");
+    }
+    const name = higgsfieldWorkflowName(req.workflow);
+    if (!name || name === "auto") throw new Error(`Unknown workflow "${req.workflow}" — pick one from the workflow list. Nothing was submitted.`);
+    const wf = await this.workflowDetail(name).catch(() => null);
+    if (!wf) throw new Error(`Couldn't read workflow "${name}" from the Higgsfield CLI — sign in (\`higgsfield auth login\`) and retry. Nothing was submitted.`);
+    const kind = wf.type;
+    const video = kind === "video";
+    const namespaced = `${HIGGSFIELD_CLI_WORKFLOW_ID_PREFIX}${name}`;
+
+    // Media plan + temp files (all validation throws BEFORE any submit).
+    const mediaPlan = planWorkflowMedia(name, wf.detail, req);
+    const flatRefs = mediaPlan.flatMap((e) => e.refs);
+    const { paths, cleanup } = writeCliTempRefs(flatRefs);
+    try {
+      const badAt = paths.findIndex((fp) => !fp);
+      if (badAt >= 0) throw new Error(`Couldn't load reference "${flatRefs[badAt]?.name ?? "?"}" for workflow "${name}". Nothing was submitted.`);
+
+      const args: string[] = [name];
+      // Prompt: the schema builder drops it (positional for models), so
+      // emit it explicitly when the workflow declares one.
+      const promptParam = HiggsfieldCliProvider.param(wf.detail, "prompt");
+      const paramsPrompt = typeof req.params?.prompt === "string" ? req.params.prompt : undefined;
+      const promptText = (req.prompt ?? paramsPrompt ?? "").trim();
+      if (promptParam?.required === true && !promptText) {
+        throw new Error(`Workflow "${name}" needs a prompt. Nothing was submitted.`);
+      }
+      if (promptParam && promptText) args.push("--prompt", req.prompt ?? paramsPrompt ?? "");
+      // Scalars (throws on a provided value the schema rejects).
+      const schema = normalizeCliModelDetail(wf.detail, null, name, null);
+      const sent = emitWorkflowScalars(schema, wf.detail, req.params, args);
+      // Media flags (local paths auto-upload, exactly like model submits).
+      let cursor = 0;
+      for (const emission of mediaPlan) {
+        for (let i = 0; i < emission.refs.length; i++) {
+          args.push(`--${emission.flag}`, paths[cursor] as string);
+          cursor += 1;
+        }
+      }
+
+      const pendingRec = (jobId: string, url?: string): PendingWorkflowGen => ({
+        historyId: jobId,
+        ...(url ? { url } : {}),
+        workflow: namespaced,
+        kind,
+        ...(Object.keys(sent).length ? { params: sent } : {}),
+        ...(req.shotId ? { shotId: req.shotId } : {}),
+        at: new Date().toISOString(),
+      });
+      let submitted = false;
+      emit(`Submitting workflow ${name} (Higgsfield CLI)…`);
+      let jobId: string;
+      let urls: string[];
+      try {
+        ({ jobId, urls } = await this.submitAndWaitUrls(
+          ["generate", "workflow", ...args],
+          video,
+          req.waitTimeoutMs ?? (video ? VIDEO_WAIT_TIMEOUT_MS : IMAGE_WAIT_TIMEOUT_MS),
+          (status) => emit(`Workflow ${name}: ${status.toLowerCase()}… still running.`, "info"),
+          (id) => { submitted = true; req.onPending?.(pendingRec(id)); }
+        ));
+      } catch (e) {
+        if (e instanceof HiggsfieldCliPendingError) {
+          if (!submitted) req.onPending?.(pendingRec(e.jobId, e.url));
+        } else if (submitted && /failed|cancel/i.test(e instanceof Error ? e.message : "")) {
+          req.onPending?.(null);
+        }
+        throw e;
+      }
+      // Structured (layered) results carry assets the wait output does
+      // not list — image_decompose's background plate rides only in
+      // `generate get`'s result_json (verified live) — so fetch the job
+      // once and merge any structured assets ahead of the wait URLs.
+      let assets: WorkflowResultAsset[] = urls.map((url) => ({ url }));
+      try {
+        const structured = workflowResultAssets(await this.json(["generate", "get", jobId], 60_000));
+        if (structured.length) {
+          const seen = new Set(structured.map((a) => a.url));
+          assets = [...structured, ...assets.filter((a) => !seen.has(a.url))];
+        }
+      } catch { /* best-effort: the wait URLs still land */ }
+      // Download EVERY output before landing anything — a partial layer
+      // set on disk would read as a complete result.
+      const downloaded: { bytes: Buffer; ext: string; url: string; asset: WorkflowResultAsset }[] = [];
+      for (const asset of assets) {
+        let got: { buf: Buffer; url: string };
+        try {
+          got = await downloadBytes([asset.url], { attempts: 3, kind });
+        } catch (e) {
+          throw new HiggsfieldCliPendingError(jobId, e instanceof DownloadError && e.url ? e.url : asset.url);
+        }
+        const ext = (path.extname(new URL(got.url).pathname) || (video ? ".mp4" : ".png")).replace(/^\./, "").toLowerCase() || (video ? "mp4" : "png");
+        downloaded.push({ bytes: got.buf, ext, url: got.url, asset });
+      }
+      const rels = writeWorkflowResults(p, name, jobId, kind, downloaded.map((d) => ({ bytes: d.bytes, ext: d.ext })));
+      if (submitted) req.onPending?.(null);
+      const sentDuration = typeof sent.duration === "string" ? Number(sent.duration) : undefined;
+      this.fireGeneration({
+        kind,
+        model: namespaced,
+        resolution: typeof sent.resolution === "string" ? sent.resolution : "",
+        ...(video && sentDuration !== undefined && Number.isFinite(sentDuration) ? { durationSec: sentDuration } : {}),
+        ...(Object.keys(sent).length ? { params: sent } : {}),
+        // Best-effort submit-time quote (cost_params only — see getWorkflowCost).
+        credits: (await this.getWorkflowCost({ workflow: namespaced, ...(req.params ? { params: req.params } : {}) })) ?? undefined,
+        at: Date.now(),
+        productionId: p.meta.id,
+        ...(req.shotId ? { shotId: req.shotId } : {}),
+      });
+      emit(`Workflow ${name} finished — ${rels.length} file${rels.length === 1 ? "" : "s"} saved.`);
+      return {
+        jobId,
+        kind,
+        files: rels.map((rel, i) => ({
+          rel,
+          ext: downloaded[i].ext,
+          url: downloaded[i].url,
+          ...(downloaded[i].asset.label !== undefined ? { label: downloaded[i].asset.label } : {}),
+          ...(downloaded[i].asset.x !== undefined ? { x: downloaded[i].asset.x } : {}),
+          ...(downloaded[i].asset.y !== undefined ? { y: downloaded[i].asset.y } : {}),
+          ...(downloaded[i].asset.w !== undefined ? { w: downloaded[i].asset.w } : {}),
+          ...(downloaded[i].asset.h !== undefined ? { h: downloaded[i].asset.h } : {}),
+        })),
+        resultUrls: assets.map((a) => a.url),
+      };
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Recheck an orphaned workflow job and download its outputs (bytes
+   * only — landing + billing are the caller's, mirroring the pending
+   * image/video rechecks). Null while still rendering or still
+   * unfetchable; throws when the job reports FAILED/CANCELLED.
+   */
+  async recheckWorkflow(rec: PendingWorkflowGen): Promise<WorkflowFetchResult | null> {
+    if (!this.isAvailable() || !rec.historyId) return null;
+    let out = "";
+    try {
+      out = await this.json(["generate", "get", rec.historyId], 60_000);
+    } catch {
+      return null;
+    }
+    const { failed, status } = cliJobStatus(out);
+    if (failed) throw new Error(`Higgsfield workflow ${status.toLowerCase() || "failed"} (${rec.historyId.slice(0, 8)}…).`);
+    const video = rec.kind === "video";
+    // Structured assets are authoritative when present — the loose
+    // full-payload scan would also match the submitted input's echo URL
+    // under params.medias and download the source as a "result".
+    const structured = workflowResultAssets(out);
+    const assets: WorkflowResultAsset[] = structured.length
+      ? structured
+      : cliResultUrls(out, video).map((url) => ({ url }));
+    if (rec.url && !assets.some((a) => a.url === rec.url)) assets.push({ url: rec.url });
+    if (!assets.length) return null;
+    const files: WorkflowFetchResult["files"] = [];
+    for (const asset of assets) {
+      const got = await tryDownloadBytes([asset.url], { attempts: 3, kind: rec.kind });
+      if (!got) return null;
+      const ext = (path.extname(new URL(got.url).pathname) || (video ? ".mp4" : ".png")).replace(/^\./, "").toLowerCase() || (video ? "mp4" : "png");
+      files.push({
+        buf: got.buf, ext, url: got.url,
+        ...(asset.label !== undefined ? { label: asset.label } : {}),
+        ...(asset.x !== undefined ? { x: asset.x } : {}),
+        ...(asset.y !== undefined ? { y: asset.y } : {}),
+        ...(asset.w !== undefined ? { w: asset.w } : {}),
+        ...(asset.h !== undefined ? { h: asset.h } : {}),
+      });
+    }
+    return { jobId: rec.historyId, kind: rec.kind, files, resultUrls: assets.map((a) => a.url) };
+  }
+
   // ---- temp refs ----------------------------------------------------------------------
 
   private static fileDataUrl(p: Production, rel: string, label: string): { name: string; dataUrl: string } {
@@ -1472,19 +2022,21 @@ export class HiggsfieldCliProvider implements MediaProvider {
   }
 
   /**
-   * Submit (`generate create`, no --wait) then rejoin (`generate wait`) and
-   * return the finished asset bytes. Throws on FAILED/CANCELLED; throws a
-   * timeout error past the deadline (image callers record the job id as
-   * pending for a later recheck; video callers surface it).
+   * Submit (a `generate create` or `generate workflow` argv, no --wait)
+   * then rejoin (`generate wait`) and return the finished job's result
+   * URLs in reply order. Throws on FAILED/CANCELLED; throws a pending
+   * error past the deadline (callers record the job id for a recheck).
+   * Model and workflow submits share this core — the job id space and
+   * the wait/get commands are identical for both.
    */
-  private async createAndWait(
-    createArgs: string[],
+  private async submitAndWaitUrls(
+    submitArgs: string[],
     video: boolean,
     timeoutMs: number,
     onStatus?: (status: string) => void,
     onSubmitted?: (jobId: string) => void
-  ): Promise<{ buf: Buffer; ext: string; jobId: string }> {
-    const createOut = await this.cli(["generate", "create", ...createArgs], 120_000);
+  ): Promise<{ jobId: string; urls: string[]; status: string }> {
+    const createOut = await this.cli(submitArgs, 120_000);
     const jobId = extractCliJobId(createOut);
     if (jobId) onSubmitted?.(jobId);
     if (!jobId) {
@@ -1544,6 +2096,25 @@ export class HiggsfieldCliProvider implements MediaProvider {
       // cap. Signal it distinctly so callers can record the job id.
       throw new HiggsfieldCliPendingError(jobId);
     }
+    return { jobId, urls, status };
+  }
+
+  /**
+   * Submit (`generate create`, no --wait) then rejoin (`generate wait`) and
+   * return the finished asset bytes. Throws on FAILED/CANCELLED; throws a
+   * timeout error past the deadline (image callers record the job id as
+   * pending for a later recheck; video callers surface it).
+   */
+  private async createAndWait(
+    createArgs: string[],
+    video: boolean,
+    timeoutMs: number,
+    onStatus?: (status: string) => void,
+    onSubmitted?: (jobId: string) => void
+  ): Promise<{ buf: Buffer; ext: string; jobId: string }> {
+    const { jobId, urls, status } = await this.submitAndWaitUrls(
+      ["generate", "create", ...createArgs], video, timeoutMs, onStatus, onSubmitted
+    );
     // Try EVERY result URL via the shared failsafe downloader — one dead
     // CDN URL must not strand a finished, paid job.
     let downloaded: { buf: Buffer; url: string };
@@ -1587,6 +2158,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
         items = [];
       }
       const choice = modelOverride ?? p.openArt?.model ?? "auto";
+      if (isHiggsfieldWorkflowId(choice)) {
+        throw new Error(`"${higgsfieldWorkflowName(choice)}" is a workflow, not an image model — run it through the workflow path instead. Nothing was submitted.`);
+      }
       const modelId = await this.resolveImageModel(choice, items);
       if (!modelId) throw new Error("The Higgsfield CLI listed no image models — sign in (`higgsfield auth login`) and retry.");
       const detail = await this.modelDetail(modelId).catch(() => null);
@@ -1856,6 +2430,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
   ): Promise<{ rel: string }> {
     if (!this.isAvailable()) {
       throw new Error("The Higgsfield CLI isn't installed (no `higgsfield` binary found), so videos can't be generated through it.");
+    }
+    if (isHiggsfieldWorkflowId(opts.model)) {
+      throw new Error(`"${higgsfieldWorkflowName(opts.model)}" is a workflow, not a video model — run it through the workflow path instead. Nothing was submitted.`);
     }
 
     let items: CliListItem[] = [];
@@ -2153,6 +2730,9 @@ export class HiggsfieldCliProvider implements MediaProvider {
   ): Promise<{ rel: string }> {
     if (!this.isAvailable()) {
       throw new Error("The Higgsfield CLI isn't installed (no `higgsfield` binary found), so videos can't be edited through it.");
+    }
+    if (isHiggsfieldWorkflowId(opts.model)) {
+      throw new Error(`"${higgsfieldWorkflowName(opts.model)}" is a workflow, not a video model — run it through the workflow path instead. Nothing was submitted.`);
     }
     const sourceRel = sourceVideoPath?.trim();
     if (!sourceRel) throw new Error("The edit-video node needs a source video — pipe a clip in, pick a video reference, or generate a clip first.");

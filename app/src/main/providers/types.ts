@@ -33,6 +33,11 @@ import type {
   ProductionShot,
   VideoGenOptions,
   VideoModelOptions,
+  WorkflowChoice,
+  WorkflowCostRequest,
+  WorkflowGenRequest,
+  WorkflowGenResult,
+  PendingWorkflowGen,
 } from "../../shared/ipc.js";
 
 /** A recorder (the expenses ledger) observing every successful generation. */
@@ -42,6 +47,20 @@ export interface GenerationRecorder {
 
 /** The log-line callback generation flows emit through (mirrors productionEmit). */
 export type ProviderEmit = (m: string, l?: ProductionEvent["level"]) => void;
+
+/** One fetched-but-not-landed workflow run (recheck result): output
+ *  bytes in CLI reply order. Landing (write + register) and ledger
+ *  billing are the caller's, mirroring the pending image/video rechecks. */
+export interface WorkflowFetchResult {
+  /** Vendor job id. */
+  jobId: string;
+  /** Output kind (the workflow's declared type). */
+  kind: "image" | "video";
+  /** Every output file's bytes, in the order the CLI reported them. */
+  files: { buf: Buffer; ext: string; url: string; label?: string; x?: number; y?: number; w?: number; h?: number }[];
+  /** Result URLs in CLI reply order. */
+  resultUrls: string[];
+}
 
 export interface MediaProvider {
   readonly id: MediaProviderId;
@@ -177,6 +196,30 @@ export interface MediaProvider {
    *  transport availability), for truthful Settings status. Optional —
    *  vendors that don't track discovery omit it. */
   modelDiscovery?(): ModelDiscoveryState;
+
+  /** Workflows this vendor exposes (`workflow list`). Optional — vendors
+   *  without a workflow surface omit the whole workflow group. */
+  listWorkflowChoices?(): Promise<WorkflowChoice[]>;
+
+  /** The normalized option schema for one workflow (`workflow get`).
+   *  Optional, like `modelOptions`. */
+  workflowOptions?(workflow: string): Promise<CliModelSchema | null>;
+
+  /** Live credit quote for one workflow run (no job submitted). Optional,
+   *  like `getGenerationCost`; never throws (null = unknown). */
+  getWorkflowCost?(req: WorkflowCostRequest): Promise<number | null>;
+
+  /** Run one workflow end-to-end: submit, wait, download every output,
+   *  write + register the files in the project, and record the run in
+   *  the expenses ledger with the parameters actually sent. Optional —
+   *  callers surface a clear error when the active provider omits it. */
+  generateWorkflow?(p: Production, req: WorkflowGenRequest, emit: ProviderEmit): Promise<WorkflowGenResult>;
+
+  /** Recheck an orphaned workflow job and download its outputs (bytes
+   *  only — landing + billing are the caller's, mirroring
+   *  `recheckPendingImage`/`recheckPendingVideo`). Null while still
+   *  rendering; throws when the job is dead. */
+  recheckWorkflow?(rec: PendingWorkflowGen): Promise<WorkflowFetchResult | null>;
 }
 
 /** The dependencies every provider is constructed with (the seam). */
@@ -186,6 +229,7 @@ export interface ProviderDeps {
 }
 
 // Re-exported so vendor modules and tests share one vocabulary.
+export type { WorkflowChoice, WorkflowCostRequest, WorkflowGenRequest, WorkflowGenResult, PendingWorkflowGen } from "../../shared/ipc.js";
 export type {
   ModelDiscoveryState,
   CliModelSchema,

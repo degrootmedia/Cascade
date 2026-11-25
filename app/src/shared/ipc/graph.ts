@@ -596,3 +596,25 @@ export interface PendingImageGen {
   /** ISO timestamp of when the job was orphaned. */
   at: string;
 }
+
+/** An async workflow job (`generate workflow`) that outlived the
+ *  generating call — the wait timed out or a finished result couldn't be
+ *  downloaded, but the vendor job keeps running server-side. Kept so the
+ *  outputs can be reclaimed (`generate get` + download) instead of
+ *  paying for a second run. */
+export interface PendingWorkflowGen {
+  /** The async job id to re-poll (CLI `generate get`). */
+  historyId: string;
+  /** First result URL when the job finished but a download failed. */
+  url?: string;
+  /** Namespaced workflow id (`higgsfield-cli:workflow:<name>`). */
+  workflow: string;
+  /** Output kind (the workflow's declared type). */
+  kind: "image" | "video";
+  /** Schema options actually sent (a reclaim bills like the original). */
+  params?: Record<string, string | number | boolean | string[]>;
+  /** Shot the run belongs to (ledger scoping), when there is one. */
+  shotId?: string;
+  /** ISO timestamp of when the job was orphaned. */
+  at: string;
+}

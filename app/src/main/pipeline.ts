@@ -2313,6 +2313,47 @@ export function writeSequenceVideo(
   return rel;
 }
 
+/** Directory holding one workflow run's outputs:
+ *  `<outDir>/workflows/<workflow>/<jobTag>`. Workflow results are not
+ *  board frames or takes (a decompose run is a SET of layer files), so
+ *  they land under `out/` like the other derived outputs, one folder
+ *  per vendor job so a run's files always stay together. */
+export function workflowResultDir(p: Production, workflow: string, jobId: string): string {
+  const safeW = workflow.replace(/[^\w\-]+/g, "-") || "workflow";
+  const tag = (jobId || "").replace(/[^\w\-]+/g, "").slice(0, 8) || Date.now().toString(36);
+  return `${p.assets.outDir}/workflows/${safeW}/${tag}`;
+}
+
+/** Write every output of one workflow run into its job folder and return
+ *  the workspace-relative paths, in the order the files were reported
+ *  (the CLI's reply order — for decompose, the layer order). Files are
+ *  named `<workflow>-##.<ext>` with a zero-padded index so the set
+ *  sorts in report order. Every file registers with the media registry
+ *  before it is exposed to any consumer, exactly like `writeShotVideo`. */
+export function writeWorkflowResults(
+  p: Production,
+  workflow: string,
+  jobId: string,
+  kind: "image" | "video",
+  files: { bytes: Buffer; ext: string }[]
+): string[] {
+  const dir = workflowResultDir(p, workflow, jobId);
+  fs.mkdirSync(assetPath(p, dir), { recursive: true });
+  const safeW = workflow.replace(/[^\w\-]+/g, "-") || "workflow";
+  const width = String(Math.max(1, files.length)).length;
+  const pad = Math.max(2, width);
+  const rels: string[] = [];
+  files.forEach((f, i) => {
+    const safeExt = (/^[a-z0-9]{2,4}$/i.test(f.ext) ? f.ext : kind === "video" ? "mp4" : "png").toLowerCase();
+    const rel = `${dir}/${safeW}-${String(i + 1).padStart(pad, "0")}.${safeExt}`;
+    fs.writeFileSync(assetPath(p, rel), f.bytes);
+    mediaFiles.register(p, rel, kind, "generated");
+    if (kind === "video") queueVideoFilePostProcess(assetPath(p, rel));
+    rels.push(rel);
+  });
+  return rels;
+}
+
 /** Move a freshly generated clip from wherever the provider landed it (a
  *  board folder) into the sequence's own folder, returning the new relative
  *  path. Providers are shot-parameterized, so a sequence generation borrows

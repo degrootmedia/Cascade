@@ -99,7 +99,7 @@ export function Transcript({ items, pureChat = false }: { items: DisplayItem[]; 
           }
           case "notice":
             return (
-              <div key={itemKey(item)} className="msg notice">
+              <div key={itemKey(item)} className={"msg notice" + (item.tone === "caution" ? " notice-caution" : "")}>
                 {item.text}
               </div>
             );

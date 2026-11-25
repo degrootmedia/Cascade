@@ -5,9 +5,28 @@ const VIDEO_KINDS: ReadonlySet<JobKind> = new Set<JobKind>([
   "recheckVideo", "fetchVideos", "tweenBlock", "stitch", "unstitch",
 ]);
 
-/** Image or video, for the row's type label and icon. */
-export function jobMediaType(kind: JobKind): "image" | "video" {
+/** Text jobs run on the chat LLM, not an image/video provider (Bug #19:
+ *  magic-prompt writing was falling through to "image"). */
+const TEXT_KINDS: ReadonlySet<JobKind> = new Set<JobKind>(["magicPrompts"]);
+
+export type JobMediaType = "image" | "video" | "text";
+
+/** Image, video or text, for the row's type label and icon. */
+export function jobMediaType(kind: JobKind): JobMediaType {
+  if (TEXT_KINDS.has(kind)) return "text";
   return VIDEO_KINDS.has(kind) ? "video" : "image";
+}
+
+/** The row's type label ("Image", "Video", "Text (LLM)"). */
+export function jobMediaTypeLabel(kind: JobKind): string {
+  const type = jobMediaType(kind);
+  return type === "video" ? "Video" : type === "text" ? "Text (LLM)" : "Image";
+}
+
+/** The row's placeholder icon when it has no thumbnail. */
+export function jobMediaTypeIcon(kind: JobKind): string {
+  const type = jobMediaType(kind);
+  return type === "video" ? "\u25B6" : type === "text" ? "\u270E" : "\u25A3";
 }
 
 /** "higgsfield-cli:kling-2" -> "Kling 2 (Higgsfield)"; plain ids are OpenArt. */

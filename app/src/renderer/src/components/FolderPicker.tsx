@@ -82,6 +82,16 @@ export function FolderPicker({
       )}
       {open && (
         <div className="folder-menu">
+          {/* Feature #27: the folder picker option leads the list. */}
+          <button
+            className="folder-option add"
+            onClick={() => {
+              setOpen(false);
+              onPick();
+            }}
+          >
+            <span className="folder-label">Choose folder...</span>
+          </button>
           <button
             className={`folder-option${pureChat && !followProduction ? " current" : ""}`}
             onClick={() => {
@@ -140,15 +150,6 @@ export function FolderPicker({
               ))}
             </>
           )}
-          <button
-            className="folder-option add"
-            onClick={() => {
-              setOpen(false);
-              onPick();
-            }}
-          >
-            <span className="folder-label">Choose different folder…</span>
-          </button>
         </div>
       )}
     </div>

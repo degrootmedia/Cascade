@@ -13,6 +13,7 @@ import { normalizeSandboxMode, type SandboxMode } from "@core";
 import { normalizeModelSurfaces, resolveAspectRatio, type ModelParamDefaultValue, type ModelSurface, type UiIconSet, type UiTheme, type VerifyCommandIpc } from "../shared/ipc.js";
 import { coerceWhisperModel, isWhisperModel, type WhisperModel } from "../shared/voice.js";
 import { resolvePromptSnippets, sanitizePromptSnippets, type PromptSnippet } from "../shared/prompt-snippets.js";
+import { sanitizeHiddenLlmModels } from "../shared/llm-visibility.js";
 
 interface SettingsFile {
   /** Selected LLM API provider id (see shared/providers.ts). */
@@ -85,6 +86,13 @@ interface SettingsFile {
    * them without the renderer knowing the list.
    */
   hiddenMediaModels: string[];
+  /**
+   * Chat/LLM model ids hidden in the Model Customizer (Feature #9). The
+   * header model picker, Settings → Model and the agent editor list only the
+   * models not in it. Kept separate from hiddenMediaModels so image/video
+   * customizations are untouched.
+   */
+  hiddenLlmModels: string[];
   /**
    * Manual per-model kind assignments from the Models & expenses
    * drag-and-drop (model id → "image" | "video"). Applied main-side to the
@@ -204,6 +212,7 @@ const DEFAULTS: SettingsFile = {
   externalEditor: null,
   audioEditor: null,
   hiddenMediaModels: [],
+  hiddenLlmModels: [],
   modelKindOverrides: {},
   mediaDefaults: {},
   mediaModelOrder: [],
@@ -663,6 +672,16 @@ export function setHiddenMediaModels(ids: string[]): void {
     clean.push(id);
   }
   load().hiddenMediaModels = clean.slice(0, 500);
+  save();
+}
+
+/** Chat/LLM model ids hidden from the LLM pickers (see hiddenLlmModels). */
+export function getHiddenLlmModels(): string[] {
+  return sanitizeHiddenLlmModels(load().hiddenLlmModels);
+}
+
+export function setHiddenLlmModels(ids: string[]): void {
+  load().hiddenLlmModels = sanitizeHiddenLlmModels(ids);
   save();
 }
 

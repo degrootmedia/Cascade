@@ -13,6 +13,7 @@ import { VerifyApprovalModal } from "./components/VerifyApprovalModal.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { OPEN_SETTINGS_EVENT } from "./components/settings/open-settings.js";
 import { ModelCustomizer } from "./components/ModelCustomizer.js";
+import { useHiddenLlmModels } from "./components/useHiddenLlmModels.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ModelPicker } from "./components/ModelPicker.js";
 import { MediaProviderToggle, type MediaCredits } from "./components/MediaProviderToggle.js";
@@ -21,6 +22,7 @@ import { FolderPicker } from "./components/FolderPicker.js";
 import { AgentPicker } from "./components/AgentPicker.js";
 import { AgentsPanel } from "./components/AgentsPanel.js";
 import { ViewTabs, type AppView } from "./components/ViewTabs.js";
+import { chatAttentionAfterEvent, type ChatAttention } from "./components/chat-attention.js";
 import { ProductionWorkspace } from "./components/ProductionWorkspace.js";
 import { AutoTextarea } from "./components/AutoTextarea.js";
 import { clipboardText } from "./clipboard.js";
@@ -76,6 +78,7 @@ export function App() {
   const [sessionList, setSessionList] = useState<SessionMeta[]>([]);
   const [credits, setCredits] = useState<ChatBalance | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const hiddenLlmModels = useHiddenLlmModels();
   /** Top-bar media dial: active vendor, per-vendor balances + availability. */
   const [mediaProvider, setMediaProvider] = useState<MediaProviderId>("openart");
   const [mediaCredits, setMediaCredits] = useState<MediaCredits>({ openart: null, "higgsfield-cli": null, "openart-cli": null });
@@ -126,6 +129,14 @@ export function App() {
   });
   useEffect(() => {
     if (view === "prod") setProdEverOpen(true);
+  }, [view]);
+  // Feature #29: glow the Chat tab when the agent stops or asks for input
+  // while another view is showing; showing the chat clears it.
+  const [chatAttention, setChatAttention] = useState<ChatAttention>(null);
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+    if (view === "home") setChatAttention(null);
   }, [view]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -406,6 +417,7 @@ export function App() {
     });
     const offEvent = window.cascade.onAgentEvent(({ sessionId, event }) => {
       const nextItems = updateTranscript(sessionId, (prev) => applyEvent(prev, event));
+      setChatAttention((a) => chatAttentionAfterEvent(a, event, viewRef.current === "home"));
       if (event.type === "agent-done") {
         setBusyIds((p) => ({ ...p, [sessionId]: false }));
         // Persist the completed transcript to this chat's session file, even
@@ -619,10 +631,12 @@ export function App() {
       <ViewTabs
         value={view}
         onChange={switchView}
+        chatAttention={chatAttention}
         rightContent={
           <>
             <ModelPicker
               models={models}
+              hidden={hiddenLlmModels}
               current={effectiveModel}
               disabled={busy}
               onChange={(id) => {
@@ -942,7 +956,7 @@ export function App() {
         />
       )}
       {showModelCustomizer && <ModelCustomizer onClose={() => setShowModelCustomizer(false)} />}
-      {showAgents && <AgentsPanel onClose={() => { setShowAgents(false); void refreshAgents(); void refreshActiveAgent(currentId); }} models={models} />}
+      {showAgents && <AgentsPanel onClose={() => { setShowAgents(false); void refreshAgents(); void refreshActiveAgent(currentId); }} models={models} hidden={hiddenLlmModels} />}
     </div>
   );
 }
@@ -981,7 +995,7 @@ function applyEvent(prev: DisplayItem[], e: AgentEventIpc): DisplayItem[] {
     case "error":
       return [...clearStreaming(prev), { kind: "notice", text: e.message }];
     case "notice":
-      return [...prev, { kind: "notice", text: e.text }];
+      return [...prev, e.tone ? { kind: "notice", text: e.text, tone: e.tone } : { kind: "notice", text: e.text }];
     case "verification-start":
       return [...prev, { kind: "checks", commands: e.commands }];
     case "verification-result": {

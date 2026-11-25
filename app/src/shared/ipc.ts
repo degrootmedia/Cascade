@@ -165,7 +165,7 @@ export type AgentEventIpc =
   | { type: "turn-done"; usage: Record<string, number | undefined> }
   | { type: "agent-done"; finalText: string; totalCredits: number }
   | { type: "group-enabled"; group: string }
-  | { type: "notice"; text: string }
+  | { type: "notice"; text: string; /** "caution": a warning, not an error — rendered in the autonomous button's yellow (Feature #28). */ tone?: "caution" }
   | { type: "error"; message: string }
   | { type: "verification-start"; commands: string[] }
   | { type: "verification-result"; results: VerifyResultIpc[] }
@@ -342,7 +342,7 @@ export type DisplayItem =
   | { kind: "tool"; name: string; args: string; result?: string; isError?: boolean; images?: string[] }
   | { kind: "mention"; filename: string; image: string }
   | { kind: "agent-switch"; agentId: string | null; name: string; description?: string; model?: string; avatar: { kind: "emoji"; value: string } | { kind: "image"; path: string } | null; avatarDataUrl?: string | null; at: string }
-  | { kind: "notice"; text: string }
+  | { kind: "notice"; text: string; tone?: "caution" }
   | { kind: "checks"; commands: string[]; results?: VerifyResultIpc[]; exhausted?: number };
 
 /** API exposed to the renderer via contextBridge. */
@@ -402,6 +402,9 @@ export interface CascadeApi {
   /** Media model ids the user hides from the generation model dropdowns. */
   getHiddenMediaModels(): Promise<string[]>;
   setHiddenMediaModels(ids: string[]): Promise<void>;
+  /** Chat/LLM model ids hidden from the LLM pickers (Model Customizer, Feature #9). */
+  getHiddenLlmModels(): Promise<string[]>;
+  setHiddenLlmModels(ids: string[]): Promise<void>;
   /** Manual per-model kind assignments (model id → "image" | "video") that
    *  override the provider's auto-detected flags in every model dropdown. */
   getModelKindOverrides(): Promise<Record<string, "image" | "video">>;

@@ -105,6 +105,17 @@ const validators: Record<string, (args: unknown[]) => void> = {
       }
     }
   },
+  "settings:setHiddenLlmModels": (args) => {
+    const list = args[0];
+    if (!Array.isArray(list) || list.length > 500) {
+      throw new Error("IPC validation: hidden LLM models must be an array (max 500)");
+    }
+    for (const id of list) {
+      if (typeof id !== "string" || id.length > 512 || id.includes("\0")) {
+        throw new Error("IPC validation: hidden LLM model id must be a string (max 512 chars)");
+      }
+    }
+  },
   "settings:setPromptSnippets": (args) => {
     const list = args[0];
     if (!Array.isArray(list) || list.length > 500) {

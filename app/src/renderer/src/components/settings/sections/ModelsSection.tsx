@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ModelInfo } from "../../../../../shared/ipc.js";
+import { visibleLlmModels } from "../../../../../shared/llm-visibility.js";
+import { useHiddenLlmModels } from "../../useHiddenLlmModels.js";
 import { useSettings } from "../context.js";
 import { SettingField } from "../SettingField.js";
 
@@ -10,10 +12,16 @@ export function ModelsSection() {
   const [model, setModel] = useState(view.model);
   const [modelError, setModelError] = useState<string | null>(null);
 
+  const hiddenLlm = useHiddenLlmModels();
   const sortedModels = useMemo(
     () => [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id)),
     [models]
   );
+  // The dropdown offers only models not hidden in the Model Customizer. The
+  // fallback below still checks the full list, so hiding the active model
+  // never silently switches it; it stays selected, marked hidden.
+  const pickable = useMemo(() => visibleLlmModels(sortedModels, hiddenLlm), [sortedModels, hiddenLlm]);
+  const currentHidden = !!model && hiddenLlm.has(model) && sortedModels.some((m) => m.id === model);
 
   async function loadModels(): Promise<ModelInfo[]> {
     const res = await window.cascade.listModels();
@@ -63,7 +71,8 @@ export function ModelsSection() {
       <div className="row">
         <select value={model} onChange={(e) => void changeModel(e.target.value)} disabled={!view.hasApiKey} style={{ flex: 1 }}>
           {sortedModels.length === 0 && <option value={model}>{model}</option>}
-          {sortedModels.map((m) => (
+          {currentHidden && <option value={model}>{`${model} (hidden)`}</option>}
+          {pickable.map((m) => (
             <option key={m.id} value={m.id} title={m.costTitle}>
               {m.costLabel.startsWith("$") ? `${m.id} (${m.costLabel})` : m.id}
             </option>

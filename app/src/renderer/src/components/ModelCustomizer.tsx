@@ -26,6 +26,7 @@ import type {
 } from "../../../shared/ipc.js";
 import { isImageModel, isVideoModel } from "../../../shared/ipc.js";
 import { EyeIcon, EyeOffIcon, ImportIcon, XIcon } from "./icons.js";
+import { LlmModelsPane } from "./LlmModelsPane.js";
 import { paramDefaultKey, primeModelParamDefaults, rememberModelParamDefault } from "./production/model-param-defaults.js";
 
 /** Dedicated flags the options form renders with its own control; the dev
@@ -219,6 +220,8 @@ function DefaultControl({ field: f, value, onChange }: {
 export function ModelCustomizer({ onClose }: { onClose: () => void }) {
   const [providers, setProviders] = useState<MediaProviderInfo[]>([]);
   const [providerId, setProviderId] = useState<MediaProviderId>("higgsfield-cli");
+  /** Feature #9: the "LLM models" tab replaces the media list when active. */
+  const [llmTab, setLlmTab] = useState(false);
   const [probe, setProbe] = useState<ModelProbeResult | null>(null);
   const [probeBusy, setProbeBusy] = useState(false);
   const [search, setSearch] = useState("");
@@ -637,24 +640,35 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
         {providers.map((p) => (
           <button
             key={p.id}
-            className={"mc-provider" + (p.id === providerId ? " active" : "")}
-            onClick={() => { setSelectedId(null); setProviderId(p.id); }}
+            className={"mc-provider" + (!llmTab && p.id === providerId ? " active" : "")}
+            onClick={() => { setLlmTab(false); setSelectedId(null); setProviderId(p.id); }}
             title={`${p.displayName}${p.available ? "" : " (unavailable)"}`}
           >
             <span className={"mc-dot" + (p.available ? " on" : "")} />
             {p.displayName}
           </button>
         ))}
-        <span className="mc-spacer" />
-        <button className="prod-btn" disabled={probeBusy} onClick={() => void runProbe(providerId, true)}>
-          {probeBusy ? "Probing…" : "Refresh probe"}
+        <button
+          className={"mc-provider mc-provider-llm" + (llmTab ? " active" : "")}
+          onClick={() => { setSelectedId(null); setLlmTab(true); }}
+          title="Chat / agent LLM models (hide or show them in the model pickers)"
+        >
+          LLM models
         </button>
+        <span className="mc-spacer" />
+        {!llmTab && (
+          <button className="prod-btn" disabled={probeBusy} onClick={() => void runProbe(providerId, true)}>
+            {probeBusy ? "Probing…" : "Refresh probe"}
+          </button>
+        )}
       </div>
 
-      {error && <p className="error-text mc-error">{error}</p>}
-      {probe?.error && <p className="hint mc-error">{probe.error}</p>}
+      {llmTab && <LlmModelsPane panelWidth={panelWidth} />}
 
-      <div className="mc-body">
+      {!llmTab && error && <p className="error-text mc-error">{error}</p>}
+      {!llmTab && probe?.error && <p className="hint mc-error">{probe.error}</p>}
+
+      {!llmTab && <div className="mc-body">
         <div className="mc-models" style={{ width: panelWidth }}>
           <div className="mc-models-head">
             <input
@@ -911,7 +925,7 @@ export function ModelCustomizer({ onClose }: { onClose: () => void }) {
             );
           })()}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

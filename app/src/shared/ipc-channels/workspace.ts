@@ -26,6 +26,8 @@ export const settingsChannels = {
   "audio:editExternally": { method: "editAudioExternally", kind: "invoke" },
   "settings:getHiddenMediaModels": { method: "getHiddenMediaModels", kind: "invoke" },
   "settings:setHiddenMediaModels": { method: "setHiddenMediaModels", kind: "invoke" },
+  "settings:getHiddenLlmModels": { method: "getHiddenLlmModels", kind: "invoke" },
+  "settings:setHiddenLlmModels": { method: "setHiddenLlmModels", kind: "invoke" },
   "settings:getModelKindOverrides": { method: "getModelKindOverrides", kind: "invoke" },
   "settings:setModelKindOverrides": { method: "setModelKindOverrides", kind: "invoke" },
   "settings:getMediaDefaults": { method: "getMediaDefaults", kind: "invoke" },

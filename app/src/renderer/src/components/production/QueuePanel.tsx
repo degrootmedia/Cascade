@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isActiveJobState, jobStateLabel, type JobRecord } from "../../../../shared/ipc.js";
-import { clearFinishedIds, formatElapsed, friendlyModel, jobElapsedMs, jobMediaType, queueFooterText } from "./queue-format.js";
+import { clearFinishedIds, formatElapsed, friendlyModel, jobElapsedMs, jobMediaType, jobMediaTypeIcon, jobMediaTypeLabel, queueFooterText } from "./queue-format.js";
 
 /** Active jobs first, then newest first. */
 export function sortQueueJobs(jobs: JobRecord[]): JobRecord[] {
@@ -67,8 +67,10 @@ export function QueuePanel({ jobs, describeTarget, projectName, thumbFor, onOpen
         const active = isActiveJobState(j.state);
         const retryable = (j.state === "failed" || j.state === "interrupted") && !!j.channel;
         const type = jobMediaType(j.kind);
+        const typeLabel = jobMediaTypeLabel(j.kind);
         const model = friendlyModel(j);
-        const thumb = thumbFor?.(j);
+        // Text (LLM) jobs have no picture of their own; never show a shot frame for them.
+        const thumb = type === "text" ? undefined : thumbFor?.(j);
         const target = describeTarget(j);
         const hasPct = active && typeof j.progress === "number";
         return (
@@ -77,7 +79,7 @@ export function QueuePanel({ jobs, describeTarget, projectName, thumbFor, onOpen
               onClick={() => onOpenJob(j)}
               onKeyDown={(e) => { if (e.key === "Enter") onOpenJob(j); }}>
               <div className="prod-queue-thumb">
-                {thumb ? <img src={thumb} alt="" /> : <span aria-hidden="true">{type === "video" ? "\u25B6" : "\u25A3"}</span>}
+                {thumb ? <img src={thumb} alt="" /> : <span aria-hidden="true">{jobMediaTypeIcon(j.kind)}</span>}
               </div>
               <div className="prod-queue-row-body">
                 <div className="prod-queue-row-main">
@@ -87,7 +89,7 @@ export function QueuePanel({ jobs, describeTarget, projectName, thumbFor, onOpen
                   </span>
                 </div>
                 <div className="prod-queue-row-meta">
-                  {type === "video" ? "Video" : "Image"}{model ? ` \u00B7 ${model}` : ""}{j.origin === "agent" ? " \u00B7 chat" : ""}
+                  {typeLabel}{model ? ` \u00B7 ${model}` : ""}{j.origin === "agent" ? " \u00B7 chat" : ""}
                   <span className="prod-queue-row-elapsed">{formatElapsed(jobElapsedMs(j, now))}</span>
                 </div>
                 {active && (

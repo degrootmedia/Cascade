@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AgentMeta, ModelInfo } from "../../../shared/ipc.js";
+import { visibleLlmModels } from "../../../shared/llm-visibility.js";
 import { AgentHoverCard } from "./AgentIdCard.js";
 import { confirmDestructive } from "./ConfirmDialog.js";
 import { AutoTextarea } from "./AutoTextarea.js";
@@ -26,7 +27,10 @@ function Avatar({ avatar, dataUrl, size = 28 }: { avatar: AgentMeta["avatar"]; d
   return <span className="agent-card-avatar default" style={{ width: size, height: size }}>◐</span>;
 }
 
-export function AgentsPanel({ onClose, models }: { onClose: () => void; models: ModelInfo[] }) {
+export function AgentsPanel({ onClose, models: allModels, hidden }: { onClose: () => void; models: ModelInfo[]; hidden?: ReadonlySet<string> }) {
+  // Models hidden in the Model Customizer are not offered as choices; an
+  // agent already set to one still shows it (the fallback option below).
+  const models = visibleLlmModels(allModels, hidden ?? []);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [mcpServers, setMcpServers] = useState<string[]>([]);
   const [editing, setEditing] = useState<null | { id: string | null; prompt: string; meta: Partial<AgentMeta> & { avatar?: AgentMeta["avatar"] } }>(null);

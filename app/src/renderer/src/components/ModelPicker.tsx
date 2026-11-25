@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelInfo } from "../../../shared/ipc.js";
+import { visibleLlmModels } from "../../../shared/llm-visibility.js";
 import { ImageIcon, TokenIcon } from "./icons.js";
 
 /** Clean line-art "image input" indicator (replaces the 📷 emoji). */
@@ -43,11 +44,15 @@ function CostBadge({ info }: { info: ModelInfo }) {
 
 export function ModelPicker({
   models,
+  hidden,
   current,
   disabled,
   onChange,
 }: {
   models: ModelInfo[];
+  /** LLM ids hidden in the Model Customizer: left out of the menu. The
+   *  button still names the current model even if it is hidden. */
+  hidden?: ReadonlySet<string>;
   current: string;
   disabled: boolean;
   onChange: (id: string) => void;
@@ -65,7 +70,7 @@ export function ModelPicker({
   }, [open]);
 
   const currentInfo = models.find((m) => m.id === current);
-  const sorted = [...models].sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id));
+  const sorted = visibleLlmModels(models, hidden ?? []).sort((a, b) => a.baseCost - b.baseCost || a.id.localeCompare(b.id));
 
   return (
     <div className="model-picker" ref={ref}>

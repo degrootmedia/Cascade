@@ -161,8 +161,11 @@ export function PromptSidePanel({ shotNumber, value, includeBrand, styles, style
     <aside className={"prod-prompt-sidepanel" + (magicActive ? " magic-active" : "")}>
       <div className="prod-prompt-drawer-head">
         <span className="prod-prompt-drawer-title">{shotNumber ? `Shot ${shotNumber}` : "Frame prompt"}</span>
-        <SnippetsButton />
-        {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
+        {/* Feature #19: Snippets sits immediately left of Nodes, as one group on the right. */}
+        <span className="prod-prompt-drawer-actions">
+          <SnippetsButton />
+          {shotNumber && <button className="prod-btn prod-graph-open" onClick={onOpenGraph} title="Open the node graph for this prompt"><NodesIcon size={14} /> Nodes</button>}
+        </span>
       </div>
       {shotNumber ? <>
         <ReferencePromptEditor

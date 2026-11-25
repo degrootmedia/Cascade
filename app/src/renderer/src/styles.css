@@ -253,6 +253,18 @@ body {
 }
 .view-tab:hover { color: var(--text); border-color: transparent; box-shadow: 0 0 0 1px var(--accent); }
 .view-tab.active { color: var(--text); background: var(--bg-raised); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+/* Feature #29: the agent stopped or asked for input while another view was
+   showing. A gentle 2.4s glow pulse in the accent color (red tint if it
+   stopped on an error); cleared as soon as the Chat view is shown. */
+.view-tab.attention { --attention-color: var(--accent); color: var(--text); border-color: var(--attention-color); animation: view-tab-attention 2.4s ease-in-out infinite; }
+.view-tab.attention-error { --attention-color: var(--danger); }
+@keyframes view-tab-attention {
+  0%, 100% { box-shadow: 0 0 0 1px var(--attention-color), 0 0 2px 0 color-mix(in srgb, var(--attention-color) 25%, transparent); }
+  50% { box-shadow: 0 0 0 1px var(--attention-color), 0 0 12px 3px color-mix(in srgb, var(--attention-color) 60%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-tab.attention { animation: none; box-shadow: 0 0 0 1px var(--attention-color), 0 0 8px 2px color-mix(in srgb, var(--attention-color) 45%, transparent); }
+}
 
 /* ---------- production welcome / picker ---------- */
 .prod-welcome { display: flex; align-items: flex-start; justify-content: center; overflow-y: auto; }
@@ -1533,6 +1545,9 @@ body {
   box-shadow: -12px 0 40px rgba(0, 0, 0, 0.4);
 }
 .prod-prompt-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* Classic side panel button group: [Snippets] [Nodes], adjacent, right-aligned
+   (Nodes keeps its place at the right edge). */
+.prod-prompt-drawer-actions { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
 .prod-prompt-drawer-title { font-weight: 600; color: var(--text); }
 .prod-prompt-drawer-text {
   flex: 1;
@@ -2952,6 +2967,9 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
   margin: 8px 0;
 }
 .msg.notice { color: var(--danger); font-size: 0.9rem; align-self: center; }
+/* Feature #28: a caution notice (the autonomous-mode ON warning) uses the
+   autonomous button's own yellow, since it is a warning, not an error. */
+.msg.notice.notice-caution { color: var(--amber); }
 
 /* ---------- mention (OpenArt reference image) ---------- */
 .msg.mention {
@@ -4192,14 +4210,21 @@ button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .prod-board-recheck:not(.prod-board-recheck-video) ~ .prod-board-recheck-video { top: 92px; }
 
 /* Explicit missing-media state (media registry) — the brief's rule: never a
-   silently blank frame. */
+   silently blank frame. A corner badge in the frame's upper right, same inset
+   as the "video pending" badge (it never shows alongside the pending badges).
+   The width cap keeps it clear of the 24px top-center drag handle at the
+   smallest Frame size (it wraps to two lines there instead of overlapping). */
 .prod-board-missing {
-  top: 38px;
+  top: 8px;
   left: auto;
-  right: 38px;
+  right: 6px;
+  max-width: calc(50% - 22px);
   border-color: var(--danger);
   color: var(--danger);
 }
+/* Browsing a history frame: "Make Primary" owns the corner, so the tag sits
+   just below it. */
+.prod-board-promote ~ .prod-board-missing { top: 38px; }
 .prod-board-recheck-video { top: 38px; right: 6px; }
 
 /* Disabled shot: faded in the storyboard, excluded from the animatic/export.

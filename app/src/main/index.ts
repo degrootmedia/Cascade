@@ -1531,6 +1531,9 @@ function registerIpc() {
       text: entry.session.autonomousMode
         ? "Autonomous mode ON — Cascade will act without asking for approval. Turn it off any time."
         : "Autonomous mode OFF.",
+      // Feature #28: the ON warning is a caution, not an error, so it renders
+      // in the autonomous button's yellow instead of the notice red.
+      ...(entry.session.autonomousMode ? { tone: "caution" as const } : {}),
     });
   });
 
@@ -1689,6 +1692,12 @@ function registerIpc() {
 
   handle("settings:setHiddenMediaModels", (_e, ids: string[]) => {
     settings.setHiddenMediaModels(Array.isArray(ids) ? ids.map(String) : []);
+  });
+
+  handle("settings:getHiddenLlmModels", () => settings.getHiddenLlmModels());
+
+  handle("settings:setHiddenLlmModels", (_e, ids: string[]) => {
+    settings.setHiddenLlmModels(Array.isArray(ids) ? ids.map(String) : []);
   });
 
   handle("settings:getModelKindOverrides", () => settings.getModelKindOverrides());

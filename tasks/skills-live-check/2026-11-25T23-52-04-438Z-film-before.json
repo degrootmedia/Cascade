@@ -1,0 +1,17 @@
+{
+  "scenario": "film",
+  "label": "before",
+  "prompt": "I want to make a 20-second animated short about a lighthouse keeper who befriends a seagull, using Cascade productions. Before you call any production tool, tell me which skill you are following, then list the workflow steps you will take in order and the exact cascade_* tool you will call at each step. Do not create or generate anything yet.",
+  "skillsSource": "test/fixtures/skills-before",
+  "startedAt": "2026-11-25T23:52:04.438Z",
+  "outcome": "done",
+  "toolCalls": [],
+  "approvals": [],
+  "errors": [
+    "You're out of credits/balance — top up your account, then try again. (HTTP 402: Insufficient wallet balance for this request. [insufficient_balance])"
+  ],
+  "notices": [],
+  "finalText": null,
+  "credits": null,
+  "tempProfileDeleted": true
+}

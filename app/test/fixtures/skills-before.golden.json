@@ -1,0 +1,212 @@
+{
+  "list": [
+    {
+      "name": "commit",
+      "description": "Stage and commit the intended changes with a clear, conventional message.",
+      "namespace": "code",
+      "kind": "utility",
+      "triggers": [
+        "commit",
+        "stage",
+        "make a commit",
+        "what to commit"
+      ]
+    },
+    {
+      "name": "review",
+      "description": "Review the current changes for correctness, style, and unintended side effects.",
+      "namespace": "code",
+      "kind": "utility",
+      "triggers": [
+        "review the changes",
+        "review the diff",
+        "check my work"
+      ]
+    },
+    {
+      "name": "architect",
+      "description": "Think about component responsibilities and good architecture — DDD-style reasoning that adapts to the codebase rather than following a rigid procedure.",
+      "namespace": "oracle",
+      "kind": "advisory",
+      "triggers": [
+        "design a component",
+        "where should this live",
+        "architecture"
+      ]
+    },
+    {
+      "name": "challenge",
+      "description": "Push back on the current approach and poke holes in the design before committing to it.",
+      "namespace": "oracle",
+      "kind": "advisory",
+      "triggers": [
+        "poke holes in this",
+        "challenge my approach",
+        "review the design"
+      ]
+    },
+    {
+      "name": "film",
+      "description": "Produces a short film end-to-end inside a Cascade production using the cascade_* tools, so the script, frames, and clips are all written into the production folder.",
+      "namespace": "production",
+      "kind": "sequential",
+      "triggers": [
+        "make a short film",
+        "create a film",
+        "produce an animation",
+        "storyboard a script",
+        "animate a script",
+        "use cascade productions",
+        "production assistant"
+      ]
+    },
+    {
+      "name": "finish",
+      "description": "Validate the whole implementation and run a final review pass before calling the work done.",
+      "namespace": "spec",
+      "kind": "sequential",
+      "triggers": [
+        "finish up",
+        "validate the work",
+        "review pass",
+        "wrap up"
+      ]
+    },
+    {
+      "name": "implement",
+      "description": "Execute the approved plan task by task, test-first, stopping and reporting whenever reality contradicts the plan.",
+      "namespace": "spec",
+      "kind": "sequential",
+      "triggers": [
+        "implement the plan",
+        "start building",
+        "execute the tasks"
+      ]
+    },
+    {
+      "name": "plan",
+      "description": "Take the research and break it into a concrete, ordered task list (plan.json) the agent can execute without constant course-correction.",
+      "namespace": "spec",
+      "kind": "sequential",
+      "triggers": [
+        "make a plan",
+        "break a feature into tasks",
+        "plan an implementation"
+      ]
+    },
+    {
+      "name": "research",
+      "description": "Explore the codebase/workspace and produce a spec.md — the research artifact every downstream step depends on.",
+      "namespace": "spec",
+      "kind": "sequential",
+      "triggers": [
+        "research the codebase",
+        "explore the workspace",
+        "understand the patterns"
+      ]
+    },
+    {
+      "name": "ux-audit",
+      "description": "Audit Cascade's own user interface and report usability problems as a ranked findings list. You are auditing the app you run inside, on behalf of its users: creative professionals, many of them NOT te",
+      "namespace": "ux audit"
+    },
+    {
+      "name": "ux-audit",
+      "description": "Audit Cascade's own user interface and report usability problems as a ranked findings list. You are auditing the app you run inside, on behalf of its users: creative professionals, many of them NOT te",
+      "namespace": "ux-audit"
+    }
+  ],
+  "reads": {
+    "code:commit": {
+      "sha256": "1f88459ed2fba8f39b60d586fce964798047de9847c59a22ac41266acca57bf3",
+      "chars": 586
+    },
+    "code:review": {
+      "sha256": "9c40596e634777c200282d1ac982e4b34745b65c5a7069c131bfbee6f289273e",
+      "chars": 592
+    },
+    "oracle:architect": {
+      "sha256": "413ce88446acd9aa02c1ae8d8f8e74db1afd01364b29cdc7b396dfa410951a88",
+      "chars": 807
+    },
+    "oracle:challenge": {
+      "sha256": "09a3b98175155c7fc4d919e4c2da49c739b2e978867b0698008d9a0fc624d777",
+      "chars": 638
+    },
+    "production:film": {
+      "sha256": "2bb210bfe5dfba76a6abc00c7314f13bbb371325da2cc5e9d063b1c50c7dcb57",
+      "chars": 10791
+    },
+    "spec:finish": {
+      "sha256": "f7e29f3bec39605608ac2a9e68794fa87bac7182c1249c2231c6b3cc1221dbce",
+      "chars": 628
+    },
+    "spec:implement": {
+      "sha256": "2104e51c727421e64f743a190bc6df3a091e7270eaed48359ec17b67d9581834",
+      "chars": 991
+    },
+    "spec:plan": {
+      "sha256": "308bf51ab3f9625a2c3b18f401d7b44fbbfdf9e843af7d5b4df40b9d1fc10522",
+      "chars": 1085
+    },
+    "spec:research": {
+      "sha256": "bb7c78c0f49b1b0256065e7147c9b6b6c0f6951924ff184e073cc1a0677e639a",
+      "chars": 942
+    },
+    "ux audit:ux-audit": {
+      "sha256": "7c365924cc1ce2ef080e37c9daf47d0c8d82cfaa1978f065267f0ef015bb47b8",
+      "chars": 7931
+    },
+    "ux-audit:ux-audit": {
+      "sha256": "7c365924cc1ce2ef080e37c9daf47d0c8d82cfaa1978f065267f0ef015bb47b8",
+      "chars": 7931
+    }
+  },
+  "tool": {
+    "code:commit": {
+      "sha256": "1f88459ed2fba8f39b60d586fce964798047de9847c59a22ac41266acca57bf3",
+      "chars": 586
+    },
+    "code:review": {
+      "sha256": "9c40596e634777c200282d1ac982e4b34745b65c5a7069c131bfbee6f289273e",
+      "chars": 592
+    },
+    "oracle:architect": {
+      "sha256": "413ce88446acd9aa02c1ae8d8f8e74db1afd01364b29cdc7b396dfa410951a88",
+      "chars": 807
+    },
+    "oracle:challenge": {
+      "sha256": "09a3b98175155c7fc4d919e4c2da49c739b2e978867b0698008d9a0fc624d777",
+      "chars": 638
+    },
+    "production:film": {
+      "sha256": "2bb210bfe5dfba76a6abc00c7314f13bbb371325da2cc5e9d063b1c50c7dcb57",
+      "chars": 10791
+    },
+    "spec:finish": {
+      "sha256": "f7e29f3bec39605608ac2a9e68794fa87bac7182c1249c2231c6b3cc1221dbce",
+      "chars": 628
+    },
+    "spec:implement": {
+      "sha256": "2104e51c727421e64f743a190bc6df3a091e7270eaed48359ec17b67d9581834",
+      "chars": 991
+    },
+    "spec:plan": {
+      "sha256": "308bf51ab3f9625a2c3b18f401d7b44fbbfdf9e843af7d5b4df40b9d1fc10522",
+      "chars": 1085
+    },
+    "spec:research": {
+      "sha256": "bb7c78c0f49b1b0256065e7147c9b6b6c0f6951924ff184e073cc1a0677e639a",
+      "chars": 942
+    },
+    "ux audit:ux-audit": {
+      "sha256": "7c365924cc1ce2ef080e37c9daf47d0c8d82cfaa1978f065267f0ef015bb47b8",
+      "chars": 7931
+    },
+    "ux-audit:ux-audit": {
+      "sha256": "7c365924cc1ce2ef080e37c9daf47d0c8d82cfaa1978f065267f0ef015bb47b8",
+      "chars": 7931
+    }
+  },
+  "missing": "ERROR: skill \"no-such-skill\" not found. Available: code:commit, code:review, oracle:architect, oracle:challenge, production:film, spec:finish, spec:implement, spec:plan, spec:research, ux audit:ux-audit, ux-audit:ux-audit"
+}

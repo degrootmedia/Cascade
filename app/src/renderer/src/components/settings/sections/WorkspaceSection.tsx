@@ -76,8 +76,8 @@ export function WorkspaceSection() {
         label="Skills"
         help={
           <>
-            Markdown files that teach Cascade repeatable workflows. Drop .md files in the skills folder; Cascade reads
-            them when relevant.{" "}
+            Markdown files that teach Cascade repeatable workflows. Drop .md files or skill folders (with a SKILL.md) in
+            the skills folder; Cascade reads them when relevant. Only add skills from sources you trust.{" "}
             <button className="link" onClick={() => void window.cascade.openSkillsFolder()}>
               Open skills folder
             </button>

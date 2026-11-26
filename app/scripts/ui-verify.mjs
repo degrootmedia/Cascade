@@ -4,6 +4,7 @@
  *
  *   npm run build            (first; this script runs out/main)
  *   npm run ui:verify [-- --views Chat,"Production Assistant" --out ../tasks/screenshots --wait 1500]
+ *                     [-- --settings "Workspace,Data & Folders"]   (Settings sections, by rail title)
  *
  * Output: <out>/<timestamp>/<view>.png plus report.json. Exit 1 if any
  * [renderer:error], page error, or main-process crash was logged.
@@ -25,6 +26,7 @@ const arg = (f, d) => {
   return i >= 0 ? process.argv[i + 1] : d;
 };
 const views = arg("--views", "Chat,Production Assistant").split(",").map((s) => s.trim());
+const settingsSections = arg("--settings", "").split(",").map((s) => s.trim()).filter(Boolean);
 const waitMs = Number(arg("--wait", "1500"));
 const port = Number(arg("--port", "9333"));
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -73,6 +75,23 @@ try {
     const first = path.join(outDir, "first-run-modal.png");
     await page.screenshot({ path: first });
     shots.push(first);
+    // --settings "Workspace,Data & Folders": open those Settings sections (by
+    // rail title, expanding collapsed categories) and capture each one.
+    for (const title of settingsSections) {
+      const button = () => page.locator(".settings-rail-scroll button").filter({ hasText: new RegExp(`^\\s*${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) });
+      if (!(await button().count())) {
+        for (const heading of await page.locator('.settings-rail-heading[aria-expanded="false"]').all()) await heading.click();
+      }
+      if (!(await button().count())) {
+        problems.push(`settings section not found: ${title}`);
+        continue;
+      }
+      await button().first().click({ timeout: 5000 });
+      await page.waitForTimeout(waitMs);
+      const file = path.join(outDir, `settings-${title.replace(/\W+/g, "-").toLowerCase()}.png`);
+      await page.screenshot({ path: file });
+      shots.push(file);
+    }
     // The app re-opens Settings whenever there is no API key (and a test profile never has one),
     // so closing it is futile. Hide it for navigation only; the screenshot above shows the real state.
     await page.addStyleTag({ content: ".modal-backdrop{display:none !important}" });

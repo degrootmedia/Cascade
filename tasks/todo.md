@@ -1,5 +1,57 @@
 <!-- Active work only. Finished items (with a Review section and no open checkboxes) live in tasks/archive/todo-2026.md. -->
 
+# Folder skills (Agent Skills format) in the skills loader (2026-11-25)
+
+Why: Claude-format skills (SKILL.md + references/ + scripts) could not be used in
+Cascade; this blocked the Topview 3D Builder evaluation (Feature #26) and the
+Seedance previz skill. Plan approved 2026-11-25. Decisions (operator): live
+checks on a throwaway profile copy; real skills folder changed last; delete the
+`ux audit\` duplicate; convert production:film.
+
+Plan:
+- [x] Live harness `app/scripts/skills-live-check.mjs` (temp profile: settings.json +
+      Local State + chosen skills dir; approvals auto-denied except a per-scenario
+      allowlist; records tool calls + answer; deletes the profile).
+- [x] Before-evidence (pre-change code): fixture copy of today's 11 skills + golden
+      loadSkills/read_skill JSON. Live `film-before` attempted: the provider
+      (cheaperinference) answered HTTP 402 insufficient balance.
+- [x] Item 1: folder discovery, mini-YAML frontmatter (name/description + kind/
+      namespace/triggers), label-based resolution (fixes `ux audit:ux-audit`),
+      read_skill `file` (per-file 20k cap), folder-aware seeding + dedup. Tests.
+- [x] Item 3: scripts listed by read_skill (run via run_command only, never on load);
+      trust rule in _README.md (migrated when unedited), docs/skills.md, CONTEXT.md,
+      Settings help copy. Tests incl. a skill script run through runCommandArgv.
+- [x] Item 2: convert bundled production:film (tool table -> references/tools.md);
+      inventory + decisions in docs/skills.md.
+- [ ] Live: film-after, script-e2e, topview: SKIPPED by operator (provider out of
+      balance; declined switching the test copy to Gab). Harness and scenario
+      folders are ready to run.
+- [x] Gates: app npm test, core check:fast + test, build, ui:verify (+ Settings shot).
+- [x] Real folder last: back up film.md, convert it, delete `ux audit\`, install
+      topview-3d-cli skill, migrate _README.md; loadSkills on the real folder.
+- [x] progress.md entry; report.
+
+## Review
+
+- Flat skills unchanged: golden (pre-change loader output for a byte-exact copy
+  of the real folder) passes after the change; the one intended difference
+  (`ux audit:ux-audit` read the other folder's file) was red before, green after.
+- Folder skills: 30 tests in `app/test/skills.test.ts` + 3 golden tests. The real
+  Topview skill (13 files, 117k chars, blob-hash identical to upstream 631c08c)
+  lists with its 1,004-char frontmatter description; read_skill returns SKILL.md
+  + index only; every reference loads on demand; nothing is truncated.
+- production:film conversion is lossless (pointer swapped back for the table ==
+  original bytes, for both the bundled copy and the user's copy); listing
+  identical, so triggering is identical.
+- Not verified: live agent behavior (operator skipped). Item 4's missing
+  capabilities are from reading code, not a live run: topview-3d-cli not
+  installed; no In-App Browser for Studio; run_command has no shell (no
+  `$env:` expansion, no stdin) and a 300 s ceiling.
+- Gates: app 2672 passed / 1 failed (pre-existing `group` guard) / 15 skipped,
+  tsc clean; core check:fast 0 errors, 205 passed; build clean; ui:verify exit 0
+  (tasks/screenshots/2026-11-26T01-00-25-745Z, incl. settings-workspace.png and
+  settings-data-folders.png).
+
 # Moodboard image-node rotate/scale handles are gray dots in minimal icon mode
 
 Root cause (verified): the node's other controls (`RefFigure` actions: zoom/

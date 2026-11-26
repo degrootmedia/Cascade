@@ -7,7 +7,10 @@ export function DataSection() {
 
   return (
     <>
-      <SettingField label="Skills folder" help="Markdown files that teach Cascade repeatable workflows. Cascade reads them when relevant.">
+      <SettingField
+        label="Skills folder"
+        help="Markdown files and skill folders (with a SKILL.md) that teach Cascade repeatable workflows. Cascade reads them when relevant. Only add skills from sources you trust."
+      >
         <div className="row">
           <button onClick={() => void window.cascade.openSkillsFolder().catch((e) => setError(String(e)))}>
             Open skills folder
